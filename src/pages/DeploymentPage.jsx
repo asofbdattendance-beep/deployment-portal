@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react'
-import { supabase } from '../lib/supabase'
-import { Users, BarChart3, CheckCircle2, Clock } from 'lucide-react'
+import { useState, useEffect, useCallback } from 'react'
+import { supabase, fetchCentres, getRootCentre } from '../lib/supabase'
+import { Users, BarChart3, CheckCircle2 } from 'lucide-react'
+import DeadlinePill from '../components/DeadlinePill'
 
 /* ─── ASO / super_admin: read-only overview of requested deployments ─── */
 export default function DeploymentPage() {
@@ -8,6 +9,7 @@ export default function DeploymentPage() {
   const [selectedScheduleId, setSelectedScheduleId] = useState('')
   const [rows, setRows] = useState([])
   const [allocations, setAllocations] = useState([])
+  const [centres, setCentres] = useState([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -16,41 +18,66 @@ export default function DeploymentPage() {
         setSchedules(data)
         setSelectedScheduleId(prev => (prev && data.some(s => s.id === prev)) ? prev : (data[0]?.id || ''))
       }
-    })
+    }).catch(() => {})
+    fetchCentres().then(setCentres).catch(() => {})
+  }, [])
+
+  const load = useCallback(async (scheduleId) => {
+    const [dRes, aRes] = await Promise.all([
+      supabase.from('deployments').select('*, deployment_departments(name)').eq('schedule_id', scheduleId).order('centre'),
+      supabase.from('centre_allocations').select('*, deployment_departments(name)').eq('schedule_id', scheduleId),
+    ])
+    setRows(dRes.data || [])
+    setAllocations(aRes.data || [])
   }, [])
 
   useEffect(() => {
     if (!selectedScheduleId) return
     setLoading(true)
     let mounted = true
-    Promise.all([
-      supabase.from('deployments').select('*, deployment_departments(name)').eq('schedule_id', selectedScheduleId).order('centre'),
-      supabase.from('centre_allocations').select('*, deployment_departments(name)').eq('schedule_id', selectedScheduleId),
-    ]).then(([dRes, aRes]) => {
-      if (!mounted) return
-      setRows(dRes.data || [])
-      setAllocations(aRes.data || [])
-      setLoading(false)
-    })
+    load(selectedScheduleId).then(() => { if (mounted) setLoading(false) })
     return () => { mounted = false }
-  }, [selectedScheduleId])
+  }, [selectedScheduleId, load])
+
+  // realtime: refresh live while centres edit
+  useEffect(() => {
+    if (!selectedScheduleId) return
+    let mounted = true
+    const channel = supabase
+      .channel(`deploy-overview-${selectedScheduleId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` }, () => {
+        if (!mounted) return
+        load(selectedScheduleId)
+      })
+      .subscribe()
+    return () => { mounted = false; supabase.removeChannel(channel) }
+  }, [selectedScheduleId, load])
 
   const schedule = schedules.find(s => s.id === selectedScheduleId)
   const deadlinePassed = schedule?.deadline ? new Date(schedule.deadline) < new Date() : false
 
-  // per-centre: requested departments + totals
+  // Roll deployments up to their ROOT centre so child-centre requests align with
+  // parent-centre allocations (allocations are only stored against parent centres).
+  const rootOf = (centre) => getRootCentre(centres, centre) || centre
   const byCentre = {}
   rows.forEach(r => {
-    if (!byCentre[r.centre]) byCentre[r.centre] = { departments: {} }
+    const root = rootOf(r.centre)
+    if (!byCentre[root]) byCentre[root] = { departments: {}, children: new Set() }
+    byCentre[root].children.add(r.centre)
     const name = r.deployment_departments?.name || '—'
-    byCentre[r.centre].departments[name] = (byCentre[r.centre].departments[name] || 0) + 1
+    byCentre[root].departments[name] = (byCentre[root].departments[name] || 0) + 1
   })
 
-  // per-centre requested vs allocated quota
+  // allocations are keyed by root centre
   const allocByCentre = {}
   allocations.forEach(a => {
     if (!allocByCentre[a.centre]) allocByCentre[a.centre] = []
     allocByCentre[a.centre].push(a)
+  })
+
+  // also list roots that have allocations but no requests yet
+  Object.keys(allocByCentre).forEach(root => {
+    if (!byCentre[root]) byCentre[root] = { departments: {}, children: new Set() }
   })
 
   return (
@@ -66,11 +93,7 @@ export default function DeploymentPage() {
               <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
             ))}
           </select>
-          {schedule?.deadline && (
-            <span className={`pill ${deadlinePassed || schedule.status === 'done' ? 'pill-red' : 'pill-green'}`}>
-              <Clock size={11} /> Deadline {new Date(schedule.deadline).toLocaleString()}
-            </span>
-          )}
+          {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
         </div>
       </div>
 
@@ -88,17 +111,19 @@ export default function DeploymentPage() {
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-          {Object.entries(byCentre).map(([centre, data]) => {
-            const allocs = allocByCentre[centre] || []
+          {Object.entries(byCentre).map(([root, data]) => {
+            const allocs = allocByCentre[root] || []
             const requestedTotal = Object.values(data.departments).reduce((s, n) => s + n, 0)
             const allocTotal = allocs.reduce((s, a) => s + a.max_count, 0)
+            const childCount = data.children.size - 1
             return (
-              <div key={centre} className="card" style={{ padding: '0.75rem 0.9rem' }}>
+              <div key={root} className="card" style={{ padding: '0.75rem 0.9rem' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                  <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>{centre}</span>
+                  <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>{root}</span>
+                  {childCount > 0 && <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>+ {childCount} child centre{childCount > 1 ? 's' : ''}</span>}
                   <span className="pill pill-blue"><BarChart3 size={11} /> {requestedTotal} requested</span>
                   {allocTotal > 0 && (
-                    <span className="pill pill-gray">Allocated {allocTotal}</span>
+                    <span className={`pill ${requestedTotal > allocTotal ? 'pill-red' : 'pill-gray'}`}>Allocated {allocTotal}</span>
                   )}
                   {schedule?.deadline && (
                     <span className={`pill ${deadlinePassed || schedule.status === 'done' ? 'pill-red' : 'pill-green'}`}>
@@ -111,7 +136,7 @@ export default function DeploymentPage() {
                     <span key={dept} className="pill pill-blue">{dept}: {count}</span>
                   ))}
                   {Object.keys(data.departments).length === 0 && (
-                    <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No department requests</span>
+                    <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No department requests yet</span>
                   )}
                 </div>
               </div>

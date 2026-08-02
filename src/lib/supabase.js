@@ -1,4 +1,10 @@
 import { createClient } from '@supabase/supabase-js'
+import {
+  getParentCentres,
+  getRootCentre,
+  getSubtreeCentres,
+  notElderlyFilter,
+} from './logic'
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
@@ -39,53 +45,9 @@ export async function fetchCentres() {
   return data || []
 }
 
-export function getParentCentres(centres) {
-  return (centres || []).filter(c => !c.parent_centre)
-}
-
-export function getRootCentre(centres, centreName) {
-  if (!centreName) return null
-  const byName = {}
-  ;(centres || []).forEach(c => { byName[c.name] = c })
-  let cur = byName[centreName]
-  if (!cur) return centreName
-  let guard = 0
-  while (cur.parent_centre && byName[cur.parent_centre] && guard < 20) {
-    cur = byName[cur.parent_centre]
-    guard++
-  }
-  return cur.name
-}
-
-export function getSubtreeCentres(centres, centreName) {
-  if (!centreName) return []
-  const children = {}
-  ;(centres || []).forEach(c => {
-    if (!children[c.parent_centre]) children[c.parent_centre] = []
-    children[c.parent_centre].push(c.name)
-  })
-  const result = []
-  const stack = [centreName]
-  let guard = 0
-  while (stack.length && guard < 100) {
-    const cur = stack.pop()
-    result.push(cur)
-    ;(children[cur] || []).forEach(ch => stack.push(ch))
-    guard++
-  }
-  return result
-}
-
 export async function fetchSubtreeCentres(centreName) {
   const centres = await fetchCentres()
   return { centres, subtree: getSubtreeCentres(centres, centreName) }
 }
 
-export async function fetchRemainingQuota(scheduleId, departmentId) {
-  const { data, error } = await supabase.rpc('get_remaining_quota', {
-    p_schedule: scheduleId,
-    p_department: departmentId,
-  })
-  if (error) throw error
-  return data ?? 0
-}
+export { getParentCentres, getRootCentre, getSubtreeCentres, notElderlyFilter }

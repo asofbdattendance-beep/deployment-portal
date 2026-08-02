@@ -3,6 +3,7 @@ import { supabase, fetchCentres, getParentCentres } from '../lib/supabase'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import { Plus, Trash2, Edit3, Calendar, Lock, Unlock, ChevronRight } from 'lucide-react'
+import DeadlinePill from '../components/DeadlinePill'
 
 const SCHEDULE_STATUS_LABELS = {
   open: 'Open',
@@ -67,7 +68,12 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
 
   const createSchedule = async () => {
     if (!newName.trim()) return
-    const payload = { name: newName.trim(), created_by: profile?.name }
+    const name = newName.trim()
+    if (schedules.some(s => s.name.toLowerCase() === name.toLowerCase())) {
+      toast.error('A schedule with this name already exists')
+      return
+    }
+    const payload = { name, created_by: profile?.name }
     if (newDeadline) payload.deadline = new Date(newDeadline).toISOString()
     const { error } = await supabase.from('deployment_schedules').insert(payload)
     if (error) { toast.error(error.message); return }
@@ -92,6 +98,18 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
   }
 
   const deleteSchedule = async (id) => {
+    const sched = schedules.find(s => s.id === id)
+    // audit log the deletion so it can be undone / reviewed
+    try {
+      await supabase.from('audit_log').insert({
+        action: 'DELETE',
+        table_name: 'deployment_schedules',
+        record_id: id,
+        schedule_id: id,
+        payload: sched || {},
+        acted_by: profile?.name || profile?.email || null,
+      })
+    } catch { /* audit is best-effort */ }
     const { error } = await supabase.from('deployment_schedules').delete().eq('id', id)
     if (error) { toast.error(error.message); return }
     setConfirmDelete(null)
@@ -153,6 +171,7 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
                 <span className={`pill ${s.status === "done" ? "pill-gray" : "pill-green"}`}>
                   {SCHEDULE_STATUS_LABELS[s.status] || s.status}
                 </span>
+                {s.deadline && <DeadlinePill deadline={s.deadline} />}
                 {isSuper && (
                   <>
                     <div className="cluster" onClick={e => e.stopPropagation()} style={{ gap: '0.4rem' }}>
@@ -208,6 +227,7 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
 
 /* ─── Departments + restriction rules ─── */
 function DepartmentsPanel({ isSuper, toast }) {
+  const { profile } = usePortalAuth()
   const [depts, setDepts] = useState([])
   const [newDeptName, setNewDeptName] = useState('')
   const [editDeptId, setEditDeptId] = useState(null)
@@ -247,6 +267,15 @@ function DepartmentsPanel({ isSuper, toast }) {
   const [confirmDeleteDept, setConfirmDeleteDept] = useState(null)
 
   const deleteDept = async (id) => {
+    try {
+      await supabase.from('audit_log').insert({
+        action: 'DELETE',
+        table_name: 'deployment_departments',
+        record_id: id,
+        payload: { department: depts.find(d => d.id === id) || {} },
+        acted_by: profile?.name || profile?.email || null,
+      })
+    } catch { /* audit is best-effort */ }
     const { error } = await supabase.from('deployment_departments').delete().eq('id', id)
     if (error) { toast.error(error.message); return }
     setConfirmDeleteDept(null)
@@ -376,6 +405,7 @@ function DepartmentsPanel({ isSuper, toast }) {
 
 /* ─── Allocations: pick dept, set count per parent centre, save all at once ─── */
 function AllocationsPanel({ schedule, isSuper, toast }) {
+  const { profile } = usePortalAuth()
   const [allocations, setAllocations] = useState([])
   const [depts, setDepts] = useState([])
   const [centres, setCentres] = useState([])
@@ -467,12 +497,32 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
   }
 
   const removeAllocation = async (id) => {
+    try {
+      await supabase.from('audit_log').insert({
+        action: 'DELETE',
+        table_name: 'centre_allocations',
+        record_id: id,
+        schedule_id: schedule.id,
+        payload: { allocation_id: id },
+        acted_by: profile?.name || profile?.email || null,
+      })
+    } catch { /* audit is best-effort */ }
     await supabase.from('centre_allocations').delete().eq('id', id)
     await load()
     if (expandedDept) setEditCounts(buildCounts(expandedDept))
   }
 
   const removeDeptAll = async (deptId) => {
+    try {
+      const existing = await supabase.from('centre_allocations').select('*').eq('schedule_id', schedule.id).eq('department_id', deptId)
+      await supabase.from('audit_log').insert({
+        action: 'REMOVE_ALL',
+        table_name: 'centre_allocations',
+        schedule_id: schedule.id,
+        payload: { department_id: deptId, allocations: existing.data || [] },
+        acted_by: profile?.name || profile?.email || null,
+      })
+    } catch { /* audit is best-effort */ }
     const { error } = await supabase.from('centre_allocations').delete().eq('schedule_id', schedule.id).eq('department_id', deptId)
     if (error) { toast.error(error.message); return }
     setConfirmRemoveDept(null)

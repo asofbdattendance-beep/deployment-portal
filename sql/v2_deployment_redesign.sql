@@ -244,7 +244,7 @@ BEGIN
   IF v_sched_status IS NULL OR v_sched_status = 'done' THEN
     RAISE EXCEPTION 'This schedule is done — editing disabled';
   END IF;
-  IF v_deadline IS NULL OR now() > v_deadline THEN
+  IF v_deadline IS NOT NULL AND now() > v_deadline THEN
     RAISE EXCEPTION 'Deadline has passed for this schedule';
   END IF;
 
@@ -327,7 +327,7 @@ BEGIN
     IF v_sched_status IS NULL OR v_sched_status = 'done' THEN
       RAISE EXCEPTION 'This schedule is done — editing disabled';
     END IF;
-    IF v_deadline IS NULL OR now() > v_deadline THEN
+    IF v_deadline IS NOT NULL AND now() > v_deadline THEN
       RAISE EXCEPTION 'Deadline has passed for this schedule';
     END IF;
 
