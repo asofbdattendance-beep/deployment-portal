@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react'
 import { Clock, AlertTriangle } from 'lucide-react'
 
-// Live countdown to a deadline; turns red and warns when < 24h remain.
+// Live countdown to a deadline. Rendered prominently by default (big red on
+// yellow) so the remaining time is impossible to miss; pass small={true} for
+// the compact pill (e.g. inside schedule list rows).
 export function useDeadlineCountdown(deadline) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -24,15 +26,23 @@ export function fmtRemaining(deadline, now = Date.now()) {
   return { passed, days, hours, mins, secs, text: passed ? 'Deadline passed' : `${days}d ${hours}h ${mins}m ${secs}s remaining` }
 }
 
-export default function DeadlinePill({ deadline, showCountdown = true }) {
+export default function DeadlinePill({ deadline, showCountdown = true, small = false }) {
   const now = useDeadlineCountdown(deadline)
   const r = fmtRemaining(deadline, now)
   if (!r) return null
-  const warn = r.days < 1 && !r.passed
-  const cls = r.passed ? 'pill-red' : warn ? 'pill-amber' : 'pill-green'
+  const title = `Deadline ${new Date(deadline).toLocaleString()}`
+  if (small) {
+    const warn = r.days < 1 && !r.passed
+    const cls = r.passed ? 'pill-red' : warn ? 'pill-amber' : 'pill-green'
+    return (
+      <span className={`pill ${cls}`} style={{ fontSize: '0.72rem', whiteSpace: 'nowrap' }} title={title}>
+        {warn && !r.passed ? <AlertTriangle size={11} /> : <Clock size={11} />} {showCountdown ? r.text : new Date(deadline).toLocaleString()}
+      </span>
+    )
+  }
   return (
-    <span className={`pill ${cls}`} style={{ fontSize: '0.72rem' }} title={`Deadline ${new Date(deadline).toLocaleString()}`}>
-      {warn && !r.passed ? <AlertTriangle size={11} /> : <Clock size={11} />} {showCountdown ? r.text : new Date(deadline).toLocaleString()}
+    <span className="deadline-countdown" title={title}>
+      {r.passed ? <AlertTriangle size={18} /> : <Clock size={18} />} {showCountdown ? r.text : new Date(deadline).toLocaleString()}
     </span>
   )
 }

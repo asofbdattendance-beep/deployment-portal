@@ -171,7 +171,7 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
                 <span className={`pill ${s.status === "done" ? "pill-gray" : "pill-green"}`}>
                   {SCHEDULE_STATUS_LABELS[s.status] || s.status}
                 </span>
-                {s.deadline && <DeadlinePill deadline={s.deadline} />}
+                {s.deadline && <DeadlinePill deadline={s.deadline} small />}
                 {isSuper && (
                   <>
                     <div className="cluster" onClick={e => e.stopPropagation()} style={{ gap: '0.4rem' }}>
@@ -233,7 +233,11 @@ function DepartmentsPanel({ isSuper, toast }) {
   const [editDeptId, setEditDeptId] = useState(null)
   const [editDeptName, setEditDeptName] = useState('')
   const [rulesDeptId, setRulesDeptId] = useState(null)
-  const [rules, setRules] = useState({ min_days: 1, requires_stay_at_bhati: false, requires_initiated: false })
+  const [rules, setRules] = useState({
+    min_days: 1, requires_stay_at_bhati: false, requires_initiated: false,
+    include_vss: false, vss_min_days: 1, vss_requires_stay_at_bhati: false,
+    vss_requires_initiated: false, vss_requires_gender: '',
+  })
 
   const loadDepts = useCallback(async () => {
     const { data } = await supabase.from('deployment_departments').select('*').order('name')
@@ -285,7 +289,11 @@ function DepartmentsPanel({ isSuper, toast }) {
 
   const resetRules = async (deptId) => {
     const { error } = await supabase.from('deployment_departments')
-      .update({ min_days: 1, requires_stay_at_bhati: false, requires_initiated: false })
+      .update({
+        min_days: 1, requires_stay_at_bhati: false, requires_initiated: false,
+        include_vss: false, vss_min_days: 1, vss_requires_stay_at_bhati: false,
+        vss_requires_initiated: false, vss_requires_gender: null,
+      })
       .eq('id', deptId)
     if (error) { toast.error(error.message); return }
     setRulesDeptId(null)
@@ -295,14 +303,28 @@ function DepartmentsPanel({ isSuper, toast }) {
 
   const openRules = (dept) => {
     setRulesDeptId(dept.id)
-    setRules({ min_days: dept.min_days ?? 1, requires_stay_at_bhati: !!dept.requires_stay_at_bhati, requires_initiated: !!dept.requires_initiated })
+    setRules({
+      min_days: dept.min_days ?? 1, requires_stay_at_bhati: !!dept.requires_stay_at_bhati, requires_initiated: !!dept.requires_initiated,
+      include_vss: !!dept.include_vss, vss_min_days: dept.vss_min_days ?? 1,
+      vss_requires_stay_at_bhati: !!dept.vss_requires_stay_at_bhati, vss_requires_initiated: !!dept.vss_requires_initiated,
+      vss_requires_gender: dept.vss_requires_gender || '',
+    })
   }
 
   const saveRules = async (deptId) => {
     const minDays = parseInt(rules.min_days)
     if (!minDays || minDays < 1 || minDays > 5) { toast.error('Minimum days must be between 1 and 5'); return }
+    const vssMinDays = parseInt(rules.vss_min_days)
+    if (rules.include_vss && (!vssMinDays || vssMinDays < 1 || vssMinDays > 5)) {
+      toast.error('VSS minimum days must be between 1 and 5'); return
+    }
     const { error } = await supabase.from('deployment_departments')
-      .update({ min_days: minDays, requires_stay_at_bhati: rules.requires_stay_at_bhati, requires_initiated: rules.requires_initiated })
+      .update({
+        min_days: minDays, requires_stay_at_bhati: rules.requires_stay_at_bhati, requires_initiated: rules.requires_initiated,
+        include_vss: rules.include_vss, vss_min_days: vssMinDays,
+        vss_requires_stay_at_bhati: rules.vss_requires_stay_at_bhati, vss_requires_initiated: rules.vss_requires_initiated,
+        vss_requires_gender: rules.vss_requires_gender || null,
+      })
       .eq('id', deptId)
     if (error) { toast.error(error.message); return }
     setRulesDeptId(null)
@@ -337,6 +359,7 @@ function DepartmentsPanel({ isSuper, toast }) {
                 <span className="pill pill-blue">MIN {d.min_days ?? 1} DAY{d.min_days > 1 ? 'S' : ''}</span>
                 {d.requires_stay_at_bhati && <span className="pill pill-red">STAY AT BHATI</span>}
                 {d.requires_initiated && <span className="pill pill-amber">INITIATED</span>}
+                {d.include_vss && <span className="pill pill-green">VSS</span>}
                 <div style={{ flex: 1 }} />
                 {editDeptId === d.id ? (
                   <>
@@ -360,24 +383,58 @@ function DepartmentsPanel({ isSuper, toast }) {
                 )}
               </div>
               {rulesDeptId === d.id && (
-                <div style={{ marginTop: '0.5rem', padding: '0.6rem 0.75rem', background: '#f9fafb', borderRadius: 6, display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem', fontWeight: 600, color: '#6b7280' }}>
-                    Minimum consent days:
-                    <input type="number" min="1" max="5" value={rules.min_days} onChange={e => setRules(r => ({ ...r, min_days: e.target.value }))} style={{ width: 60, padding: '0.25rem 0.4rem', border: '1px solid #e5e7eb', borderRadius: 4, fontSize: '0.8rem', textAlign: 'center' }} />
-                    <span style={{ color: '#9ca3af', fontWeight: 400 }}>/5</span>
-                  </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer' }}>
-                    <input type="checkbox" checked={rules.requires_stay_at_bhati} onChange={e => setRules(r => ({ ...r, requires_stay_at_bhati: e.target.checked }))} />
-                    Requires stay at bhati
-                  </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer' }}>
-                    <input type="checkbox" checked={rules.requires_initiated} onChange={e => setRules(r => ({ ...r, requires_initiated: e.target.checked }))} />
-                    Requires initiated
-                  </label>
-                  <div style={{ flex: 1 }} />
-                  <button onClick={() => saveRules(d.id)} style={{ padding: '0.3rem 0.7rem', border: 'none', borderRadius: 6, background: '#16a34a', color: '#fff', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600 }}>Save Rules</button>
-                  <button onClick={() => resetRules(d.id)} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.78rem', color: '#b45309' }}>Reset Rules</button>
-                  <button onClick={() => setRulesDeptId(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', fontSize: '0.8rem' }}>Cancel</button>
+                <div style={{ marginTop: '0.5rem', padding: '0.6rem 0.75rem', background: '#f9fafb', borderRadius: 6 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem', fontWeight: 600, color: '#6b7280' }}>
+                      Minimum consent days:
+                      <input type="number" min="1" max="5" value={rules.min_days} onChange={e => setRules(r => ({ ...r, min_days: e.target.value }))} style={{ width: 60, padding: '0.25rem 0.4rem', border: '1px solid #e5e7eb', borderRadius: 4, fontSize: '0.8rem', textAlign: 'center' }} />
+                      <span style={{ color: '#9ca3af', fontWeight: 400 }}>/5</span>
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer' }}>
+                      <input type="checkbox" checked={rules.requires_stay_at_bhati} onChange={e => setRules(r => ({ ...r, requires_stay_at_bhati: e.target.checked }))} />
+                      Requires stay at bhati
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer' }}>
+                      <input type="checkbox" checked={rules.requires_initiated} onChange={e => setRules(r => ({ ...r, requires_initiated: e.target.checked }))} />
+                      Requires initiated
+                    </label>
+                    <div style={{ flex: 1 }} />
+                    <button onClick={() => saveRules(d.id)} style={{ padding: '0.3rem 0.7rem', border: 'none', borderRadius: 6, background: '#16a34a', color: '#fff', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600 }}>Save Rules</button>
+                    <button onClick={() => resetRules(d.id)} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.78rem', color: '#b45309' }}>Reset Rules</button>
+                    <button onClick={() => setRulesDeptId(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', fontSize: '0.8rem' }}>Cancel</button>
+                  </div>
+
+                  <div style={{ marginTop: '0.6rem', paddingTop: '0.6rem', borderTop: '1px dashed #e5e7eb' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer' }}>
+                      <input type="checkbox" checked={rules.include_vss} onChange={e => setRules(r => ({ ...r, include_vss: e.target.checked }))} />
+                      Include VSS <span style={{ fontWeight: 500, color: '#6b7280' }}>— opens this department for VSS sewadars</span>
+                    </label>
+                    {rules.include_vss && (
+                      <div style={{ marginTop: '0.5rem', display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 6, padding: '0.5rem 0.75rem' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem', fontWeight: 600, color: '#166534' }}>
+                          VSS minimum days:
+                          <input type="number" min="1" max="5" value={rules.vss_min_days} onChange={e => setRules(r => ({ ...r, vss_min_days: e.target.value }))} style={{ width: 60, padding: '0.25rem 0.4rem', border: '1px solid #d1fae5', borderRadius: 4, fontSize: '0.8rem', textAlign: 'center' }} />
+                          <span style={{ color: '#6b7280', fontWeight: 400 }}>/5</span>
+                        </label>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer' }}>
+                          <input type="checkbox" checked={rules.vss_requires_stay_at_bhati} onChange={e => setRules(r => ({ ...r, vss_requires_stay_at_bhati: e.target.checked }))} />
+                          VSS requires stay at bhati
+                        </label>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer' }}>
+                          <input type="checkbox" checked={rules.vss_requires_initiated} onChange={e => setRules(r => ({ ...r, vss_requires_initiated: e.target.checked }))} />
+                          VSS requires initiated
+                        </label>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem', fontWeight: 600, color: '#166534' }}>
+                          VSS gender:
+                          <select value={rules.vss_requires_gender} onChange={e => setRules(r => ({ ...r, vss_requires_gender: e.target.value }))} style={{ padding: '0.25rem 0.4rem', border: '1px solid #d1fae5', borderRadius: 4, fontSize: '0.8rem' }}>
+                            <option value="">Any</option>
+                            <option value="MALE">Male</option>
+                            <option value="FEMALE">Female</option>
+                          </select>
+                        </label>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>

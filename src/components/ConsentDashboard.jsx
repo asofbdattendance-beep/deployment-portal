@@ -1,15 +1,31 @@
-import { useState, useEffect } from 'react'
-import { supabase, fetchCentres, notElderlyFilter } from '../lib/supabase'
-import { attendanceDisplay, isLowAttendance } from '../lib/logic'
-import { BarChart3, Building2, CalendarDays, Users, Download, AlertTriangle } from 'lucide-react'
+import { useState, useEffect, useCallback } from 'react'
+import { supabase, fetchCentres, fetchPortalSettings, setPortalSetting } from '../lib/supabase'
+import { getSubtreeCentres, getRootCentre } from '../lib/logic'
+import { usePortalAuth } from '../context/PortalAuthContext'
+import { useToast } from './Toast'
+import MasterSwitch from './MasterSwitch'
+import { BarChart3, Users, Download, AlertTriangle, Building2, LayoutGrid } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import DeadlinePill from './DeadlinePill'
 
-/* ─── Super admin / ASO: read-only consent dashboard across all centres ─── */
+/* ─── Super admin / ASO: comprehensive consent dashboard ───
+   Two matrices:
+   1) Parent-centre consent matrix — badges / consented / initiated /
+      non-initiated / staying + Scheduled (total allocated seats)
+   2) Parent-centre department matrix — allocated seats per parent
+      centre (incl. child centres) by department; Scheduled = total
+      allocated for the centre. Both derived from centre_allocations. */
 export default function ConsentDashboard() {
+  const { profile } = usePortalAuth()
+  const toast = useToast()
   const [schedules, setSchedules] = useState([])
   const [selectedScheduleId, setSelectedScheduleId] = useState('')
-  const [data, setData] = useState(null)
+  const [centres, setCentres] = useState([])
+  const [depts, setDepts] = useState([])
+  const [consentMatrix, setConsentMatrix] = useState([])
+  const [allocations, setAllocations] = useState([])
+  const [settings, setSettings] = useState({ sewadar_deployment_open: true })
+  const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -19,47 +35,33 @@ export default function ConsentDashboard() {
         setSelectedScheduleId(prev => (prev && data.some(s => s.id === prev)) ? prev : (data[0]?.id || ''))
       }
     }).catch(() => {})
+    fetchPortalSettings().then(setSettings).catch(() => {})
+    Promise.all([
+      fetchCentres(),
+      supabase.from('deployment_departments').select('id, name').eq('is_active', true),
+    ]).then(([c, d]) => {
+      setCentres(c)
+      setDepts(d.data || [])
+    }).catch(() => {})
   }, [])
 
-  const load = async (scheduleId) => {
-    const [centres, sewadars, consents, deps, prev, depts] = await Promise.all([
-      fetchCentres(),
-      supabase.from('sewadars').select('badge_number, sewadar_name, department, centre, is_initiated').or(notElderlyFilter()),
-      supabase.from('sewadar_consents').select('*').eq('schedule_id', scheduleId),
-      supabase.from('deployments').select('centre, badge_number, department_id').eq('schedule_id', scheduleId),
-      supabase.from('prev_year_deployments').select('badge_number, prev_department, attendance_reported'),
-      supabase.from('deployment_departments').select('id, name').eq('is_active', true),
+  const loadMatrices = useCallback(async (scheduleId) => {
+    if (!scheduleId) return
+    const [consentRes, allocRes] = await Promise.all([
+      supabase.rpc('get_parent_consent_matrix', { p_schedule: scheduleId }),
+      supabase.from('centre_allocations').select('department_id, centre, max_count').eq('schedule_id', scheduleId),
     ])
-    const consentMap = {}
-    ;(consents.data || []).forEach(c => { consentMap[`${c.centre}|${c.badge_number}`] = c })
-    const deployMap = {}
-    ;(deps.data || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d.department_id })
-    const prevMap = {}
-    ;(prev.data || []).forEach(p => { prevMap[p.badge_number] = p })
-    const deptNameMap = {}
-    ;(depts.data || []).forEach(d => { deptNameMap[d.id] = d.name })
-    return {
-      centres: centres || [],
-      sewadars: sewadars.data || [],
-      consentMap,
-      deployMap,
-      prevMap,
-      deptNameMap,
-    }
-  }
+    setConsentMatrix(consentRes.data || [])
+    setAllocations(allocRes.data || [])
+  }, [])
 
   useEffect(() => {
     if (!selectedScheduleId) return
     setLoading(true)
     let mounted = true
-    ;(async () => {
-      try {
-        const d = await load(selectedScheduleId)
-        if (mounted) setData(d)
-      } finally { if (mounted) setLoading(false) }
-    })()
+    loadMatrices(selectedScheduleId).then(() => { if (mounted) setLoading(false) }).catch(() => { if (mounted) setLoading(false) })
     return () => { mounted = false }
-  }, [selectedScheduleId])
+  }, [selectedScheduleId, loadMatrices])
 
   // realtime: refresh live while centres edit
   useEffect(() => {
@@ -69,87 +71,149 @@ export default function ConsentDashboard() {
       .channel(`consent-dash-${selectedScheduleId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` }, () => {
         if (!mounted) return
-        load(selectedScheduleId).then(d => setData(d)).catch(() => {})
+        loadMatrices(selectedScheduleId).catch(() => {})
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` }, () => {
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_allocations', filter: `schedule_id=eq.${selectedScheduleId}` }, () => {
         if (!mounted) return
-        load(selectedScheduleId).then(d => setData(d)).catch(() => {})
+        loadMatrices(selectedScheduleId).catch(() => {})
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_settings' }, () => {
+        fetchPortalSettings().then(setSettings).catch(() => {})
       })
       .subscribe()
     return () => { mounted = false; supabase.removeChannel(channel) }
-  }, [selectedScheduleId])
+  }, [selectedScheduleId, loadMatrices])
+
+  const toggleSewadars = async () => {
+    if (busy) return
+    setBusy(true)
+    const next = !settings.sewadar_deployment_open
+    try {
+      await setPortalSetting('sewadar_deployment_open', next, profile?.name || null)
+      setSettings(s => ({ ...s, sewadar_deployment_open: next }))
+      toast.success(next ? 'Sewadar deployment is now OPEN' : 'Sewadar deployment is now CLOSED')
+    } catch (err) {
+      toast.error(err.message || 'Could not update setting')
+    } finally { setBusy(false) }
+  }
 
   const schedule = schedules.find(s => s.id === selectedScheduleId)
-  const allCentreNames = (data?.centres || []).map(c => c.name)
-  const consentedList = (data?.sewadars || []).filter(sw => data?.consentMap[`${sw.centre}|${sw.badge_number}`]?.consent_given)
 
-  const total = data?.sewadars.length || 0
-  const consented = consentedList.length
-  const pct = total ? Math.round(consented / total * 100) : 0
-  const bhatiCount = consentedList.filter(sw => data?.consentMap[`${sw.centre}|${sw.badge_number}`]?.stay_at_bhati).length
-  const initiatedCount = consentedList.filter(sw => sw.is_initiated).length
-  const requestedCount = consentedList.filter(sw => data?.deployMap[`${sw.centre}|${sw.badge_number}`]).length
-
-  // day-wise distribution (1-5)
-  const dayDist = [1, 2, 3, 4, 5].map(n => ({
-    days: n,
-    count: consentedList.filter(sw => (data?.consentMap[`${sw.centre}|${sw.badge_number}`]?.available_days_count ?? 0) === n).length,
-  }))
-
-  // centre-wise breakdown (grouped by parent)
-  const centreRows = allCentreNames.map(name => {
-    const sw = (data?.sewadars || []).filter(x => x.centre === name)
-    const con = sw.filter(x => data?.consentMap[`${x.centre}|${x.badge_number}`]?.consent_given)
+  // build parent rows (names from centres, counts from the consent RPC)
+  const parents = centres.filter(c => !c.parent_centre)
+  const parentRows = parents.map(p => {
+    const cm = consentMatrix.find(r => r.parent_centre === p.name) || {}
     return {
-      name,
-      parent: data?.centres.find(c => c.name === name)?.parent_centre || null,
-      total: sw.length,
-      consented: con.length,
+      name: p.name,
+      childCount: getSubtreeCentres(centres, p.name).length - 1,
+      total: Number(cm.total_badges || 0),
+      consented: Number(cm.consented || 0),
+      initiated: Number(cm.initiated || 0),
+      nonInitiated: Number(cm.non_initiated || 0),
+      staying: Number(cm.staying || 0),
+      allocCounts: {},
     }
-  }).filter(r => r.total > 0).sort((a, b) => (a.parent || '') < (b.parent || '') ? -1 : 1)
+  }).sort((a, b) => a.name.localeCompare(b.name))
 
-  const parents = [...new Set(centreRows.filter(r => r.parent).map(r => r.parent))]
-  const parentOrder = [...allCentreNames.filter(n => !data?.centres.find(c => c.name === n)?.parent_centre), ...parents].filter((v, i, a) => a.indexOf(v) === i)
+  // roll allocations up to the parent centre (allocations are stored per parent;
+  // clubbing child-centre allocations if any)
+  const allocByParent = {}
+  ;(allocations || []).forEach(a => {
+    const root = getRootCentre(centres, a.centre) || a.centre
+    if (!allocByParent[root]) allocByParent[root] = {}
+    allocByParent[root][a.department_id] = (allocByParent[root][a.department_id] || 0) + (a.max_count || 0)
+  })
+  parentRows.forEach(r => {
+    r.allocCounts = allocByParent[r.name] || {}
+    r.allocTotal = Object.values(r.allocCounts).reduce((a, b) => a + b, 0)
+  })
 
-  const maxDay = Math.max(...dayDist.map(d => d.count), 1)
+  const totals = {
+    total: parentRows.reduce((s, r) => s + r.total, 0),
+    consented: parentRows.reduce((s, r) => s + r.consented, 0),
+    initiated: parentRows.reduce((s, r) => s + r.initiated, 0),
+    nonInitiated: parentRows.reduce((s, r) => s + r.nonInitiated, 0),
+    staying: parentRows.reduce((s, r) => s + r.staying, 0),
+    allocTotal: parentRows.reduce((s, r) => s + r.allocTotal, 0),
+  }
+  totals.allocCounts = {}
+  depts.forEach(d => {
+    totals.allocCounts[d.id] = parentRows.reduce((s, r) => s + ((r.allocCounts || {})[d.id] || 0), 0)
+  })
 
-  const deptName = (id) => data?.deptNameMap?.[id] || '—'
+  const pct = totals.total ? Math.round(totals.consented / totals.total * 100) : 0
 
   const exportExcel = () => {
-    const rows = (data?.sewadars || []).map(sw => {
-      const key = `${sw.centre}|${sw.badge_number}`
-      const c = data?.consentMap[key]
-      const prev = data?.prevMap[sw.badge_number]
-      return {
-        'Badge': sw.badge_number,
-        'Name': sw.sewadar_name,
-        'Centre': sw.centre,
-        'Dept': sw.department || '',
-        'Initiated': sw.is_initiated ? 'Yes' : 'No',
-        'Consent': c?.consent_given ? 'Yes' : 'No',
-        'Days': c?.consent_given ? c.available_days_count : '',
-        'Stay at Bhati': c?.stay_at_bhati ? 'Yes' : 'No',
-        'Chair Pass': c?.chair_pass ? 'Yes' : 'No',
-        'Requested Dept': deptName(data?.deployMap[key]),
-        'Prev. Dept': prev?.prev_department || 'Were not deployed in last session',
-        'Attendance Reported': attendanceDisplay(prev?.attendance_reported, prev?.prev_department) || '',
-      }
-    })
-    const ws = XLSX.utils.json_to_sheet(rows)
     const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, ws, 'Consent & Deployment')
+
+    const consentRows = parentRows.map(r => ({
+      'Parent Centre': r.childCount > 0 ? `${r.name} (+${r.childCount})` : r.name,
+      'Total Badges': r.total,
+      'Consented Yes': r.consented,
+      'Initiated (consented)': r.initiated,
+      'Non-Initiated (consented)': r.nonInitiated,
+      'Staying (consented)': r.staying,
+      'Scheduled (allocated)': r.allocTotal,
+    }))
+    consentRows.push({
+      'Parent Centre': 'TOTAL',
+      'Total Badges': totals.total,
+      'Consented Yes': totals.consented,
+      'Initiated (consented)': totals.initiated,
+      'Non-Initiated (consented)': totals.nonInitiated,
+      'Staying (consented)': totals.staying,
+      'Scheduled (allocated)': totals.allocTotal,
+    })
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(consentRows), 'Consent Matrix')
+
+    const deptRows = parentRows.map(r => {
+      const row = { 'Parent Centre': r.childCount > 0 ? `${r.name} (+${r.childCount})` : r.name, 'Scheduled (allocated)': r.allocTotal }
+      depts.forEach(d => { row[d.name] = (r.allocCounts || {})[d.id] || 0 })
+      return row
+    })
+    deptRows.push({
+      'Parent Centre': 'TOTAL',
+      'Scheduled (allocated)': totals.allocTotal,
+      ...Object.fromEntries(depts.map(d => [d.name, totals.allocCounts[d.id] || 0])),
+    })
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(deptRows), 'Department Matrix')
+
     const name = (schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')
     XLSX.writeFile(wb, `${name}.xlsx`)
   }
+
+  const cell = (key, v) => (
+    <td key={key} style={{ textAlign: 'center', fontWeight: v > 0 ? 800 : 400, color: v > 0 ? '#047857' : '#94a3b8' }}>{v}</td>
+  )
+
+  // department cell shows the ALLOCATED quota for that centre × department
+  const allocCell = (key, alloc) => (
+    <td key={key} style={{ textAlign: 'center', fontWeight: alloc > 0 ? 800 : 400, color: alloc > 0 ? '#4f46e5' : '#cbd5e1' }}>
+      {alloc > 0 ? alloc : '—'}
+    </td>
+  )
+
+  const parentCell = (r) => (
+    <td style={{ fontWeight: 700, position: 'sticky', left: 0, background: '#fff', whiteSpace: 'nowrap' }}>
+      {r.name}
+      {r.childCount > 0 && <span style={{ fontSize: '0.68rem', color: '#94a3b8', fontWeight: 600, marginLeft: '0.35rem' }}>(+{r.childCount})</span>}
+    </td>
+  )
 
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
       <div className="page-header">
         <div>
           <h2 className="page-title"><BarChart3 size={22} /> Consent Dashboard</h2>
-          <div className="page-sub">Collective overview across every centre</div>
+          <div className="page-sub">Parent-centre consent &amp; allocated-seat matrices</div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+          <MasterSwitch
+            label="Sewadar Deployment"
+            open={settings.sewadar_deployment_open}
+            onToggle={toggleSewadars}
+            busy={busy}
+          />
           <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
             {schedules.map(s => (
               <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
@@ -162,11 +226,17 @@ export default function ConsentDashboard() {
         </div>
       </div>
 
-      {loading || !data ? (
+      {settings.sewadar_deployment_open === false && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
+          <AlertTriangle size={16} /> Sewadar deployment is currently <strong>CLOSED</strong> — centres cannot edit any consent or deployment until you open it.
+        </div>
+      )}
+
+      {loading ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
           {[...Array(3)].map((_, i) => <div key={i} className="skeleton" style={{ height: 56, borderRadius: 10 }} />)}
         </div>
-      ) : total === 0 ? (
+      ) : totals.total === 0 ? (
         <div className="card">
           <div className="empty">
             <div className="empty-icon"><Users size={22} /></div>
@@ -180,13 +250,13 @@ export default function ConsentDashboard() {
           <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
             <div className="stat">
               <div className="stat-label">Sewadars</div>
-              <div className="stat-value">{total}</div>
-              <div className="stat-sub">across {allCentreNames.length} centres</div>
+              <div className="stat-value">{totals.total}</div>
+              <div className="stat-sub">across {centres.length} centres</div>
             </div>
             <div className="stat">
               <div className="stat-label">Consented (Yes)</div>
-              <div className="stat-value" style={{ color: '#10b981' }}>{consented}</div>
-              <div className="stat-sub">of {total}</div>
+              <div className="stat-value" style={{ color: '#10b981' }}>{totals.consented}</div>
+              <div className="stat-sub">of {totals.total}</div>
             </div>
             <div className="stat">
               <div className="stat-label">Consent rate</div>
@@ -198,176 +268,104 @@ export default function ConsentDashboard() {
               <div className="stat-sub">{pct}% consented</div>
             </div>
             <div className="stat">
-              <div className="stat-label">Requested dept</div>
-              <div className="stat-value" style={{ color: '#8b5cf6' }}>{requestedCount}</div>
-              <div className="stat-sub">of {consented} consented</div>
+              <div className="stat-label">Initiated</div>
+              <div className="stat-value" style={{ color: '#0ea5e9' }}>{totals.initiated}</div>
+              <div className="stat-sub">of {totals.consented} consented</div>
             </div>
             <div className="stat">
               <div className="stat-label">Stay at Bhati</div>
-              <div className="stat-value" style={{ color: '#6366f1' }}>{bhatiCount}</div>
-              <div className="stat-sub">of {consented} consented</div>
+              <div className="stat-value" style={{ color: '#6366f1' }}>{totals.staying}</div>
+              <div className="stat-sub">of {totals.consented} consented</div>
             </div>
             <div className="stat">
-              <div className="stat-label">Initiated</div>
-              <div className="stat-value" style={{ color: '#0ea5e9' }}>{initiatedCount}</div>
-              <div className="stat-sub">of {consented} consented</div>
+              <div className="stat-label">Allocated</div>
+              <div className="stat-value" style={{ color: '#8b5cf6' }}>{totals.allocTotal}</div>
+              <div className="stat-sub">seats across departments</div>
             </div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.25rem' }}>
-            {/* ── day-wise consent distribution ── */}
-            <div className="card" style={{ padding: '1.25rem' }}>
-              <div className="section-header">
-                <div>
-                  <div className="section-title"><CalendarDays size={15} style={{ marginRight: '0.35rem', verticalAlign: '-2px' }} /> Day-wise consent</div>
-                  <div className="card-sub">How many days each consented sewadar is available</div>
-                </div>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.7rem' }}>
-                {dayDist.map(({ days, count }) => (
-                  <div key={days} className="stack-row">
-                    <span className="stack-label" style={{ flex: '0 0 68px', fontSize: '0.78rem', color: '#64748b', fontWeight: 600 }}>{days} day{days > 1 ? 's' : ''}</span>
-                    <div className="progress grow" style={{ height: 12 }}>
-                      <div className="progress-bar" style={{ width: `${Math.round(count / maxDay * 100)}%` }} />
-                    </div>
-                    <span style={{ flex: '0 0 30px', textAlign: 'right', fontSize: '0.82rem', fontWeight: 800 }}>{count}</span>
-                    <span style={{ flex: '0 0 40px', fontSize: '0.7rem', color: '#94a3b8', textAlign: 'right' }}>{consented ? Math.round(count / consented * 100) : 0}%</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* ── centre-wise consent breakdown ── */}
-            <div className="card" style={{ padding: '1.25rem' }}>
-              <div className="section-header">
-                <div>
-                  <div className="section-title"><Building2 size={15} style={{ marginRight: '0.35rem', verticalAlign: '-2px' }} /> Centre-wise consent</div>
-                  <div className="card-sub">Consent status per centre (children indented under parent)</div>
-                </div>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.7rem' }}>
-                {centreRows.map(r => (
-                  <div key={r.name} className="stack-row">
-                    <span style={{ flex: '0 0 8px' }} />
-                    <span className="stack-label" style={{ flex: '0 0 34%', fontSize: '0.8rem', fontWeight: 600 }}>
-                      {r.parent ? '↳ ' : ''}{r.name}
-                    </span>
-                    <div className="progress grow" style={{ height: 12 }}>
-                      <div className={`progress-bar ${r.total && r.consented === r.total ? 'success' : r.consented ? '' : 'warn'}`} style={{ width: `${r.total ? Math.round(r.consented / r.total * 100) : 0}%` }} />
-                    </div>
-                    <span style={{ flex: '0 0 56px', textAlign: 'right', fontSize: '0.8rem', fontWeight: 700 }}>
-                      {r.consented}/{r.total}
-                    </span>
-                    <span style={{ flex: '0 0 40px', textAlign: 'right', fontSize: '0.7rem', color: '#94a3b8' }}>
-                      {r.total ? Math.round(r.consented / r.total * 100) : 0}%
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* ── grouped parent-child table ── */}
-          <div className="card">
-            <div className="table-wrap" style={{ border: 'none', borderRadius: '10px 10px 0 0' }}>
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Parent centre</th>
-                    <th>Centre</th>
-                    <th>Sewadars</th>
-                    <th>Consented</th>
-                    <th>Consent %</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {parentOrder.map(parent => {
-                    const kids = centreRows.filter(r => r.parent === parent)
-                    const parentRow = centreRows.find(r => r.name === parent)
-                    return [
-                      parentRow && (
-                        <tr key={parent}>
-                          <td colSpan={2} style={{ fontWeight: 700 }}>{parent} {kids.length > 0 && <span style={{ fontSize: '0.7rem', color: '#94a3b8' }}>+ {kids.length} child{kids.length > 1 ? 'ren' : ''}</span>}</td>
-                          <td data-label="Sewadars">{parentRow.total}</td>
-                          <td data-label="Consented">{parentRow.consented}</td>
-                          <td data-label="Consent %">
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                              <div className="progress" style={{ width: 60, height: 8 }}><div className="progress-bar" style={{ width: `${parentRow.total ? Math.round(parentRow.consented / parentRow.total * 100) : 0}%` }} /></div>
-                              <span style={{ fontSize: '0.75rem', fontWeight: 700 }}>{parentRow.total ? Math.round(parentRow.consented / parentRow.total * 100) : 0}%</span>
-                            </div>
-                          </td>
-                        </tr>
-                      ),
-                      kids.map(k => (
-                        <tr key={k.name} style={{ background: '#fafbfd' }}>
-                          <td style={{ color: '#cbd5e1' }}>·</td>
-                          <td data-label="Centre" style={{ paddingLeft: '1.5rem', fontWeight: 600 }}>↳ {k.name}</td>
-                          <td data-label="Sewadars">{k.total}</td>
-                          <td data-label="Consented">{k.consented}</td>
-                          <td data-label="Consent %">
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                              <div className="progress" style={{ width: 60, height: 8 }}><div className="progress-bar" style={{ width: `${k.total ? Math.round(k.consented / k.total * 100) : 0}%` }} /></div>
-                              <span style={{ fontSize: '0.75rem', fontWeight: 700 }}>{k.total ? Math.round(k.consented / k.total * 100) : 0}%</span>
-                            </div>
-                          </td>
-                        </tr>
-                      )),
-                    ]
-                  })}
-                </tbody>
-              </table>
-            </div>
-            {centreRows.length > 0 && (
-              <div style={{ padding: '0.85rem 1.25rem', fontSize: '0.82rem', color: '#64748b', borderTop: '1px solid #f1f5f9' }}>
-                Overall: <strong>{centreRows.reduce((s, r) => s + r.consented, 0)}</strong> of <strong>{centreRows.reduce((s, r) => s + r.total, 0)}</strong> sewadars consented across {allCentreNames.length} centres
-              </div>
-            )}
-          </div>
-
-          {/* ── prev-year comparison table ── */}
+          {/* ── 1. Parent-centre consent matrix ── */}
           <div className="card">
             <div className="section-header" style={{ padding: '1.25rem 1.25rem 0' }}>
               <div>
-                <div className="section-title"><AlertTriangle size={15} style={{ marginRight: '0.35rem', verticalAlign: '-2px' }} /> Prev-year comparison</div>
-                <div className="card-sub">Current requested dept vs last visit's dept &amp; attendance</div>
+                <div className="section-title"><Building2 size={15} style={{ marginRight: '0.35rem', verticalAlign: '-2px' }} /> Parent-centre consent matrix</div>
+                <div className="card-sub">Per parent centre (incl. child centres): total badges, consented, initiated / non-initiated and staying among consented — <strong>Scheduled</strong> = total allocated seats for the centre</div>
               </div>
             </div>
             <div className="table-wrap" style={{ border: 'none', borderRadius: 0, padding: '0 1.25rem 1.25rem' }}>
               <table className="table">
                 <thead>
                   <tr>
-                    <th>Badge</th>
-                    <th>Name</th>
-                    <th>Centre</th>
-                    <th>Current Requested</th>
-                    <th>Prev. Dept</th>
-                    <th>Attendance Reported</th>
+                    <th style={{ position: 'sticky', left: 0, background: '#fff', zIndex: 2 }}>Parent Centre</th>
+                    <th style={{ textAlign: 'center' }}>Total Badges</th>
+                    <th style={{ textAlign: 'center' }}>Consented Yes</th>
+                    <th style={{ textAlign: 'center' }}>Initiated</th>
+                    <th style={{ textAlign: 'center' }}>Non-Initiated</th>
+                    <th style={{ textAlign: 'center' }}>Staying</th>
+                    <th style={{ textAlign: 'center', background: '#eef2ff', color: '#4f46e5', fontWeight: 800 }}>Scheduled</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {consentedList.map(sw => {
-                    const key = `${sw.centre}|${sw.badge_number}`
-                    const prev = data?.prevMap[sw.badge_number]
-                    const low = isLowAttendance(prev?.attendance_reported, prev?.prev_department)
-                    return (
-                      <tr key={key}>
-                        <td style={{ fontFamily: 'monospace', fontSize: '0.8rem' }} data-label="Badge">{sw.badge_number}</td>
-                        <td style={{ fontWeight: 500 }} data-label="Name">{sw.sewadar_name}</td>
-                        <td data-label="Centre" style={{ color: '#64748b', fontSize: '0.8rem' }}>{sw.centre}</td>
-                        <td data-label="Current Requested">{deptName(data?.deployMap[key])}</td>
-                        <td data-label="Prev. Dept">{prev?.prev_department || 'Were not deployed in last session'}</td>
-                        <td data-label="Attendance Reported" style={{ textAlign: 'center' }}>
-                          {prev ? (
-                            <span className={`attendance-pill ${low ? 'low' : 'ok'}`}>
-                              {attendanceDisplay(prev.attendance_reported, prev.prev_department)}
-                            </span>
-                          ) : <span style={{ color: '#cbd5e1' }}>—</span>}
-                        </td>
-                      </tr>
-                    )
-                  })}
+                  {parentRows.map(r => (
+                    <tr key={r.name}>
+                      {parentCell(r)}
+                      <td data-label="Total" style={{ textAlign: 'center', fontWeight: 600 }}>{r.total}</td>
+                      <td data-label="Consented" style={{ textAlign: 'center', fontWeight: 700 }}>{r.consented}</td>
+                      {cell('initiated', r.initiated)}
+                      {cell('nonInitiated', r.nonInitiated)}
+                      {cell('staying', r.staying)}
+                      <td data-label="Scheduled" style={{ textAlign: 'center', fontWeight: 800, color: '#4f46e5', background: '#eef2ff' }}>{r.allocTotal}</td>
+                    </tr>
+                  ))}
+                  <tr style={{ background: '#f8fafc', borderTop: '2px solid #e2e8f0' }}>
+                    <td style={{ fontWeight: 800, position: 'sticky', left: 0, background: '#f8fafc' }}>TOTAL</td>
+                    <td style={{ textAlign: 'center', fontWeight: 800 }}>{totals.total}</td>
+                    <td style={{ textAlign: 'center', fontWeight: 800 }}>{totals.consented}</td>
+                    {cell('initiated', totals.initiated)}
+                    {cell('nonInitiated', totals.nonInitiated)}
+                    {cell('staying', totals.staying)}
+                    <td style={{ textAlign: 'center', fontWeight: 800, color: '#4f46e5', background: '#eef2ff' }}>{totals.allocTotal}</td>
+                  </tr>
                 </tbody>
               </table>
+            </div>
+          </div>
+
+          {/* ── 2. Parent-centre department matrix ── */}
+          <div className="card">
+            <div className="section-header" style={{ padding: '1.25rem 1.25rem 0' }}>
+              <div>
+                <div className="section-title"><LayoutGrid size={15} style={{ marginRight: '0.35rem', verticalAlign: '-2px' }} /> Parent-centre department matrix</div>
+                <div className="card-sub">Allocated seats per parent centre (incl. child centres) by department — <strong>Scheduled</strong> = total allocated for the centre</div>
+              </div>
+            </div>
+            <div className="table-wrap" style={{ border: 'none', borderRadius: 0, padding: '0 1.25rem 1.25rem' }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th style={{ position: 'sticky', left: 0, background: '#fff', zIndex: 2 }}>Parent Centre</th>
+                    {depts.map(d => <th key={d.id} style={{ textAlign: 'center', fontWeight: 700, fontSize: '0.72rem' }}>{d.name}</th>)}
+                    <th style={{ textAlign: 'center', background: '#eef2ff', color: '#4f46e5', fontWeight: 800 }}>Scheduled</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {parentRows.map(r => (
+                    <tr key={r.name}>
+                      {parentCell(r)}
+                      {depts.map(d => allocCell(d.id, (r.allocCounts || {})[d.id] || 0))}
+                      <td data-label="Scheduled" style={{ textAlign: 'center', fontWeight: 800, color: '#4f46e5', background: '#eef2ff' }}>{r.allocTotal}</td>
+                    </tr>
+                  ))}
+                  <tr style={{ background: '#f8fafc', borderTop: '2px solid #e2e8f0' }}>
+                    <td style={{ fontWeight: 800, position: 'sticky', left: 0, background: '#f8fafc' }}>TOTAL</td>
+                    {depts.map(d => allocCell(d.id, totals.allocCounts[d.id] || 0))}
+                    <td style={{ textAlign: 'center', fontWeight: 800, color: '#4f46e5', background: '#eef2ff' }}>{totals.allocTotal}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div style={{ padding: '0.85rem 1.25rem', fontSize: '0.82rem', color: '#64748b', borderTop: '1px solid #f1f5f9' }}>
+              <strong>{totals.consented}</strong> of <strong>{totals.total}</strong> sewadars consented across {centres.length} centres ({parents.length} parent centres)
             </div>
           </div>
         </div>

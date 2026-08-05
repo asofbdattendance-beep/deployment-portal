@@ -4,12 +4,14 @@ import LoginPage from './pages/LoginPage'
 import DeploymentPage from './pages/DeploymentPage'
 import ScheduleMakerPage from './pages/ScheduleMakerPage'
 import ConsentPage from './pages/ConsentPage'
+import VssPage from './pages/VssPage'
 import { ROLE_LABELS, ROLE_COLORS } from './lib/supabase'
-import { Calendar, Users, ClipboardCheck, ShieldCheck } from 'lucide-react'
+import { Calendar, Users, ClipboardCheck, ShieldCheck, Star } from 'lucide-react'
 
 const PAGES = {
   schedule: { label: 'Schedule', icon: Calendar, roles: ['aso', 'super_admin'] },
   consent: { label: 'Consent & Deploy', icon: ClipboardCheck, roles: ['centre_user', 'centre_admin', 'aso', 'super_admin'] },
+  vss: { label: 'VSS', icon: Star, roles: ['centre_user', 'centre_admin', 'aso', 'super_admin'] },
   deployment: { label: 'Overview', icon: Users, roles: ['aso', 'super_admin'] },
 }
 
@@ -63,6 +65,7 @@ function Dashboard() {
       <main style={{ flex: 1 }}>
         {currentPage === 'schedule' && <ScheduleMakerPage />}
         {currentPage === 'consent' && <ConsentPage />}
+        {currentPage === 'vss' && <VssPage />}
         {currentPage === 'deployment' && <DeploymentPage />}
       </main>
     </div>

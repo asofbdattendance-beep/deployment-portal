@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase, fetchCentres, getRootCentre } from '../lib/supabase'
+import { isVssBadge } from '../lib/logic'
 import { Users, BarChart3, CheckCircle2 } from 'lucide-react'
 import DeadlinePill from '../components/DeadlinePill'
 
@@ -62,10 +63,11 @@ export default function DeploymentPage() {
   const byCentre = {}
   rows.forEach(r => {
     const root = rootOf(r.centre)
-    if (!byCentre[root]) byCentre[root] = { departments: {}, children: new Set() }
+    if (!byCentre[root]) byCentre[root] = { departments: {}, vssDepartments: {}, children: new Set() }
     byCentre[root].children.add(r.centre)
     const name = r.deployment_departments?.name || '—'
-    byCentre[root].departments[name] = (byCentre[root].departments[name] || 0) + 1
+    const key = isVssBadge(r.badge_number) ? 'vssDepartments' : 'departments'
+    byCentre[root][key][name] = (byCentre[root][key][name] || 0) + 1
   })
 
   // allocations are keyed by root centre
@@ -77,7 +79,7 @@ export default function DeploymentPage() {
 
   // also list roots that have allocations but no requests yet
   Object.keys(allocByCentre).forEach(root => {
-    if (!byCentre[root]) byCentre[root] = { departments: {}, children: new Set() }
+    if (!byCentre[root]) byCentre[root] = { departments: {}, vssDepartments: {}, children: new Set() }
   })
 
   return (
@@ -113,7 +115,8 @@ export default function DeploymentPage() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
           {Object.entries(byCentre).map(([root, data]) => {
             const allocs = allocByCentre[root] || []
-            const requestedTotal = Object.values(data.departments).reduce((s, n) => s + n, 0)
+            const vssTotal = Object.values(data.vssDepartments).reduce((s, n) => s + n, 0)
+            const requestedTotal = Object.values(data.departments).reduce((s, n) => s + n, 0) + vssTotal
             const allocTotal = allocs.reduce((s, a) => s + a.max_count, 0)
             const childCount = data.children.size - 1
             return (
@@ -122,6 +125,7 @@ export default function DeploymentPage() {
                   <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>{root}</span>
                   {childCount > 0 && <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>+ {childCount} child centre{childCount > 1 ? 's' : ''}</span>}
                   <span className="pill pill-blue"><BarChart3 size={11} /> {requestedTotal} requested</span>
+                  {vssTotal > 0 && <span className="pill pill-green">VSS {vssTotal}</span>}
                   {allocTotal > 0 && (
                     <span className={`pill ${requestedTotal > allocTotal ? 'pill-red' : 'pill-gray'}`}>Allocated {allocTotal}</span>
                   )}
@@ -133,9 +137,12 @@ export default function DeploymentPage() {
                 </div>
                 <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginTop: '0.4rem' }}>
                   {Object.entries(data.departments).map(([dept, count]) => (
-                    <span key={dept} className="pill pill-blue">{dept}: {count}</span>
+                    <span key={`r-${dept}`} className="pill pill-blue">{dept}: {count}</span>
                   ))}
-                  {Object.keys(data.departments).length === 0 && (
+                  {Object.entries(data.vssDepartments).map(([dept, count]) => (
+                    <span key={`v-${dept}`} className="pill pill-green">VSS {dept}: {count}</span>
+                  ))}
+                  {Object.keys(data.departments).length === 0 && Object.keys(data.vssDepartments).length === 0 && (
                     <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No department requests yet</span>
                   )}
                 </div>
