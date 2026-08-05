@@ -45,6 +45,29 @@ export async function fetchCentres() {
   return data || []
 }
 
+export async function fetchPortalSettings() {
+  const { data, error } = await supabase.from('portal_settings').select('*').eq('id', 1).maybeSingle()
+  if (error) throw error
+  return {
+    sewadar_deployment_open: data?.sewadar_deployment_open !== false,
+    vss_deployment_open: data?.vss_deployment_open === true,
+    updated_by: data?.updated_by || null,
+    updated_at: data?.updated_at || null,
+  }
+}
+
+export async function setPortalSetting(key, value, updatedBy = null) {
+  const { error } = await supabase
+    .from('portal_settings')
+    .update({
+      [key]: value,
+      updated_at: new Date().toISOString(),
+      ...(updatedBy ? { updated_by: updatedBy } : {}),
+    })
+    .eq('id', 1)
+  if (error) throw error
+}
+
 export async function fetchSubtreeCentres(centreName) {
   const centres = await fetchCentres()
   return { centres, subtree: getSubtreeCentres(centres, centreName) }

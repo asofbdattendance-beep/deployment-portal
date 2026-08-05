@@ -1,14 +1,47 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { supabase, fetchSubtreeCentres, getRootCentre, notElderlyFilter, fetchPortalSettings } from '../lib/supabase'
-import { computeDeptQuota, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge } from '../lib/logic'
+import { supabase, fetchSubtreeCentres, getRootCentre, fetchPortalSettings } from '../lib/supabase'
+import { computeDeptQuota, vssEligibilityReasons, isVssBadge, canEditDeployment } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
-import ConsentDashboard from '../components/ConsentDashboard'
 import DeptDropdown from '../components/DeptDropdown'
 import DeadlinePill, { useDeadlineCountdown, fmtRemaining } from '../components/DeadlinePill'
-import { Save, Lock, CheckCircle2, Search, ClipboardCheck, ChevronDown, Users, AlertTriangle, CheckSquare } from 'lucide-react'
+import Tip from '../components/Tip'
+import VssDashboard from '../components/VssDashboard'
+import AddVssForm from '../components/AddVssForm'
+import VssRoster from '../components/VssRoster'
+import {
+  Save, Lock, CheckCircle2, Search, ClipboardCheck, ChevronDown, Users, AlertTriangle,
+  CheckSquare, Star, UserPlus,
+} from 'lucide-react'
 
-export default function ConsentPage() {
+/* ─── VSS: dedicated tab. Inner tabs: Deployment (+ Add VSS, placeholder). ─── */
+export default function VssPage() {
+  const { profile } = usePortalAuth()
+  const isAso = profile?.role === 'aso' || profile?.role === 'super_admin'
+  const [tab, setTab] = useState('deploy')
+
+  return (
+    <div>
+      <div style={{ maxWidth: 1400, margin: '0 auto', padding: '0.9rem 1.25rem 0', display: 'flex', gap: '0.4rem' }}>
+        <button className={`seg-btn ${tab === 'deploy' ? 'seg-active' : ''}`} onClick={() => setTab('deploy')}>
+          <ClipboardCheck size={14} /> Deployment
+        </button>
+        <button className={`seg-btn ${tab === 'add' ? 'seg-active' : ''}`} onClick={() => setTab('add')}>
+          <UserPlus size={14} /> Add VSS
+        </button>
+        {isAso && (
+          <button className={`seg-btn ${tab === 'roster' ? 'seg-active' : ''}`} onClick={() => setTab('roster')}>
+            <Users size={14} /> Roster
+          </button>
+        )}
+      </div>
+      {tab === 'add' ? <AddVssForm /> : tab === 'roster' ? <VssRoster /> : isAso ? <VssDashboard /> : <VssDeployTable />}
+    </div>
+  )
+}
+
+/* ─── VSS consent & deployment table (centre_user / centre_admin) ─── */
+function VssDeployTable() {
   const { profile } = usePortalAuth()
   const toast = useToast()
   const myCentre = profile?.centre
@@ -20,6 +53,7 @@ export default function ConsentPage() {
   const [depts, setDepts] = useState([])
   const [allocations, setAllocations] = useState([])
   const [deployments, setDeployments] = useState([])
+  const [settings, setSettings] = useState({ vss_deployment_open: false })
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [savedAt, setSavedAt] = useState(null)
@@ -39,7 +73,6 @@ export default function ConsentPage() {
   const [openReasons, setOpenReasons] = useState(null)
   const [selected, setSelected] = useState({})
   const [pendingBulk, setPendingBulk] = useState(null)
-  const [settings, setSettings] = useState({ sewadar_deployment_open: true })
 
   const myRoot = getRootCentre(centres, myCentre)
 
@@ -66,41 +99,37 @@ export default function ConsentPage() {
     if (!selectedScheduleId || !subtree.length) return
     setLoading(true)
     try {
-      const [sewRes, consRes, depRes, allocRes, deployRes, prevRes] = await Promise.all([
-        supabase.from('sewadars').select('badge_number, sewadar_name, department, centre, is_initiated').or(notElderlyFilter()).in('centre', subtree).order('sewadar_name'),
+      const [vssRes, consRes, depRes, allocRes, deployRes] = await Promise.all([
+        supabase.from('vss_sewadars').select('badge_number, sewadar_name, gender, is_initiated, is_active, remarks, centre').in('centre', subtree).order('sewadar_name'),
         supabase.from('sewadar_consents').select('*').eq('schedule_id', selectedScheduleId).in('centre', subtree),
         supabase.from('deployment_departments').select('*').eq('is_active', true).order('name'),
         supabase.from('centre_allocations').select('*').eq('schedule_id', selectedScheduleId),
         supabase.from('deployments').select('*').eq('schedule_id', selectedScheduleId).in('centre', subtree),
-        supabase.from('prev_year_deployments').select('badge_number, prev_department, attendance_reported'),
       ])
 
-      const sewadars = sewRes.data || []
+      const vss = vssRes.data || []
       const existing = consRes.data || []
       const map = {}
       existing.forEach(c => { map[`${c.centre}|${c.badge_number}`] = c })
       const deployMap = {}
       ;(deployRes.data || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d.department_id })
-      const prevMap = {}
-      ;(prevRes.data || []).forEach(p => { prevMap[p.badge_number] = p })
       const rows = {}
-      sewadars.forEach(sw => {
+      vss.forEach(sw => {
         const key = `${sw.centre}|${sw.badge_number}`
         const ex = map[key]
-        const prev = prevMap[sw.badge_number]
         rows[key] = {
           centre: sw.centre,
           badge_number: sw.badge_number,
           sewadar_name: sw.sewadar_name,
-          department: sw.department,
+          gender: sw.gender || '',
           is_initiated: !!sw.is_initiated,
+          is_active: sw.is_active !== false,
+          remarks: sw.remarks || '',
           consent_given: ex?.consent_given ?? false,
           available_days_count: ex?.available_days_count ?? 3,
           stay_at_bhati: ex?.stay_at_bhati || false,
           chair_pass: ex?.chair_pass || false,
           requested_dept: deployMap[key] || '',
-          prev_department: prev?.prev_department || null,
-          prev_attendance: prev?.attendance_reported != null ? prev.attendance_reported : null,
         }
       })
       setConsentRows(rows)
@@ -119,11 +148,11 @@ export default function ConsentPage() {
 
   useEffect(() => { loadData() }, [loadData])
 
-  // live-update the master switch state (ASO open/close)
+  // realtime: reflect master switch + centre edits live
   useEffect(() => {
     if (!selectedScheduleId) return
     const channel = supabase
-      .channel(`consent-settings-${selectedScheduleId}`)
+      .channel(`vss-deploy-${selectedScheduleId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_settings' }, () => {
         fetchPortalSettings().then(setSettings).catch(() => {})
       })
@@ -149,7 +178,7 @@ export default function ConsentPage() {
       }))
       const activeDeptIds = new Set(depts.map(d => d.id))
       const toDeploy = Object.values(consentRows)
-        .filter(r => r.consent_given && r.requested_dept && activeDeptIds.has(r.requested_dept))
+        .filter(r => r.consent_given && r.requested_dept && r.is_active && activeDeptIds.has(r.requested_dept))
         .map(r => ({
           schedule_id: selectedScheduleId,
           department_id: r.requested_dept,
@@ -159,7 +188,7 @@ export default function ConsentPage() {
           status: 'requested',
         }))
       const toRemove = Object.values(consentRows)
-        .filter(r => !r.consent_given || !r.requested_dept || !activeDeptIds.has(r.requested_dept))
+        .filter(r => !r.consent_given || !r.requested_dept || !r.is_active || !activeDeptIds.has(r.requested_dept))
         .map(r => `${r.centre}|${r.badge_number}`)
         .filter(key => deployments.some(d => `${d.centre}|${d.badge_number}` === key))
 
@@ -176,7 +205,6 @@ export default function ConsentPage() {
         const { error } = await supabase.from('deployments').delete().eq('schedule_id', selectedScheduleId).eq('centre', centre).eq('badge_number', badge_number)
         if (error) { toast.error(error.message); dirtyRef.current = true; return }
       }
-      // only clear dirty if no new edits landed while this save was in flight
       if (editVersionRef.current === versionAtStart) {
         dirtyRef.current = false
       }
@@ -186,7 +214,6 @@ export default function ConsentPage() {
     } catch (err) { toast.error(err.message); dirtyRef.current = true } finally { setSaving(false) }
   }, [selectedScheduleId, consentRows, deployments, depts, subtree, toast])
 
-  // keep a stable ref so the debounce effect isn't reset by saveAll's identity
   saveAllRef.current = saveAll
 
   // drop any pending auto-save when the schedule changes (rows belong to the old one)
@@ -206,7 +233,14 @@ export default function ConsentPage() {
   const schedule = schedules.find(s => s.id === selectedScheduleId)
   const deadlinePassed = schedule?.deadline ? new Date(schedule.deadline) < new Date() : false
   const scheduleDone = schedule?.status === 'done'
-  const canEdit = isEditableRole && !!schedule && schedule.status === 'open' && !deadlinePassed && !scheduleDone && settings.sewadar_deployment_open !== false
+  const masterOpen = settings.vss_deployment_open === true
+  const canEdit = canEditDeployment({
+    editableRole: isEditableRole,
+    schedule,
+    deadlinePassed,
+    done: scheduleDone,
+    masterOpen,
+  })
   const deadlineNow = useDeadlineCountdown(schedule?.deadline)
   const deadlineRemaining = fmtRemaining(schedule?.deadline, deadlineNow)
   const deadlineWarn = deadlineRemaining && !deadlineRemaining.passed && deadlineRemaining.days < 1
@@ -215,15 +249,17 @@ export default function ConsentPage() {
   const savedAllCounts = {}
   deployments.forEach(d => { savedAllCounts[d.department_id] = (savedAllCounts[d.department_id] || 0) + 1 })
   const savedOwnCounts = {}
-  deployments.filter(d => !isVssBadge(d.badge_number)).forEach(d => { savedOwnCounts[d.department_id] = (savedOwnCounts[d.department_id] || 0) + 1 })
-  const localCounts = {}
-  Object.values(consentRows).forEach(r => { if (r.consent_given && r.requested_dept) localCounts[r.requested_dept] = (localCounts[r.requested_dept] || 0) + 1 })
-  const deptQuota = computeDeptQuota(myAlloc, savedAllCounts, localCounts, savedOwnCounts)
+  deployments.filter(d => isVssBadge(d.badge_number)).forEach(d => { savedOwnCounts[d.department_id] = (savedOwnCounts[d.department_id] || 0) + 1 })
+  const localOwnCounts = {}
+  Object.values(consentRows).forEach(r => { if (r.consent_given && r.requested_dept) localOwnCounts[r.requested_dept] = (localOwnCounts[r.requested_dept] || 0) + 1 })
+  const deptQuota = computeDeptQuota(myAlloc, savedAllCounts, localOwnCounts, savedOwnCounts)
 
-  // returns a list of human-readable reasons a sewadar is not eligible for a dept
+  const vssSewadarMap = {}
+  Object.values(consentRows).forEach(r => { vssSewadarMap[`${r.centre}|${r.badge_number}`] = r })
+
   const rowEligibilityReasons = (key, deptId) => {
     const dept = depts.find(d => d.id === deptId)
-    return eligibilityReasons(consentRows[key], dept)
+    return vssEligibilityReasons(consentRows[key], vssSewadarMap[key], dept)
   }
 
   const setConsent = (key, value) => {
@@ -265,10 +301,6 @@ export default function ConsentPage() {
     return () => document.removeEventListener('click', onDocClick)
   }, [openDeptDropdown])
 
-  if (profile?.role === 'super_admin' || profile?.role === 'aso') {
-    return <ConsentDashboard />
-  }
-
   if (!schedules.length) {
     return (
       <div className="page">
@@ -288,7 +320,6 @@ export default function ConsentPage() {
     return (a.sewadar_name || '').localeCompare(b.sewadar_name || '', undefined, { sensitivity: 'base' })
   })
 
-  // group by centre
   const byCentre = {}
   visible.forEach(r => {
     if (!byCentre[r.centre]) byCentre[r.centre] = []
@@ -298,28 +329,14 @@ export default function ConsentPage() {
   const totalAll = Object.values(consentRows).length
   const consentedAll = Object.values(consentRows).filter(r => r.consent_given).length
   const requestedAll = Object.values(consentRows).filter(r => r.consent_given && r.requested_dept).length
+  const inactiveAll = Object.values(consentRows).filter(r => !r.is_active).length
 
-  const SkeletonTable = () => (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', padding: '0.5rem' }}>
-      {[...Array(4)].map((_, i) => (
-        <div key={i} style={{ display: 'grid', gridTemplateColumns: '80px 1fr 100px 120px 100px 100px 80px 160px', gap: '0.75rem' }}>
-          {[...Array(8)].map((_, j) => <div key={j} className="skeleton" style={{ height: 26 }} />)}
-        </div>
-      ))}
-    </div>
-  )
-
-  // Highlight low prev-year attendance: 0,1 always; 2 only if not TRAFFIC OUTSIDE BHATI
-  const attendanceClass = (r) => {
-    if (r.prev_attendance == null) return 'attendance-pill muted'
-    return `attendance-pill ${isLowAttendance(r.prev_attendance, r.prev_department) ? 'low' : 'ok'}`
-  }
   const renderConsentCell = (r) => (
     <td style={{ textAlign: 'center' }} data-label="Consent">
       <select
         value={r.consent_given ? 'yes' : 'no'}
         onChange={e => setConsent(`${r.centre}|${r.badge_number}`, e.target.value === 'yes')}
-        disabled={!canEdit}
+        disabled={!canEdit || !r.is_active}
         className="select"
         style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
       >
@@ -334,7 +351,7 @@ export default function ConsentPage() {
         role="switch"
         aria-checked={r.stay_at_bhati}
         onClick={() => toggleBhati(`${r.centre}|${r.badge_number}`)}
-        disabled={!canEdit || !r.consent_given}
+        disabled={!canEdit || !r.consent_given || !r.is_active}
         className="toggle"
         title="Stay at bhati"
       >
@@ -348,7 +365,7 @@ export default function ConsentPage() {
         role="switch"
         aria-checked={r.chair_pass}
         onClick={() => toggleChairPass(`${r.centre}|${r.badge_number}`)}
-        disabled={!canEdit || !r.consent_given}
+        disabled={!canEdit || !r.consent_given || !r.is_active}
         className="toggle"
         title="Chair pass"
       >
@@ -361,7 +378,7 @@ export default function ConsentPage() {
       <select
         value={r.available_days_count}
         onChange={e => setDays(`${r.centre}|${r.badge_number}`, e.target.value)}
-        disabled={!canEdit || !r.consent_given}
+        disabled={!canEdit || !r.consent_given || !r.is_active}
         className="select"
         style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
       >
@@ -372,10 +389,10 @@ export default function ConsentPage() {
   const renderDeptCell = (r) => {
     const key = `${r.centre}|${r.badge_number}`
     const open = openDeptDropdown === key
-    const allocatedIds = new Set(myAlloc.map(a => a.department_id))
+    // VSS dropdown lists only departments opened for VSS (include_vss)
     const items = myAlloc.map(a => {
       const dept = depts.find(d => d.id === a.department_id)
-      if (!dept) return null
+      if (!dept || !dept.include_vss) return null
       const q = deptQuota[a.department_id]
       const reasons = rowEligibilityReasons(key, a.department_id)
       const isCurrent = r.requested_dept === a.department_id
@@ -383,12 +400,20 @@ export default function ConsentPage() {
       if (full) reasons.push(`Allocated quota reached (${q ? q.effective : 0}/${q ? q.max : a.max_count})`)
       return { deptId: a.department_id, name: dept.name, q, reasons, isCurrent, full }
     }).filter(Boolean)
-    // unallocated depts appear greyed-out with a reason so users know they exist but weren't allocated
+    // VSS-enabled departments that aren't allocated to this centre appear greyed
     depts.forEach(d => {
-      if (!allocatedIds.has(d.id) && !items.some(it => it.deptId === d.id)) {
-        items.push({ deptId: d.id, name: d.name, q: null, reasons: ['Not allocated to your centre'], isCurrent: false, full: false })
-      }
+      if (!d.include_vss) return
+      if (items.some(it => it.deptId === d.id)) return
+      items.push({
+        deptId: d.id,
+        name: d.name,
+        q: null,
+        reasons: ['Not allocated to your centre'],
+        isCurrent: false,
+        full: false,
+      })
     })
+    const rowDisabled = !r.is_active
     return (
       <td style={{ textAlign: 'center' }} data-label="Requested Deployment Department">
         <DeptDropdown
@@ -396,7 +421,7 @@ export default function ConsentPage() {
           depts={depts}
           items={items}
           open={open}
-          disabled={!canEdit || !r.consent_given}
+          disabled={!canEdit || !r.consent_given || rowDisabled}
           onToggle={close => close === false ? setOpenDeptDropdown(null) : setOpenDeptDropdown(open ? null : key)}
           onSelect={deptId => { setRequestedDept(key, deptId); setOpenDeptDropdown(null) }}
           openReasons={openReasons}
@@ -410,22 +435,35 @@ export default function ConsentPage() {
     setSelected(prev => ({ ...prev, [key]: !prev[key] }))
   }
   const selectAllCentre = (centreRows) => {
-    const allSelected = centreRows.length > 0 && centreRows.every(r => selected[`${r.centre}|${r.badge_number}`])
+    const activeRows = centreRows.filter(r => r.is_active)
+    const allSelected = activeRows.length > 0 && activeRows.every(r => selected[`${r.centre}|${r.badge_number}`])
     const next = { ...selected }
-    centreRows.forEach(r => { next[`${r.centre}|${r.badge_number}`] = !allSelected })
+    activeRows.forEach(r => { next[`${r.centre}|${r.badge_number}`] = !allSelected })
     setSelected(next)
   }
   const clearSelection = () => setSelected({})
   const selectedRows = visible.filter(r => selected[`${r.centre}|${r.badge_number}`])
 
-  // unified bulk update: sets a pending action that asks for confirmation
   const requestBulk = (title, message, updater, keys = null, skipped = []) => {
     if (!selectedRows.length) return
+    const inactiveSelected = selectedRows.filter(r => !r.is_active)
+    if (inactiveSelected.length > 0) {
+      const names = inactiveSelected.map(r => r.sewadar_name).slice(0, 4).join(', ') + (inactiveSelected.length > 4 ? '…' : '')
+      toast.error(`Cannot modify ${inactiveSelected.length} inactive VSS sewadar${inactiveSelected.length > 1 ? 's' : ''} — ${names}`)
+      return
+    }
     setPendingBulk({ title, message, updater, keys, skipped })
   }
 
   const applyBulk = () => {
     if (!pendingBulk) return
+    const inactiveSelected = selectedRows.filter(r => !r.is_active)
+    if (inactiveSelected.length > 0) {
+      const names = inactiveSelected.map(r => r.sewadar_name).slice(0, 4).join(', ') + (inactiveSelected.length > 4 ? '…' : '')
+      toast.error(`Cannot modify ${inactiveSelected.length} inactive VSS sewadar${inactiveSelected.length > 1 ? 's' : ''} — ${names}`)
+      setPendingBulk(null)
+      return
+    }
     dirtyRef.current = true
     editVersionRef.current++
     setConsentRows(prev => {
@@ -443,37 +481,33 @@ export default function ConsentPage() {
   const bulkConsent = (value) => {
     requestBulk(
       'Mark consent',
-      `Set consent to ${value ? 'Yes' : 'No'} for ${selectedRows.length} selected sewadar${selectedRows.length > 1 ? 's' : ''}?`,
+      `Set consent to ${value ? 'Yes' : 'No'} for ${selectedRows.length} selected VSS sewadar${selectedRows.length > 1 ? 's' : ''}?`,
       row => value
         ? { ...row, consent_given: true }
         : { ...row, consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: 3, requested_dept: '' },
     )
   }
-
   const bulkDays = (days) => {
     requestBulk(
       'Set days',
-      `Set available days to ${days} and mark consent Yes for ${selectedRows.length} selected sewadar${selectedRows.length > 1 ? 's' : ''}?`,
+      `Set available days to ${days} and mark consent Yes for ${selectedRows.length} selected VSS sewadar${selectedRows.length > 1 ? 's' : ''}?`,
       row => ({ ...row, consent_given: true, available_days_count: days }),
     )
   }
-
   const bulkSetBhati = (value) => {
     requestBulk(
       'Stay at Bhati',
-      `Set stay at bhati to ${value ? 'Yes' : 'No'} for ${selectedRows.length} selected sewadar${selectedRows.length > 1 ? 's' : ''}?`,
+      `Set stay at bhati to ${value ? 'Yes' : 'No'} for ${selectedRows.length} selected VSS sewadar${selectedRows.length > 1 ? 's' : ''}?`,
       row => ({ ...row, stay_at_bhati: value }),
     )
   }
-
   const bulkSetChairPass = (value) => {
     requestBulk(
       'Chair pass',
-      `Set chair pass to ${value ? 'Yes' : 'No'} for ${selectedRows.length} selected sewadar${selectedRows.length > 1 ? 's' : ''}?`,
+      `Set chair pass to ${value ? 'Yes' : 'No'} for ${selectedRows.length} selected VSS sewadar${selectedRows.length > 1 ? 's' : ''}?`,
       row => ({ ...row, chair_pass: value }),
     )
   }
-
   const bulkAssignDept = (deptId) => {
     const dept = depts.find(d => d.id === deptId)
     if (!dept) return
@@ -488,7 +522,7 @@ export default function ConsentPage() {
       if (!already && remaining < 1) {
         reasons = [`Quota full (${q ? q.effective : 0}/${q ? q.max : '?'} already assigned)`]
       } else {
-        reasons = eligibilityReasons(r, dept)
+        reasons = vssEligibilityReasons(r, r, dept)
         if (reasons.length === 0) {
           eligibleKeys.add(key)
           if (!already) remaining--
@@ -500,7 +534,7 @@ export default function ConsentPage() {
     const count = eligibleKeys.size
     requestBulk(
       'Assign to department',
-      `Assign ${count} selected sewadar${count === 1 ? '' : 's'} to "${dept.name}"?${skipped.length ? ` ${skipped.length} skipped — see reasons below.` : ''}`,
+      `Assign ${count} selected VSS sewadar${count === 1 ? '' : 's'} to "${dept.name}"?${skipped.length ? ` ${skipped.length} skipped — see reasons below.` : ''}`,
       row => ({ ...row, requested_dept: deptId }),
       eligibleKeys,
       skipped,
@@ -511,8 +545,8 @@ export default function ConsentPage() {
     <div className="page" style={{ maxWidth: 1400 }}>
       <div className="page-header">
         <div>
-          <h2 className="page-title"><ClipboardCheck size={22} /> Consent &amp; Deployment</h2>
-          <div className="page-sub">{myCentre} · manages {subtree.length} centre{subtree.length > 1 ? 's' : ''} (own + children)</div>
+          <h2 className="page-title"><Star size={22} /> VSS Consent &amp; Deployment</h2>
+          <div className="page-sub">{myCentre} · manages {subtree.length} centre{subtree.length > 1 ? 's' : ''} (own + children) · VSS sewadars only</div>
         </div>
         <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
           {saving ? (
@@ -526,7 +560,7 @@ export default function ConsentPage() {
 
       <div className="stat-row">
         <div className="stat">
-          <div className="stat-label">Sewadars in scope</div>
+          <div className="stat-label">VSS sewadars in scope</div>
           <div className="stat-value">{totalAll}</div>
         </div>
         <div className="stat">
@@ -549,6 +583,12 @@ export default function ConsentPage() {
           <div className="stat-sub">{totalAll ? Math.round(consentedAll / totalAll * 100) : 0}% consented</div>
         </div>
       </div>
+
+      {inactiveAll > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.6rem 0.75rem', fontSize: '0.82rem', color: '#b91c1c', marginBottom: '1rem' }}>
+          <AlertTriangle size={15} /> {inactiveAll} inactive VSS sewadar{inactiveAll > 1 ? 's' : ''} — deployment blocked. Hover the red icon for the reason.
+        </div>
+      )}
 
       {myAlloc.length > 0 && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: '0.75rem', marginBottom: '1.25rem' }}>
@@ -575,8 +615,8 @@ export default function ConsentPage() {
       <div className="card" style={{ padding: '1.25rem' }}>
         <div className="section-header" style={{ flexWrap: 'wrap', gap: '0.75rem' }}>
           <div>
-            <div className="section-title">Consent &amp; requested department</div>
-            <div className="card-sub">Consent · days (1–5) · stay at bhati · chair pass · requested deployment department · prev. visit data</div>
+            <div className="section-title">VSS consent &amp; requested department</div>
+            <div className="card-sub">Consent · days (1–5) · stay at bhati · chair pass · requested deployment department (VSS-enabled only)</div>
           </div>
           <div style={{ flex: 1 }} />
           <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
@@ -598,14 +638,14 @@ export default function ConsentPage() {
           </div>
         </div>
 
+        {!masterOpen && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
+            <Lock size={16} /> VSS deployment is closed by the ASO. Editing is disabled.
+          </div>
+        )}
         {(scheduleDone || deadlinePassed) && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
             <Lock size={16} /> {scheduleDone ? 'This schedule is done.' : 'The deadline has passed.'} Editing is disabled.
-          </div>
-        )}
-        {settings.sewadar_deployment_open === false && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
-            <Lock size={16} /> Deployment is closed by the ASO. Editing is disabled.
           </div>
         )}
         {canEdit && deadlineWarn && (
@@ -644,9 +684,8 @@ export default function ConsentPage() {
             <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Dept:</span>
             <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" onChange={e => { if (e.target.value) { bulkAssignDept(e.target.value); e.target.value = '' } }}>
               <option value="" disabled>Assign…</option>
-              {myAlloc.map(a => {
+              {myAlloc.filter(a => depts.find(d => d.id === a.department_id)?.include_vss).map(a => {
                 const dept = depts.find(d => d.id === a.department_id)
-                if (!dept) return null
                 return <option key={a.department_id} value={a.department_id}>{dept.name} ({deptQuota[a.department_id]?.effective || 0}/{deptQuota[a.department_id]?.max || a.max_count})</option>
               })}
             </select>
@@ -686,17 +725,20 @@ export default function ConsentPage() {
         )}
 
         {loading ? (
-          <SkeletonTable />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', padding: '0.5rem' }}>
+            {[...Array(4)].map((_, i) => <div key={i} className="skeleton" style={{ height: 26 }} />)}
+          </div>
         ) : visible.length === 0 ? (
           <div className="empty">
             <div className="empty-icon"><Users size={22} /></div>
-            <div className="empty-title">No sewadars found</div>
-            <div className="empty-text">{search ? 'Try a different name or badge, or clear the filters.' : 'No sewadars exist for the centres in your scope.'}</div>
+            <div className="empty-title">No VSS sewadars found</div>
+            <div className="empty-text">{search ? 'Try a different name or badge, or clear the filters.' : 'No VSS sewadars exist for the centres in your scope.'}</div>
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
             {Object.entries(byCentre).map(([centre, rows]) => {
               const open = expanded[centre] !== false
+              const activeRows = rows.filter(r => r.is_active)
               const done = rows.filter(r => r.consent_given).length
               const pct = rows.length ? Math.round(done / rows.length * 100) : 0
               return (
@@ -719,61 +761,59 @@ export default function ConsentPage() {
                           <thead>
                             <tr>
                               <th style={{ width: 30, textAlign: 'center' }}>
-                                <input type="checkbox" checked={rows.length > 0 && rows.every(r => selected[`${r.centre}|${r.badge_number}`])} onChange={() => selectAllCentre(rows)} disabled={!canEdit} style={{ cursor: canEdit ? 'pointer' : 'not-allowed' }} title="Select all in this centre" />
+                                <input type="checkbox" checked={activeRows.length > 0 && activeRows.every(r => selected[`${r.centre}|${r.badge_number}`])} onChange={() => selectAllCentre(rows)} disabled={!canEdit} style={{ cursor: canEdit ? 'pointer' : 'not-allowed' }} title="Select all active VSS in this centre" />
                               </th>
                               <th>Badge</th>
                               <th>Name</th>
-                              <th>Dept</th>
+                              <th style={{ textAlign: 'center' }}>Gender</th>
                               <th style={{ textAlign: 'center' }}>Initiated</th>
                               <th style={{ textAlign: 'center' }}>Consent</th>
                               <th style={{ textAlign: 'center' }}>Stay at Bhati</th>
                               <th style={{ textAlign: 'center' }}>Chair Pass</th>
                               <th style={{ textAlign: 'center' }}>Days</th>
                               <th style={{ textAlign: 'center' }}>Requested Deployment Department</th>
-                              <th style={{ textAlign: 'center', borderLeft: '2px solid #e2e8f0' }}>Prev. Dept</th>
-                              <th style={{ textAlign: 'center' }}>Attendance Reported</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {rows.map(r => (
-                              <tr key={`${r.centre}|${r.badge_number}`} style={{ background: selected[`${r.centre}|${r.badge_number}`] ? '#f5f3ff' : undefined }}>
-                                <td style={{ textAlign: 'center' }} data-label="Select">
-                                  <input type="checkbox" checked={!!selected[`${r.centre}|${r.badge_number}`]} onChange={() => toggleSelect(`${r.centre}|${r.badge_number}`)} disabled={!canEdit} style={{ cursor: canEdit ? 'pointer' : 'not-allowed' }} />
-                                </td>
-                                <td style={{ fontFamily: 'monospace', fontSize: '0.8rem' }} data-label="Badge">
-                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
-                                    {isLowAttendance(r.prev_attendance, r.prev_department) && (
-                                      <AlertTriangle size={14} style={{ color: '#dc2626', flexShrink: 0 }} title="Low attendance in last session" />
-                                    )}
-                                    <span>{r.badge_number}</span>
-                                  </span>
-                                </td>
-                                <td style={{ fontWeight: 500 }} data-label="Name">{r.sewadar_name}</td>
-                                <td style={{ color: '#64748b' }} data-label="Dept">{r.department || '—'}</td>
-                                <td style={{ textAlign: 'center' }} data-label="Initiated">
-                                  <span className={`pill ${r.is_initiated ? 'pill-green' : 'pill-amber'}`}>{r.is_initiated ? 'Yes' : 'No'}</span>
-                                </td>
-                                {renderConsentCell(r)}
-                                {renderBhatiCell(r)}
-                                {renderChairPassCell(r)}
-                                {renderDaysCell(r)}
-                                {renderDeptCell(r)}
-                                {!r.prev_department ? (
-                                  <td colSpan={2} data-label="Prev. Session" style={{ textAlign: 'center', borderLeft: '2px solid #e2e8f0', color: '#94a3b8', fontSize: '0.78rem', fontWeight: 400, whiteSpace: 'normal' }}>
-                                    Were not deployed in last session
+                            {rows.map(r => {
+                              const key = `${r.centre}|${r.badge_number}`
+                              const inactive = !r.is_active
+                              return (
+                                <tr key={key} style={{
+                                  background: inactive ? '#fef2f2' : selected[key] ? '#f5f3ff' : undefined,
+                                  opacity: inactive ? 0.9 : 1,
+                                }}>
+                                  <td style={{ textAlign: 'center' }} data-label="Select">
+                                    <input type="checkbox" checked={!!selected[key]} onChange={() => toggleSelect(key)} disabled={!canEdit || !r.is_active} style={{ cursor: canEdit && r.is_active ? 'pointer' : 'not-allowed' }} title={inactive ? 'Inactive VSS sewadar — cannot be selected' : undefined} />
                                   </td>
-                                ) : (
-                                  <>
-                                    <td data-label="Prev. Dept" style={{ textAlign: 'center', borderLeft: '2px solid #e2e8f0', color: '#334155', fontSize: '0.8rem', fontWeight: 500 }}>
-                                      {r.prev_department}
-                                    </td>
-                                    <td data-label="Attendance Reported" style={{ textAlign: 'center', fontSize: '0.8rem', fontWeight: 700 }}>
-                                      <span className={attendanceClass(r)}>{attendanceDisplay(r.prev_attendance, r.prev_department)}</span>
-                                    </td>
-                                  </>
-                                )}
-                              </tr>
-                            ))}
+                                  <td style={{ fontFamily: 'monospace', fontSize: '0.8rem' }} data-label="Badge">
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                                      {inactive && (
+                                        <Tip label={`Cant deploy sewadar — ${r.remarks || 'inactive VSS sewadar'}`} tone="danger">
+                                          <AlertTriangle size={14} style={{ color: '#dc2626', flexShrink: 0 }} />
+                                        </Tip>
+                                      )}
+                                      <span>{r.badge_number}</span>
+                                    </span>
+                                    {inactive && (
+                                      <Tip label={`Cant deploy sewadar — ${r.remarks || 'inactive VSS sewadar'}`} tone="danger">
+                                        <span className="pill pill-red" style={{ fontSize: '0.62rem', marginLeft: '0.35rem', cursor: 'help' }}>INACTIVE</span>
+                                      </Tip>
+                                    )}
+                                  </td>
+                                  <td style={{ fontWeight: 500 }} data-label="Name">{r.sewadar_name}</td>
+                                  <td style={{ textAlign: 'center', color: '#64748b', fontSize: '0.8rem' }} data-label="Gender">{r.gender || '—'}</td>
+                                  <td style={{ textAlign: 'center' }} data-label="Initiated">
+                                    <span className={`pill ${r.is_initiated ? 'pill-green' : 'pill-amber'}`}>{r.is_initiated ? 'Yes' : 'No'}</span>
+                                  </td>
+                                  {renderConsentCell(r)}
+                                  {renderBhatiCell(r)}
+                                  {renderChairPassCell(r)}
+                                  {renderDaysCell(r)}
+                                  {renderDeptCell(r)}
+                                </tr>
+                              )
+                            })}
                           </tbody>
                         </table>
                       </div>

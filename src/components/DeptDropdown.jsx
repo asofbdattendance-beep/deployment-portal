@@ -111,7 +111,7 @@ export default function DeptDropdown({
                     {it.isCurrent && <span style={{ color: '#4f46e5', fontSize: '0.7rem', flexShrink: 0 }}>✓</span>}
                   </span>
                   <span style={{ fontSize: '0.7rem', color: '#94a3b8', flexShrink: 0 }}>
-                    {it.q ? `${it.q.local}/${it.q.max}` : '0/0'}
+                    {it.q ? `${it.q.effective}/${it.q.max}` : '0/0'}
                   </span>
                 </div>
                 {showReasons && (
