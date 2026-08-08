@@ -28,7 +28,8 @@ No dates. Every schedule spans the fixed 5 days: **WED, THU, FRI, SAT, SUN**. Co
    - Chair pass (Yes/No)
    - **Requested deployment department** (from the superadmin-allocated departments only)
    Everything auto-saves (debounced ~800ms). Filter + search + sort available. Bulk multi-select actions with confirmation: set consent, days, stay-at-bhati, chair pass, and assign-to-department (per-row eligibility/quota checks, skips listed with reasons).
-5. **The deadline governs everything** — after the deadline (or when status = `done`), all editing is disabled in the UI **and** enforced by DB triggers. No centre locks, no superadmin go-ahead.
+5. **The deadline governs everything** — after the deadline (or when status = `done`), all editing is disabled in the UI **and** enforced by DB triggers. No centre locks, no superadmin go-ahead. **Exception:** ASO / super_admin may keep editing (final deployed department + optional consent fixes) after the deadline — they are exempted inside `block_after_deadline` / `check_deployment`.
+6. **ASO / super_admin finalize deployment** on the extra **Deployment Allocation** tab: they see every sewadar's consent + requested department and set the **deployed (final) department**. Consent inputs are shown read-only and only become editable when *Enable editing* is ticked (explicit, never automatic).
 
 ## Rules enforced
 
@@ -53,7 +54,7 @@ Super-admin allocation: `(schedule, department, centre)` → `max_count`. Only p
 Per-sewadar: `(schedule, centre, badge, consent_given, available_days_count, stay_at_bhati, chair_pass)`. Unique `(schedule_id, centre, badge_number)`.
 
 ### `deployments`
-Assignments: `(schedule, centre, badge)` → `department_id`, `status` (`requested`). Unique `(schedule_id, centre, badge_number)`.
+Assignments: `(schedule, centre, badge)` → `department_id` (the sewadar's **requested** department), `deployed_department_id` (the **final** department set by ASO/super_admin, nullable), `status` (`requested`). Unique `(schedule_id, centre, badge_number)`.
 
 ### `prev_year_deployments`
 Reference data from the previous visit, matched by `badge_number` (PK): `prev_department`, `attendance_reported`. Imported from Excel (`sql/prev_year_deployments_data.sql`, 2415 rows).
@@ -80,19 +81,23 @@ Soft-audit for destructive actions: schedule/`centre_allocation`/department dele
 - `src/pages/ConsentPage.jsx` — combined Consent & Deploy table for centre roles (auto-save, quota bars, bulk actions, prev-year columns, custom dept dropdown).
 - `src/components/ConsentDashboard.jsx` — read-only superadmin/ASO dashboard (stats, day/centre distribution, prev-year comparison, **Export Excel** via `xlsx`, realtime refresh).
 - `src/pages/DeploymentPage.jsx` — read-only overview for superadmin/ASO, rolls child-centre requests up to their root centre and compares against allocations (realtime refresh).
+- `src/pages/DeploymentAllocationPage.jsx` — ASO/super_admin final assignment page: every sewadar's consent + requested department with a **Deployed Department** dropdown (from `deployments.deployed_department_id`); edits locked until *Enable editing* is ticked; auto-save; **Export Excel** via `xlsx`.
 - `src/pages/ScheduleMakerPage.jsx` — schedules + deadline, departments/rules, allocations panel, requested-deployment summary.
 - `src/components/DeptDropdown.jsx` — custom fixed-position dropdown listing allocated depts with per-option eligibility reasons; unallocated depts appear greyed with "Not allocated to your centre".
 - `src/components/DeadlinePill.jsx` — live countdown (`Xd Yh Zm Zs`), amber <24h, red when passed.
 - `src/lib/logic.js` — pure domain logic (quota math, eligibility, elderly filter, tree helpers, attendance) shared with tests.
 - `src/lib/logic.test.js` — Vitest unit tests (16). Run with `npm test`.
-- `src/App.jsx` — dedicated sticky tab navbar: **Schedule** (aso/super_admin), **Consent & Deploy** (all roles), **Overview** (aso/super_admin).
+- `src/App.jsx` — dedicated sticky tab navbar: **Schedule** (aso/super_admin), **Consent & Deploy** (all roles), **VSS** (all roles), **Deployment Allocation** (aso/super_admin), **Overview** (aso/super_admin).
 
 ## SQL migrations (run in order in Supabase)
 
 1. `sql/portal_setup.sql` — base tables, RLS, helpers.
 2. `sql/v2_deployment_redesign.sql` — deadline design, restriction rules, `chair_pass`, `prev_year_deployments`, triggers, RLS. **Non-destructive; safe to re-run.**
 3. `sql/v3_data_safety.sql` — unique schedule-name index + `audit_log` table (with correct super_admin insert policy).
-4. `sql/prev_year_deployments_data.sql` — upserts 2415 prev-year badge rows (run after the tables exist).
+4. `sql/v4_vss.sql`, `sql/v5_vss_creation.sql`, `sql/v6_vss_roster.sql` — VSS tables, registration, rosters.
+5. `sql/v7_consent_matrix_rpc.sql` — consent-matrix RPC for the dashboard.
+6. `sql/v8_deployed_department.sql` — `deployments.deployed_department_id` (final dept set by ASO/super_admin late), admin exemption in `block_after_deadline`/`check_deployment`, RLS for aso/super_admin write. **Non-destructive; safe to re-run.**
+7. `sql/prev_year_deployments_data.sql` — upserts 2415 prev-year badge rows (run after the tables exist).
 
 ## Env / deploy
 

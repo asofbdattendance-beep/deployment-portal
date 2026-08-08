@@ -769,7 +769,7 @@ function ReadOnlySummary({ schedule }) {
       setLoading(true)
       const { data } = await supabase
         .from('deployments')
-        .select('*, deployment_departments(name)')
+        .select('*, deployment_departments!deployments_department_id_fkey(name)')
         .eq('schedule_id', schedule.id)
       if (!mounted) return
       setRows(data || [])

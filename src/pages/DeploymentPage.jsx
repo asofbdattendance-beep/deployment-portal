@@ -25,7 +25,7 @@ export default function DeploymentPage() {
 
   const load = useCallback(async (scheduleId) => {
     const [dRes, aRes] = await Promise.all([
-      supabase.from('deployments').select('*, deployment_departments(name)').eq('schedule_id', scheduleId).order('centre'),
+      supabase.from('deployments').select('*, deployment_departments!deployments_department_id_fkey(name)').eq('schedule_id', scheduleId).order('centre'),
       supabase.from('centre_allocations').select('*, deployment_departments(name)').eq('schedule_id', scheduleId),
     ])
     setRows(dRes.data || [])
