@@ -5,13 +5,15 @@ import DeploymentPage from './pages/DeploymentPage'
 import ScheduleMakerPage from './pages/ScheduleMakerPage'
 import ConsentPage from './pages/ConsentPage'
 import VssPage from './pages/VssPage'
+import DeploymentAllocationPage from './pages/DeploymentAllocationPage'
 import { ROLE_LABELS, ROLE_COLORS } from './lib/supabase'
-import { Calendar, Users, ClipboardCheck, ShieldCheck, Star } from 'lucide-react'
+import { Calendar, Users, ClipboardCheck, ShieldCheck, Star, Tags } from 'lucide-react'
 
 const PAGES = {
   schedule: { label: 'Schedule', icon: Calendar, roles: ['aso', 'super_admin'] },
   consent: { label: 'Consent & Deploy', icon: ClipboardCheck, roles: ['centre_user', 'centre_admin', 'aso', 'super_admin'] },
   vss: { label: 'VSS', icon: Star, roles: ['centre_user', 'centre_admin', 'aso', 'super_admin'] },
+  alloc: { label: 'Deployment Allocation', icon: Tags, roles: ['aso', 'super_admin'] },
   deployment: { label: 'Overview', icon: Users, roles: ['aso', 'super_admin'] },
 }
 
@@ -67,6 +69,7 @@ function Dashboard() {
         {currentPage === 'consent' && <ConsentPage />}
         {currentPage === 'vss' && <VssPage />}
         {currentPage === 'deployment' && <DeploymentPage />}
+        {currentPage === 'alloc' && <DeploymentAllocationPage />}
       </main>
     </div>
   )

@@ -544,6 +544,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
 .pill-blue { background: var(--primary-soft); color: var(--primary-dark); }
 .pill-green { background: var(--success-soft); color: #047857; }
 .pill-amber { background: var(--warning-soft); color: #b45309; }
+.pill-indigo { background: #eef2ff; color: #4f46e5; border: 1px solid #c7d2fe; }
 .pill-red { background: var(--danger-soft); color: #b91c1c; }
 .pill-gray { background: #f1f5f9; color: var(--text-sec); }
 
