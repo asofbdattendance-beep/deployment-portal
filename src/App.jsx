@@ -1,20 +1,31 @@
-import { useState } from 'react'
+import { useState, lazy, Suspense } from 'react'
 import { usePortalAuth } from './context/PortalAuthContext'
 import LoginPage from './pages/LoginPage'
-import DeploymentPage from './pages/DeploymentPage'
-import ScheduleMakerPage from './pages/ScheduleMakerPage'
-import ConsentPage from './pages/ConsentPage'
-import VssPage from './pages/VssPage'
-import DeploymentAllocationPage from './pages/DeploymentAllocationPage'
 import { ROLE_LABELS, ROLE_COLORS } from './lib/supabase'
-import { Calendar, Users, ClipboardCheck, ShieldCheck, Star, Tags } from 'lucide-react'
+import { Calendar, Users, ClipboardCheck, ShieldCheck, Star, Tags, RefreshCw, AlertTriangle } from 'lucide-react'
+
+// Code-split each page so the initial bundle stays small (xlsx etc. only
+// loads when the page that uses it is actually opened).
+const DeploymentPage = lazy(() => import('./pages/DeploymentPage'))
+const ScheduleMakerPage = lazy(() => import('./pages/ScheduleMakerPage'))
+const ConsentPage = lazy(() => import('./pages/ConsentPage'))
+const VssPage = lazy(() => import('./pages/VssPage'))
+const DeploymentAllocationPage = lazy(() => import('./pages/DeploymentAllocationPage'))
 
 const PAGES = {
   schedule: { label: 'Schedule', icon: Calendar, roles: ['aso', 'super_admin'] },
   consent: { label: 'Consent & Deploy', icon: ClipboardCheck, roles: ['centre_user', 'centre_admin', 'aso', 'super_admin'] },
   vss: { label: 'VSS', icon: Star, roles: ['centre_user', 'centre_admin', 'aso', 'super_admin'] },
-  alloc: { label: 'Deployment Allocation', icon: Tags, roles: ['aso', 'super_admin'] },
+  alloc: { label: 'Finalize Deployment', icon: Tags, roles: ['aso', 'super_admin'] },
   deployment: { label: 'Overview', icon: Users, roles: ['aso', 'super_admin'] },
+}
+
+function PageFallback() {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '40vh' }}>
+      <div style={{ width: 32, height: 32, border: '3px solid #e2e8f0', borderTopColor: '#6366f1', borderRadius: '50%', animation: 'spin 0.6s linear infinite' }} />
+    </div>
+  )
 }
 
 function Dashboard() {
@@ -65,11 +76,13 @@ function Dashboard() {
       </nav>
 
       <main style={{ flex: 1 }}>
-        {currentPage === 'schedule' && <ScheduleMakerPage />}
-        {currentPage === 'consent' && <ConsentPage />}
-        {currentPage === 'vss' && <VssPage />}
-        {currentPage === 'deployment' && <DeploymentPage />}
-        {currentPage === 'alloc' && <DeploymentAllocationPage />}
+        <Suspense fallback={<PageFallback />}>
+          {currentPage === 'schedule' && <ScheduleMakerPage />}
+          {currentPage === 'consent' && <ConsentPage />}
+          {currentPage === 'vss' && <VssPage />}
+          {currentPage === 'deployment' && <DeploymentPage />}
+          {currentPage === 'alloc' && <DeploymentAllocationPage />}
+        </Suspense>
       </main>
     </div>
   )
@@ -89,8 +102,30 @@ function AccessDenied({ signOut }) {
   )
 }
 
+function ProfileError({ message, onRetry, onSignOut }) {
+  return (
+    <div style={{ maxWidth: 440, margin: '4rem auto', padding: '0 1rem', textAlign: 'center' }}>
+      <div style={{ background: '#fff', borderRadius: 12, padding: '2rem', boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }}>
+        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '0.75rem' }}>
+          <AlertTriangle size={28} style={{ color: '#b45309' }} />
+        </div>
+        <h1 style={{ fontSize: '1.2rem', marginBottom: '0.5rem' }}>Couldn't load your profile</h1>
+        <p style={{ color: '#6b7280', fontSize: '0.9rem', marginBottom: '1.25rem' }}>
+          {message || 'Something went wrong while loading your account. This is usually temporary.'}
+        </p>
+        <div style={{ display: 'flex', gap: '0.6rem', justifyContent: 'center', flexWrap: 'wrap' }}>
+          <button onClick={onRetry} className="btn btn-primary" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
+            <RefreshCw size={15} /> Try again
+          </button>
+          <button onClick={onSignOut} className="btn">Sign out</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
-  const { isAuthenticated, loading, profile, signOut } = usePortalAuth()
+  const { isAuthenticated, loading, profile, profileError, signOut, refreshProfile } = usePortalAuth()
 
   if (loading) {
     return (
@@ -102,8 +137,17 @@ export default function App() {
 
   if (!isAuthenticated) return <LoginPage />
 
+  // Authenticated but the profile RPC failed (transient / config issue):
+  // show a retry screen instead of a cryptic access-denied.
+  if (!profile) {
+    if (profileError) {
+      return <ProfileError message={profileError} onRetry={refreshProfile} onSignOut={signOut} />
+    }
+    return <AccessDenied signOut={signOut} />
+  }
+
   const allowedRoles = ['centre_user', 'centre_admin', 'aso', 'super_admin']
-  if (!profile || !allowedRoles.includes(profile.role)) return <AccessDenied signOut={signOut} />
+  if (!allowedRoles.includes(profile.role)) return <AccessDenied signOut={signOut} />
 
   return <Dashboard />
 }

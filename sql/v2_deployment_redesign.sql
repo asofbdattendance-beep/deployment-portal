@@ -37,8 +37,18 @@ CREATE TABLE IF NOT EXISTS public.deployment_schedules (
   created_by text,
   created_at timestamptz DEFAULT now()
 );
+-- Repair for DBs that created the table from an OLDER portal_setup.sql
+-- (which used the event_date/deployment_department_id shape) — ensure the
+-- v2 columns exist before the status migration below touches them.
+ALTER TABLE public.deployment_schedules ADD COLUMN IF NOT EXISTS name text;
+ALTER TABLE public.deployment_schedules ADD COLUMN IF NOT EXISTS status text;
+ALTER TABLE public.deployment_schedules ADD COLUMN IF NOT EXISTS created_by text;
 ALTER TABLE public.deployment_schedules
   ADD COLUMN IF NOT EXISTS deadline timestamptz;
+-- drop legacy (unused) columns from the old shape so nothing references them
+ALTER TABLE public.deployment_schedules DROP COLUMN IF EXISTS event_date;
+ALTER TABLE public.deployment_schedules DROP COLUMN IF EXISTS deployment_department_id;
+ALTER TABLE public.deployment_schedules DROP COLUMN IF EXISTS max_count;
 -- old lock columns no longer used
 ALTER TABLE public.deployment_schedules DROP COLUMN IF EXISTS consent_locked;
 ALTER TABLE public.deployment_schedules DROP COLUMN IF EXISTS deployment_locked;
@@ -47,6 +57,7 @@ DO $$
 BEGIN
   ALTER TABLE public.deployment_schedules DROP CONSTRAINT IF EXISTS deployment_schedules_status_check;
   UPDATE public.deployment_schedules SET status = 'open' WHERE status IN ('consent_open', 'deployment_open');
+  UPDATE public.deployment_schedules SET status = 'open' WHERE status IS NULL;
   ALTER TABLE public.deployment_schedules
     ADD CONSTRAINT deployment_schedules_status_check CHECK (status IN ('open', 'done'));
 EXCEPTION WHEN OTHERS THEN NULL;
@@ -103,6 +114,13 @@ CREATE TABLE IF NOT EXISTS public.deployments (
   created_by text,
   UNIQUE (schedule_id, centre, badge_number)
 );
+-- Repair for DBs that created deployments from an OLDER portal_setup.sql:
+-- add the v2 columns (department_id, v2 status check) and fix the default.
+ALTER TABLE public.deployments
+  ADD COLUMN IF NOT EXISTS department_id uuid REFERENCES public.deployment_departments(id) ON DELETE CASCADE;
+ALTER TABLE public.deployments DROP CONSTRAINT IF EXISTS deployments_status_check;
+ALTER TABLE public.deployments ADD CONSTRAINT deployments_status_check
+  CHECK (status IN ('requested', 'pending'));
 ALTER TABLE public.deployments
   ALTER COLUMN status SET DEFAULT 'requested';
 CREATE INDEX IF NOT EXISTS idx_deployments_centre ON public.deployments(centre);

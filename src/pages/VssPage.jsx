@@ -1,17 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, getRootCentre, fetchPortalSettings } from '../lib/supabase'
-import { computeDeptQuota, vssEligibilityReasons, isVssBadge, canEditDeployment } from '../lib/logic'
+import { computeDeptQuota, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, consentRowKey, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import DeptDropdown from '../components/DeptDropdown'
-import DeadlinePill, { useDeadlineCountdown, fmtRemaining } from '../components/DeadlinePill'
+import DeadlinePill, { DeadlineWarning } from '../components/DeadlinePill'
 import Tip from '../components/Tip'
 import VssDashboard from '../components/VssDashboard'
 import AddVssForm from '../components/AddVssForm'
 import VssRoster from '../components/VssRoster'
 import {
   Save, Lock, CheckCircle2, Search, ClipboardCheck, ChevronDown, Users, AlertTriangle,
-  CheckSquare, Star, UserPlus,
+  CheckSquare, Star, UserPlus, Download,
 } from 'lucide-react'
 
 /* ─── VSS: dedicated tab. Inner tabs: Deployment (+ Add VSS, placeholder). ─── */
@@ -60,7 +60,8 @@ function VssDeployTable() {
   const loadedRef = useRef(false)
   const dirtyRef = useRef(false)
   const saveTimer = useRef(null)
-  const saveAllRef = useRef(null)
+  const flushRef = useRef(null)
+  const persistRef = useRef(null)
   const editVersionRef = useRef(0)
   const scheduleIdRef = useRef(null)
   const [subtree, setSubtree] = useState([])
@@ -73,6 +74,7 @@ function VssDeployTable() {
   const [openReasons, setOpenReasons] = useState(null)
   const [selected, setSelected] = useState({})
   const [pendingBulk, setPendingBulk] = useState(null)
+  const [locked, setLocked] = useState(false)
 
   const myRoot = getRootCentre(centres, myCentre)
 
@@ -85,12 +87,11 @@ function VssDeployTable() {
   }, [myCentre])
 
   const loadSchedules = useCallback(async () => {
-    const { data } = await supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false })
-    if (data) {
-      setSchedules(data)
-      setSelectedScheduleId(prev => (prev && data.some(s => s.id === prev)) ? prev : (data[0]?.id || ''))
-    }
-  }, [])
+    const { data, error } = await supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false })
+    if (error) { toast.error(error.message); return }
+    setSchedules(data || [])
+    setSelectedScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
+  }, [toast])
 
   useEffect(() => { loadSchedules() }, [loadSchedules])
   useEffect(() => { fetchPortalSettings().then(setSettings).catch(() => {}) }, [])
@@ -98,6 +99,16 @@ function VssDeployTable() {
   const loadData = useCallback(async () => {
     if (!selectedScheduleId || !subtree.length) return
     setLoading(true)
+    // the lock is per schedule — never carry a previous schedule's lock state
+    // over while the new schedule's lock is being fetched
+    setLocked(false)
+    // Capture in-flight edits before the fetch. They belong to the schedule that
+    // was last loaded (scheduleIdRef.current). A refresh of the SAME schedule
+    // overlays them on the fresh rows so a reload never discards unsaved work; a
+    // schedule switch saves the previous schedule's leftovers before the reset.
+    const prevLoadedSchedule = scheduleIdRef.current
+    const prevRows = liveRef.current.rows
+    const prevDirty = dirtyRef.current
     try {
       const [vssRes, consRes, depRes, allocRes, deployRes] = await Promise.all([
         supabase.from('vss_sewadars').select('badge_number, sewadar_name, gender, is_initiated, is_active, remarks, centre').in('centre', subtree).order('sewadar_name'),
@@ -107,6 +118,12 @@ function VssDeployTable() {
         supabase.from('deployments').select('*').eq('schedule_id', selectedScheduleId).in('centre', subtree),
       ])
 
+      // Abort the load if any query failed — rendering empty/default rows here
+      // would make the next auto-save treat every VSS sewadar as "new" and
+      // could overwrite real consent data.
+      const failed = [vssRes, consRes, depRes, allocRes, deployRes].find(r => r?.error)
+      if (failed) throw failed.error
+
       const vss = vssRes.data || []
       const existing = consRes.data || []
       const map = {}
@@ -114,10 +131,23 @@ function VssDeployTable() {
       const deployMap = {}
       ;(deployRes.data || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d.department_id })
       const rows = {}
+      const deptNameById = {}
+      ;(depRes.data || []).forEach(d => { deptNameById[d.id] = d.name })
+      // days as stored in the DB — the save baseline must use these so legacy
+      // values that differ from the auto-set rule get corrected on first save
+      const storedDays = {}
+      const autoSetDays = (r) => {
+        // Available days are NOT user-editable: every department defaults to 5,
+        // except OE ESCORTS which is fixed at 3. Enforce on load — this also
+        // fixes rows whose stored value predates the rule.
+        r.available_days_count = daysForDept(deptNameById[r.requested_dept])
+        return r
+      }
       vss.forEach(sw => {
         const key = `${sw.centre}|${sw.badge_number}`
         const ex = map[key]
-        rows[key] = {
+        storedDays[key] = ex?.available_days_count ?? DEFAULT_AVAILABLE_DAYS
+        rows[key] = autoSetDays({
           centre: sw.centre,
           badge_number: sw.badge_number,
           sewadar_name: sw.sewadar_name,
@@ -126,71 +156,172 @@ function VssDeployTable() {
           is_active: sw.is_active !== false,
           remarks: sw.remarks || '',
           consent_given: ex?.consent_given ?? false,
-          available_days_count: ex?.available_days_count ?? 3,
+          available_days_count: storedDays[key],
           stay_at_bhati: ex?.stay_at_bhati || false,
           chair_pass: ex?.chair_pass || false,
           requested_dept: deployMap[key] || '',
-        }
+        })
       })
+
+      // Same-schedule refresh: keep unsaved edits on top of the fresh rows
+      // instead of wiping them along with the baseline reset below.
+      if (prevLoadedSchedule === selectedScheduleId && prevDirty) {
+        const editsByKey = {}
+        changedConsentRows(prevRows, savedConsentRef.current).forEach(r => {
+          editsByKey[`${r.centre}|${r.badge_number}`] = r
+        })
+        if (Object.keys(editsByKey).length > 0) {
+          // overlay ONLY user-editable fields — fresh rows keep server-side
+          // values for read-only data (is_active, is_initiated, gender, etc.)
+          Object.keys(rows).forEach(key => {
+            const edit = editsByKey[key]
+            if (edit) EDITABLE_CONSENT_FIELDS.forEach(f => { if (f in edit) rows[key][f] = edit[f] })
+            // even after the overlay, days stay auto-set (5 / 3 for OE ESCORTS)
+            rows[key] = autoSetDays(rows[key])
+          })
+          setConsentRows(rows)
+          setDepts(depRes.data || [])
+          setAllocations(allocRes.data || [])
+          setDeployments(deployRes.data || [])
+          loadedRef.current = true
+          scheduleIdRef.current = selectedScheduleId
+          const ex = {}
+          subtree.forEach(c => { ex[c] = true })
+          setExpanded(ex)
+          // dirtyRef / savedConsentRef / editVersionRef stay untouched — the
+          // edits are still pending and the debounce persists them next.
+          return
+        }
+      }
+
+      // Schedule switch: a save triggered by the switch flush may still be in
+      // flight (or queued). Let it settle while scheduleIdRef still points at
+      // the previous schedule, then re-save whatever is still unsaved to it —
+      // the reset below must not invalidate that queued save.
+      if (prevLoadedSchedule && prevLoadedSchedule !== selectedScheduleId && prevDirty) {
+        let guard = 0
+        while (savingRef.current && guard < 100) {
+          await new Promise(r => setTimeout(r, 50))
+          guard++
+        }
+        if (savingRef.current) {
+          // A save hung past the 5s drain — fail loudly instead of silently
+          // resetting away the previous schedule's unsaved edits.
+          toast.error('Saving is still in progress — some edits may not have been saved before switching schedules.')
+        } else if (dirtyRef.current) {
+          await persistRef.current({
+            scheduleId: prevLoadedSchedule,
+            rows: prevRows,
+            deployments: liveRef.current.deployments,
+            depts: liveRef.current.depts,
+            subtree: liveRef.current.subtree,
+          })
+        }
+      }
+
       setConsentRows(rows)
       setDepts(depRes.data || [])
       setAllocations(allocRes.data || [])
       setDeployments(deployRes.data || [])
-      dirtyRef.current = false
+      // Baseline the snapshot on the DB-stored days: rows whose days were
+      // auto-corrected on load (legacy values ≠ the 5/3 rule) are flagged as
+      // changed so the first save fixes them, keeping UI + DB in sync.
+      const baseline = {}
+      Object.keys(rows).forEach(k => {
+        baseline[k] = storedDays[k] !== rows[k].available_days_count
+          ? { ...rows[k], available_days_count: storedDays[k] }
+          : rows[k]
+      })
+      savedConsentRef.current = buildConsentSnapshot(baseline)
+      dirtyRef.current = Object.keys(rows).some(k => rows[k].available_days_count !== storedDays[k])
       editVersionRef.current = 0
       loadedRef.current = true
       scheduleIdRef.current = selectedScheduleId
       const ex = {}
       subtree.forEach(c => { ex[c] = true })
       setExpanded(ex)
+
+      // Centre deployment lock (v13) — non-fatal: if the migration hasn't run,
+      // the page still loads fine with the lock off.
+      try {
+        const { data: lockRow } = await supabase.from('centre_locks')
+          .select('*').eq('schedule_id', selectedScheduleId).eq('centre', myRoot).maybeSingle()
+        setLocked(!!lockRow)
+      } catch { /* table missing — lock stays off until migrated */ }
+    } catch (err) {
+      console.error('Failed to load VSS consent data:', err)
+      toast.error(err?.message || 'Failed to load data — check your connection')
+      // a failed refresh must not pretend in-flight edits were saved
+      if (!prevDirty) dirtyRef.current = false
     } finally { setLoading(false) }
-  }, [selectedScheduleId, subtree])
+  }, [selectedScheduleId, subtree, myRoot, toast])
 
   useEffect(() => { loadData() }, [loadData])
 
   // realtime: reflect master switch + centre edits live
   useEffect(() => {
     if (!selectedScheduleId) return
+    const reload = () => {
+      if (dirtyRef.current || savingRef.current) return
+      loadData()
+    }
     const channel = supabase
       .channel(`vss-deploy-${selectedScheduleId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_settings' }, () => {
         fetchPortalSettings().then(setSettings).catch(() => {})
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
       .subscribe()
     return () => { supabase.removeChannel(channel) }
-  }, [selectedScheduleId])
+  }, [selectedScheduleId, loadData])
 
-  const saveAll = useCallback(async () => {
-    if (!selectedScheduleId) return
-    if (scheduleIdRef.current !== selectedScheduleId) return
+  const savedConsentRef = useRef({})
+  const liveRef = useRef({})
+  const pendingSaveRef = useRef(null)
+  const savingRef = useRef(false)
+  const mountedRef = useRef(true)
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false } }, [])
+  liveRef.current = { scheduleId: selectedScheduleId, rows: consentRows, deployments, depts, subtree }
+
+  const persist = useCallback(async (snap) => {
+    if (!snap?.scheduleId) return
+    if (scheduleIdRef.current !== snap.scheduleId) return
+    if (savingRef.current) { pendingSaveRef.current = snap; return }
+    savingRef.current = true
     setSaving(true)
     const versionAtStart = editVersionRef.current
+    const { scheduleId, rows, deployments: depRows, depts: depList, subtree: sub } = snap
     try {
-      const toUpsert = Object.values(consentRows).map(r => ({
-        schedule_id: selectedScheduleId,
+      const changed = changedConsentRows(rows, savedConsentRef.current)
+      const deptNameById = {}
+      depList.forEach(d => { deptNameById[d.id] = d.name })
+      const toUpsert = changed.map(r => ({
+        schedule_id: scheduleId,
         centre: r.centre,
         badge_number: r.badge_number,
         sewadar_name: r.sewadar_name,
         consent_given: r.consent_given,
-        available_days_count: r.consent_given ? r.available_days_count : null,
+        available_days_count: r.consent_given ? daysForDept(deptNameById[r.requested_dept]) : null,
         stay_at_bhati: r.stay_at_bhati,
         chair_pass: r.chair_pass,
       }))
-      const activeDeptIds = new Set(depts.map(d => d.id))
-      const toDeploy = Object.values(consentRows)
+      const activeDeptIds = new Set(depList.map(d => d.id))
+      const toDeploy = changed
         .filter(r => r.consent_given && r.requested_dept && r.is_active && activeDeptIds.has(r.requested_dept))
         .map(r => ({
-          schedule_id: selectedScheduleId,
+          schedule_id: scheduleId,
           department_id: r.requested_dept,
           centre: r.centre,
           badge_number: r.badge_number,
           sewadar_name: r.sewadar_name,
           status: 'requested',
         }))
-      const toRemove = Object.values(consentRows)
+      const toRemove = Object.values(rows)
         .filter(r => !r.consent_given || !r.requested_dept || !r.is_active || !activeDeptIds.has(r.requested_dept))
-        .map(r => `${r.centre}|${r.badge_number}`)
-        .filter(key => deployments.some(d => `${d.centre}|${d.badge_number}` === key))
+        .map(consentRowKey)
+        .filter(key => depRows.some(d => `${d.centre}|${d.badge_number}` === key))
 
       if (toUpsert.length > 0) {
         const { error } = await supabase.from('sewadar_consents').upsert(toUpsert, { onConflict: 'schedule_id,centre,badge_number' })
@@ -200,52 +331,123 @@ function VssDeployTable() {
         const { error } = await supabase.from('deployments').upsert(toDeploy, { onConflict: 'schedule_id,centre,badge_number' })
         if (error) { toast.error(error.message); dirtyRef.current = true; return }
       }
-      for (const key of toRemove) {
-        const [centre, badge_number] = key.split('|')
-        const { error } = await supabase.from('deployments').delete().eq('schedule_id', selectedScheduleId).eq('centre', centre).eq('badge_number', badge_number)
-        if (error) { toast.error(error.message); dirtyRef.current = true; return }
+      if (toRemove.length > 0) {
+        const byCentre = {}
+        toRemove.forEach(key => {
+          const [centre, badge_number] = key.split('|')
+          ;(byCentre[centre] = byCentre[centre] || []).push(badge_number)
+        })
+        for (const [centre, badges] of Object.entries(byCentre)) {
+          const { error } = await supabase.from('deployments')
+            .delete()
+            .eq('schedule_id', scheduleId)
+            .eq('centre', centre)
+            .in('badge_number', badges)
+          if (error) { toast.error(error.message); dirtyRef.current = true; return }
+        }
       }
       if (editVersionRef.current === versionAtStart) {
         dirtyRef.current = false
       }
-      setSavedAt(new Date())
-      const { data: fresh } = await supabase.from('deployments').select('*').eq('schedule_id', selectedScheduleId).in('centre', subtree)
-      if (fresh) setDeployments(fresh)
-    } catch (err) { toast.error(err.message); dirtyRef.current = true } finally { setSaving(false) }
-  }, [selectedScheduleId, consentRows, deployments, depts, subtree, toast])
+      // The schedule may have changed while this save was in flight — don't
+      // clobber the newly loaded schedule's dirty-tracking baseline.
+      if (scheduleIdRef.current === scheduleId) {
+        savedConsentRef.current = buildConsentSnapshot(rows)
+        setSavedAt(new Date())
+      }
+      if (mountedRef.current && scheduleIdRef.current === scheduleId) {
+        const { data: fresh } = await supabase.from('deployments').select('*').eq('schedule_id', scheduleId).in('centre', sub)
+        if (fresh && mountedRef.current) setDeployments(fresh)
+      }
+    } catch (err) { toast.error(err.message); dirtyRef.current = true } finally {
+      savingRef.current = false
+      setSaving(false)
+      // If a newer snapshot was queued while this save was in flight, persist it
+      // now — otherwise those edits would be dropped silently.
+      if (pendingSaveRef.current) {
+        const s = pendingSaveRef.current
+        pendingSaveRef.current = null
+        persist(s)
+      }
+    }
+  }, [toast])
+  persistRef.current = persist
 
-  saveAllRef.current = saveAll
-
-  // drop any pending auto-save when the schedule changes (rows belong to the old one)
-  useEffect(() => {
+  const flushPending = useCallback(() => {
     if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null }
+    if (!loadedRef.current || !dirtyRef.current) return
+    const snap = pendingSaveRef.current || liveRef.current
+    pendingSaveRef.current = null
+    persist(snap)
+  }, [persist])
+  flushRef.current = flushPending
+
+  // explicit “Save Draft” — flush whatever is pending right now instead of
+  // waiting for the 800ms debounce
+  const saveDraft = () => {
+    if (!loadedRef.current) return
+    if (dirtyRef.current) {
+      flushRef.current && flushRef.current()
+    } else {
+      toast.info('No pending changes — everything is already saved')
+    }
+  }
+
+  // Schedule switch: save the OLD schedule's pending edits before its rows
+  // are replaced by the new schedule's load (previously they were dropped).
+  useEffect(() => {
+    return () => { flushRef.current && flushRef.current() }
   }, [selectedScheduleId])
 
+  // Unmount (tab switch / logout): flush instead of dropping unsaved edits.
+  useEffect(() => () => { flushRef.current && flushRef.current() }, [])
+
+  // Warn before closing/reloading the tab with unsaved edits.
   useEffect(() => {
+    const onBeforeUnload = (e) => {
+      if (dirtyRef.current) {
+        e.preventDefault()
+        e.returnValue = ''
+      }
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [])
+
+  useEffect(() => {
+    // During a schedule switch the loaded schedule still differs from the
+    // selected one — don't re-arm a debounce whose snapshot would pair the NEW
+    // schedule id with the OLD rows (that used to write A's rows to B).
     if (!loadedRef.current || !dirtyRef.current) return
+    if (scheduleIdRef.current !== selectedScheduleId) return
     if (saveTimer.current) clearTimeout(saveTimer.current)
-    saveTimer.current = setTimeout(async () => {
-      await saveAllRef.current()
+    pendingSaveRef.current = { scheduleId: selectedScheduleId, rows: consentRows, deployments, depts, subtree }
+    saveTimer.current = setTimeout(() => {
+      const snap = pendingSaveRef.current
+      pendingSaveRef.current = null
+      persist(snap)
     }, 800)
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current) }
-  }, [consentRows])
+  }, [consentRows, selectedScheduleId, deployments, depts, subtree, persist])
 
   const schedule = schedules.find(s => s.id === selectedScheduleId)
   const deadlinePassed = schedule?.deadline ? new Date(schedule.deadline) < new Date() : false
   const scheduleDone = schedule?.status === 'done'
   const masterOpen = settings.vss_deployment_open === true
-  const canEdit = canEditDeployment({
+  const canEdit = !locked && canEditDeployment({
     editableRole: isEditableRole,
     schedule,
     deadlinePassed,
     done: scheduleDone,
     masterOpen,
   })
-  const deadlineNow = useDeadlineCountdown(schedule?.deadline)
-  const deadlineRemaining = fmtRemaining(schedule?.deadline, deadlineNow)
-  const deadlineWarn = deadlineRemaining && !deadlineRemaining.passed && deadlineRemaining.days < 1
 
   const myAlloc = allocations.filter(a => a.centre === myRoot)
+  // only departments the superadmin actually gave a quota to are offered/highlighted
+  const allocatedQuota = myAlloc.filter(a => (a.max_count || 0) > 0)
+  // VSS can only be deployed to departments the ASO opened for VSS (include_vss)
+  // AND gave a quota — quota bars / dropdowns show only those.
+  const vssAllocatedQuota = allocatedQuota.filter(a => depts.find(d => d.id === a.department_id)?.include_vss)
   const savedAllCounts = {}
   deployments.forEach(d => { savedAllCounts[d.department_id] = (savedAllCounts[d.department_id] || 0) + 1 })
   const savedOwnCounts = {}
@@ -259,8 +461,16 @@ function VssDeployTable() {
 
   const rowEligibilityReasons = (key, deptId) => {
     const dept = depts.find(d => d.id === deptId)
-    return vssEligibilityReasons(consentRows[key], vssSewadarMap[key], dept)
+    const row = consentRows[key]
+    if (!dept || !row) return ['Department not found']
+    // Days are auto-set when the department changes (5 by default, 3 for OE
+    // ESCORTS), so judge the days rule against the days this row WOULD have
+    // after switching — otherwise a row on OE ESCORTS (3 days) could never be
+    // moved to a department that requires 5.
+    const prospective = { ...row, available_days_count: daysForDept(dept.name) }
+    return vssEligibilityReasons(prospective, vssSewadarMap[key], dept)
   }
+  const deptNameOf = (deptId) => depts.find(d => d.id === deptId)?.name || ''
 
   const setConsent = (key, value) => {
     dirtyRef.current = true
@@ -269,14 +479,8 @@ function VssDeployTable() {
       ...prev,
       [key]: value
         ? { ...prev[key], consent_given: true }
-        : { ...prev[key], consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: 3, requested_dept: '' },
+        : { ...prev[key], consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: DEFAULT_AVAILABLE_DAYS, requested_dept: '' },
     }))
-  }
-  const setDays = (key, value) => {
-    dirtyRef.current = true
-    editVersionRef.current++
-    const days = parseInt(value) || 1
-    setConsentRows(prev => ({ ...prev, [key]: { ...prev[key], available_days_count: Math.min(Math.max(days, 1), 5) } }))
   }
   const toggleBhati = (key) => {
     dirtyRef.current = true
@@ -291,7 +495,12 @@ function VssDeployTable() {
   const setRequestedDept = (key, deptId) => {
     dirtyRef.current = true
     editVersionRef.current++
-    setConsentRows(prev => ({ ...prev, [key]: { ...prev[key], requested_dept: deptId } }))
+    setConsentRows(prev => {
+      const next = { ...prev[key], requested_dept: deptId }
+      // days are auto-set by the chosen department: 5 by default, 3 for OE ESCORTS
+      next.available_days_count = daysForDept(deptNameOf(deptId))
+      return { ...prev, [key]: next }
+    })
   }
 
   useEffect(() => {
@@ -373,26 +582,29 @@ function VssDeployTable() {
       </button>
     </td>
   )
-  const renderDaysCell = (r) => (
-    <td style={{ textAlign: 'center' }} data-label="Days">
-      <select
-        value={r.available_days_count}
-        onChange={e => setDays(`${r.centre}|${r.badge_number}`, e.target.value)}
-        disabled={!canEdit || !r.consent_given || !r.is_active}
-        className="select"
-        style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
-      >
-        {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}</option>)}
-      </select>
-    </td>
-  )
+  const renderDaysCell = (r) => {
+    const oeLocked = isOeEscortsDept(deptNameOf(r.requested_dept))
+    const days = r.available_days_count
+    return (
+      <td style={{ textAlign: 'center' }} data-label="Days">
+        <span
+          className={`pill ${oeLocked ? 'pill-amber' : 'pill-blue'}`}
+          title={oeLocked ? 'OE ESCORTS is fixed at 3 days' : 'Days are set automatically to 5 for every department'}
+          style={{ fontSize: '0.72rem', cursor: 'help' }}
+        >
+          <Lock size={10} style={{ verticalAlign: '-1px', marginRight: '0.25rem' }} />{days} day{days > 1 ? 's' : ''}
+        </span>
+      </td>
+    )
+  }
   const renderDeptCell = (r) => {
     const key = `${r.centre}|${r.badge_number}`
     const open = openDeptDropdown === key
-    // VSS dropdown lists only departments opened for VSS (include_vss)
-    const items = myAlloc.map(a => {
+    // Only departments the ASO allocated a quota > 0 for AND opened for VSS
+    // (include_vss) are offered — everything else is hidden entirely.
+    const items = vssAllocatedQuota.map(a => {
       const dept = depts.find(d => d.id === a.department_id)
-      if (!dept || !dept.include_vss) return null
+      if (!dept) return null
       const q = deptQuota[a.department_id]
       const reasons = rowEligibilityReasons(key, a.department_id)
       const isCurrent = r.requested_dept === a.department_id
@@ -400,22 +612,9 @@ function VssDeployTable() {
       if (full) reasons.push(`Allocated quota reached (${q ? q.effective : 0}/${q ? q.max : a.max_count})`)
       return { deptId: a.department_id, name: dept.name, q, reasons, isCurrent, full }
     }).filter(Boolean)
-    // VSS-enabled departments that aren't allocated to this centre appear greyed
-    depts.forEach(d => {
-      if (!d.include_vss) return
-      if (items.some(it => it.deptId === d.id)) return
-      items.push({
-        deptId: d.id,
-        name: d.name,
-        q: null,
-        reasons: ['Not allocated to your centre'],
-        isCurrent: false,
-        full: false,
-      })
-    })
     const rowDisabled = !r.is_active
     return (
-      <td style={{ textAlign: 'center' }} data-label="Requested Deployment Department">
+      <td style={{ textAlign: 'center' }} data-label="Deployment">
         <DeptDropdown
           row={r}
           depts={depts}
@@ -484,14 +683,7 @@ function VssDeployTable() {
       `Set consent to ${value ? 'Yes' : 'No'} for ${selectedRows.length} selected VSS sewadar${selectedRows.length > 1 ? 's' : ''}?`,
       row => value
         ? { ...row, consent_given: true }
-        : { ...row, consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: 3, requested_dept: '' },
-    )
-  }
-  const bulkDays = (days) => {
-    requestBulk(
-      'Set days',
-      `Set available days to ${days} and mark consent Yes for ${selectedRows.length} selected VSS sewadar${selectedRows.length > 1 ? 's' : ''}?`,
-      row => ({ ...row, consent_given: true, available_days_count: days }),
+        : { ...row, consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: DEFAULT_AVAILABLE_DAYS, requested_dept: '' },
     )
   }
   const bulkSetBhati = (value) => {
@@ -518,11 +710,13 @@ function VssDeployTable() {
     selectedRows.forEach(r => {
       const key = `${r.centre}|${r.badge_number}`
       const already = r.requested_dept === deptId
-      let reasons = []
+      let reasons
       if (!already && remaining < 1) {
         reasons = [`Quota full (${q ? q.effective : 0}/${q ? q.max : '?'} already assigned)`]
       } else {
-        reasons = vssEligibilityReasons(r, r, dept)
+        // days are auto-set by the target department (5 / 3 for OE ESCORTS)
+        const prospective = { ...r, available_days_count: daysForDept(dept.name) }
+        reasons = vssEligibilityReasons(prospective, r, dept)
         if (reasons.length === 0) {
           eligibleKeys.add(key)
           if (!already) remaining--
@@ -535,27 +729,63 @@ function VssDeployTable() {
     requestBulk(
       'Assign to department',
       `Assign ${count} selected VSS sewadar${count === 1 ? '' : 's'} to "${dept.name}"?${skipped.length ? ` ${skipped.length} skipped — see reasons below.` : ''}`,
-      row => ({ ...row, requested_dept: deptId }),
+      row => ({ ...row, requested_dept: deptId, available_days_count: daysForDept(dept.name) }),
       eligibleKeys,
       skipped,
     )
   }
 
+  // ── Excel export (centre role) — same lazy xlsx pattern as the other pages ──
+  const exportExcel = async () => {
+    if (!visible.length) {
+      toast.info('Nothing to export yet')
+      return
+    }
+    const XLSX = await import('xlsx') // lazy — keeps xlsx (~400 kB) out of the main bundle
+    const wb = XLSX.utils.book_new()
+    const sheet = visible.map(r => ({
+      'CENTRE': r.centre,
+      'Badge Number': r.badge_number,
+      'Name': r.sewadar_name,
+      'Gender': r.gender || '',
+      'Initiated': r.is_initiated ? 'Yes' : 'No',
+      'Active': r.is_active ? 'Yes' : 'No',
+      'Consent': r.consent_given ? 'Yes' : 'No',
+      'Stay at Bhati': r.stay_at_bhati ? 'Yes' : 'No',
+      'Chair Pass': r.chair_pass ? 'Yes' : 'No',
+      'Days': r.consent_given ? r.available_days_count : '—',
+      'Deployment': deptNameOf(r.requested_dept) || '',
+    }))
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), 'VSS Consent & Deployment')
+    const name = (schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')
+    XLSX.writeFile(wb, `${name}_vss_consent_deployment.xlsx`)
+  }
+
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
-      <div className="page-header">
-        <div>
+      <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
+        <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
           <h2 className="page-title"><Star size={22} /> VSS Consent &amp; Deployment</h2>
-          <div className="page-sub">{myCentre} · manages {subtree.length} centre{subtree.length > 1 ? 's' : ''} (own + children) · VSS sewadars only</div>
+          <div className="page-sub" style={{ fontWeight: 700, fontSize: '0.95rem', color: '#1e293b', marginTop: 0 }}>
+            {myCentre}
+          </div>
+          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            {saving ? (
+              <span className="pill pill-amber"><Save size={12} /> Saving...</span>
+            ) : savedAt ? (
+              <span className="pill pill-green"><CheckCircle2 size={12} /> Saved {savedAt.toLocaleTimeString()}</span>
+            ) : null}
+            {canEdit && (
+              <button onClick={saveDraft} className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+                <Save size={13} /> Save Draft
+              </button>
+            )}
+            <button onClick={exportExcel} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+              <Download size={13} /> Export Excel
+            </button>
+          </div>
         </div>
-        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-          {saving ? (
-            <span className="pill pill-amber"><Save size={12} /> Saving...</span>
-          ) : savedAt ? (
-            <span className="pill pill-green"><CheckCircle2 size={12} /> Saved {savedAt.toLocaleTimeString()}</span>
-          ) : null}
-          {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
-        </div>
+        {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
       </div>
 
       <div className="stat-row">
@@ -569,7 +799,7 @@ function VssDeployTable() {
           <div className="stat-sub">of {totalAll}</div>
         </div>
         <div className="stat">
-          <div className="stat-label">Requested dept</div>
+          <div className="stat-label">Deployment</div>
           <div className="stat-value" style={{ color: requestedAll === consentedAll && consentedAll ? '#10b981' : '#8b5cf6' }}>{requestedAll}</div>
           <div className="stat-sub">of {consentedAll} consented</div>
         </div>
@@ -590,9 +820,9 @@ function VssDeployTable() {
         </div>
       )}
 
-      {myAlloc.length > 0 && (
+      {vssAllocatedQuota.length > 0 && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: '0.75rem', marginBottom: '1.25rem' }}>
-          {myAlloc.map(a => {
+          {vssAllocatedQuota.map(a => {
             const dept = depts.find(d => d.id === a.department_id)
             const q = deptQuota[a.department_id]
             const pct = q ? Math.round(q.effective / q.max * 100) : 0
@@ -616,7 +846,7 @@ function VssDeployTable() {
         <div className="section-header" style={{ flexWrap: 'wrap', gap: '0.75rem' }}>
           <div>
             <div className="section-title">VSS consent &amp; requested department</div>
-            <div className="card-sub">Consent · days (1–5) · stay at bhati · chair pass · requested deployment department (VSS-enabled only)</div>
+            <div className="card-sub">Consent · days (auto: 5, 3 for OE ESCORTS) · stay at bhati · chair pass · deployment department (VSS-enabled only)</div>
           </div>
           <div style={{ flex: 1 }} />
           <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
@@ -643,17 +873,17 @@ function VssDeployTable() {
             <Lock size={16} /> VSS deployment is closed by the ASO. Editing is disabled.
           </div>
         )}
+        {locked && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
+            <Lock size={16} /> Deployment is locked by your centre — VSS consent and deployment are read-only. Only the ASO / Super Admin can reopen it.
+          </div>
+        )}
         {(scheduleDone || deadlinePassed) && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
             <Lock size={16} /> {scheduleDone ? 'This schedule is done.' : 'The deadline has passed.'} Editing is disabled.
           </div>
         )}
-        {canEdit && deadlineWarn && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#92400e', marginBottom: '1rem' }}>
-            <AlertTriangle size={16} style={{ color: '#b45309', flexShrink: 0 }} />
-            <span>Deadline is soon — <strong>{deadlineRemaining.text}</strong>. Plan to finish consent &amp; deployment before it closes.</span>
-          </div>
-        )}
+        {canEdit && <DeadlineWarning deadline={schedule?.deadline} />}
 
         {canEdit && selectedRows.length > 0 && (
           <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.6rem', background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: 10, padding: '0.6rem 0.75rem', marginBottom: '1rem', fontSize: '0.82rem' }}>
@@ -663,11 +893,6 @@ function VssDeployTable() {
               <option value="" disabled>Set…</option>
               <option value="yes">Yes</option>
               <option value="no">No</option>
-            </select>
-            <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Days:</span>
-            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" onChange={e => { if (e.target.value !== '') { bulkDays(parseInt(e.target.value, 10)); e.target.value = '' } }}>
-              <option value="" disabled>Set…</option>
-              {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n} day{n > 1 ? 's' : ''}</option>)}
             </select>
             <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Stay:</span>
             <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" onChange={e => { if (e.target.value !== '') { bulkSetBhati(e.target.value === 'yes'); e.target.value = '' } }}>
@@ -684,7 +909,7 @@ function VssDeployTable() {
             <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Dept:</span>
             <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" onChange={e => { if (e.target.value) { bulkAssignDept(e.target.value); e.target.value = '' } }}>
               <option value="" disabled>Assign…</option>
-              {myAlloc.filter(a => depts.find(d => d.id === a.department_id)?.include_vss).map(a => {
+              {vssAllocatedQuota.map(a => {
                 const dept = depts.find(d => d.id === a.department_id)
                 return <option key={a.department_id} value={a.department_id}>{dept.name} ({deptQuota[a.department_id]?.effective || 0}/{deptQuota[a.department_id]?.max || a.max_count})</option>
               })}
@@ -756,10 +981,11 @@ function VssDeployTable() {
                   </div>
                   {open && (
                     <div className="acc-body" style={{ padding: 0 }}>
-                      <div className="table-wrap" style={{ border: 'none', borderRadius: 0 }}>
-                        <table className="table">
+                      <div className="table-wrap table-wrap-sticky" style={{ border: 'none', borderRadius: 0 }}>
+                        <table className="table table-sticky">
                           <thead>
                             <tr>
+                              <th style={{ width: 40, textAlign: 'center' }}>S.No.</th>
                               <th style={{ width: 30, textAlign: 'center' }}>
                                 <input type="checkbox" checked={activeRows.length > 0 && activeRows.every(r => selected[`${r.centre}|${r.badge_number}`])} onChange={() => selectAllCentre(rows)} disabled={!canEdit} style={{ cursor: canEdit ? 'pointer' : 'not-allowed' }} title="Select all active VSS in this centre" />
                               </th>
@@ -771,11 +997,11 @@ function VssDeployTable() {
                               <th style={{ textAlign: 'center' }}>Stay at Bhati</th>
                               <th style={{ textAlign: 'center' }}>Chair Pass</th>
                               <th style={{ textAlign: 'center' }}>Days</th>
-                              <th style={{ textAlign: 'center' }}>Requested Deployment Department</th>
+                              <th style={{ textAlign: 'center' }}>Deployment</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {rows.map(r => {
+                            {rows.map((r, i) => {
                               const key = `${r.centre}|${r.badge_number}`
                               const inactive = !r.is_active
                               return (
@@ -783,6 +1009,7 @@ function VssDeployTable() {
                                   background: inactive ? '#fef2f2' : selected[key] ? '#f5f3ff' : undefined,
                                   opacity: inactive ? 0.9 : 1,
                                 }}>
+                                  <td style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }} data-label="S.No.">{i + 1}</td>
                                   <td style={{ textAlign: 'center' }} data-label="Select">
                                     <input type="checkbox" checked={!!selected[key]} onChange={() => toggleSelect(key)} disabled={!canEdit || !r.is_active} style={{ cursor: canEdit && r.is_active ? 'pointer' : 'not-allowed' }} title={inactive ? 'Inactive VSS sewadar — cannot be selected' : undefined} />
                                   </td>

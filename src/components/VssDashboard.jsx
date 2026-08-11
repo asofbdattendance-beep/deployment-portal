@@ -1,12 +1,11 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { supabase, fetchCentres, fetchPortalSettings, setPortalSetting } from '../lib/supabase'
 import { isVssBadge } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from './Toast'
 import MasterSwitch from './MasterSwitch'
 import DeadlinePill from './DeadlinePill'
-import { BarChart3, Building2, CalendarDays, Users, Download, AlertTriangle, Lock } from 'lucide-react'
-import * as XLSX from 'xlsx'
+import { BarChart3, Building2, Users, Download, AlertTriangle, Lock } from 'lucide-react'
 
 /* ─── Super admin / ASO: read-only VSS consent dashboard + master switch ─── */
 export default function VssDashboard() {
@@ -20,14 +19,13 @@ export default function VssDashboard() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false }).then(({ data }) => {
-      if (data) {
-        setSchedules(data)
-        setSelectedScheduleId(prev => (prev && data.some(s => s.id === prev)) ? prev : (data[0]?.id || ''))
-      }
+    supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false }).then(({ data, error }) => {
+      if (error) { toast.error(error.message); return }
+      setSchedules(data || [])
+      setSelectedScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
     }).catch(() => {})
     fetchPortalSettings().then(setSettings).catch(() => {})
-  }, [])
+  }, [toast])
 
   const load = async (scheduleId) => {
     const [centres, vss, consents, deps, depts] = await Promise.all([
@@ -43,12 +41,20 @@ export default function VssDashboard() {
     ;(deps.data || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d.department_id })
     const deptNameMap = {}
     ;(depts.data || []).forEach(d => { deptNameMap[d.id] = d.name })
+    // centre deployment locks (v13) — non-fatal: the strip stays empty if the
+    // migration hasn't been run yet
+    let locks = []
+    try {
+      const { data: lockData } = await supabase.from('centre_locks').select('*').eq('schedule_id', scheduleId)
+      locks = lockData || []
+    } catch { /* v13 not migrated yet */ }
     return {
       centres: centres || [],
       vss: (vss.data || []).filter(v => isVssBadge(v.badge_number)),
       consentMap,
       deployMap,
       deptNameMap,
+      locks,
     }
   }
 
@@ -60,7 +66,9 @@ export default function VssDashboard() {
       try {
         const d = await load(selectedScheduleId)
         if (mounted) setData(d)
-      } finally { if (mounted) setLoading(false) }
+      } catch { /* network error — keep previous data, just stop the spinner */ } finally {
+        if (mounted) setLoading(false)
+      }
     })()
     return () => { mounted = false }
   }, [selectedScheduleId])
@@ -111,11 +119,6 @@ export default function VssDashboard() {
   const initiatedCount = consentedList.filter(sw => sw.is_initiated).length
   const requestedCount = consentedList.filter(sw => data?.deployMap[`${sw.centre}|${sw.badge_number}`]).length
 
-  const dayDist = [1, 2, 3, 4, 5].map(n => ({
-    days: n,
-    count: consentedList.filter(sw => (data?.consentMap[`${sw.centre}|${sw.badge_number}`]?.available_days_count ?? 0) === n).length,
-  }))
-
   const centreRows = allCentreNames.map(name => {
     const sw = (data?.vss || []).filter(x => x.centre === name)
     const con = sw.filter(x => data?.consentMap[`${x.centre}|${x.badge_number}`]?.consent_given)
@@ -127,13 +130,13 @@ export default function VssDashboard() {
     }
   }).filter(r => r.total > 0).sort((a, b) => (a.parent || '') < (b.parent || '') ? -1 : 1)
 
-  const maxDay = Math.max(...dayDist.map(d => d.count), 1)
   const maleCount = (data?.vss || []).filter(v => v.gender === 'MALE').length
   const femaleCount = (data?.vss || []).filter(v => v.gender === 'FEMALE').length
 
   const deptName = (id) => data?.deptNameMap?.[id] || '—'
 
-  const exportExcel = () => {
+  const exportExcel = async () => {
+    const XLSX = await import('xlsx') // lazy — keeps xlsx (~400 kB) out of the main bundle
     const rows = (data?.vss || []).map(sw => {
       const key = `${sw.centre}|${sw.badge_number}`
       const c = data?.consentMap[key]
@@ -149,7 +152,7 @@ export default function VssDashboard() {
         'Days': c?.consent_given ? c.available_days_count : '',
         'Stay at Bhati': c?.stay_at_bhati ? 'Yes' : 'No',
         'Chair Pass': c?.chair_pass ? 'Yes' : 'No',
-        'Requested Dept': deptName(data?.deployMap[key]),
+        'Deployment': deptName(data?.deployMap[key]),
       }
     })
     const ws = XLSX.utils.json_to_sheet(rows)
@@ -161,33 +164,46 @@ export default function VssDashboard() {
 
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
-      <div className="page-header">
-        <div>
+      <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
+        <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
           <h2 className="page-title"><BarChart3 size={22} /> VSS Deployment Dashboard</h2>
           <div className="page-sub">Collective VSS overview across every centre · visit-time sewadars</div>
+          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            <MasterSwitch
+              label="VSS Deployment"
+              open={settings.vss_deployment_open}
+              onToggle={toggleVss}
+              busy={busy}
+            />
+            <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
+              {schedules.map(s => (
+                <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
+              ))}
+            </select>
+            <button onClick={exportExcel} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+              <Download size={13} /> Export Excel
+            </button>
+          </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-          <MasterSwitch
-            label="VSS Deployment"
-            open={settings.vss_deployment_open}
-            onToggle={toggleVss}
-            busy={busy}
-          />
-          <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
-            {schedules.map(s => (
-              <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
-            ))}
-          </select>
-          <button onClick={exportExcel} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-            <Download size={13} /> Export Excel
-          </button>
-          {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
-        </div>
+        {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
       </div>
 
       {!settings.vss_deployment_open && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
           <Lock size={16} /> VSS deployment is currently <strong>CLOSED</strong> — centres cannot edit any VSS consent or deployment until you open it.
+        </div>
+      )}
+
+      {(data?.locks || []).length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, padding: '0.6rem 0.75rem', fontSize: '0.82rem', color: '#92400e', marginBottom: '1rem' }}>
+          <span style={{ fontWeight: 700 }}><Lock size={13} style={{ verticalAlign: '-2px', marginRight: '0.25rem' }} />Locked deployments:</span>
+          {data.locks.map(l => (
+            <span key={l.id} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', background: '#fff', border: '1px solid #fde68a', borderRadius: 999, padding: '0.2rem 0.7rem' }}>
+              <span style={{ fontWeight: 700 }}>{l.centre}</span>
+              {l.locked_by && <span style={{ color: '#b45309', fontSize: '0.72rem' }}>{l.locked_by}</span>}
+            </span>
+          ))}
+          <span style={{ fontSize: '0.75rem', color: '#b45309' }}>Unlock from the Consent Dashboard</span>
         </div>
       )}
 
@@ -231,7 +247,7 @@ export default function VssDashboard() {
               <div className="stat-sub">{pct}% consented</div>
             </div>
             <div className="stat">
-              <div className="stat-label">Requested dept</div>
+              <div className="stat-label">Deployment</div>
               <div className="stat-value" style={{ color: '#8b5cf6' }}>{requestedCount}</div>
               <div className="stat-sub">of {consented} consented</div>
             </div>
@@ -251,29 +267,8 @@ export default function VssDashboard() {
             <div className="card" style={{ padding: '1.25rem' }}>
               <div className="section-header">
                 <div>
-                  <div className="section-title"><CalendarDays size={15} style={{ marginRight: '0.35rem', verticalAlign: '-2px' }} /> Day-wise consent</div>
-                  <div className="card-sub">How many days each consented VSS sewadar is available</div>
-                </div>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.7rem' }}>
-                {dayDist.map(({ days, count }) => (
-                  <div key={days} className="stack-row">
-                    <span className="stack-label" style={{ flex: '0 0 68px', fontSize: '0.78rem', color: '#64748b', fontWeight: 600 }}>{days} day{days > 1 ? 's' : ''}</span>
-                    <div className="progress grow" style={{ height: 12 }}>
-                      <div className="progress-bar" style={{ width: `${Math.round(count / maxDay * 100)}%` }} />
-                    </div>
-                    <span style={{ flex: '0 0 30px', textAlign: 'right', fontSize: '0.82rem', fontWeight: 800 }}>{count}</span>
-                    <span style={{ flex: '0 0 40px', fontSize: '0.7rem', color: '#94a3b8', textAlign: 'right' }}>{consented ? Math.round(count / consented * 100) : 0}%</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="card" style={{ padding: '1.25rem' }}>
-              <div className="section-header">
-                <div>
                   <div className="section-title"><Building2 size={15} style={{ marginRight: '0.35rem', verticalAlign: '-2px' }} /> Centre-wise consent</div>
-                  <div className="card-sub">Consent status per centre (children indented under parent)</div>
+                  <div className="card-sub">Consent status per CENTRE (SC_SPs indented under CENTRE)</div>
                 </div>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.7rem' }}>

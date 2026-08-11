@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   notElderlyFilter,
   isElderly,
@@ -18,6 +18,16 @@ import {
   attendanceDenominator,
   attendanceDisplay,
   isLowAttendance,
+  consentRowSignature,
+  consentRowKey,
+  changedConsentRows,
+  buildConsentSnapshot,
+  EDITABLE_CONSENT_FIELDS,
+  DEFAULT_AVAILABLE_DAYS,
+  OE_ESCORTS_DEPT_NAME,
+  OE_ESCORTS_DAYS,
+  isOeEscortsDept,
+  daysForDept,
 } from '../lib/logic'
 
 const CENTRES = [
@@ -43,6 +53,12 @@ describe('notElderlyFilter / isElderly', () => {
 describe('centre hierarchy', () => {
   it('getParentCentres returns only root centres', () => {
     expect(getParentCentres(CENTRES).map(c => c.name)).toEqual(['ANKHEER', 'GURGAON'])
+  })
+  it('getParentCentres and getRootCentre are null-safe', () => {
+    expect(getParentCentres(null)).toEqual([])
+    expect(getRootCentre(null, 'ANY')).toBe('ANY')
+    expect(getRootCentre(CENTRES, null)).toBeNull()
+    expect(getRootCentre(CENTRES, '')).toBeNull()
   })
   it('getRootCentre resolves child to parent', () => {
     expect(getRootCentre(CENTRES, 'HODAL')).toBe('GURGAON')
@@ -107,6 +123,10 @@ describe('VSS eligibility', () => {
     expect(isEligibleVss(consent, { ...vss, is_active: false }, dept)).toBe(false)
     expect(vssEligibilityReasons(consent, { ...vss, is_active: false, remarks: 'badge not collected' }, dept))
       .toEqual(['Cannot deploy — badge not collected'])
+  })
+  it('falls back to a generic message when an inactive VSS sewadar has no remarks', () => {
+    expect(vssEligibilityReasons(consent, { ...vss, is_active: false }, dept))
+      .toEqual(['Cannot deploy — inactive VSS sewadar'])
   })
   it('blocks when consent not given', () => {
     expect(isEligibleVss({ ...consent, consent_given: false }, vss, dept)).toBe(false)
@@ -233,11 +253,71 @@ describe('isEligible / eligibilityReasons', () => {
       'Needs minimum 3 consent days (has 2)',
     ])
   })
+  it('handles null available_days_count and pluralises for a 1-day requirement', () => {
+    expect(eligibilityReasons({ ...row, available_days_count: null }, deptBasic)).toEqual([
+      'Needs minimum 3 consent days (has 0)',
+    ])
+    expect(eligibilityReasons({ ...row, available_days_count: 0 }, { min_days: 1 })).toEqual([
+      'Needs minimum 1 consent day (has 0)',
+    ])
+  })
   it('blocks stay-at-bhati requirement', () => {
     expect(eligibilityReasons({ ...row, stay_at_bhati: false }, deptBhati)).toEqual(['Requires stay at bhati'])
   })
   it('blocks initiated requirement', () => {
     expect(eligibilityReasons(row, deptInitiated)).toEqual(['Requires initiated sewadar'])
+  })
+  it('passes when an initiated requirement is satisfied', () => {
+    expect(isEligible({ ...row, is_initiated: true }, deptInitiated)).toBe(true)
+  })
+  it('defaults missing min_days to 1 and missing days to 0', () => {
+    expect(isEligible({ consent_given: true, available_days_count: 2 }, { min_days: null })).toBe(true)
+    expect(eligibilityReasons({ consent_given: true, available_days_count: 2 }, { min_days: null })).toEqual([])
+    // missing days fall back to 0 and get flagged against the default of 1
+    expect(eligibilityReasons({ consent_given: true, available_days_count: null }, { min_days: null }))
+      .toEqual(['Needs minimum 1 consent day (has 0)'])
+    // isEligible treats missing days as 0 too
+    expect(isEligible({ consent_given: true, available_days_count: null }, { min_days: 1 })).toBe(false)
+  })
+})
+
+describe('consent row signatures / dirty detection', () => {
+  const row = { centre: 'GURGAON', badge_number: 'B1', consent_given: true, available_days_count: 3, stay_at_bhati: true, chair_pass: false, requested_dept: 'd1' }
+
+  it('keys rows by centre|badge', () => {
+    expect(consentRowKey(row)).toBe('GURGAON|B1')
+  })
+  it('signature reflects every persisted editable field', () => {
+    expect(consentRowSignature(row)).toBe('true|3|true|false|d1|true')
+  })
+  it('signature treats consent_given=false as days null (not persisted days)', () => {
+    expect(consentRowSignature({ ...row, consent_given: false, available_days_count: 5 })).toBe('false||true|false|d1|true')
+  })
+  it('VSS rows include is_active in the signature', () => {
+    expect(consentRowSignature({ ...row, is_active: false })).toBe('true|3|true|false|d1|false')
+  })
+  it('changedConsentRows returns only rows that differ from the snapshot', () => {
+    const rows = [
+      { ...row },
+      { ...row, badge_number: 'B2', requested_dept: 'd2' },
+      { ...row, badge_number: 'B3', consent_given: false, requested_dept: '' },
+    ]
+    const snap = {
+      'GURGAON|B1': consentRowSignature(rows[0]),
+      'GURGAON|B2': consentRowSignature({ ...rows[1], requested_dept: 'd1' }), // B2 changed dept
+      'GURGAON|B3': consentRowSignature(rows[2]),
+    }
+    const changed = changedConsentRows(rows, snap)
+    expect(changed.map(r => r.badge_number)).toEqual(['B2'])
+  })
+  it('buildConsentSnapshot round-trips as no-op for unchanged rows', () => {
+    const rows = { 'GURGAON|B1': { ...row } }
+    const snap = buildConsentSnapshot(rows)
+    expect(changedConsentRows(rows, snap)).toEqual([])
+  })
+  it('new rows (missing from snapshot) are always dirty', () => {
+    const rows = { 'GURGAON|B9': { ...row, badge_number: 'B9' } }
+    expect(changedConsentRows(rows, {})).toHaveLength(1)
   })
 })
 
@@ -260,5 +340,247 @@ describe('prev-year attendance', () => {
     expect(isLowAttendance(3, 'TRAFFIC OUTSIDE BHATI')).toBe(false)
     expect(isLowAttendance(5, 'LANGAR')).toBe(false)
     expect(isLowAttendance(null, 'LANGAR')).toBe(false)
+  })
+})
+
+describe('centre hierarchy edge cases', () => {
+  it('getRootCentre returns the name itself for unknown centres', () => {
+    expect(getRootCentre(CENTRES, 'NOWHERE')).toBe('NOWHERE')
+    expect(getRootCentre([], 'ANY')).toBe('ANY')
+  })
+  it('getSubtreeCentres returns [] for unknown centres and handles deep chains', () => {
+    expect(getSubtreeCentres(CENTRES, 'NOWHERE')).toEqual([])
+    const deep = [
+      { name: 'A', parent_centre: null },
+      { name: 'B', parent_centre: 'A' },
+      { name: 'C', parent_centre: 'B' },
+      { name: 'D', parent_centre: 'C' },
+    ]
+    expect(getSubtreeCentres(deep, 'A')).toEqual(['A', 'B', 'C', 'D'])
+    expect(getRootCentre(deep, 'D')).toBe('A')
+  })
+  it('getSubtreeCentres is null-safe on the centres list and name', () => {
+    expect(getSubtreeCentres(null, 'GURGAON')).toEqual([])
+    expect(getSubtreeCentres(undefined, 'GURGAON')).toEqual([])
+    expect(getSubtreeCentres(CENTRES, null)).toEqual([])
+    expect(getSubtreeCentres(CENTRES, '')).toEqual([])
+  })
+  it('getParentCentres handles an empty list', () => {
+    expect(getParentCentres([])).toEqual([])
+  })
+})
+
+describe('computeDeptQuota robustness', () => {
+  const allocs = [{ department_id: 'd1', centre: 'GURGAON', max_count: 10 }]
+  it('does not throw when savedAll / localOwn are undefined', () => {
+    expect(() => computeDeptQuota(allocs)).not.toThrow()
+    expect(computeDeptQuota(allocs).d1.rem).toBe(10)
+  })
+  it('works when savedOwn is omitted (3 args)', () => {
+    const q = computeDeptQuota(allocs, { d1: 4 }, { d1: 4 })
+    expect(q.d1.own).toBe(0)
+    expect(q.d1.effective).toBe(8) // 4 saved + (4 local − 0 own)
+  })
+  it('outputs only allocated departments', () => {
+    const q = computeDeptQuota(allocs, { dX: 99 }, { dX: 1 }, { dX: 1 })
+    expect(Object.keys(q)).toEqual(['d1'])
+  })
+  it('returns an empty map when allocations is null', () => {
+    expect(computeDeptQuota(null, {}, {}, {})).toEqual({})
+    expect(computeDeptQuota(undefined)).toEqual({})
+  })
+})
+
+describe('isVssBadge case-insensitivity', () => {
+  it('matches lowercase vs prefix', () => {
+    expect(isVssBadge('vsfb5971')).toBe(true)
+    expect(isVssBadge('Vs123')).toBe(true)
+  })
+})
+
+describe('eligibility null-safety', () => {
+  const dept = { min_days: 3 }
+  it('isEligible returns false for missing row or dept', () => {
+    expect(isEligible(null, dept)).toBe(false)
+    expect(isEligible({ consent_given: true }, null)).toBe(false)
+  })
+  it('eligibilityReasons reports missing inputs', () => {
+    expect(eligibilityReasons(null, dept)).toEqual(['Department not found'])
+    expect(eligibilityReasons({ consent_given: true }, null)).toEqual(['Department not found'])
+  })
+  it('vssEligibilityReasons reports missing inputs', () => {
+    expect(vssEligibilityReasons(null, {}, dept)).toEqual(['Department not found'])
+    expect(vssEligibilityReasons({ consent_given: true }, {}, null)).toEqual(['Department not found'])
+  })
+  it('blocks VSS initiated/gender requirements when the sewadar record is missing', () => {
+    const dInit = { include_vss: true, vss_min_days: 1, vss_requires_initiated: true }
+    expect(isEligibleVss({ consent_given: true, available_days_count: 2 }, null, dInit)).toBe(false)
+    const dGen = { include_vss: true, vss_min_days: 1, vss_requires_gender: 'FEMALE' }
+    expect(vssEligibilityReasons({ consent_given: true, available_days_count: 2 }, null, dGen)).toEqual(['Requires FEMALE VSS sewadar'])
+  })
+  it('blocks when consent days are missing entirely', () => {
+    const d = { include_vss: true, vss_min_days: 1 }
+    expect(isEligibleVss({ consent_given: true }, { is_active: true }, d)).toBe(false)
+  })
+  it('isEligibleVss returns false for a missing consent row', () => {
+    expect(isEligibleVss(null, { is_active: true }, { include_vss: true })).toBe(false)
+  })
+  it('falls back to sensible defaults for missing vss_min_days and gender', () => {
+    const d = { include_vss: true, vss_min_days: null, vss_requires_gender: 'FEMALE' }
+    expect(isEligibleVss({ consent_given: true, available_days_count: 2 }, null, d)).toBe(false)
+    expect(vssEligibilityReasons({ consent_given: true, available_days_count: 2 }, null, d))
+      .toEqual(['Requires FEMALE VSS sewadar'])
+  })
+  it('pluralises the min-days message for a 1-day requirement', () => {
+    const d = { include_vss: true, vss_min_days: 1 }
+    expect(vssEligibilityReasons({ consent_given: true, available_days_count: 0 }, { is_active: true }, d))
+      .toEqual(['Needs minimum 1 consent day (has 0)'])
+    // null days also surfaces the fallback of 0 in the message
+    expect(vssEligibilityReasons({ consent_given: true, available_days_count: null }, { is_active: true }, d))
+      .toEqual(['Needs minimum 1 consent day (has 0)'])
+  })
+})
+
+describe('canEditDeployment edge cases', () => {
+  it('requires a schedule', () => {
+    expect(canEditDeployment({ editableRole: true, schedule: null, deadlinePassed: false, done: false, masterOpen: true })).toBe(false)
+  })
+  it('treats an undefined master switch as open', () => {
+    expect(canEditDeployment({ editableRole: true, schedule: { status: 'open' }, deadlinePassed: false, done: false, masterOpen: undefined })).toBe(true)
+  })
+})
+
+describe('computeAge edge cases', () => {
+  it('rejects malformed dates', () => {
+    expect(computeAge('2024-13-01')).toBeNull()
+    expect(computeAge('2024-05-00')).toBeNull()
+    expect(computeAge('2024-00-10')).toBeNull()
+  })
+  it('computes an age for a leap-day dob', () => {
+    expect(computeAge('2000-02-29')).toBeGreaterThan(20)
+  })
+  it('decrements age when the birthday has not arrived yet this year', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date(2026, 7, 9, 12, 0, 0)) // 9 Aug 2026
+      // raw age would be 1 (2026 − 2025); Dec > Aug so the birthday hasn't
+      // arrived yet this year → decrement to 0
+      expect(computeAge('2025-12-31')).toBe(0)
+      // same month, later day → still decrements. NOTE: a future DOB yields a
+      // negative age — intentional, current behavior (no clamping); if the
+      // form ever clamps ages, update this assertion.
+      expect(computeAge('2026-08-20')).toBe(-1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('vssRegistrationErrors edge cases', () => {
+  const form = {
+    centre: 'GURGAON',
+    sewadar_name: 'TEST',
+    father_husband_name: 'FATHER',
+    gender: 'MALE',
+    dob: '2000-01-01',
+    address: 'ADDRESS',
+    contact_no: '9876543210',
+    emergency_contact: '9876543211',
+    aadhar_number: '123456789012',
+  }
+  it('rejects whitespace-only names', () => {
+    expect(vssRegistrationErrors({ ...form, sewadar_name: '   ' }, { hasPhoto: true }).sewadar_name).toBe('Sewadar name is required')
+  })
+  it('accepts contact numbers with spaces/dashes after stripping non-digits', () => {
+    expect(vssRegistrationErrors({ ...form, contact_no: '98765 43210' }, { hasPhoto: true }).contact_no).toBeUndefined()
+  })
+  it('rejects an invalid emergency contact', () => {
+    expect(vssRegistrationErrors({ ...form, emergency_contact: 'abc' }, { hasPhoto: true }).emergency_contact).toMatch(/valid contact number/)
+  })
+  it('rejects a structurally-invalid dob', () => {
+    expect(vssRegistrationErrors({ ...form, dob: 'not-a-date' }, { hasPhoto: true }).dob).toBe('Enter a valid date of birth')
+  })
+  it('accepts a photo at exactly 3 MB', () => {
+    expect(vssRegistrationErrors(form, { hasPhoto: true, photoSize: 3 * 1024 * 1024 }).photo).toBeUndefined()
+  })
+})
+
+describe('consent signature invariants', () => {
+  const row = { centre: 'GURGAON', badge_number: 'B1', consent_given: true, available_days_count: 3, stay_at_bhati: true, chair_pass: true, requested_dept: 'd1', is_active: true }
+  it('returns a stable signature for null/empty rows', () => {
+    expect(consentRowSignature(null)).toBe('')
+    expect(consentRowSignature(undefined)).toBe('')
+    expect(consentRowSignature({})).toBe('false||false|false||true') // null days & '' dept join as empty
+  })
+  it('EDITABLE_CONSENT_FIELDS is exactly the persisted editable fields (excluding is_active)', () => {
+    expect(EDITABLE_CONSENT_FIELDS).toEqual(['consent_given', 'available_days_count', 'stay_at_bhati', 'chair_pass', 'requested_dept'])
+    expect(EDITABLE_CONSENT_FIELDS).not.toContain('is_active')
+  })
+  it('changing any single editable field changes the signature', () => {
+    const flip = {
+      consent_given: r => ({ ...r, consent_given: false }),
+      available_days_count: r => ({ ...r, available_days_count: 4 }),
+      stay_at_bhati: r => ({ ...r, stay_at_bhati: false }),
+      chair_pass: r => ({ ...r, chair_pass: false }),
+      requested_dept: r => ({ ...r, requested_dept: 'd2' }),
+    }
+    const base = consentRowSignature(row)
+    EDITABLE_CONSENT_FIELDS.forEach(f => {
+      expect(consentRowSignature(flip[f](row))).not.toBe(base)
+    })
+  })
+  it('is_active changes the signature too (VSS) even though it is not editable', () => {
+    expect(consentRowSignature({ ...row, is_active: false })).not.toBe(consentRowSignature(row))
+  })
+})
+
+describe('changedConsentRows robustness', () => {
+  it('handles null rows', () => {
+    expect(changedConsentRows(null, {})).toEqual([])
+    expect(changedConsentRows(undefined, {})).toEqual([])
+  })
+  it('buildConsentSnapshot returns an empty snapshot for null/undefined rows', () => {
+    expect(buildConsentSnapshot(null)).toEqual({})
+    expect(buildConsentSnapshot(undefined)).toEqual({})
+  })
+  it('treats every row as dirty when no snapshot is provided', () => {
+    const rows = { k1: { centre: 'G', badge_number: '1' }, k2: { centre: 'G', badge_number: '2' } }
+    expect(changedConsentRows(rows, null)).toHaveLength(2)
+  })
+})
+
+describe('attendance display clamping', () => {
+  it('clamps attendance above the denominator', () => {
+    expect(attendanceDisplay(7, 'LANGAR')).toBe('5 / 5')
+    expect(attendanceDisplay(4, 'TRAFFIC OUTSIDE BHATI')).toBe('3 / 3')
+  })
+})
+
+describe('available days rules', () => {
+  it('defaults to 5 days and OE ESCORTS is fixed at 3', () => {
+    expect(DEFAULT_AVAILABLE_DAYS).toBe(5)
+    expect(OE_ESCORTS_DAYS).toBe(3)
+    expect(OE_ESCORTS_DEPT_NAME).toBe('OE ESCORTS')
+  })
+  it('isOeEscortsDept matches the name case-insensitively, trimmed, with SEWA variants', () => {
+    expect(isOeEscortsDept('OE ESCORTS')).toBe(true)
+    expect(isOeEscortsDept('oe escorts')).toBe(true)
+    expect(isOeEscortsDept('  OE ESCORTS  ')).toBe(true)
+    expect(isOeEscortsDept('OE ESCORTS (SEWA)')).toBe(true) // variant used in prod
+    expect(isOeEscortsDept('oe escorts-sewa')).toBe(true)
+    expect(isOeEscortsDept('LANGAR')).toBe(false)
+    expect(isOeEscortsDept('ESCORTS AUX')).toBe(false) // not a prefix match
+    expect(isOeEscortsDept('')).toBe(false)
+    expect(isOeEscortsDept(null)).toBe(false)
+    expect(isOeEscortsDept(undefined)).toBe(false)
+  })
+  it('daysForDept auto-sets 5 for every department and 3 for OE ESCORTS', () => {
+    expect(daysForDept('LANGAR')).toBe(DEFAULT_AVAILABLE_DAYS)
+    expect(daysForDept('')).toBe(DEFAULT_AVAILABLE_DAYS)
+    expect(daysForDept(null)).toBe(DEFAULT_AVAILABLE_DAYS)
+    expect(daysForDept(undefined)).toBe(DEFAULT_AVAILABLE_DAYS)
+    expect(daysForDept('OE ESCORTS')).toBe(OE_ESCORTS_DAYS)
+    expect(daysForDept('  oe escorts-sewa  ')).toBe(OE_ESCORTS_DAYS)
+    expect(daysForDept('OE ESCORTS (SEWA)')).toBe(OE_ESCORTS_DAYS)
   })
 })

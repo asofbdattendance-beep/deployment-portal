@@ -2,10 +2,12 @@ import { useState, useEffect, useCallback } from 'react'
 import { supabase, fetchCentres, getRootCentre } from '../lib/supabase'
 import { isVssBadge } from '../lib/logic'
 import { Users, BarChart3, CheckCircle2 } from 'lucide-react'
+import { useToast } from '../components/Toast'
 import DeadlinePill from '../components/DeadlinePill'
 
 /* ─── ASO / super_admin: read-only overview of requested deployments ─── */
 export default function DeploymentPage() {
+  const toast = useToast()
   const [schedules, setSchedules] = useState([])
   const [selectedScheduleId, setSelectedScheduleId] = useState('')
   const [rows, setRows] = useState([])
@@ -14,21 +16,25 @@ export default function DeploymentPage() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false }).then(({ data }) => {
-      if (data) {
-        setSchedules(data)
-        setSelectedScheduleId(prev => (prev && data.some(s => s.id === prev)) ? prev : (data[0]?.id || ''))
-      }
+    supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false }).then(({ data, error }) => {
+      if (error) { toast.error(error.message); return }
+      setSchedules(data || [])
+      setSelectedScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
     }).catch(() => {})
     fetchCentres().then(setCentres).catch(() => {})
-  }, [])
+  }, [toast])
 
   const load = useCallback(async (scheduleId) => {
-    const [dRes, aRes] = await Promise.all([
-      supabase.from('deployments').select('*, deployment_departments!deployments_department_id_fkey(name)').eq('schedule_id', scheduleId).order('centre'),
-      supabase.from('centre_allocations').select('*, deployment_departments(name)').eq('schedule_id', scheduleId),
+    // resolve department names client-side instead of relying on a hard-coded
+    // FK constraint name in the select hint (fragile across DBs)
+    const [dRes, aRes, depRes] = await Promise.all([
+      supabase.from('deployments').select('*').eq('schedule_id', scheduleId).order('centre'),
+      supabase.from('centre_allocations').select('*').eq('schedule_id', scheduleId),
+      supabase.from('deployment_departments').select('id, name'),
     ])
-    setRows(dRes.data || [])
+    const deptNameById = {}
+    ;(depRes.data || []).forEach(d => { deptNameById[d.id] = d.name })
+    setRows((dRes.data || []).map(r => ({ ...r, dept_name: deptNameById[r.department_id] || '—' })))
     setAllocations(aRes.data || [])
   }, [])
 
@@ -36,7 +42,9 @@ export default function DeploymentPage() {
     if (!selectedScheduleId) return
     setLoading(true)
     let mounted = true
-    load(selectedScheduleId).then(() => { if (mounted) setLoading(false) })
+    load(selectedScheduleId)
+      .then(() => { if (mounted) setLoading(false) })
+      .catch(() => { if (mounted) setLoading(false) }) // never leave the page stuck on the skeleton
     return () => { mounted = false }
   }, [selectedScheduleId, load])
 
@@ -48,7 +56,7 @@ export default function DeploymentPage() {
       .channel(`deploy-overview-${selectedScheduleId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` }, () => {
         if (!mounted) return
-        load(selectedScheduleId)
+        load(selectedScheduleId).catch(() => {})
       })
       .subscribe()
     return () => { mounted = false; supabase.removeChannel(channel) }
@@ -65,7 +73,7 @@ export default function DeploymentPage() {
     const root = rootOf(r.centre)
     if (!byCentre[root]) byCentre[root] = { departments: {}, vssDepartments: {}, children: new Set() }
     byCentre[root].children.add(r.centre)
-    const name = r.deployment_departments?.name || '—'
+    const name = r.dept_name
     const key = isVssBadge(r.badge_number) ? 'vssDepartments' : 'departments'
     byCentre[root][key][name] = (byCentre[root][key][name] || 0) + 1
   })
@@ -86,8 +94,8 @@ export default function DeploymentPage() {
     <div className="page" style={{ maxWidth: 1400 }}>
       <div className="page-header">
         <div>
-          <h2 className="page-title"><Users size={22} /> Requested Deployments — All Centres</h2>
-          <div className="page-sub">Read-only overview of requested departments across every centre</div>
+          <h2 className="page-title"><Users size={22} /> Deployment — All Centres</h2>
+          <div className="page-sub">Read-only overview of deployments across every centre</div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
           <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
@@ -107,7 +115,7 @@ export default function DeploymentPage() {
         <div className="card">
           <div className="empty">
             <div className="empty-icon"><Users size={22} /></div>
-            <div className="empty-title">No requested deployments yet</div>
+            <div className="empty-title">No deployments yet</div>
             <div className="empty-text">Centres will appear here once they request departments for this schedule.</div>
           </div>
         </div>
@@ -123,8 +131,8 @@ export default function DeploymentPage() {
               <div key={root} className="card" style={{ padding: '0.75rem 0.9rem' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                   <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>{root}</span>
-                  {childCount > 0 && <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>+ {childCount} child centre{childCount > 1 ? 's' : ''}</span>}
-                  <span className="pill pill-blue"><BarChart3 size={11} /> {requestedTotal} requested</span>
+                  {childCount > 0 && <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>+ {childCount} SC_SP{childCount > 1 ? 's' : ''}</span>}
+                  <span className="pill pill-blue"><BarChart3 size={11} /> {requestedTotal} deployment{requestedTotal === 1 ? '' : 's'}</span>
                   {vssTotal > 0 && <span className="pill pill-green">VSS {vssTotal}</span>}
                   {allocTotal > 0 && (
                     <span className={`pill ${requestedTotal > allocTotal ? 'pill-red' : 'pill-gray'}`}>Allocated {allocTotal}</span>
@@ -143,7 +151,7 @@ export default function DeploymentPage() {
                     <span key={`v-${dept}`} className="pill pill-green">VSS {dept}: {count}</span>
                   ))}
                   {Object.keys(data.departments).length === 0 && Object.keys(data.vssDepartments).length === 0 && (
-                    <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No department requests yet</span>
+                    <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No deployments yet</span>
                   )}
                 </div>
               </div>

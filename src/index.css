@@ -260,6 +260,8 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   .header-user, .header-centre { display: none; }
   .table thead { display: none; }
   .table, .table tbody, .table tr, .table td { display: block; width: 100%; }
+  /* tables become stacked cards on mobile — drop the sticky scrollbox */
+  .table-wrap-sticky { max-height: none; overflow-x: auto; }
   .table tr { padding: 0.6rem 0; border-bottom: 1px solid var(--border); }
   .table tr:last-child { border-bottom: none; }
   .table tbody td {
@@ -491,6 +493,19 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
 /* ─── Table ─── */
 .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
 
+/* Sticky table headers: long tables scroll inside their wrapper while the
+   header row stays pinned — users always know which column is which.
+   Declared AFTER the base .table thead th rule so the sticky background
+   can't be silently overridden by a future change to the base rule. */
+.table-wrap-sticky {
+  overflow: auto;
+  max-height: 65vh;
+}
+.table-sticky {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
 .table {
   width: 100%;
   border-collapse: collapse;
@@ -514,6 +529,16 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
 }
 .table tbody tr:last-child td { border-bottom: none; }
 .table tbody tr:hover { background: #fafbfd; }
+
+/* sticky header row — lives here (after the base thead rule) so its
+   background + border-shadow win the cascade at equal specificity */
+.table-sticky thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface-2);
+  box-shadow: 0 1px 0 var(--border);
+}
 
 /* attendance pill — flex-aligns inside both table cells and mobile card rows */
 .attendance-pill {
@@ -548,24 +573,105 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
 .pill-red { background: var(--danger-soft); color: #b91c1c; }
 .pill-gray { background: #f1f5f9; color: var(--text-sec); }
 
-/* ─── Deadline countdown pill (big red on yellow) ─── */
-.deadline-countdown {
+/* ─── Deadline countdown — box-style timer ─── */
+.deadline-boxes {
+  position: relative;
   display: inline-flex;
+  flex-direction: column;
   align-items: center;
-  gap: 0.45rem;
-  padding: 0.5rem 1rem;
+  gap: 0.5rem;
+  padding: 0.8rem 0.9rem 0.7rem;
+  border: 1px solid var(--border);
   border-radius: 12px;
-  background: #fef08a;
-  color: #dc2626;
-  font-size: 1.44rem;
-  font-weight: 800;
-  letter-spacing: 0.01em;
-  white-space: nowrap;
-  box-shadow: 0 1px 3px rgba(202, 138, 4, 0.35);
-  border: 1px solid #fde047;
+  background: #fff;
+  box-shadow: var(--shadow);
 }
+.deadline-boxes-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-sec);
+  text-align: center;
+  white-space: nowrap;
+  padding: 0 0.15rem 0.4rem;
+  border-bottom: 1px solid #f1f5f9;
+  margin-bottom: 0.15rem;
+}
+.deadline-boxes-row {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 0.45rem;
+}
+.deadline-badge {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 21px;
+  height: 21px;
+  border-radius: 50%;
+  background: #10b981;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1px 3px rgba(16, 185, 129, 0.5);
+}
+.deadline-box {
+  min-width: 58px;
+  padding: 0.5rem 0.55rem 0.45rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 7px;
+  background: #fff;
+  text-align: center;
+}
+.deadline-box-value {
+  font-size: 1.5rem;
+  font-weight: 800;
+  line-height: 1.15;
+  color: #dc2626;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+.deadline-box-label {
+  margin-top: 0.15rem;
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.deadline-date {
+  font-size: 0.82rem;
+  color: var(--text-sec);
+  white-space: nowrap;
+}
+/* compact variant (e.g. schedule list rows) */
+.deadline-boxes-small {
+  gap: 0.3rem;
+  padding: 0.5rem 0.55rem 0.45rem;
+}
+.deadline-boxes-small .deadline-boxes-row { gap: 0.3rem; }
+.deadline-boxes-small .deadline-box {
+  min-width: 40px;
+  padding: 0.32rem 0.32rem 0.28rem;
+  border-radius: 6px;
+}
+.deadline-boxes-small .deadline-box-value { font-size: 1.05rem; }
+.deadline-boxes-small .deadline-box-label { font-size: 0.52rem; }
+.deadline-boxes-small .deadline-badge {
+  width: 17px;
+  height: 17px;
+  top: -6px;
+  right: -6px;
+}
+/* responsive scaling for small screens */
 @media (max-width: 640px) {
-  .deadline-countdown { font-size: 1rem; padding: 0.4rem 0.7rem; }
+  .deadline-boxes { gap: 0.3rem; padding: 0.7rem 0.7rem 0.55rem; }
+  .deadline-boxes .deadline-boxes-row { gap: 0.3rem; }
+  .deadline-box { min-width: 46px; padding: 0.38rem 0.35rem 0.32rem; border-radius: 6px; }
+  .deadline-box-value { font-size: 1.15rem; }
+  .deadline-box-label { font-size: 0.55rem; }
 }
 
 /* ─── Toggle switch ─── */
@@ -611,7 +717,9 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
 .tip-host:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 4px; }
 .tooltip {
   position: fixed;
-  z-index: 999;
+  /* portalled to <body>, so a very high z-index keeps it above every row,
+     accordion card, sticky header and the tab navbar */
+  z-index: 9999;
   max-width: min(320px, calc(100vw - 16px));
   padding: 0.5rem 0.7rem;
   font-size: 0.76rem;
@@ -664,9 +772,17 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
 
 .error-message { display: flex; align-items: center; gap: 0.4rem; color: #dc2626; font-size: 0.85rem; padding: 0.6rem 0.8rem; background: var(--danger-soft); border-radius: 10px; margin-bottom: 1rem; }
 
-.btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; width: 100%; padding: 0.65rem 1.25rem; border: none; border-radius: 10px; font-size: 0.9rem; font-weight: 600; cursor: pointer; background: var(--primary); color: #fff; transition: background 0.15s; }
-.btn-primary:hover { background: var(--primary-dark); }
-.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Login-only submit — scoped here so the generic .btn-primary rules above
+   (used across the app) never inherit this full-width style. */
+.login-submit { display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; width: 100%; padding: 0.65rem 1.25rem; border: none; border-radius: 10px; font-size: 0.9rem; font-weight: 600; cursor: pointer; background: var(--primary); color: #fff; transition: background 0.15s; }
+.login-submit:hover { background: var(--primary-dark); }
+.login-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.forgot-link { display: block; margin: 1rem auto 0; background: none; border: none; color: var(--primary); font-size: 0.82rem; font-weight: 600; cursor: pointer; }
+.forgot-link:hover { color: var(--primary-dark); text-decoration: underline; }
+.back-to-login { display: inline-flex; align-items: center; gap: 0.35rem; margin-top: 1.1rem; background: none; border: none; color: var(--text-sec); font-size: 0.82rem; font-weight: 600; cursor: pointer; }
+.back-to-login:hover { color: var(--primary); }
+.reset-sent { display: flex; flex-direction: column; align-items: center; gap: 0.6rem; padding: 0.6rem 0.25rem; }
 
 /* ─── Modal ─── */
 .modal-overlay {

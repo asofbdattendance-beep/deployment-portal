@@ -69,7 +69,27 @@ export default function DeptDropdown({
         >
           {items.length === 0 && (
             <div style={{ padding: '0.75rem', fontSize: '0.78rem', color: '#94a3b8' }}>
-              No departments allocated to your centre yet. Contact your super admin.
+              No departments with an allocated quota for your centre yet. Contact your super admin.
+            </div>
+          )}
+          {current && (
+            <div
+              className="dept-item"
+              onClick={e => { e.stopPropagation(); onSelect('') }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '0.5rem',
+                padding: '0.5rem 0.75rem',
+                fontSize: '0.82rem',
+                cursor: 'pointer',
+                color: '#dc2626',
+                fontWeight: 500,
+                borderBottom: '1px solid #f1f5f9',
+              }}
+            >
+              <span>✕ Clear department</span>
             </div>
           )}
           {items.map(it => {

@@ -54,6 +54,11 @@ export default function AddVssForm() {
   const fileRef = useRef(null)
   const editFileRef = useRef(null)
 
+  // revoke preview object URLs so repeated photo picks don't leak memory
+  const revokePreview = useCallback(() => setPhotoPreview(prev => { if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev); return '' }), [])
+  const revokeEditPreview = useCallback(() => setEditPhotoPreview(prev => { if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev); return '' }), [])
+  useEffect(() => () => { revokePreview(); revokeEditPreview() }, [revokePreview, revokeEditPreview])
+
   const loadRegistrations = useCallback(async () => {
     const { data } = await supabase.from('vss_registrations').select('*').order('created_at', { ascending: false }).limit(200)
     if (data) setRegistrations(data)
@@ -92,13 +97,14 @@ export default function AddVssForm() {
     if (!file) return
     if (!file.type.startsWith('image/')) { toast.error('Please upload an image file (JPG/PNG etc.)'); clearPhoto(); return }
     setPhoto(file)
+    revokePreview()
     setPhotoPreview(URL.createObjectURL(file))
     setErrors(prev => ({ ...prev, photo: undefined }))
   }
 
   const clearPhoto = () => {
     setPhoto(null)
-    setPhotoPreview('')
+    revokePreview()
     if (fileRef.current) fileRef.current.value = ''
   }
 
@@ -108,8 +114,10 @@ export default function AddVssForm() {
     setErrors(e2)
     if (Object.keys(e2).some(k => e2[k])) { toast.error('Please fix the highlighted fields'); return }
     setSubmitting(true)
+    let uploadedPath = null
     try {
       const photo_url = await uploadPhoto(photo)
+      uploadedPath = photo_url.split('/vss-photos/')[1] || null
       const { error } = await supabase.from('vss_registrations').insert({
         centre: form.centre,
         sewadar_name: form.sewadar_name.trim(),
@@ -131,6 +139,9 @@ export default function AddVssForm() {
       clearPhoto()
       loadRegistrations()
     } catch (err) {
+      // the photo was already uploaded — remove it so a failed insert doesn't
+      // leave an orphaned file in storage
+      if (uploadedPath) await supabase.storage.from('vss-photos').remove([uploadedPath]).catch(() => {})
       toast.error(err.message || 'Could not create record')
     } finally { setSubmitting(false) }
   }
@@ -152,7 +163,7 @@ export default function AddVssForm() {
     })
     setEditErrors({})
     setEditPhoto(null)
-    setEditPhotoPreview('')
+    revokeEditPreview()
   }
   const setEdit = (key) => (e) => {
     setEditForm(f => ({ ...f, [key]: e.target.value }))
@@ -163,6 +174,7 @@ export default function AddVssForm() {
     if (!file) return
     if (!file.type.startsWith('image/')) { toast.error('Please upload an image file (JPG/PNG etc.)'); if (editFileRef.current) editFileRef.current.value = ''; return }
     setEditPhoto(file)
+    revokeEditPreview()
     setEditPhotoPreview(URL.createObjectURL(file))
   }
   const saveEdit = async () => {
@@ -170,9 +182,13 @@ export default function AddVssForm() {
     setEditErrors(e2)
     if (Object.keys(e2).some(k => e2[k])) { toast.error('Please fix the highlighted fields'); return }
     setEditSaving(true)
+    let uploadedEditPath = null
     try {
       let photo_url = editReg.photo_url
-      if (editPhoto) photo_url = await uploadPhoto(editPhoto)
+      if (editPhoto) {
+        photo_url = await uploadPhoto(editPhoto)
+        uploadedEditPath = photo_url.split('/vss-photos/')[1] || null
+      }
       const { error } = await supabase.from('vss_registrations').update({
         centre: editForm.centre,
         sewadar_name: editForm.sewadar_name.trim(),
@@ -191,6 +207,9 @@ export default function AddVssForm() {
       setEditReg(null)
       loadRegistrations()
     } catch (err) {
+      // a freshly uploaded replacement photo would be orphaned if the row
+      // update failed — remove it to keep storage clean
+      if (uploadedEditPath) await supabase.storage.from('vss-photos').remove([uploadedEditPath]).catch(() => {})
       toast.error(err.message || 'Could not update record')
     } finally { setEditSaving(false) }
   }
@@ -326,10 +345,9 @@ export default function AddVssForm() {
             {f.is_initiated ? 'YES — INITIATED' : 'NO — NOT INITIATED'}
           </span>
         </div>
-        {blocked && (
-          <div style={{ marginTop: '0.45rem', padding: '0.5rem 0.7rem', borderRadius: 8, background: '#fef2f2', border: '1px solid #fecaca', color: '#b91c1c', fontSize: '0.8rem', fontWeight: 600 }}>
-            Age >= 29, not initiated — cannot add VSS (age {age})
-          </div>
+        {blocked && (            <div style={{ marginTop: '0.45rem', padding: '0.5rem 0.7rem', borderRadius: 8, background: '#fef2f2', border: '1px solid #fecaca', color: '#b91c1c', fontSize: '0.8rem', fontWeight: 600 }}>
+              {'Age >= 29, not initiated — cannot add VSS (age '}{age}{')'}
+            </div>
         )}
         {errs.age && <div style={{ color: '#dc2626', fontSize: '0.75rem', marginTop: '0.25rem' }}>{errs.age}</div>}
       </div>
@@ -356,7 +374,7 @@ export default function AddVssForm() {
           <div className="page-sub">
             {isAllCentres
               ? 'Create new VSS records for any centre — super admin / ASO assigns the final VSFB number'
-              : `Create new VSS records for ${profile?.centre} and its child centres`}
+              : `Create new VSS records for ${profile?.centre} and its SC_SPs`}
           </div>
         </div>
       </div>
@@ -446,6 +464,7 @@ export default function AddVssForm() {
               <table className="table">
                 <thead>
                   <tr>
+                    <th style={{ width: 40, textAlign: 'center' }}>S.No.</th>
                     <th>Temp ID</th>
                     <th>Status</th>
                     <th>Photo</th>
@@ -460,10 +479,11 @@ export default function AddVssForm() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredRegs.map(r => {
+                  {filteredRegs.map((r, i) => {
                     const assigned = r.status === 'assigned'
                     return (
                       <tr key={r.id} style={{ background: assigned ? '#f0fdf4' : undefined }}>
+                        <td style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }} data-label="S.No.">{i + 1}</td>
                         <td data-label="Temp ID" style={{ fontFamily: 'monospace', fontSize: '0.78rem', fontWeight: 700, color: assigned ? '#94a3b8' : '#4f46e5' }}>
                           {r.temp_vss_id || '—'}
                           {assigned && r.assigned_badge_number && <div style={{ fontSize: '0.72rem', color: '#047857', fontWeight: 600 }}>{r.assigned_badge_number}</div>}
@@ -554,7 +574,7 @@ export default function AddVssForm() {
                     <Camera size={14} /> {editPhoto ? 'Change photo' : 'Replace photo'}
                   </label>
                   {editPhoto && (
-                    <button type="button" onClick={() => { setEditPhoto(null); setEditPhotoPreview(''); if (editFileRef.current) editFileRef.current.value = '' }}
+                    <button type="button" onClick={() => { setEditPhoto(null); revokeEditPreview(); if (editFileRef.current) editFileRef.current.value = '' }}
                       style={{ background: 'none', border: 'none', color: '#dc2626', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '0.3rem', width: 'fit-content', padding: 0 }}>
                       <Trash2 size={13} /> Keep original
                     </button>

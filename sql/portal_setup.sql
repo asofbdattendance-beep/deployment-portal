@@ -49,38 +49,37 @@ CREATE TABLE IF NOT EXISTS public.deployment_departments (
 );
 
 -- ============================================================
--- TABLE: deployment_schedules
--- ASO sets which departments are active for a date + max count
+-- TABLE: deployment_schedules (named visit — v2+ shape)
+-- Super admin creates a named schedule; deadline optional.
 -- ============================================================
 CREATE TABLE IF NOT EXISTS public.deployment_schedules (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  deployment_department_id UUID NOT NULL REFERENCES public.deployment_departments(id) ON DELETE CASCADE,
-  event_date DATE NOT NULL,
-  max_count INTEGER NOT NULL CHECK (max_count > 0),
-  created_by TEXT,
-  created_at TIMESTAMPTZ DEFAULT now(),
-  UNIQUE(event_date, deployment_department_id)
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  status text NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done')),
+  deadline timestamptz,
+  created_by text,
+  created_at timestamptz DEFAULT now()
 );
 
 -- ============================================================
 -- TABLE: deployments
--- Centre users assign sewadars to scheduled departments
+-- Centre users request a department per sewadar per schedule
 -- ============================================================
 CREATE TABLE IF NOT EXISTS public.deployments (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  schedule_id UUID NOT NULL REFERENCES public.deployment_schedules(id) ON DELETE CASCADE,
-  centre TEXT NOT NULL,
-  badge_number TEXT NOT NULL,
-  sewadar_name TEXT,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'locked', 'approved')),
-  created_at TIMESTAMPTZ DEFAULT now(),
-  created_by TEXT
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  schedule_id uuid NOT NULL REFERENCES public.deployment_schedules(id) ON DELETE CASCADE,
+  department_id uuid NOT NULL REFERENCES public.deployment_departments(id) ON DELETE CASCADE,
+  centre text NOT NULL,
+  badge_number text NOT NULL,
+  sewadar_name text,
+  status text NOT NULL DEFAULT 'requested' CHECK (status IN ('requested', 'pending')),
+  created_at timestamptz DEFAULT now(),
+  created_by text,
+  UNIQUE (schedule_id, centre, badge_number)
 );
 
 CREATE INDEX IF NOT EXISTS idx_deployments_centre ON public.deployments(centre);
 CREATE INDEX IF NOT EXISTS idx_deployments_schedule ON public.deployments(schedule_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_deployments_unique_assign
-  ON public.deployments(schedule_id, centre, badge_number);
 
 -- ============================================================
 -- HELPER: get portal user role (SECURITY DEFINER bypasses RLS)

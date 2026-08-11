@@ -19,12 +19,11 @@ export default function ScheduleMakerPage() {
   const [selectedScheduleId, setSelectedScheduleId] = useState('')
 
   const loadSchedules = useCallback(async () => {
-    const { data } = await supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false })
-    if (data) {
-      setSchedules(data)
-      setSelectedScheduleId(prev => (prev && data.some(s => s.id === prev)) ? prev : (data[0]?.id || ''))
-    }
-  }, [])
+    const { data, error } = await supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false })
+    if (error) { toast.error(error.message); return }
+    setSchedules(data || [])
+    setSelectedScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
+  }, [toast])
 
   useEffect(() => { loadSchedules() }, [loadSchedules])
 
@@ -264,8 +263,10 @@ function DepartmentsPanel({ isSuper, toast }) {
   }
 
   const toggleDept = async (dept) => {
-    await supabase.from('deployment_departments').update({ is_active: !dept.is_active }).eq('id', dept.id)
+    const { error } = await supabase.from('deployment_departments').update({ is_active: !dept.is_active }).eq('id', dept.id)
+    if (error) { toast.error(error.message); return }
     loadDepts()
+    toast.success(dept.is_active ? `${dept.name} disabled` : `${dept.name} enabled`)
   }
 
   const [confirmDeleteDept, setConfirmDeleteDept] = useState(null)
@@ -447,7 +448,7 @@ function DepartmentsPanel({ isSuper, toast }) {
           <div className="modal" onClick={e => e.stopPropagation()}>
             <h4 style={{ fontSize: '0.95rem', fontWeight: 700, marginBottom: '0.5rem' }}>Delete department?</h4>
             <p style={{ fontSize: '0.82rem', color: '#64748b', marginBottom: '1rem' }}>
-              This will permanently delete <b>{confirmDeleteDept.name}</b> and its rules, and remove it from all schedule allocations. This cannot be undone.
+              This will permanently delete <b>{confirmDeleteDept.name}</b> and its rules, remove it from all schedule allocations, and delete its deployment records. This cannot be undone.
             </p>
             <div style={{ display: 'flex', gap: '0.6rem', justifyContent: 'flex-end' }}>
               <button onClick={() => setConfirmDeleteDept(null)} className="btn">Cancel</button>
@@ -476,10 +477,12 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
       supabase.from('centre_allocations').select('*, deployment_departments(name)').eq('schedule_id', schedule.id).order('created_at'),
       supabase.from('deployment_departments').select('*').order('name'),
     ])
+    const failed = [aRes, dRes].find(r => r?.error)
+    if (failed) { toast.error(failed.error.message); return }
     setAllocations(aRes.data || [])
     setDepts(dRes.data || [])
     try { setCentres(getParentCentres(await fetchCentres())) } catch { /* ignore */ }
-  }, [schedule.id])
+  }, [schedule.id, toast])
 
   useEffect(() => { load() }, [load])
 
@@ -564,7 +567,8 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
         acted_by: profile?.name || profile?.email || null,
       })
     } catch { /* audit is best-effort */ }
-    await supabase.from('centre_allocations').delete().eq('id', id)
+    const { error } = await supabase.from('centre_allocations').delete().eq('id', id)
+    if (error) { toast.error(error.message); return }
     await load()
     if (expandedDept) setEditCounts(buildCounts(expandedDept))
   }
@@ -615,7 +619,7 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
 
           {formDeptId && (
             <div style={{ marginTop: '0.75rem' }}>
-              <p style={{ fontSize: '0.78rem', color: '#6b7280', marginBottom: '0.5rem' }}>Enter max count per parent centre — centres left blank are skipped:</p>
+              <p style={{ fontSize: '0.78rem', color: '#6b7280', marginBottom: '0.5rem' }}>Enter max count per CENTRE — centres left blank are skipped:</p>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '0.5rem' }}>
                 {centres.map(c => (
                   <label key={c.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', padding: '0.35rem 0.6rem', border: '1px solid #eef2f7', borderRadius: 6, fontSize: '0.8rem', fontWeight: 500 }}>
@@ -666,7 +670,7 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
                 {expanded && (
                   <div style={{ padding: '0.5rem 0.75rem', borderTop: '1px solid #eef2f7' }}>
                     {centreNames.length === 0 ? (
-                      <p style={{ fontSize: '0.8rem', color: '#9ca3af' }}>No parent centres found.</p>
+                      <p style={{ fontSize: '0.8rem', color: '#9ca3af' }}>No CENTREs found.</p>
                     ) : (
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '0.5rem' }}>
                         {centreNames.map(name => {
@@ -767,13 +771,19 @@ function ReadOnlySummary({ schedule }) {
     let mounted = true
     ;(async () => {
       setLoading(true)
-      const { data } = await supabase
-        .from('deployments')
-        .select('*, deployment_departments!deployments_department_id_fkey(name)')
-        .eq('schedule_id', schedule.id)
-      if (!mounted) return
-      setRows(data || [])
-      setLoading(false)
+      try {
+        // fetch department names separately instead of relying on a hard-coded
+        // FK constraint name in the select hint (that name can differ between DBs)
+        const [dRes, depRes] = await Promise.all([
+          supabase.from('deployments').select('centre, department_id').eq('schedule_id', schedule.id),
+          supabase.from('deployment_departments').select('id, name'),
+        ])
+        if (mounted) {
+          const deptNameById = {}
+          ;(depRes.data || []).forEach(d => { deptNameById[d.id] = d.name })
+          setRows((dRes.data || []).map(r => ({ ...r, dept_name: deptNameById[r.department_id] || '—' })))
+        }
+      } finally { if (mounted) setLoading(false) }
     })()
     return () => { mounted = false }
   }, [schedule.id])
@@ -781,8 +791,8 @@ function ReadOnlySummary({ schedule }) {
   const byCentre = {}
   rows.forEach(r => {
     if (!byCentre[r.centre]) byCentre[r.centre] = {}
-    if (!byCentre[r.centre][r.deployment_departments?.name]) byCentre[r.centre][r.deployment_departments?.name] = 0
-    byCentre[r.centre][r.deployment_departments?.name]++
+    if (!byCentre[r.centre][r.dept_name]) byCentre[r.centre][r.dept_name] = 0
+    byCentre[r.centre][r.dept_name]++
   })
 
   const centres = Object.keys(byCentre)
@@ -792,10 +802,10 @@ function ReadOnlySummary({ schedule }) {
   return (
     <section className="card" style={{ padding: '1.25rem' }}>
       <div className="section-header">
-        <div className="section-title">Requested Deployment Summary — {schedule.name}</div>
+        <div className="section-title">Deployment Summary — {schedule.name}</div>
       </div>
       {centres.length === 0 ? (
-        <p style={{ color: '#9ca3af', fontSize: '0.85rem', textAlign: 'center', padding: '1rem' }}>No requested deployments yet.</p>
+        <p style={{ color: '#9ca3af', fontSize: '0.85rem', textAlign: 'center', padding: '1rem' }}>No deployments yet.</p>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
           {centres.map(c => (

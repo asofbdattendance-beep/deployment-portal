@@ -4,8 +4,7 @@ import { getSubtreeCentres, getRootCentre } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from './Toast'
 import MasterSwitch from './MasterSwitch'
-import { BarChart3, Users, Download, AlertTriangle, Building2, LayoutGrid } from 'lucide-react'
-import * as XLSX from 'xlsx'
+import { BarChart3, Users, Download, AlertTriangle, Building2, LayoutGrid, Lock } from 'lucide-react'
 import DeadlinePill from './DeadlinePill'
 
 /* ─── Super admin / ASO: comprehensive consent dashboard ───
@@ -25,15 +24,15 @@ export default function ConsentDashboard() {
   const [consentMatrix, setConsentMatrix] = useState([])
   const [allocations, setAllocations] = useState([])
   const [settings, setSettings] = useState({ sewadar_deployment_open: true })
+  const [locks, setLocks] = useState([])
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false }).then(({ data }) => {
-      if (data) {
-        setSchedules(data)
-        setSelectedScheduleId(prev => (prev && data.some(s => s.id === prev)) ? prev : (data[0]?.id || ''))
-      }
+    supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false }).then(({ data, error }) => {
+      if (error) { toast.error(error.message); return }
+      setSchedules(data || [])
+      setSelectedScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
     }).catch(() => {})
     fetchPortalSettings().then(setSettings).catch(() => {})
     Promise.all([
@@ -43,7 +42,7 @@ export default function ConsentDashboard() {
       setCentres(c)
       setDepts(d.data || [])
     }).catch(() => {})
-  }, [])
+  }, [toast])
 
   const loadMatrices = useCallback(async (scheduleId) => {
     if (!scheduleId) return
@@ -53,6 +52,12 @@ export default function ConsentDashboard() {
     ])
     setConsentMatrix(consentRes.data || [])
     setAllocations(allocRes.data || [])
+    // centre deployment locks (v13) — non-fatal: strip just stays empty if the
+    // migration hasn't been run yet
+    try {
+      const { data: lockData } = await supabase.from('centre_locks').select('*').eq('schedule_id', scheduleId)
+      setLocks(lockData || [])
+    } catch { setLocks([]) }
   }, [])
 
   useEffect(() => {
@@ -77,12 +82,25 @@ export default function ConsentDashboard() {
         if (!mounted) return
         loadMatrices(selectedScheduleId).catch(() => {})
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` }, () => {
+        if (!mounted) return
+        loadMatrices(selectedScheduleId).catch(() => {})
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_settings' }, () => {
         fetchPortalSettings().then(setSettings).catch(() => {})
       })
       .subscribe()
     return () => { mounted = false; supabase.removeChannel(channel) }
   }, [selectedScheduleId, loadMatrices])
+
+  const unlockCentre = async (id) => {
+    const row = locks.find(l => l.id === id)
+    if (!window.confirm(`Reopen ${row?.centre || 'this centre'}'s deployment? The centre will be able to edit consent, deployment and incharges again.`)) return
+    const { error } = await supabase.from('centre_locks').delete().eq('id', id)
+    if (error) { toast.error(error.message); return }
+    setLocks(prev => prev.filter(l => l.id !== id))
+    toast.success('Deployment reopened — the centre can edit again')
+  }
 
   const toggleSewadars = async () => {
     if (busy) return
@@ -143,11 +161,12 @@ export default function ConsentDashboard() {
 
   const pct = totals.total ? Math.round(totals.consented / totals.total * 100) : 0
 
-  const exportExcel = () => {
+  const exportExcel = async () => {
+    const XLSX = await import('xlsx') // lazy — keeps xlsx (~400 kB) out of the main bundle
     const wb = XLSX.utils.book_new()
 
     const consentRows = parentRows.map(r => ({
-      'Parent Centre': r.childCount > 0 ? `${r.name} (+${r.childCount})` : r.name,
+      'CENTRE': r.childCount > 0 ? `${r.name} (+${r.childCount})` : r.name,
       'Total Badges': r.total,
       'Consented Yes': r.consented,
       'Initiated (consented)': r.initiated,
@@ -156,7 +175,7 @@ export default function ConsentDashboard() {
       'Scheduled (allocated)': r.allocTotal,
     }))
     consentRows.push({
-      'Parent Centre': 'TOTAL',
+      'CENTRE': 'TOTAL',
       'Total Badges': totals.total,
       'Consented Yes': totals.consented,
       'Initiated (consented)': totals.initiated,
@@ -167,12 +186,12 @@ export default function ConsentDashboard() {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(consentRows), 'Consent Matrix')
 
     const deptRows = parentRows.map(r => {
-      const row = { 'Parent Centre': r.childCount > 0 ? `${r.name} (+${r.childCount})` : r.name, 'Scheduled (allocated)': r.allocTotal }
+      const row = { 'CENTRE': r.childCount > 0 ? `${r.name} (+${r.childCount})` : r.name, 'Scheduled (allocated)': r.allocTotal }
       depts.forEach(d => { row[d.name] = (r.allocCounts || {})[d.id] || 0 })
       return row
     })
     deptRows.push({
-      'Parent Centre': 'TOTAL',
+      'CENTRE': 'TOTAL',
       'Scheduled (allocated)': totals.allocTotal,
       ...Object.fromEntries(depts.map(d => [d.name, totals.allocCounts[d.id] || 0])),
     })
@@ -202,29 +221,42 @@ export default function ConsentDashboard() {
 
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
-      <div className="page-header">
-        <div>
+      <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
+        <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
           <h2 className="page-title"><BarChart3 size={22} /> Consent Dashboard</h2>
-          <div className="page-sub">Parent-centre consent &amp; allocated-seat matrices</div>
+          <div className="page-sub">CENTRE consent &amp; allocated-seat matrices</div>
+          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            <MasterSwitch
+              label="Sewadar Deployment"
+              open={settings.sewadar_deployment_open}
+              onToggle={toggleSewadars}
+              busy={busy}
+            />
+            <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
+              {schedules.map(s => (
+                <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
+              ))}
+            </select>
+            <button onClick={exportExcel} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+              <Download size={13} /> Export Excel
+            </button>
+          </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-          <MasterSwitch
-            label="Sewadar Deployment"
-            open={settings.sewadar_deployment_open}
-            onToggle={toggleSewadars}
-            busy={busy}
-          />
-          <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
-            {schedules.map(s => (
-              <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
-            ))}
-          </select>
-          <button onClick={exportExcel} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-            <Download size={13} /> Export Excel
-          </button>
-          {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
-        </div>
+        {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
       </div>
+
+      {locks.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, padding: '0.6rem 0.75rem', fontSize: '0.82rem', color: '#92400e', marginBottom: '1rem' }}>
+          <span style={{ fontWeight: 700 }}><Lock size={13} style={{ verticalAlign: '-2px', marginRight: '0.25rem' }} />Locked deployments:</span>
+          {locks.map(l => (
+            <span key={l.id} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', background: '#fff', border: '1px solid #fde68a', borderRadius: 999, padding: '0.2rem 0.5rem 0.2rem 0.7rem' }}>
+              <span style={{ fontWeight: 700 }}>{l.centre}</span>
+              {l.locked_by && <span style={{ color: '#b45309', fontSize: '0.72rem' }}>{l.locked_by}</span>}
+              <button onClick={() => unlockCentre(l.id)} className="btn btn-ghost" style={{ padding: '0.15rem 0.45rem', fontSize: '0.7rem', color: '#b91c1c' }}>Unlock</button>
+            </span>
+          ))}
+        </div>
+      )}
 
       {settings.sewadar_deployment_open === false && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
@@ -288,15 +320,16 @@ export default function ConsentDashboard() {
           <div className="card">
             <div className="section-header" style={{ padding: '1.25rem 1.25rem 0' }}>
               <div>
-                <div className="section-title"><Building2 size={15} style={{ marginRight: '0.35rem', verticalAlign: '-2px' }} /> Parent-centre consent matrix</div>
-                <div className="card-sub">Per parent centre (incl. child centres): total badges, consented, initiated / non-initiated and staying among consented — <strong>Scheduled</strong> = total allocated seats for the centre</div>
+                <div className="section-title"><Building2 size={15} style={{ marginRight: '0.35rem', verticalAlign: '-2px' }} /> CENTRE consent matrix</div>
+                <div className="card-sub">Per CENTRE (incl. SC_SPs): total badges, consented, initiated / non-initiated and staying among consented — <strong>Scheduled</strong> = total allocated seats for the centre</div>
               </div>
             </div>
             <div className="table-wrap" style={{ border: 'none', borderRadius: 0, padding: '0 1.25rem 1.25rem' }}>
               <table className="table">
                 <thead>
                   <tr>
-                    <th style={{ position: 'sticky', left: 0, background: '#fff', zIndex: 2 }}>Parent Centre</th>
+                    <th style={{ width: 44, textAlign: 'center' }}>S.No.</th>
+                    <th style={{ position: 'sticky', left: 0, background: '#fff', zIndex: 2 }}>CENTRE</th>
                     <th style={{ textAlign: 'center' }}>Total Badges</th>
                     <th style={{ textAlign: 'center' }}>Consented Yes</th>
                     <th style={{ textAlign: 'center' }}>Initiated</th>
@@ -306,8 +339,9 @@ export default function ConsentDashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {parentRows.map(r => (
+                  {parentRows.map((r, i) => (
                     <tr key={r.name}>
+                      <td style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }} data-label="S.No.">{i + 1}</td>
                       {parentCell(r)}
                       <td data-label="Total" style={{ textAlign: 'center', fontWeight: 600 }}>{r.total}</td>
                       <td data-label="Consented" style={{ textAlign: 'center', fontWeight: 700 }}>{r.consented}</td>
@@ -318,6 +352,7 @@ export default function ConsentDashboard() {
                     </tr>
                   ))}
                   <tr style={{ background: '#f8fafc', borderTop: '2px solid #e2e8f0' }}>
+                    <td style={{ background: '#f8fafc' }} />
                     <td style={{ fontWeight: 800, position: 'sticky', left: 0, background: '#f8fafc' }}>TOTAL</td>
                     <td style={{ textAlign: 'center', fontWeight: 800 }}>{totals.total}</td>
                     <td style={{ textAlign: 'center', fontWeight: 800 }}>{totals.consented}</td>
@@ -335,28 +370,31 @@ export default function ConsentDashboard() {
           <div className="card">
             <div className="section-header" style={{ padding: '1.25rem 1.25rem 0' }}>
               <div>
-                <div className="section-title"><LayoutGrid size={15} style={{ marginRight: '0.35rem', verticalAlign: '-2px' }} /> Parent-centre department matrix</div>
-                <div className="card-sub">Allocated seats per parent centre (incl. child centres) by department — <strong>Scheduled</strong> = total allocated for the centre</div>
+                <div className="section-title"><LayoutGrid size={15} style={{ marginRight: '0.35rem', verticalAlign: '-2px' }} /> CENTRE department matrix</div>
+                <div className="card-sub">Allocated seats per CENTRE (incl. SC_SPs) by department — <strong>Scheduled</strong> = total allocated for the centre</div>
               </div>
             </div>
             <div className="table-wrap" style={{ border: 'none', borderRadius: 0, padding: '0 1.25rem 1.25rem' }}>
               <table className="table">
                 <thead>
                   <tr>
-                    <th style={{ position: 'sticky', left: 0, background: '#fff', zIndex: 2 }}>Parent Centre</th>
+                    <th style={{ width: 44, textAlign: 'center' }}>S.No.</th>
+                    <th style={{ position: 'sticky', left: 0, background: '#fff', zIndex: 2 }}>CENTRE</th>
                     {depts.map(d => <th key={d.id} style={{ textAlign: 'center', fontWeight: 700, fontSize: '0.72rem' }}>{d.name}</th>)}
                     <th style={{ textAlign: 'center', background: '#eef2ff', color: '#4f46e5', fontWeight: 800 }}>Scheduled</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {parentRows.map(r => (
+                  {parentRows.map((r, i) => (
                     <tr key={r.name}>
+                      <td style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }} data-label="S.No.">{i + 1}</td>
                       {parentCell(r)}
                       {depts.map(d => allocCell(d.id, (r.allocCounts || {})[d.id] || 0))}
                       <td data-label="Scheduled" style={{ textAlign: 'center', fontWeight: 800, color: '#4f46e5', background: '#eef2ff' }}>{r.allocTotal}</td>
                     </tr>
                   ))}
                   <tr style={{ background: '#f8fafc', borderTop: '2px solid #e2e8f0' }}>
+                    <td style={{ background: '#f8fafc' }} />
                     <td style={{ fontWeight: 800, position: 'sticky', left: 0, background: '#f8fafc' }}>TOTAL</td>
                     {depts.map(d => allocCell(d.id, totals.allocCounts[d.id] || 0))}
                     <td style={{ textAlign: 'center', fontWeight: 800, color: '#4f46e5', background: '#eef2ff' }}>{totals.allocTotal}</td>
@@ -365,7 +403,7 @@ export default function ConsentDashboard() {
               </table>
             </div>
             <div style={{ padding: '0.85rem 1.25rem', fontSize: '0.82rem', color: '#64748b', borderTop: '1px solid #f1f5f9' }}>
-              <strong>{totals.consented}</strong> of <strong>{totals.total}</strong> sewadars consented across {centres.length} centres ({parents.length} parent centres)
+              <strong>{totals.consented}</strong> of <strong>{totals.total}</strong> sewadars consented across {centres.length} centres ({parents.length} CENTREs)
             </div>
           </div>
         </div>

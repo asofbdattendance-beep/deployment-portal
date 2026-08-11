@@ -33,8 +33,12 @@ export function getRootCentre(centres, centreName) {
 
 export function getSubtreeCentres(centres, centreName) {
   if (!centreName) return []
+  const list = centres || []
+  // Unknown centre → no subtree. Returning a phantom one-element list would
+  // make callers fire pointless `.in('centre', ...)` queries.
+  if (!list.some(c => c.name === centreName)) return []
   const children = {}
-  ;(centres || []).forEach(c => {
+  list.forEach(c => {
     if (!children[c.parent_centre]) children[c.parent_centre] = []
     children[c.parent_centre].push(c.name)
   })
@@ -66,8 +70,8 @@ export function getSubtreeCentres(centres, centreName) {
 export function computeDeptQuota(allocations, savedAll, localOwn, savedOwn) {
   const out = {}
   ;(allocations || []).forEach(a => {
-    const used = savedAll[a.department_id] || 0
-    const local = localOwn[a.department_id] || 0
+    const used = (savedAll && savedAll[a.department_id]) || 0
+    const local = (localOwn && localOwn[a.department_id]) || 0
     const own = (savedOwn && savedOwn[a.department_id]) || 0
     const effective = used + (local - own)
     out[a.department_id] = { max: a.max_count, used, local, own, effective, rem: a.max_count - effective }
@@ -95,8 +99,9 @@ export function eligibilityReasons(consentRow, dept) {
   if (!consentRow || !dept) return ['Department not found']
   if (!consentRow.consent_given) return ['Consent not given']
   const reasons = []
-  if ((consentRow.available_days_count ?? 0) < (dept.min_days ?? 1)) {
-    reasons.push(`Needs minimum ${dept.min_days} consent day${dept.min_days > 1 ? 's' : ''} (has ${consentRow.available_days_count ?? 0})`)
+  const minDays = dept.min_days ?? 1
+  if ((consentRow.available_days_count ?? 0) < minDays) {
+    reasons.push(`Needs minimum ${minDays} consent day${minDays > 1 ? 's' : ''} (has ${consentRow.available_days_count ?? 0})`)
   }
   if (dept.requires_stay_at_bhati && !consentRow.stay_at_bhati) {
     reasons.push('Requires stay at bhati')
@@ -129,8 +134,9 @@ export function vssEligibilityReasons(consentRow, vssSewadar, dept) {
     return [`Cannot deploy — ${vssSewadar.remarks || 'inactive VSS sewadar'}`]
   }
   const reasons = []
-  if ((consentRow.available_days_count ?? 0) < (dept.vss_min_days ?? 1)) {
-    reasons.push(`Needs minimum ${dept.vss_min_days} consent day${dept.vss_min_days > 1 ? 's' : ''} (has ${consentRow.available_days_count ?? 0})`)
+  const vssMinDays = dept.vss_min_days ?? 1
+  if ((consentRow.available_days_count ?? 0) < vssMinDays) {
+    reasons.push(`Needs minimum ${vssMinDays} consent day${vssMinDays > 1 ? 's' : ''} (has ${consentRow.available_days_count ?? 0})`)
   }
   if (dept.vss_requires_stay_at_bhati && !consentRow.stay_at_bhati) {
     reasons.push('Requires stay at bhati')
@@ -199,6 +205,28 @@ export function vssRegistrationErrors(form, { hasPhoto = false, photoSize = 0 } 
   return e
 }
 
+/* ─── Available days rules ───
+   All sewadars (regular + VSS) default to 5 days. The OE ESCORTS sewa
+   department is FIXED at 3 days: the days input is disabled for those rows
+   and selecting that department auto-sets 3.                              */
+
+export const DEFAULT_AVAILABLE_DAYS = 5
+export const OE_ESCORTS_DEPT_NAME = 'OE ESCORTS'
+export const OE_ESCORTS_DAYS = 3
+
+// Matches the exact name or variants like "OE ESCORTS (SEWA)" / "OE ESCORTS-SEWA".
+export function isOeEscortsDept(deptName) {
+  return typeof deptName === 'string' && deptName.trim().toUpperCase().startsWith(OE_ESCORTS_DEPT_NAME)
+}
+
+// The available-days value a row gets once assigned to `deptName`. Days are
+// NOT user-editable: every department defaults to 5, except OE ESCORTS which
+// is fixed at 3. Used on load, on department change, at save time, and to
+// judge eligibility when switching departments.
+export function daysForDept(deptName) {
+  return isOeEscortsDept(deptName) ? OE_ESCORTS_DAYS : DEFAULT_AVAILABLE_DAYS
+}
+
 /* ─── Prev-year attendance ─── */
 
 export const TRAFFIC_OUTSIDE_BHATI = 'TRAFFIC OUTSIDE BHATI'
@@ -219,4 +247,54 @@ export function isLowAttendance(prevAttendance, prevDepartment) {
   if (prevAttendance == null) return false
   if (prevAttendance <= 1) return true
   return prevAttendance === 2 && prevDepartment !== TRAFFIC_OUTSIDE_BHATI
+}
+
+/* ─── Dirty-row detection for auto-save ───
+   The consent pages upsert ALL rows on every debounced save. With big
+   centres that means re-writing every row each keystroke. Instead we
+   persist a snapshot of the last-saved signatures ({key → signature})
+   and only upsert rows whose current signature differs.           */
+
+// Stable signature of the editable consent/deploy fields that get persisted.
+// `is_active` is only meaningful for VSS rows (undefined for regular ones).
+export function consentRowSignature(row) {
+  if (!row) return ''
+  return [
+    !!row.consent_given,
+    row.consent_given ? row.available_days_count : null,
+    !!row.stay_at_bhati,
+    !!row.chair_pass,
+    row.requested_dept || '',
+    row.is_active !== false, // VSS-only; regular rows keep it true
+  ].join('|')
+}
+
+export function consentRowKey(row) {
+  return `${row.centre}|${row.badge_number}`
+}
+
+// Fields a centre user can actually edit. loadData's reload-merge overlays ONLY
+// these onto freshly-fetched rows — read-only data (is_active, is_initiated,
+// gender, remarks, prev_* attendance) must always come fresh from the server.
+export const EDITABLE_CONSENT_FIELDS = ['consent_given', 'available_days_count', 'stay_at_bhati', 'chair_pass', 'requested_dept']
+
+// Rows that differ from the last-saved snapshot. `snapshot` is
+// { [centre|badge]: signature } built after every successful save.
+export function changedConsentRows(rows, snapshot) {
+  if (!rows) return []
+  const snap = snapshot || {}
+  return Object.values(rows).filter(row => {
+    const key = consentRowKey(row)
+    return consentRowSignature(row) !== snap[key]
+  })
+}
+
+// Build the snapshot map from the current rows (call after load/save).
+export function buildConsentSnapshot(rows) {
+  const snap = {}
+  if (!rows) return snap
+  Object.values(rows).forEach(row => {
+    snap[consentRowKey(row)] = consentRowSignature(row)
+  })
+  return snap
 }

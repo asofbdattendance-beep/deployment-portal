@@ -25,10 +25,11 @@ export default function VssRoster() {
   const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
-    const { data } = await supabase.from('vss_sewadars').select('*').order('sewadar_name')
-    if (data) setRows(data)
+    const { data, error } = await supabase.from('vss_sewadars').select('*').order('sewadar_name')
+    if (error) { toast.error(error.message); setLoading(false); return }
+    setRows(data || [])
     setLoading(false)
-  }, [])
+  }, [toast])
 
   useEffect(() => { load() }, [load])
   useEffect(() => { fetchCentres().then(setCentres).catch(() => {}) }, [])
@@ -140,6 +141,7 @@ export default function VssRoster() {
             <table className="table">
               <thead>
                 <tr>
+                  <th style={{ width: 40, textAlign: 'center' }}>S.No.</th>
                   <th>Badge</th>
                   <th>Name</th>
                   <th>Centre</th>
@@ -152,11 +154,12 @@ export default function VssRoster() {
                 </tr>
               </thead>
               <tbody>
-                {visible.map(r => {
+                {visible.map((r, i) => {
                   const editing = editId === r.id
                   return (
                     <Fragment key={r.id}>
                       <tr style={{ background: !r.is_active ? '#fef2f2' : undefined, opacity: !r.is_active ? 0.9 : 1 }}>
+                        <td style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }} data-label="S.No.">{i + 1}</td>
                         <td style={{ fontFamily: 'monospace', fontSize: '0.8rem' }} data-label="Badge">
                           {r.badge_number}
                           {r.aadhar_number && <div style={{ fontSize: '0.68rem', color: '#94a3b8' }}>Aadhar {r.aadhar_number}</div>}
@@ -194,7 +197,7 @@ export default function VssRoster() {
                       </tr>
                       {editing && (
                         <tr style={{ background: '#f8fafc' }}>
-                          <td colSpan={isSuper ? 9 : 8} style={{ padding: '1rem' }}>
+                          <td colSpan={isSuper ? 10 : 9} style={{ padding: '1rem' }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
                               <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>Edit — {r.badge_number}</span>
                               <button onClick={() => { setEditId(null); setEditForm(null) }} className="btn btn-ghost" style={{ padding: '0.25rem' }} aria-label="Close"><X size={16} /></button>

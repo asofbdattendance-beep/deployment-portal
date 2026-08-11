@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, getRootCentre, notElderlyFilter, fetchPortalSettings } from '../lib/supabase'
-import { computeDeptQuota, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge } from '../lib/logic'
+import { computeDeptQuota, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, consentRowKey, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import ConsentDashboard from '../components/ConsentDashboard'
 import DeptDropdown from '../components/DeptDropdown'
-import DeadlinePill, { useDeadlineCountdown, fmtRemaining } from '../components/DeadlinePill'
-import { Save, Lock, CheckCircle2, Search, ClipboardCheck, ChevronDown, Users, AlertTriangle, CheckSquare } from 'lucide-react'
+import InchargePicker from '../components/InchargePicker'
+import DeadlinePill, { DeadlineWarning } from '../components/DeadlinePill'
+import { Save, Lock, CheckCircle2, Search, ClipboardCheck, ChevronDown, Users, AlertTriangle, CheckSquare, Download } from 'lucide-react'
 
 export default function ConsentPage() {
   const { profile } = usePortalAuth()
@@ -26,7 +27,8 @@ export default function ConsentPage() {
   const loadedRef = useRef(false)
   const dirtyRef = useRef(false)
   const saveTimer = useRef(null)
-  const saveAllRef = useRef(null)
+  const flushRef = useRef(null)
+  const persistRef = useRef(null)
   const editVersionRef = useRef(0)
   const scheduleIdRef = useRef(null)
   const [subtree, setSubtree] = useState([])
@@ -36,10 +38,16 @@ export default function ConsentPage() {
   const [sortBy, setSortBy] = useState('name')
   const [expanded, setExpanded] = useState({})
   const [openDeptDropdown, setOpenDeptDropdown] = useState(null)
+  const [openIncharge, setOpenIncharge] = useState(null)
   const [openReasons, setOpenReasons] = useState(null)
   const [selected, setSelected] = useState({})
   const [pendingBulk, setPendingBulk] = useState(null)
   const [settings, setSettings] = useState({ sewadar_deployment_open: true })
+  const [incharges, setIncharges] = useState({})
+  const [locked, setLocked] = useState(false)
+  const [lockBusy, setLockBusy] = useState(false)
+  const [lockWarn, setLockWarn] = useState(null)
+  const [lockConfirm, setLockConfirm] = useState(false)
 
   const myRoot = getRootCentre(centres, myCentre)
 
@@ -52,12 +60,11 @@ export default function ConsentPage() {
   }, [myCentre])
 
   const loadSchedules = useCallback(async () => {
-    const { data } = await supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false })
-    if (data) {
-      setSchedules(data)
-      setSelectedScheduleId(prev => (prev && data.some(s => s.id === prev)) ? prev : (data[0]?.id || ''))
-    }
-  }, [])
+    const { data, error } = await supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false })
+    if (error) { toast.error(error.message); return }
+    setSchedules(data || [])
+    setSelectedScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
+  }, [toast])
 
   useEffect(() => { loadSchedules() }, [loadSchedules])
   useEffect(() => { fetchPortalSettings().then(setSettings).catch(() => {}) }, [])
@@ -65,6 +72,16 @@ export default function ConsentPage() {
   const loadData = useCallback(async () => {
     if (!selectedScheduleId || !subtree.length) return
     setLoading(true)
+    // the lock is per schedule — never carry a previous schedule's lock state
+    // over while the new schedule's lock is being fetched
+    setLocked(false)
+    // Capture in-flight edits before the fetch. They belong to the schedule that
+    // was last loaded (scheduleIdRef.current). A refresh of the SAME schedule
+    // overlays them on the fresh rows so a reload never discards unsaved work; a
+    // schedule switch saves the previous schedule's leftovers before the reset.
+    const prevLoadedSchedule = scheduleIdRef.current
+    const prevRows = liveRef.current.rows
+    const prevDirty = dirtyRef.current
     try {
       const [sewRes, consRes, depRes, allocRes, deployRes, prevRes] = await Promise.all([
         supabase.from('sewadars').select('badge_number, sewadar_name, department, centre, is_initiated').or(notElderlyFilter()).in('centre', subtree).order('sewadar_name'),
@@ -75,6 +92,12 @@ export default function ConsentPage() {
         supabase.from('prev_year_deployments').select('badge_number, prev_department, attendance_reported'),
       ])
 
+      // If any query failed, abort the load INSTEAD of rendering empty/default
+      // rows — otherwise the next auto-save would treat every sewadar as "new"
+      // (no consent, default days) and could overwrite real consent data.
+      const failed = [sewRes, consRes, depRes, allocRes, deployRes, prevRes].find(r => r?.error)
+      if (failed) throw failed.error
+
       const sewadars = sewRes.data || []
       const existing = consRes.data || []
       const map = {}
@@ -84,84 +107,220 @@ export default function ConsentPage() {
       const prevMap = {}
       ;(prevRes.data || []).forEach(p => { prevMap[p.badge_number] = p })
       const rows = {}
+      const deptNameById = {}
+      ;(depRes.data || []).forEach(d => { deptNameById[d.id] = d.name })
+      // days as stored in the DB — the save baseline must use these so legacy
+      // values that differ from the auto-set rule get corrected on first save
+      const storedDays = {}
+      const autoSetDays = (r) => {
+        // Available days are NOT user-editable: every department defaults to 5,
+        // except OE ESCORTS which is fixed at 3. Enforce on load — this also
+        // fixes rows whose stored value predates the rule.
+        r.available_days_count = daysForDept(deptNameById[r.requested_dept])
+        return r
+      }
       sewadars.forEach(sw => {
         const key = `${sw.centre}|${sw.badge_number}`
         const ex = map[key]
         const prev = prevMap[sw.badge_number]
-        rows[key] = {
+        storedDays[key] = ex?.available_days_count ?? DEFAULT_AVAILABLE_DAYS
+        rows[key] = autoSetDays({
           centre: sw.centre,
           badge_number: sw.badge_number,
           sewadar_name: sw.sewadar_name,
           department: sw.department,
           is_initiated: !!sw.is_initiated,
           consent_given: ex?.consent_given ?? false,
-          available_days_count: ex?.available_days_count ?? 3,
+          available_days_count: storedDays[key],
           stay_at_bhati: ex?.stay_at_bhati || false,
           chair_pass: ex?.chair_pass || false,
           requested_dept: deployMap[key] || '',
           prev_department: prev?.prev_department || null,
           prev_attendance: prev?.attendance_reported != null ? prev.attendance_reported : null,
-        }
+        })
       })
+
+      // Same-schedule refresh: keep unsaved edits on top of the fresh rows
+      // instead of wiping them along with the baseline reset below.
+      if (prevLoadedSchedule === selectedScheduleId && prevDirty) {
+        const editsByKey = {}
+        changedConsentRows(prevRows, savedConsentRef.current).forEach(r => {
+          editsByKey[`${r.centre}|${r.badge_number}`] = r
+        })
+        if (Object.keys(editsByKey).length > 0) {
+          // overlay ONLY user-editable fields — fresh rows keep server-side
+          // values for read-only data (is_active, is_initiated, prev_*, etc.)
+          Object.keys(rows).forEach(key => {
+            const edit = editsByKey[key]
+            if (edit) EDITABLE_CONSENT_FIELDS.forEach(f => { if (f in edit) rows[key][f] = edit[f] })
+            // even after the overlay, days stay auto-set (5 / 3 for OE ESCORTS)
+            rows[key] = autoSetDays(rows[key])
+          })
+          setConsentRows(rows)
+          setDepts(depRes.data || [])
+          setAllocations(allocRes.data || [])
+          setDeployments(deployRes.data || [])
+          loadedRef.current = true
+          scheduleIdRef.current = selectedScheduleId
+          const ex = {}
+          subtree.forEach(c => { ex[c] = true })
+          setExpanded(ex)
+          // dirtyRef / savedConsentRef / editVersionRef stay untouched — the
+          // edits are still pending and the debounce persists them next.
+          return
+        }
+      }
+
+      // Schedule switch: a save triggered by the switch flush may still be in
+      // flight (or queued). Let it settle while scheduleIdRef still points at
+      // the previous schedule, then re-save whatever is still unsaved to it —
+      // the reset below must not invalidate that queued save.
+      if (prevLoadedSchedule && prevLoadedSchedule !== selectedScheduleId && prevDirty) {
+        let guard = 0
+        while (savingRef.current && guard < 100) {
+          await new Promise(r => setTimeout(r, 50))
+          guard++
+        }
+        if (savingRef.current) {
+          // A save hung past the 5s drain — fail loudly instead of silently
+          // resetting away the previous schedule's unsaved edits.
+          toast.error('Saving is still in progress — some edits may not have been saved before switching schedules.')
+        } else if (dirtyRef.current) {
+          await persistRef.current({
+            scheduleId: prevLoadedSchedule,
+            rows: prevRows,
+            deployments: liveRef.current.deployments,
+            depts: liveRef.current.depts,
+            subtree: liveRef.current.subtree,
+            incharges: liveRef.current.incharges,
+          })
+        }
+      }
+
       setConsentRows(rows)
       setDepts(depRes.data || [])
       setAllocations(allocRes.data || [])
       setDeployments(deployRes.data || [])
-      dirtyRef.current = false
+      // Baseline the snapshot on the DB-stored days: rows whose days were
+      // auto-corrected on load (legacy values ≠ the 5/3 rule) are flagged as
+      // changed so the first save fixes them, keeping UI + DB in sync.
+      const baseline = {}
+      Object.keys(rows).forEach(k => {
+        baseline[k] = storedDays[k] !== rows[k].available_days_count
+          ? { ...rows[k], available_days_count: storedDays[k] }
+          : rows[k]
+      })
+      savedConsentRef.current = buildConsentSnapshot(baseline)
+      dirtyRef.current = Object.keys(rows).some(k => rows[k].available_days_count !== storedDays[k])
       editVersionRef.current = 0
       loadedRef.current = true
       scheduleIdRef.current = selectedScheduleId
       const ex = {}
       subtree.forEach(c => { ex[c] = true })
       setExpanded(ex)
+
+      // Department incharges (one per CENTRE × department). Non-fatal fetches:
+      // if the v12/v13 migrations haven't been run yet the page still loads fine.
+      try {
+        const { data: incData } = await supabase.from('department_incharges')
+          .select('*').eq('schedule_id', selectedScheduleId).eq('centre', myRoot)
+        const incMap = {}
+        ;(incData || []).forEach(r => {
+          incMap[`${r.centre}|${r.department_id}`] = { centre: r.centre, department_id: r.department_id, badge_number: r.badge_number, sewadar_name: r.sewadar_name }
+        })
+        setIncharges(incMap)
+        savedInchargesRef.current = { ...incMap }
+      } catch { /* table missing — incharges stay empty until migrated */ }
+      try {
+        const { data: lockRow } = await supabase.from('centre_locks')
+          .select('*').eq('schedule_id', selectedScheduleId).eq('centre', myRoot).maybeSingle()
+        setLocked(!!lockRow)
+      } catch { /* table missing — lock stays off until migrated */ }
+    } catch (err) {
+      console.error('Failed to load consent data:', err)
+      toast.error(err?.message || 'Failed to load data — check your connection')
+      // a failed refresh must not pretend in-flight edits were saved
+      if (!prevDirty) dirtyRef.current = false
     } finally { setLoading(false) }
-  }, [selectedScheduleId, subtree])
+  }, [selectedScheduleId, subtree, myRoot, toast])
 
   useEffect(() => { loadData() }, [loadData])
 
-  // live-update the master switch state (ASO open/close)
+  // live-update the master switch state (ASO open/close) + refresh when a
+  // peer centre edits consents/deployments for this schedule
   useEffect(() => {
     if (!selectedScheduleId) return
+    const reload = () => {
+      // don't clobber unsaved local edits with a stale server snapshot
+      if (dirtyRef.current || savingRef.current) return
+      loadData()
+    }
     const channel = supabase
       .channel(`consent-settings-${selectedScheduleId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_settings' }, () => {
         fetchPortalSettings().then(setSettings).catch(() => {})
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
       .subscribe()
     return () => { supabase.removeChannel(channel) }
-  }, [selectedScheduleId])
+  }, [selectedScheduleId, loadData])
 
-  const saveAll = useCallback(async () => {
-    if (!selectedScheduleId) return
-    if (scheduleIdRef.current !== selectedScheduleId) return
+  // Latest committed state, kept in refs so a flush triggered by unmount or
+  // a schedule switch always saves the data it belongs to (not whatever
+  // state happens to be live at that moment).
+  const savedConsentRef = useRef({})
+  const savedInchargesRef = useRef({})
+  const liveRef = useRef({})
+  const pendingSaveRef = useRef(null)
+  const savingRef = useRef(false)
+  const mountedRef = useRef(true)
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false } }, [])
+  liveRef.current = { scheduleId: selectedScheduleId, rows: consentRows, deployments, depts, subtree, incharges }
+
+  // Persist one snapshot of rows (schedule + data captured together).
+  // Only rows whose signature differs from the last saved state are written;
+  // removals are batched per centre instead of one DELETE per row.
+  const persist = useCallback(async (snap) => {
+    if (!snap?.scheduleId) return
+    if (scheduleIdRef.current !== snap.scheduleId) return
+    if (savingRef.current) { pendingSaveRef.current = snap; return }
+    savingRef.current = true
     setSaving(true)
     const versionAtStart = editVersionRef.current
+    const { scheduleId, rows, deployments: depRows, depts: depList, subtree: sub, incharges: incState = {} } = snap
     try {
-      const toUpsert = Object.values(consentRows).map(r => ({
-        schedule_id: selectedScheduleId,
+      const changed = changedConsentRows(rows, savedConsentRef.current)
+      const deptNameById = {}
+      depList.forEach(d => { deptNameById[d.id] = d.name })
+      const toUpsert = changed.map(r => ({
+        schedule_id: scheduleId,
         centre: r.centre,
         badge_number: r.badge_number,
         sewadar_name: r.sewadar_name,
         consent_given: r.consent_given,
-        available_days_count: r.consent_given ? r.available_days_count : null,
+        available_days_count: r.consent_given ? daysForDept(deptNameById[r.requested_dept]) : null,
         stay_at_bhati: r.stay_at_bhati,
         chair_pass: r.chair_pass,
       }))
-      const activeDeptIds = new Set(depts.map(d => d.id))
-      const toDeploy = Object.values(consentRows)
+      const activeDeptIds = new Set(depList.map(d => d.id))
+      const toDeploy = changed
         .filter(r => r.consent_given && r.requested_dept && activeDeptIds.has(r.requested_dept))
         .map(r => ({
-          schedule_id: selectedScheduleId,
+          schedule_id: scheduleId,
           department_id: r.requested_dept,
           centre: r.centre,
           badge_number: r.badge_number,
           sewadar_name: r.sewadar_name,
           status: 'requested',
         }))
-      const toRemove = Object.values(consentRows)
+      // toRemove scans ALL rows (not just changed) so rows whose department
+      // was deactivated or whose consent was cleared elsewhere still get cleaned
+      const toRemove = Object.values(rows)
         .filter(r => !r.consent_given || !r.requested_dept || !activeDeptIds.has(r.requested_dept))
-        .map(r => `${r.centre}|${r.badge_number}`)
-        .filter(key => deployments.some(d => `${d.centre}|${d.badge_number}` === key))
+        .map(consentRowKey)
+        .filter(key => depRows.some(d => `${d.centre}|${d.badge_number}` === key))
 
       if (toUpsert.length > 0) {
         const { error } = await supabase.from('sewadar_consents').upsert(toUpsert, { onConflict: 'schedule_id,centre,badge_number' })
@@ -171,47 +330,155 @@ export default function ConsentPage() {
         const { error } = await supabase.from('deployments').upsert(toDeploy, { onConflict: 'schedule_id,centre,badge_number' })
         if (error) { toast.error(error.message); dirtyRef.current = true; return }
       }
-      for (const key of toRemove) {
-        const [centre, badge_number] = key.split('|')
-        const { error } = await supabase.from('deployments').delete().eq('schedule_id', selectedScheduleId).eq('centre', centre).eq('badge_number', badge_number)
+      if (toRemove.length > 0) {
+        const byCentre = {}
+        toRemove.forEach(key => {
+          const [centre, badge_number] = key.split('|')
+          ;(byCentre[centre] = byCentre[centre] || []).push(badge_number)
+        })
+        for (const [centre, badges] of Object.entries(byCentre)) {
+          const { error } = await supabase.from('deployments')
+            .delete()
+            .eq('schedule_id', scheduleId)
+            .eq('centre', centre)
+            .in('badge_number', badges)
+          if (error) { toast.error(error.message); dirtyRef.current = true; return }
+        }
+      }
+      // ── department incharges — one per CENTRE × department ──
+      const rowByBadge = {}
+      Object.values(rows).forEach(r => { rowByBadge[r.badge_number] = r })
+      const toUpsertInc = Object.entries(incState)
+        .filter(([key, inc]) => {
+          const saved = savedInchargesRef.current[key]
+          return !saved || saved.badge_number !== inc.badge_number || saved.sewadar_name !== inc.sewadar_name
+        })
+        .map(([key, inc]) => {
+          const [centre, department_id] = key.split('|')
+          return { schedule_id: scheduleId, centre, department_id, badge_number: inc.badge_number, sewadar_name: inc.sewadar_name }
+        })
+      const toDeleteInc = []
+      // cleared by the user
+      Object.keys(savedInchargesRef.current).forEach(key => {
+        if (!incState[key]) toDeleteInc.push(key)
+      })
+      // stale: the incharge's sewadar no longer consents / is no longer
+      // assigned to that department
+      Object.entries(incState).forEach(([key, inc]) => {
+        const row = rowByBadge[inc.badge_number]
+        if (!row || !row.consent_given || row.requested_dept !== inc.department_id) toDeleteInc.push(key)
+      })
+      if (toUpsertInc.length > 0) {
+        const { error } = await supabase.from('department_incharges').upsert(toUpsertInc, { onConflict: 'schedule_id,centre,department_id' })
         if (error) { toast.error(error.message); dirtyRef.current = true; return }
       }
+      for (const key of [...new Set(toDeleteInc)]) {
+        const [centre, department_id] = key.split('|')
+        const { error } = await supabase.from('department_incharges')
+          .delete().eq('schedule_id', scheduleId).eq('centre', centre).eq('department_id', department_id)
+        if (error) { toast.error(error.message); dirtyRef.current = true; return }
+      }
+
       // only clear dirty if no new edits landed while this save was in flight
       if (editVersionRef.current === versionAtStart) {
         dirtyRef.current = false
       }
-      setSavedAt(new Date())
-      const { data: fresh } = await supabase.from('deployments').select('*').eq('schedule_id', selectedScheduleId).in('centre', subtree)
-      if (fresh) setDeployments(fresh)
-    } catch (err) { toast.error(err.message); dirtyRef.current = true } finally { setSaving(false) }
-  }, [selectedScheduleId, consentRows, deployments, depts, subtree, toast])
+      // The schedule may have changed while this save was in flight — don't
+      // clobber the newly loaded schedule's dirty-tracking baseline.
+      if (scheduleIdRef.current === scheduleId) {
+        const nextInc = { ...incState }
+        toDeleteInc.forEach(k => { delete nextInc[k] })
+        savedInchargesRef.current = nextInc
+        // keep the card pickers in sync immediately (only if no newer edits landed)
+        if (editVersionRef.current === versionAtStart) setIncharges(nextInc)
+        savedConsentRef.current = buildConsentSnapshot(rows)
+        setSavedAt(new Date())
+      }
+      if (mountedRef.current && scheduleIdRef.current === scheduleId) {
+        const { data: fresh } = await supabase.from('deployments').select('*').eq('schedule_id', scheduleId).in('centre', sub)
+        if (fresh && mountedRef.current) setDeployments(fresh)
+      }
+    } catch (err) { toast.error(err.message); dirtyRef.current = true } finally {
+      savingRef.current = false
+      setSaving(false)
+      // If a newer snapshot was queued while this save was in flight, persist it
+      // now — otherwise those edits would be dropped silently.
+      if (pendingSaveRef.current) {
+        const s = pendingSaveRef.current
+        pendingSaveRef.current = null
+        persist(s)
+      }
+    }
+  }, [toast])
+  persistRef.current = persist
 
-  // keep a stable ref so the debounce effect isn't reset by saveAll's identity
-  saveAllRef.current = saveAll
-
-  // drop any pending auto-save when the schedule changes (rows belong to the old one)
-  useEffect(() => {
+  // flush the pending (or latest) snapshot — used by unmount + schedule switch
+  const flushPending = useCallback(() => {
     if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null }
+    if (!loadedRef.current || !dirtyRef.current) return
+    const snap = pendingSaveRef.current || liveRef.current
+    pendingSaveRef.current = null
+    // return the promise so callers (e.g. Lock Deployment) can await the save
+    return persist(snap)
+  }, [persist])
+  flushRef.current = flushPending
+
+  // explicit “Save Draft” — flush whatever is pending right now instead of
+  // waiting for the 800ms debounce
+  const saveDraft = () => {
+    if (!loadedRef.current) return
+    if (dirtyRef.current) {
+      flushRef.current && flushRef.current()
+    } else {
+      toast.info('No pending changes — everything is already saved')
+    }
+  }
+
+  // Schedule switch: save the OLD schedule's pending edits before its rows
+  // are replaced by the new schedule's load (previously they were dropped).
+  useEffect(() => {
+    return () => { flushRef.current && flushRef.current() }
   }, [selectedScheduleId])
 
+  // Unmount (tab switch / logout): flush instead of dropping unsaved edits.
+  useEffect(() => () => { flushRef.current && flushRef.current() }, [])
+
+  // Warn before closing/reloading the tab with unsaved edits.
   useEffect(() => {
+    const onBeforeUnload = (e) => {
+      if (dirtyRef.current) {
+        e.preventDefault()
+        e.returnValue = ''
+      }
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [])
+
+  useEffect(() => {
+    // During a schedule switch the loaded schedule still differs from the
+    // selected one — don't re-arm a debounce whose snapshot would pair the NEW
+    // schedule id with the OLD rows (that used to write A's rows to B).
     if (!loadedRef.current || !dirtyRef.current) return
+    if (scheduleIdRef.current !== selectedScheduleId) return
     if (saveTimer.current) clearTimeout(saveTimer.current)
-    saveTimer.current = setTimeout(async () => {
-      await saveAllRef.current()
+    pendingSaveRef.current = { scheduleId: selectedScheduleId, rows: consentRows, deployments, depts, subtree, incharges }
+    saveTimer.current = setTimeout(() => {
+      const snap = pendingSaveRef.current
+      pendingSaveRef.current = null
+      persist(snap)
     }, 800)
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current) }
-  }, [consentRows])
+  }, [consentRows, selectedScheduleId, deployments, depts, subtree, incharges, persist])
 
   const schedule = schedules.find(s => s.id === selectedScheduleId)
   const deadlinePassed = schedule?.deadline ? new Date(schedule.deadline) < new Date() : false
   const scheduleDone = schedule?.status === 'done'
-  const canEdit = isEditableRole && !!schedule && schedule.status === 'open' && !deadlinePassed && !scheduleDone && settings.sewadar_deployment_open !== false
-  const deadlineNow = useDeadlineCountdown(schedule?.deadline)
-  const deadlineRemaining = fmtRemaining(schedule?.deadline, deadlineNow)
-  const deadlineWarn = deadlineRemaining && !deadlineRemaining.passed && deadlineRemaining.days < 1
+  const canEdit = isEditableRole && !!schedule && schedule.status === 'open' && !deadlinePassed && !scheduleDone && !locked && settings.sewadar_deployment_open !== false
 
   const myAlloc = allocations.filter(a => a.centre === myRoot)
+  // only departments the superadmin actually gave a quota to are offered/highlighted
+  const allocatedQuota = myAlloc.filter(a => (a.max_count || 0) > 0)
   const savedAllCounts = {}
   deployments.forEach(d => { savedAllCounts[d.department_id] = (savedAllCounts[d.department_id] || 0) + 1 })
   const savedOwnCounts = {}
@@ -223,7 +490,75 @@ export default function ConsentPage() {
   // returns a list of human-readable reasons a sewadar is not eligible for a dept
   const rowEligibilityReasons = (key, deptId) => {
     const dept = depts.find(d => d.id === deptId)
-    return eligibilityReasons(consentRows[key], dept)
+    const row = consentRows[key]
+    if (!dept || !row) return ['Department not found']
+    // Days are auto-set when the department changes (5 by default, 3 for OE
+    // ESCORTS), so judge the days rule against the days this row WOULD have
+    // after switching — otherwise a row on OE ESCORTS (3 days) could never be
+    // moved to a department that requires 5.
+    const prospective = { ...row, available_days_count: daysForDept(dept.name) }
+    return eligibilityReasons(prospective, dept)
+  }
+  const deptNameOf = (deptId) => depts.find(d => d.id === deptId)?.name || ''
+
+  // ── department incharges — one incharge per CENTRE × department ──
+  // eligible sewadars: consented AND requested this department
+  const inchargeOptions = {}
+  Object.values(consentRows).forEach(r => {
+    if (r.consent_given && r.requested_dept) {
+      if (!inchargeOptions[r.requested_dept]) inchargeOptions[r.requested_dept] = []
+      inchargeOptions[r.requested_dept].push(r)
+    }
+  })
+  Object.keys(inchargeOptions).forEach(k => {
+    inchargeOptions[k].sort((a, b) => (a.sewadar_name || '').localeCompare(b.sewadar_name || '', undefined, { sensitivity: 'base' }))
+  })
+  const inchargeKey = (deptId) => `${myRoot}|${deptId}`
+  const setIncharge = (deptId, badgeNumber) => {
+    dirtyRef.current = true
+    editVersionRef.current++
+    const key = inchargeKey(deptId)
+    setIncharges(prev => {
+      const next = { ...prev }
+      if (!badgeNumber) {
+        delete next[key]
+      } else {
+        const row = Object.values(consentRows).find(r => r.badge_number === badgeNumber && r.requested_dept === deptId)
+        if (row) next[key] = { centre: myRoot, department_id: deptId, badge_number: badgeNumber, sewadar_name: row.sewadar_name }
+      }
+      return next
+    })
+  }
+
+  // ── Lock deployment ──
+  // Departments that MUST have an incharge before locking: every allocated
+  // department that has at least one regular sewadar deployed to it.
+  const missingIncharges = allocatedQuota.filter(a => {
+    const hasRegularAssigned = Object.values(consentRows).some(r => r.consent_given && r.requested_dept === a.department_id && !isVssBadge(r.badge_number))
+    return hasRegularAssigned && !incharges[inchargeKey(a.department_id)]
+  })
+  const startLock = () => {
+    if (missingIncharges.length > 0) { setLockWarn(missingIncharges); return }
+    setLockConfirm(true)
+  }
+  const confirmLock = async () => {
+    setLockConfirm(false)
+    setLockBusy(true)
+    try {
+      // Save any pending edits first — the lock compulsion checks PERSISTED data.
+      if (dirtyRef.current) await flushRef.current()
+      if (dirtyRef.current) {
+        toast.error('There are still unsaved changes — please wait and try again.')
+        return
+      }
+      const { error } = await supabase.from('centre_locks')
+        .insert({ schedule_id: selectedScheduleId, centre: myRoot, locked_by: profile?.name || null })
+      if (error) throw error
+      setLocked(true)
+      toast.success('Deployment locked — only the ASO / Super Admin can reopen it')
+    } catch (err) {
+      toast.error(err?.message || 'Could not lock deployment')
+    } finally { setLockBusy(false) }
   }
 
   const setConsent = (key, value) => {
@@ -233,14 +568,8 @@ export default function ConsentPage() {
       ...prev,
       [key]: value
         ? { ...prev[key], consent_given: true }
-        : { ...prev[key], consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: 3, requested_dept: '' },
+        : { ...prev[key], consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: DEFAULT_AVAILABLE_DAYS, requested_dept: '' },
     }))
-  }
-  const setDays = (key, value) => {
-    dirtyRef.current = true
-    editVersionRef.current++
-    const days = parseInt(value) || 1
-    setConsentRows(prev => ({ ...prev, [key]: { ...prev[key], available_days_count: Math.min(Math.max(days, 1), 5) } }))
   }
   const toggleBhati = (key) => {
     dirtyRef.current = true
@@ -255,15 +584,20 @@ export default function ConsentPage() {
   const setRequestedDept = (key, deptId) => {
     dirtyRef.current = true
     editVersionRef.current++
-    setConsentRows(prev => ({ ...prev, [key]: { ...prev[key], requested_dept: deptId } }))
+    setConsentRows(prev => {
+      const next = { ...prev[key], requested_dept: deptId }
+      // days are auto-set by the chosen department: 5 by default, 3 for OE ESCORTS
+      next.available_days_count = daysForDept(deptNameOf(deptId))
+      return { ...prev, [key]: next }
+    })
   }
 
   useEffect(() => {
-    if (!openDeptDropdown) return
-    const onDocClick = () => { setOpenDeptDropdown(null); setOpenReasons(null) }
+    if (!openDeptDropdown && !openIncharge) return
+    const onDocClick = () => { setOpenDeptDropdown(null); setOpenReasons(null); setOpenIncharge(null) }
     document.addEventListener('click', onDocClick)
     return () => document.removeEventListener('click', onDocClick)
-  }, [openDeptDropdown])
+  }, [openDeptDropdown, openIncharge])
 
   if (profile?.role === 'super_admin' || profile?.role === 'aso') {
     return <ConsentDashboard />
@@ -302,8 +636,8 @@ export default function ConsentPage() {
   const SkeletonTable = () => (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', padding: '0.5rem' }}>
       {[...Array(4)].map((_, i) => (
-        <div key={i} style={{ display: 'grid', gridTemplateColumns: '80px 1fr 100px 120px 100px 100px 80px 160px', gap: '0.75rem' }}>
-          {[...Array(8)].map((_, j) => <div key={j} className="skeleton" style={{ height: 26 }} />)}
+        <div key={i} style={{ display: 'grid', gridTemplateColumns: '40px 80px 1fr 100px 120px 100px 100px 80px 160px', gap: '0.75rem' }}>
+          {[...Array(9)].map((_, j) => <div key={j} className="skeleton" style={{ height: 26 }} />)}
         </div>
       ))}
     </div>
@@ -356,24 +690,27 @@ export default function ConsentPage() {
       </button>
     </td>
   )
-  const renderDaysCell = (r) => (
-    <td style={{ textAlign: 'center' }} data-label="Days">
-      <select
-        value={r.available_days_count}
-        onChange={e => setDays(`${r.centre}|${r.badge_number}`, e.target.value)}
-        disabled={!canEdit || !r.consent_given}
-        className="select"
-        style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
-      >
-        {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}</option>)}
-      </select>
-    </td>
-  )
+  const renderDaysCell = (r) => {
+    const oeLocked = isOeEscortsDept(deptNameOf(r.requested_dept))
+    const days = r.available_days_count
+    return (
+      <td style={{ textAlign: 'center' }} data-label="Days">
+        <span
+          className={`pill ${oeLocked ? 'pill-amber' : 'pill-blue'}`}
+          title={oeLocked ? 'OE ESCORTS is fixed at 3 days' : 'Days are set automatically to 5 for every department'}
+          style={{ fontSize: '0.72rem', cursor: 'help' }}
+        >
+          <Lock size={10} style={{ verticalAlign: '-1px', marginRight: '0.25rem' }} />{days} day{days > 1 ? 's' : ''}
+        </span>
+      </td>
+    )
+  }
   const renderDeptCell = (r) => {
     const key = `${r.centre}|${r.badge_number}`
     const open = openDeptDropdown === key
-    const allocatedIds = new Set(myAlloc.map(a => a.department_id))
-    const items = myAlloc.map(a => {
+    // Only departments the superadmin allocated a quota > 0 for are offered —
+    // zero-quota / unallocated departments are hidden entirely.
+    const items = allocatedQuota.map(a => {
       const dept = depts.find(d => d.id === a.department_id)
       if (!dept) return null
       const q = deptQuota[a.department_id]
@@ -383,21 +720,19 @@ export default function ConsentPage() {
       if (full) reasons.push(`Allocated quota reached (${q ? q.effective : 0}/${q ? q.max : a.max_count})`)
       return { deptId: a.department_id, name: dept.name, q, reasons, isCurrent, full }
     }).filter(Boolean)
-    // unallocated depts appear greyed-out with a reason so users know they exist but weren't allocated
-    depts.forEach(d => {
-      if (!allocatedIds.has(d.id) && !items.some(it => it.deptId === d.id)) {
-        items.push({ deptId: d.id, name: d.name, q: null, reasons: ['Not allocated to your centre'], isCurrent: false, full: false })
-      }
-    })
     return (
-      <td style={{ textAlign: 'center' }} data-label="Requested Deployment Department">
+      <td style={{ textAlign: 'center' }} data-label="Deployment">
         <DeptDropdown
           row={r}
           depts={depts}
           items={items}
           open={open}
           disabled={!canEdit || !r.consent_given}
-          onToggle={close => close === false ? setOpenDeptDropdown(null) : setOpenDeptDropdown(open ? null : key)}
+          onToggle={close => {
+            if (close === false) { setOpenDeptDropdown(null); return }
+            setOpenIncharge(null)
+            setOpenDeptDropdown(open ? null : key)
+          }}
           onSelect={deptId => { setRequestedDept(key, deptId); setOpenDeptDropdown(null) }}
           openReasons={openReasons}
           setOpenReasons={setOpenReasons}
@@ -446,15 +781,7 @@ export default function ConsentPage() {
       `Set consent to ${value ? 'Yes' : 'No'} for ${selectedRows.length} selected sewadar${selectedRows.length > 1 ? 's' : ''}?`,
       row => value
         ? { ...row, consent_given: true }
-        : { ...row, consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: 3, requested_dept: '' },
-    )
-  }
-
-  const bulkDays = (days) => {
-    requestBulk(
-      'Set days',
-      `Set available days to ${days} and mark consent Yes for ${selectedRows.length} selected sewadar${selectedRows.length > 1 ? 's' : ''}?`,
-      row => ({ ...row, consent_given: true, available_days_count: days }),
+        : { ...row, consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: DEFAULT_AVAILABLE_DAYS, requested_dept: '' },
     )
   }
 
@@ -484,11 +811,13 @@ export default function ConsentPage() {
     selectedRows.forEach(r => {
       const key = `${r.centre}|${r.badge_number}`
       const already = r.requested_dept === deptId
-      let reasons = []
+      let reasons
       if (!already && remaining < 1) {
         reasons = [`Quota full (${q ? q.effective : 0}/${q ? q.max : '?'} already assigned)`]
       } else {
-        reasons = eligibilityReasons(r, dept)
+        // days are auto-set by the target department (5 / 3 for OE ESCORTS)
+        const prospective = { ...r, available_days_count: daysForDept(dept.name) }
+        reasons = eligibilityReasons(prospective, dept)
         if (reasons.length === 0) {
           eligibleKeys.add(key)
           if (!already) remaining--
@@ -501,27 +830,74 @@ export default function ConsentPage() {
     requestBulk(
       'Assign to department',
       `Assign ${count} selected sewadar${count === 1 ? '' : 's'} to "${dept.name}"?${skipped.length ? ` ${skipped.length} skipped — see reasons below.` : ''}`,
-      row => ({ ...row, requested_dept: deptId }),
+      row => ({ ...row, requested_dept: deptId, available_days_count: daysForDept(dept.name) }),
       eligibleKeys,
       skipped,
     )
   }
 
+  // ── Excel export (centre role) — mirrors the lazy xlsx pattern used on the
+  // Deployment Allocation / dashboard pages, so the bundle stays code-split ──
+  const exportExcel = async () => {
+    if (!visible.length) {
+      toast.info('Nothing to export yet')
+      return
+    }
+    const XLSX = await import('xlsx') // lazy — keeps xlsx (~400 kB) out of the main bundle
+    const wb = XLSX.utils.book_new()
+    const sheet = visible.map(r => ({
+      'CENTRE': r.centre,
+      'Badge Number': r.badge_number,
+      'Name': r.sewadar_name,
+      'Department': r.department || '—',
+      'Initiated': r.is_initiated ? 'Yes' : 'No',
+      'Consent': r.consent_given ? 'Yes' : 'No',
+      'Stay at Bhati': r.stay_at_bhati ? 'Yes' : 'No',
+      'Chair Pass': r.chair_pass ? 'Yes' : 'No',
+      'Days': r.consent_given ? r.available_days_count : '—',
+      'Deployment': deptNameOf(r.requested_dept) || '',
+      'Prev. Dept': r.prev_department || '',
+      'Attendance Reported': r.prev_attendance != null ? attendanceDisplay(r.prev_attendance, r.prev_department) : '',
+    }))
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), 'Consent & Deployment')
+    const name = (schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')
+    XLSX.writeFile(wb, `${name}_consent_deployment.xlsx`)
+  }
+
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
-      <div className="page-header">
-        <div>
+      <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
+        <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
           <h2 className="page-title"><ClipboardCheck size={22} /> Consent &amp; Deployment</h2>
-          <div className="page-sub">{myCentre} · manages {subtree.length} centre{subtree.length > 1 ? 's' : ''} (own + children)</div>
+          <div className="page-sub" style={{ fontWeight: 700, fontSize: '0.95rem', color: '#1e293b', marginTop: 0 }}>
+            {myCentre}
+          </div>
+          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            {saving ? (
+              <span className="pill pill-amber"><Save size={12} /> Saving...</span>
+            ) : savedAt ? (
+              <span className="pill pill-green"><CheckCircle2 size={12} /> Saved {savedAt.toLocaleTimeString()}</span>
+            ) : null}
+            {canEdit && (
+              <button onClick={saveDraft} className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+                <Save size={13} /> Save Draft
+              </button>
+            )}
+            {locked ? (
+              <span className="pill pill-red" style={{ fontSize: '0.75rem', fontWeight: 700 }} title="Only the ASO / Super Admin can reopen this deployment">
+                <Lock size={12} style={{ verticalAlign: '-1px', marginRight: '0.25rem' }} /> Deployment Locked
+              </span>
+            ) : canEdit && (
+              <button onClick={startLock} disabled={lockBusy} className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem', color: '#b91c1c', borderColor: '#fecaca', background: '#fef2f2' }}>
+                <Lock size={13} /> {lockBusy ? 'Locking…' : 'Lock Deployment'}
+              </button>
+            )}
+            <button onClick={exportExcel} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+              <Download size={13} /> Export Excel
+            </button>
+          </div>
         </div>
-        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-          {saving ? (
-            <span className="pill pill-amber"><Save size={12} /> Saving...</span>
-          ) : savedAt ? (
-            <span className="pill pill-green"><CheckCircle2 size={12} /> Saved {savedAt.toLocaleTimeString()}</span>
-          ) : null}
-          {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
-        </div>
+        {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
       </div>
 
       <div className="stat-row">
@@ -535,7 +911,7 @@ export default function ConsentPage() {
           <div className="stat-sub">of {totalAll}</div>
         </div>
         <div className="stat">
-          <div className="stat-label">Requested dept</div>
+          <div className="stat-label">Deployment</div>
           <div className="stat-value" style={{ color: requestedAll === consentedAll && consentedAll ? '#10b981' : '#8b5cf6' }}>{requestedAll}</div>
           <div className="stat-sub">of {consentedAll} consented</div>
         </div>
@@ -550,13 +926,14 @@ export default function ConsentPage() {
         </div>
       </div>
 
-      {myAlloc.length > 0 && (
+      {allocatedQuota.length > 0 && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: '0.75rem', marginBottom: '1.25rem' }}>
-          {myAlloc.map(a => {
+          {allocatedQuota.map(a => {
             const dept = depts.find(d => d.id === a.department_id)
             const q = deptQuota[a.department_id]
             const pct = q ? Math.round(q.effective / q.max * 100) : 0
             const over = q && q.rem < 0
+            const inc = incharges[inchargeKey(a.department_id)]
             return (
               <div key={a.department_id} className="card" style={{ padding: '0.85rem 1rem' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
@@ -565,6 +942,23 @@ export default function ConsentPage() {
                 </div>
                 <div className="progress">
                   <div className={`progress-bar ${over ? 'danger' : pct >= 100 ? 'success' : ''}`} style={{ width: `${Math.min(Math.max(pct, 0), 100)}%` }} />
+                </div>
+                <div style={{ marginTop: '0.55rem' }}>
+                  <div style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#94a3b8', marginBottom: '0.3rem' }}>Incharge</div>
+                  <InchargePicker
+                    id={`incharge-btn-${a.department_id}`}
+                    value={inc?.badge_number || ''}
+                    currentName={inc?.sewadar_name || ''}
+                    sewadars={inchargeOptions[a.department_id] || []}
+                    onChange={badge => setIncharge(a.department_id, badge)}
+                    open={openIncharge === a.department_id}
+                    onToggle={close => {
+                      if (close === false) { setOpenIncharge(null); return }
+                      setOpenDeptDropdown(null)
+                      setOpenIncharge(openIncharge === a.department_id ? null : a.department_id)
+                    }}
+                    disabled={!canEdit}
+                  />
                 </div>
               </div>
             )
@@ -576,7 +970,7 @@ export default function ConsentPage() {
         <div className="section-header" style={{ flexWrap: 'wrap', gap: '0.75rem' }}>
           <div>
             <div className="section-title">Consent &amp; requested department</div>
-            <div className="card-sub">Consent · days (1–5) · stay at bhati · chair pass · requested deployment department · prev. visit data</div>
+            <div className="card-sub">Consent · days (auto: 5, 3 for OE ESCORTS) · stay at bhati · chair pass · deployment department · prev. visit data</div>
           </div>
           <div style={{ flex: 1 }} />
           <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
@@ -608,12 +1002,12 @@ export default function ConsentPage() {
             <Lock size={16} /> Deployment is closed by the ASO. Editing is disabled.
           </div>
         )}
-        {canEdit && deadlineWarn && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#92400e', marginBottom: '1rem' }}>
-            <AlertTriangle size={16} style={{ color: '#b45309', flexShrink: 0 }} />
-            <span>Deadline is soon — <strong>{deadlineRemaining.text}</strong>. Plan to finish consent &amp; deployment before it closes.</span>
+        {locked && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
+            <Lock size={16} /> Deployment is locked by your centre — consent, deployment and incharges are read-only. Only the ASO / Super Admin can reopen it.
           </div>
         )}
+        {canEdit && <DeadlineWarning deadline={schedule?.deadline} />}
 
         {canEdit && selectedRows.length > 0 && (
           <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.6rem', background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: 10, padding: '0.6rem 0.75rem', marginBottom: '1rem', fontSize: '0.82rem' }}>
@@ -623,11 +1017,6 @@ export default function ConsentPage() {
               <option value="" disabled>Set…</option>
               <option value="yes">Yes</option>
               <option value="no">No</option>
-            </select>
-            <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Days:</span>
-            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" onChange={e => { if (e.target.value !== '') { bulkDays(parseInt(e.target.value, 10)); e.target.value = '' } }}>
-              <option value="" disabled>Set…</option>
-              {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n} day{n > 1 ? 's' : ''}</option>)}
             </select>
             <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Stay:</span>
             <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" onChange={e => { if (e.target.value !== '') { bulkSetBhati(e.target.value === 'yes'); e.target.value = '' } }}>
@@ -644,7 +1033,7 @@ export default function ConsentPage() {
             <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Dept:</span>
             <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" onChange={e => { if (e.target.value) { bulkAssignDept(e.target.value); e.target.value = '' } }}>
               <option value="" disabled>Assign…</option>
-              {myAlloc.map(a => {
+              {allocatedQuota.map(a => {
                 const dept = depts.find(d => d.id === a.department_id)
                 if (!dept) return null
                 return <option key={a.department_id} value={a.department_id}>{dept.name} ({deptQuota[a.department_id]?.effective || 0}/{deptQuota[a.department_id]?.max || a.max_count})</option>
@@ -685,6 +1074,48 @@ export default function ConsentPage() {
           </div>
         )}
 
+        {lockWarn && (
+          <div className="modal-overlay" onClick={() => setLockWarn(null)}>
+            <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 480 }}>
+              <h4 style={{ fontSize: '0.95rem', fontWeight: 700, marginBottom: '0.5rem' }}>Add incharges before locking</h4>
+              <p style={{ fontSize: '0.85rem', color: '#6b7280', marginBottom: '0.75rem' }}>
+                Every department with deployed sewadars needs an incharge before you can lock deployment. Missing:
+              </p>
+              <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: '0.6rem 0.75rem', marginBottom: '0.75rem' }}>
+                {lockWarn.map(a => {
+                  const dept = depts.find(d => d.id === a.department_id)
+                  return (
+                    <div key={a.department_id} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.25rem 0', borderBottom: '1px solid #fde68a', fontSize: '0.82rem', fontWeight: 600, color: '#78350f' }}>
+                      <span>{dept?.name || '—'}</span>
+                      <span style={{ color: '#b45309', fontWeight: 500 }}>no incharge</span>
+                    </div>
+                  )
+                })}
+              </div>
+              <div style={{ display: 'flex', gap: '0.6rem', justifyContent: 'flex-end' }}>
+                <button onClick={() => setLockWarn(null)} className="btn btn-primary" style={{ padding: '0.45rem 0.9rem', fontSize: '0.85rem' }}>OK</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {lockConfirm && (
+          <div className="modal-overlay" onClick={() => setLockConfirm(false)}>
+            <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 460 }}>
+              <h4 style={{ fontSize: '0.95rem', fontWeight: 700, marginBottom: '0.5rem' }}>Lock deployment for {myCentre}?</h4>
+              <p style={{ fontSize: '0.85rem', color: '#6b7280', marginBottom: '0.75rem' }}>
+                All required incharges are set. After locking, consent, deployment and incharges (including VSS) become read-only for your centre — only the ASO / Super Admin can reopen it.
+              </p>
+              <div style={{ display: 'flex', gap: '0.6rem', justifyContent: 'flex-end' }}>
+                <button onClick={() => setLockConfirm(false)} className="btn" style={{ padding: '0.45rem 0.9rem', fontSize: '0.85rem' }}>Cancel</button>
+                <button onClick={confirmLock} disabled={lockBusy} className="btn btn-primary" style={{ padding: '0.45rem 0.9rem', fontSize: '0.85rem', background: '#dc2626', borderColor: '#dc2626' }}>
+                  <Lock size={13} style={{ verticalAlign: '-2px', marginRight: '0.3rem' }} /> {lockBusy ? 'Locking…' : 'Lock Deployment'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {loading ? (
           <SkeletonTable />
         ) : visible.length === 0 ? (
@@ -714,10 +1145,11 @@ export default function ConsentPage() {
                   </div>
                   {open && (
                     <div className="acc-body" style={{ padding: 0 }}>
-                      <div className="table-wrap" style={{ border: 'none', borderRadius: 0 }}>
-                        <table className="table">
+                      <div className="table-wrap table-wrap-sticky" style={{ border: 'none', borderRadius: 0 }}>
+                        <table className="table table-sticky">
                           <thead>
                             <tr>
+                              <th style={{ width: 40, textAlign: 'center' }}>S.No.</th>
                               <th style={{ width: 30, textAlign: 'center' }}>
                                 <input type="checkbox" checked={rows.length > 0 && rows.every(r => selected[`${r.centre}|${r.badge_number}`])} onChange={() => selectAllCentre(rows)} disabled={!canEdit} style={{ cursor: canEdit ? 'pointer' : 'not-allowed' }} title="Select all in this centre" />
                               </th>
@@ -729,14 +1161,15 @@ export default function ConsentPage() {
                               <th style={{ textAlign: 'center' }}>Stay at Bhati</th>
                               <th style={{ textAlign: 'center' }}>Chair Pass</th>
                               <th style={{ textAlign: 'center' }}>Days</th>
-                              <th style={{ textAlign: 'center' }}>Requested Deployment Department</th>
+                              <th style={{ textAlign: 'center' }}>Deployment</th>
                               <th style={{ textAlign: 'center', borderLeft: '2px solid #e2e8f0' }}>Prev. Dept</th>
                               <th style={{ textAlign: 'center' }}>Attendance Reported</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {rows.map(r => (
+                            {rows.map((r, i) => (
                               <tr key={`${r.centre}|${r.badge_number}`} style={{ background: selected[`${r.centre}|${r.badge_number}`] ? '#f5f3ff' : undefined }}>
+                                <td style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }} data-label="S.No.">{i + 1}</td>
                                 <td style={{ textAlign: 'center' }} data-label="Select">
                                   <input type="checkbox" checked={!!selected[`${r.centre}|${r.badge_number}`]} onChange={() => toggleSelect(`${r.centre}|${r.badge_number}`)} disabled={!canEdit} style={{ cursor: canEdit ? 'pointer' : 'not-allowed' }} />
                                 </td>

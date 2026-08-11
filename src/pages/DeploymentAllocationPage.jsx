@@ -1,13 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react'
 import { supabase } from '../lib/supabase'
-import { notElderlyFilter, isVssBadge } from '../lib/logic'
+import { notElderlyFilter, isVssBadge, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, getRootCentre } from '../lib/logic'
 import { useToast } from '../components/Toast'
 import DeadlinePill from '../components/DeadlinePill'
 import {
-  Save, CheckCircle2, Search, ClipboardCheck, ChevronDown, Users,
+  Save, CheckCircle2, Search, ClipboardCheck, Users,
   Download, Pencil, Lock,
 } from 'lucide-react'
-import * as XLSX from 'xlsx'
 
 /* ─── ASO / super_admin: assign the FINAL (deployed) department ───
    Centres record a REQUESTED department; aso/super_admin confirm or
@@ -17,15 +16,19 @@ import * as XLSX from 'xlsx'
    not re-render every other row. */
 
 /* ─── Memoized row: re-renders only when its own data/props change ─── */
-const DeployRow = memo(function DeployRow({ row, depts, deptNames, handlers }) {
+const DeployRow = memo(function DeployRow({ row, depts, deptNames, handlers, serial }) {
   const key = `${row.centre}|${row.badge_number}`
   const reqName = deptNames.get(row.requested_dept_id)?.name || null
   const noRequest = !row.requested_dept_id
   const overridden = !!row.requested_dept_id && !!row.deployed_dept_id && row.deployed_dept_id !== row.requested_dept_id
+  // days are auto-set by the FINAL deployed department (5 by default, 3 for OE ESCORTS)
+  const oeLocked = isOeEscortsDept(deptNames.get(row.deployed_dept_id)?.name || null)
   const rowBg = overridden ? '#fff7ed' : (row.consent_given && noRequest ? '#fffbeb' : undefined)
 
   return (
     <tr style={{ background: rowBg }}>
+      <td style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }} data-label="S.No.">{serial}</td>
+      <td style={{ fontWeight: 600, fontSize: '0.82rem', whiteSpace: 'nowrap' }} data-label="Centre">{row.centre}</td>
       <td style={{ fontFamily: 'monospace', fontSize: '0.8rem' }} data-label="Badge">
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
           {row.badge_number}
@@ -42,9 +45,13 @@ const DeployRow = memo(function DeployRow({ row, depts, deptNames, handlers }) {
         </select>
       </td>
       <td style={{ textAlign: 'center' }} data-label="Days">
-        <select value={row.available_days_count} onChange={e => handlers.setDays(key, e.target.value)} disabled={!row.consent_given} className="select" style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}>
-          {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}</option>)}
-        </select>
+        <span
+          className={`pill ${oeLocked ? 'pill-amber' : 'pill-blue'}`}
+          title={oeLocked ? 'OE ESCORTS is fixed at 3 days' : 'Days are set automatically to 5 for every department'}
+          style={{ fontSize: '0.72rem', cursor: 'help' }}
+        >
+          <Lock size={10} style={{ verticalAlign: '-1px', marginRight: '0.25rem' }} />{row.available_days_count} day{row.available_days_count > 1 ? 's' : ''}
+        </span>
       </td>
       <td style={{ textAlign: 'center' }} data-label="Stay at Bhati">
         <button role="switch" aria-checked={row.stay_at_bhati} onClick={() => handlers.toggleBhati(key)} disabled={!row.consent_given} className="toggle" title="Stay at bhati">
@@ -56,17 +63,17 @@ const DeployRow = memo(function DeployRow({ row, depts, deptNames, handlers }) {
           <span className="toggle-knob" />
         </button>
       </td>
-      <td style={{ textAlign: 'center' }} data-label="Requested Department">
+      <td style={{ textAlign: 'center' }} data-label="Deployment">
         {reqName ? <span className="pill pill-blue">{reqName}</span> : <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>—</span>}
       </td>
-      <td style={{ textAlign: 'center', background: '#f8faff' }} data-label="Deployed Department">
+      <td style={{ textAlign: 'center', background: '#f8faff' }} data-label="Finalized Deployment">
         <select
           value={row.deployed_dept_id || ''}
           onChange={e => handlers.setDeployedDept(key, e.target.value)}
           disabled={noRequest}
           className={row.deployed_dept_id ? 'select assigned' : 'select'}
           style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem', minWidth: 160, ...(overridden ? { background: '#fffbeb', borderColor: '#fcd34d', fontWeight: 700, color: '#b45309' } : row.deployed_dept_id ? { background: '#ecfdf5', borderColor: '#a7f3d0', fontWeight: 700, color: '#047857' } : {}) }}
-          title={noRequest ? 'No department was requested for this sewadar' : overridden ? 'Deployed department differs from the requested one' : 'Defaults to the requested department — change only if needed'}
+          title={noRequest ? 'No department was requested for this sewadar' : overridden ? 'Finalized deployment differs from the deployment request' : 'Defaults to the deployment request — change only if needed'}
         >
           <option value="">{noRequest ? 'Not requested' : '— Not assigned —'}</option>
           {depts.map(d => <option key={d.id} value={d.id}>{d.name}{d.is_active ? '' : ' (inactive)'}</option>)}
@@ -83,6 +90,7 @@ export default function DeploymentAllocationPage() {
   const [schedules, setSchedules] = useState([])
   const [selectedScheduleId, setSelectedScheduleId] = useState('')
   const [depts, setDepts] = useState([])
+  const [centres, setCentres] = useState([])
   const [rows, setRows] = useState({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -91,40 +99,59 @@ export default function DeploymentAllocationPage() {
   const [search, setSearch] = useState('')
   const [filterCentre, setFilterCentre] = useState('all')
   const [filterStatus, setFilterStatus] = useState('all')
-  const [expanded, setExpanded] = useState({})
 
   const loadedRef = useRef(false)
   const dirtyRef = useRef(false)
   const saveTimer = useRef(null)
   const saveAllRef = useRef(null)
+  const flushRef = useRef(null)
   const editVersionRef = useRef(0)
   const scheduleIdRef = useRef(null)
+  const liveRef = useRef({})
+  const pendingSaveRef = useRef(null)
+  const savingRef = useRef(false)
+  const mountedRef = useRef(true)
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false } }, [])
+  liveRef.current = { scheduleId: selectedScheduleId, rows }
   const savedDeployedRef = useRef({})
   const existingConsentRef = useRef({})
   const editModeRef = useRef(editMode)
   editModeRef.current = editMode
+  // handlers is memoized on stable deps, so read the dept-name lookup via a
+  // ref to avoid a stale closure (and a use-before-init reference)
+  const deptNameRef = useRef(() => null)
 
   const loadSchedules = useCallback(async () => {
-    const { data } = await supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false })
-    if (data) {
-      setSchedules(data)
-      setSelectedScheduleId(prev => (prev && data.some(s => s.id === prev)) ? prev : (data[0]?.id || ''))
-    }
-  }, [])
+    const { data, error } = await supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false })
+    if (error) { toast.error(error.message); return }
+    setSchedules(data || [])
+    setSelectedScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
+  }, [toast])
 
   useEffect(() => { loadSchedules() }, [loadSchedules])
 
   const loadData = useCallback(async () => {
     if (!selectedScheduleId) return
     setLoading(true)
+    // Capture in-flight edits before the fetch (they belong to the schedule that
+    // was last loaded — scheduleIdRef.current).
+    const prevLoadedSchedule = scheduleIdRef.current
+    const prevRows = liveRef.current.rows
+    const prevDirty = dirtyRef.current
     try {
-      const [sewRes, vssRes, consRes, deptRes, deployRes] = await Promise.all([
+      const [sewRes, vssRes, consRes, deptRes, deployRes, centreRes] = await Promise.all([
         supabase.from('sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, badge_status').or(notElderlyFilter()).order('sewadar_name'),
         supabase.from('vss_sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, is_active, badge_status').order('sewadar_name'),
         supabase.from('sewadar_consents').select('*').eq('schedule_id', selectedScheduleId),
         supabase.from('deployment_departments').select('*').order('name'),
         supabase.from('deployments').select('*').eq('schedule_id', selectedScheduleId),
+        supabase.from('centres').select('name, parent_centre').order('name'),
       ])
+
+      // Abort if any query failed — empty rows here would reset the save
+      // baseline and could let a later save clobber real consent data.
+      const failed = [sewRes, vssRes, consRes, deptRes, deployRes, centreRes].find(r => r?.error)
+      if (failed) throw failed.error
 
       const sewadars = [...(sewRes.data || []), ...(vssRes.data || [])]
       const consentMap = {}
@@ -132,6 +159,29 @@ export default function DeploymentAllocationPage() {
       const deployMap = {}
       ;(deployRes.data || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d })
 
+      // Schedule switch: a save triggered by the switch flush may still be in
+      // flight (or queued). Let it settle while scheduleIdRef still points at
+      // the previous schedule, then re-save whatever is still unsaved to it —
+      // the reset below must not invalidate that queued save. Runs BEFORE the
+      // map loop below rebuilds savedDeployedRef / existingConsentRef, which
+      // saveAll still needs from the previous schedule.
+      if (prevLoadedSchedule && prevLoadedSchedule !== selectedScheduleId && prevDirty) {
+        let guard = 0
+        while (savingRef.current && guard < 100) {
+          await new Promise(r => setTimeout(r, 50))
+          guard++
+        }
+        if (savingRef.current) {
+          // A save hung past the 5s drain — fail loudly instead of silently
+          // resetting away the previous schedule's unsaved edits.
+          toast.error('Saving is still in progress — some edits may not have been saved before switching schedules.')
+        } else if (dirtyRef.current) {
+          await saveAllRef.current({ scheduleId: prevLoadedSchedule, rows: prevRows })
+        }
+      }
+
+      const deptNameById = {}
+      ;(deptRes.data || []).forEach(d => { deptNameById[d.id] = d.name })
       const map = {}
       sewadars.forEach(sw => {
         const key = `${sw.centre}|${sw.badge_number}`
@@ -145,7 +195,8 @@ export default function DeploymentAllocationPage() {
           is_initiated: !!sw.is_initiated,
           is_vss: isVssBadge(sw.badge_number),
           consent_given: ex?.consent_given ?? false,
-          available_days_count: ex?.available_days_count ?? 3,
+          // days are auto-set by the FINAL deployed department: 5 by default, 3 for OE ESCORTS
+          available_days_count: daysForDept(deptNameById[dep?.deployed_department_id || dep?.department_id]),
           stay_at_bhati: ex?.stay_at_bhati || false,
           chair_pass: ex?.chair_pass || false,
           requested_dept_id: dep?.department_id || '',
@@ -159,6 +210,7 @@ export default function DeploymentAllocationPage() {
       })
       setRows(map)
       setDepts(deptRes.data || [])
+      setCentres(centreRes.data || [])
       dirtyRef.current = false
       editVersionRef.current = 0
       loadedRef.current = true
@@ -167,8 +219,14 @@ export default function DeploymentAllocationPage() {
       setFilterStatus('all')
       setSearch('')
       setEditMode(false)
+    } catch (err) {
+      // A failed refresh must not look like a successful load — keep the
+      // previous rows and any unsaved edits, and tell the user why.
+      console.error('Failed to load allocation data:', err)
+      toast.error(err?.message || 'Failed to load data — check your connection')
+      if (!prevDirty) dirtyRef.current = false
     } finally { setLoading(false) }
-  }, [selectedScheduleId])
+  }, [selectedScheduleId, toast])
 
   useEffect(() => { loadData() }, [loadData])
 
@@ -198,6 +256,23 @@ export default function DeploymentAllocationPage() {
     return m
   }, [depts])
 
+  // Centre-hierarchy order for the flat table: CENTREs (roots) A–Z, then each
+  // CENTRE's SC_SPs A–Z, then the next CENTRE — so rows read grouped the same
+  // way the old per-centre accordion did, with the centre column in between.
+  const centreOrder = useMemo(() => {
+    const rootOf = {}
+    ;(centres || []).forEach(c => { rootOf[c.name] = getRootCentre(centres, c.name) || c.name })
+    return (a, b) => {
+      const ra = rootOf[a] || a
+      const rb = rootOf[b] || b
+      if (ra !== rb) return ra.localeCompare(rb)
+      const aRoot = ra === a
+      const bRoot = rb === b
+      if (aRoot !== bRoot) return aRoot ? -1 : 1
+      return a.localeCompare(b)
+    }
+  }, [centres])
+
   // ── edits are only recorded when editMode is ticked on ──
   const markDirty = useCallback(() => {
     dirtyRef.current = true
@@ -211,14 +286,8 @@ export default function DeploymentAllocationPage() {
       markDirty()
       setRows(prev => ({ ...prev, [key]: value
         ? { ...prev[key], consent_given: true }
-        : { ...prev[key], consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: 3, deployed_dept_id: null },
+        : { ...prev[key], consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: DEFAULT_AVAILABLE_DAYS, deployed_dept_id: null },
       }))
-    },
-    setDays: (key, value) => {
-      if (!editModeRef.current) return
-      markDirty()
-      const days = parseInt(value) || 1
-      setRows(prev => ({ ...prev, [key]: { ...prev[key], consent_given: true, available_days_count: Math.min(Math.max(days, 1), 5) } }))
     },
     toggleBhati: (key) => {
       if (!editModeRef.current) return
@@ -233,24 +302,33 @@ export default function DeploymentAllocationPage() {
     setDeployedDept: (key, deptId) => {
       if (!editModeRef.current) return
       markDirty()
-      setRows(prev => ({ ...prev, [key]: { ...prev[key], deployed_dept_id: deptId || null } }))
+      setRows(prev => {
+        const next = { ...prev[key], deployed_dept_id: deptId || null }
+        // days follow the FINAL department (5 by default, 3 for OE ESCORTS);
+        // when the final dept is cleared, fall back to the requested one
+        next.available_days_count = daysForDept(deptId ? deptNameRef.current(deptId) : deptNameRef.current(prev[key]?.requested_dept_id))
+        return { ...prev, [key]: next }
+      })
     },
   }), [markDirty])
 
-  const saveAll = useCallback(async () => {
-    if (!selectedScheduleId) return
-    if (scheduleIdRef.current !== selectedScheduleId) return
+  const saveAll = useCallback(async (snap) => {
+    const s = snap || liveRef.current
+    if (!s?.scheduleId) return
+    if (scheduleIdRef.current !== s.scheduleId) return
+    if (savingRef.current) { pendingSaveRef.current = s; return }
+    savingRef.current = true
     setSaving(true)
     const versionAtStart = editVersionRef.current
     try {
-      const entries = Object.values(rows)
+      const entries = Object.values(s.rows)
 
       // consent upserts — persist only rows that have a consent record already
       // or that the finalizer just consented (avoid creating rows for everyone)
       const toUpsert = entries
         .filter(r => r.consent_given || existingConsentRef.current[r.centre + '|' + r.badge_number])
         .map(r => ({
-          schedule_id: selectedScheduleId,
+          schedule_id: s.scheduleId,
           centre: r.centre,
           badge_number: r.badge_number,
           sewadar_name: r.sewadar_name,
@@ -273,14 +351,69 @@ export default function DeploymentAllocationPage() {
       }
       const results = await Promise.all(ops)
       for (const res of results) if (res.error) { toast.error(res.error.message); dirtyRef.current = true; return }
-      toUpdate.forEach(r => { savedDeployedRef.current[r.centre + '|' + r.badge_number] = r.deployed_dept_id })
 
       if (editVersionRef.current === versionAtStart) dirtyRef.current = false
-      setSavedAt(new Date())
-    } catch (err) { toast.error(err.message); dirtyRef.current = true } finally { setSaving(false) }
-  }, [selectedScheduleId, rows, toast])
+      // The schedule may have changed while this save was in flight — don't
+      // clobber the newly loaded schedule's deployed-department baseline.
+      if (scheduleIdRef.current === s.scheduleId) {
+        toUpdate.forEach(r => { savedDeployedRef.current[r.centre + '|' + r.badge_number] = r.deployed_dept_id })
+        setSavedAt(new Date())
+      }
+    } catch (err) { toast.error(err.message); dirtyRef.current = true } finally {
+      savingRef.current = false
+      setSaving(false)
+      // If a newer snapshot was queued while this save was in flight, save it
+      // now — otherwise those edits would be dropped silently.
+      if (pendingSaveRef.current) {
+        const next = pendingSaveRef.current
+        pendingSaveRef.current = null
+        saveAll(next)
+      }
+    }
+  }, [toast])
 
   saveAllRef.current = saveAll
+
+  const flushPending = useCallback(() => {
+    if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null }
+    if (!loadedRef.current || !dirtyRef.current) return
+    const snap = pendingSaveRef.current || liveRef.current
+    pendingSaveRef.current = null
+    saveAll(snap)
+  }, [saveAll])
+  flushRef.current = flushPending
+
+  // explicit “Save Draft” — flush whatever is pending right now instead of
+  // waiting for the 800ms debounce
+  const saveDraft = () => {
+    if (!loadedRef.current) return
+    if (dirtyRef.current) {
+      flushRef.current && flushRef.current()
+    } else {
+      toast.info('No pending changes — everything is already saved')
+    }
+  }
+
+  // Schedule switch: save the OLD schedule's pending edits before its rows
+  // are replaced by the new schedule's load (previously they were dropped).
+  useEffect(() => {
+    return () => { flushRef.current && flushRef.current() }
+  }, [selectedScheduleId])
+
+  // Unmount (tab switch / logout): flush instead of dropping unsaved edits.
+  useEffect(() => () => { flushRef.current && flushRef.current() }, [])
+
+  // Warn before closing/reloading the tab with unsaved edits.
+  useEffect(() => {
+    const onBeforeUnload = (e) => {
+      if (dirtyRef.current) {
+        e.preventDefault()
+        e.returnValue = ''
+      }
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [])
 
   // drop pending autosave when schedule changes
   useEffect(() => {
@@ -288,11 +421,20 @@ export default function DeploymentAllocationPage() {
   }, [selectedScheduleId])
 
   useEffect(() => {
+    // During a schedule switch the loaded schedule still differs from the
+    // selected one — don't re-arm a debounce whose snapshot would pair the NEW
+    // schedule id with the OLD rows (that used to write A's rows to B).
     if (!loadedRef.current || !dirtyRef.current) return
+    if (scheduleIdRef.current !== selectedScheduleId) return
     if (saveTimer.current) clearTimeout(saveTimer.current)
-    saveTimer.current = setTimeout(() => { saveAllRef.current() }, 800)
+    pendingSaveRef.current = { scheduleId: selectedScheduleId, rows }
+    saveTimer.current = setTimeout(() => {
+      const snap = pendingSaveRef.current
+      pendingSaveRef.current = null
+      saveAll(snap)
+    }, 800)
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current) }
-  }, [rows])
+  }, [rows, selectedScheduleId, saveAll])
 
   // ── derived stats & visible rows (memoized) ──
   const all = useMemo(() => Object.values(rows), [rows])
@@ -302,8 +444,8 @@ export default function DeploymentAllocationPage() {
   const awaitingAll = useMemo(() => all.filter(r => r.consent_given && !r.requested_dept_id).length, [all])
   const statusChips = useMemo(() => [
     { key: 'all', label: 'All', count: all.length },
-    { key: 'requested', label: 'Requested', count: requestedAll },
-    { key: 'deployed', label: 'Deployed', count: deployedAll },
+    { key: 'requested', label: 'Deployment', count: requestedAll },
+    { key: 'deployed', label: 'Finalized', count: deployedAll },
     { key: 'overridden', label: 'Overridden', count: overriddenAll },
     { key: 'awaiting', label: 'Awaiting', count: awaitingAll },
   ], [all, requestedAll, deployedAll, overriddenAll, awaitingAll])
@@ -318,8 +460,13 @@ export default function DeploymentAllocationPage() {
       if (filterStatus === 'awaiting' && !(r.consent_given && !r.requested_dept_id)) return false
       if (q && !`${r.sewadar_name} ${r.badge_number}`.toLowerCase().includes(q)) return false
       return true
-    }).sort((a, b) => (a.sewadar_name || '').localeCompare(b.sewadar_name || '', undefined, { sensitivity: 'base' }))
-  }, [all, filterCentre, filterStatus, search])
+    }).sort((a, b) => {
+      // group by CENTRE (root) first, SC_SPs under their CENTRE, name within centre
+      const c = centreOrder(a.centre, b.centre)
+      if (c !== 0) return c
+      return (a.sewadar_name || '').localeCompare(b.sewadar_name || '', undefined, { sensitivity: 'base' })
+    })
+  }, [all, filterCentre, filterStatus, search, centreOrder])
 
   const byCentre = useMemo(() => {
     const m = {}
@@ -333,9 +480,11 @@ export default function DeploymentAllocationPage() {
 
   // reuse for Excel + quota: only rows that have a deployment record can be overwritten
   const deptNameOf = useCallback((id) => deptMap.get(id)?.name || null, [deptMap])
+  deptNameRef.current = deptNameOf
 
   // ── Excel export ──
-  const exportExcel = useCallback(() => {
+  const exportExcel = useCallback(async () => {
+    const XLSX = await import('xlsx') // lazy — keeps xlsx (~400 kB) out of the main bundle
     const wb = XLSX.utils.book_new()
     const main = visible.map(r => {
       const autoAssigned = r.deployed_dept_id && r.deployed_dept_id === r.requested_dept_id
@@ -351,9 +500,9 @@ export default function DeploymentAllocationPage() {
         'Days': r.consent_given ? r.available_days_count : '—',
         'Stay at Bhati': r.stay_at_bhati ? 'Yes' : 'No',
         'Chair Pass': r.chair_pass ? 'Yes' : 'No',
-        'Requested Department': deptNameOf(r.requested_dept_id) || (r.requested_dept_id ? '—' : ''),
-        'Deployed Department': deptNameOf(r.deployed_dept_id) || deptNameOf(r.requested_dept_id) || '',
-        'Assignment Status': autoAssigned ? 'Auto (requested)' : overridden ? 'Overridden' : (r.consent_given ? 'Not assigned' : 'No consent'),
+        'Deployment': deptNameOf(r.requested_dept_id) || (r.requested_dept_id ? '—' : ''),
+        'Finalized Deployment': deptNameOf(r.deployed_dept_id) || deptNameOf(r.requested_dept_id) || '',
+        'Assignment Status': autoAssigned ? 'Auto (deployment)' : overridden ? 'Overridden' : (r.consent_given ? 'Not assigned' : 'No consent'),
       }
     })
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(main), 'Assignments')
@@ -377,7 +526,7 @@ export default function DeploymentAllocationPage() {
     Object.entries(tally).forEach(([centre, deps]) => {
       Object.entries(deps).forEach(([name, counts]) => {
         summary.push({
-          'Parent Centre': centre,
+          'CENTRE': centre,
           'Department': name,
           'Requested': counts.requested,
           'Deployed (assigned)': counts.deployed,
@@ -388,40 +537,38 @@ export default function DeploymentAllocationPage() {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summary), 'Department Summary')
 
     const name = (schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')
-    XLSX.writeFile(wb, `${name}_deployment_allocation.xlsx`)
+    XLSX.writeFile(wb, `${name}_finalize_deployment.xlsx`)
   }, [visible, deptNameOf, schedule])
 
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
-      <div className="page-header">
-        <div>
-          <h2 className="page-title"><ClipboardCheck size={22} /> Deployment Allocation</h2>
-          <div className="page-sub">Set the final deployed department · ASO / Super Admin · defaults to each sewadar's request</div>
+      <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
+        <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
+          <h2 className="page-title"><ClipboardCheck size={22} /> Finalize Deployment</h2>
+          <div className="page-sub">Set the Finalized Deployment · ASO / Super Admin · defaults to each sewadar's request</div>
+          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            {saving ? <span className="pill pill-amber"><Save size={12} /> Saving...</span> : savedAt ? <span className="pill pill-green"><CheckCircle2 size={12} /> Saved {savedAt.toLocaleTimeString()}</span> : null}
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer', padding: '0.3rem 0.6rem', borderRadius: 8, background: editMode ? '#eef2ff' : '#f1f5f9', border: `1px solid ${editMode ? '#c7d2fe' : '#e2e8f0'}` }}>
+              <input type="checkbox" checked={editMode} onChange={e => setEditMode(e.target.checked)} style={{ accentColor: '#6366f1' }} />
+              {editMode ? <Pencil size={13} style={{ color: '#4f46e5' }} /> : <Lock size={13} style={{ color: '#94a3b8' }} />}
+              Enable editing
+            </label>
+            <button onClick={saveDraft} className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+              <Save size={13} /> Save Draft
+            </button>
+            <button onClick={exportExcel} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+              <Download size={13} /> Export Excel
+            </button>
+            <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
+              {schedules.map(s => (
+                <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
+              ))}
+            </select>
+          </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-          {saving ? <span className="pill pill-amber"><Save size={12} /> Saving...</span> : savedAt ? <span className="pill pill-green"><CheckCircle2 size={12} /> Saved {savedAt.toLocaleTimeString()}</span> : null}
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer', padding: '0.3rem 0.6rem', borderRadius: 8, background: editMode ? '#eef2ff' : '#f1f5f9', border: `1px solid ${editMode ? '#c7d2fe' : '#e2e8f0'}` }}>
-            <input type="checkbox" checked={editMode} onChange={e => setEditMode(e.target.checked)} style={{ accentColor: '#6366f1' }} />
-            {editMode ? <Pencil size={13} style={{ color: '#4f46e5' }} /> : <Lock size={13} style={{ color: '#94a3b8' }} />}
-            Enable editing
-          </label>
-          <button onClick={exportExcel} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-            <Download size={13} /> Export Excel
-          </button>
-          <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
-            {schedules.map(s => (
-              <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
-            ))}
-          </select>
-          {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
-        </div>
+        {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
       </div>
 
-      {!editMode && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, padding: '0.6rem 0.75rem', fontSize: '0.82rem', color: '#92400e', marginBottom: '1rem' }}>
-          <Lock size={14} /> Editing is disabled. Consents are read-only — nothing changes automatically. The <b>deployed department already defaults to the requested one</b>, so you only need to edit the records that genuinely need a different final department. Tick <b>Enable editing</b> to override any of them.
-        </div>
-      )}
 
       <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
         <div className="stat">
@@ -430,7 +577,7 @@ export default function DeploymentAllocationPage() {
           <div className="stat-sub">across {new Set(all.map(r => r.centre)).size} centres</div>
         </div>
         <div className="stat">
-          <div className="stat-label">Requested dept</div>
+          <div className="stat-label">Deployment</div>
           <div className="stat-value" style={{ color: '#4f46e5' }}>{requestedAll}</div>
           <div className="stat-sub">auto-assigned by request</div>
         </div>
@@ -450,7 +597,7 @@ export default function DeploymentAllocationPage() {
         <div className="section-header" style={{ flexWrap: 'wrap', gap: '0.75rem' }}>
           <div>
             <div className="section-title">Sewadar-wise allocation</div>
-            <div className="card-sub">Consent · days · stay at bhati · chair pass · requested department · assigned department</div>
+            <div className="card-sub">All sewadars in one table — centre shown per row · consent · days · stay at bhati · chair pass · requested department · assigned department</div>
           </div>
           <div style={{ flex: 1 }} />
           <select value={filterCentre} onChange={e => setFilterCentre(e.target.value)} className="select">
@@ -494,61 +641,40 @@ export default function DeploymentAllocationPage() {
             </div>
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
-            {centreNames.map(centre => {
-              const cr = byCentre[centre]
-              const open = expanded[centre] !== false
-              const assigned = cr.filter(r => r.deployed_dept_id).length
-              return (
-                <div key={centre} className="acc-item">
-                  <div className="acc-head" onClick={() => setExpanded(e => ({ ...e, [centre]: !open }))}>
-                    <ChevronDown size={15} style={{ transform: open ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s', color: '#94a3b8' }} />
-                    <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>{centre}</span>
-                    <span className="pill pill-blue" style={{ fontSize: '0.7rem' }}>{assigned}/{cr.length} assigned</span>
-                    <div style={{ flex: 1 }} />
-                    <div className="progress" style={{ width: 90 }}>
-                      <div className="progress-bar" style={{ width: `${Math.round(assigned / cr.length * 100)}%` }} />
-                    </div>
-                  </div>
-                  {open && (
-                    <div className="acc-body" style={{ padding: 0 }}>
-                      {/* fieldset lets editMode disable every control in one
-                          attribute — rows never have to re-render on toggle */}
-                      <fieldset disabled={!editMode} style={{ border: 'none', padding: 0, margin: 0 }}>
-                        <div className="table-wrap" style={{ border: 'none', borderRadius: 0 }}>
-                          <table className="table">
-                          <thead>
-                            <tr>
-                              <th>Badge</th>
-                              <th>Name</th>
-                              <th style={{ textAlign: 'center' }}>Consent</th>
-                              <th style={{ textAlign: 'center' }}>Days</th>
-                              <th style={{ textAlign: 'center' }}>Stay at Bhati</th>
-                              <th style={{ textAlign: 'center' }}>Chair Pass</th>
-                              <th style={{ textAlign: 'center' }}>Requested Department</th>
-                              <th style={{ textAlign: 'center', background: '#eef2ff', color: '#4f46e5', fontWeight: 800 }}>Deployed Department</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {cr.map(r => (
-                              <DeployRow
-                                key={`${r.centre}|${r.badge_number}`}
-                                row={r}
-                                depts={depts}
-                                deptNames={deptNames}
-                                handlers={handlers}
-                              />
-                            ))}
-                          </tbody>
-                        </table>
-                        </div>
-                      </fieldset>
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-          </div>
+          /* fieldset lets editMode disable every control in one attribute —
+             rows never have to re-render on toggle */
+          <fieldset disabled={!editMode} style={{ border: 'none', padding: 0, margin: 0 }}>
+            <div className="table-wrap table-wrap-sticky">
+              <table className="table table-sticky">
+                <thead>
+                  <tr>
+                    <th style={{ width: 40, textAlign: 'center' }}>S.No.</th>
+                    <th>Centre</th>
+                    <th>Badge</th>
+                    <th>Name</th>
+                    <th style={{ textAlign: 'center' }}>Consent</th>
+                    <th style={{ textAlign: 'center' }}>Days</th>
+                    <th style={{ textAlign: 'center' }}>Stay at Bhati</th>
+                    <th style={{ textAlign: 'center' }}>Chair Pass</th>
+                    <th style={{ textAlign: 'center' }}>Deployment</th>
+                    <th style={{ textAlign: 'center', background: '#eef2ff', color: '#4f46e5', fontWeight: 800 }}>Finalized Deployment</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visible.map((r, i) => (
+                    <DeployRow
+                      key={`${r.centre}|${r.badge_number}`}
+                      row={r}
+                      serial={i + 1}
+                      depts={depts}
+                      deptNames={deptNames}
+                      handlers={handlers}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </fieldset>
         )}
       </div>
     </div>
