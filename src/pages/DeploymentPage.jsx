@@ -1,19 +1,24 @@
-import { useState, useEffect, useCallback } from 'react'
-import { supabase, fetchCentres, getRootCentre } from '../lib/supabase'
-import { isVssBadge } from '../lib/logic'
-import { Users, BarChart3, CheckCircle2 } from 'lucide-react'
+import { useState, useEffect, useRef } from 'react'
+import { supabase } from '../lib/supabase'
+import { Users, Download, Loader2 } from 'lucide-react'
 import { useToast } from '../components/Toast'
 import DeadlinePill from '../components/DeadlinePill'
+import DeploymentMatrixReport from '../components/DeploymentMatrixReport'
 
-/* ─── ASO / super_admin: read-only overview of requested deployments ─── */
+/* ─── ASO / super_admin Overview tab ───
+   Page shell: title, schedule selector, deadline countdown, Excel export
+   button and the print-only report header. The centre-wise matrix report
+   itself lives in the DeploymentMatrixReport section component (data
+   loading, realtime refresh, rollups, rendering and the export all inside
+   it). */
+
 export default function DeploymentPage() {
   const toast = useToast()
+  const reportRef = useRef()
   const [schedules, setSchedules] = useState([])
   const [selectedScheduleId, setSelectedScheduleId] = useState('')
-  const [rows, setRows] = useState([])
-  const [allocations, setAllocations] = useState([])
-  const [centres, setCentres] = useState([])
-  const [loading, setLoading] = useState(true)
+  const [reportLoading, setReportLoading] = useState(true)
+  const [exporting, setExporting] = useState(false)
 
   useEffect(() => {
     supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false }).then(({ data, error }) => {
@@ -21,144 +26,57 @@ export default function DeploymentPage() {
       setSchedules(data || [])
       setSelectedScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
     }).catch(() => {})
-    fetchCentres().then(setCentres).catch(() => {})
   }, [toast])
 
-  const load = useCallback(async (scheduleId) => {
-    // resolve department names client-side instead of relying on a hard-coded
-    // FK constraint name in the select hint (fragile across DBs)
-    const [dRes, aRes, depRes] = await Promise.all([
-      supabase.from('deployments').select('*').eq('schedule_id', scheduleId).order('centre'),
-      supabase.from('centre_allocations').select('*').eq('schedule_id', scheduleId),
-      supabase.from('deployment_departments').select('id, name'),
-    ])
-    const deptNameById = {}
-    ;(depRes.data || []).forEach(d => { deptNameById[d.id] = d.name })
-    setRows((dRes.data || []).map(r => ({ ...r, dept_name: deptNameById[r.department_id] || '—' })))
-    setAllocations(aRes.data || [])
-  }, [])
-
-  useEffect(() => {
-    if (!selectedScheduleId) return
-    setLoading(true)
-    let mounted = true
-    load(selectedScheduleId)
-      .then(() => { if (mounted) setLoading(false) })
-      .catch(() => { if (mounted) setLoading(false) }) // never leave the page stuck on the skeleton
-    return () => { mounted = false }
-  }, [selectedScheduleId, load])
-
-  // realtime: refresh live while centres edit
-  useEffect(() => {
-    if (!selectedScheduleId) return
-    let mounted = true
-    const channel = supabase
-      .channel(`deploy-overview-${selectedScheduleId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` }, () => {
-        if (!mounted) return
-        load(selectedScheduleId).catch(() => {})
-      })
-      .subscribe()
-    return () => { mounted = false; supabase.removeChannel(channel) }
-  }, [selectedScheduleId, load])
-
   const schedule = schedules.find(s => s.id === selectedScheduleId)
-  const deadlinePassed = schedule?.deadline ? new Date(schedule.deadline) < new Date() : false
 
-  // Roll deployments up to their ROOT centre so child-centre requests align with
-  // parent-centre allocations (allocations are only stored against parent centres).
-  const rootOf = (centre) => getRootCentre(centres, centre) || centre
-  const byCentre = {}
-  rows.forEach(r => {
-    const root = rootOf(r.centre)
-    if (!byCentre[root]) byCentre[root] = { departments: {}, vssDepartments: {}, children: new Set() }
-    byCentre[root].children.add(r.centre)
-    const name = r.dept_name
-    const key = isVssBadge(r.badge_number) ? 'vssDepartments' : 'departments'
-    byCentre[root][key][name] = (byCentre[root][key][name] || 0) + 1
-  })
-
-  // allocations are keyed by root centre
-  const allocByCentre = {}
-  allocations.forEach(a => {
-    if (!allocByCentre[a.centre]) allocByCentre[a.centre] = []
-    allocByCentre[a.centre].push(a)
-  })
-
-  // also list roots that have allocations but no requests yet
-  Object.keys(allocByCentre).forEach(root => {
-    if (!byCentre[root]) byCentre[root] = { departments: {}, vssDepartments: {}, children: new Set() }
-  })
+  const handleExport = async () => {
+    if (exporting || reportLoading || !reportRef.current) return
+    setExporting(true)
+    try {
+      await reportRef.current.exportExcel()
+    } catch (e) {
+      toast.error(e?.message || 'Failed to generate the Excel report')
+    } finally {
+      setExporting(false)
+    }
+  }
 
   return (
-    <div className="page" style={{ maxWidth: 1400 }}>
+    <div className="page" style={{ maxWidth: 1600 }}>
       <div className="page-header">
         <div>
-          <h2 className="page-title"><Users size={22} /> Deployment — All Centres</h2>
-          <div className="page-sub">Read-only overview of deployments across every centre</div>
+          <h2 className="page-title"><Users size={22} /> Deployment Report — Centre Wise</h2>
+          <div className="page-sub">Scheduled (allocated quota) vs Deployed (finalized) per department, per CENTRE (incl. SC_SPs)</div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+        <div className="print-hide" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
           <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
             {schedules.map(s => (
               <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
             ))}
           </select>
           {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
+          <button
+            onClick={handleExport}
+            disabled={reportLoading || exporting}
+            className="btn btn-primary"
+            style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}
+          >
+            {exporting ? <Loader2 size={13} style={{ animation: 'spin 0.6s linear infinite' }} /> : <Download size={13} />} Export to Excel
+          </button>
         </div>
       </div>
 
-      {loading ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
-          {[...Array(3)].map((_, i) => <div key={i} className="skeleton" style={{ height: 56, borderRadius: 10 }} />)}
-        </div>
-      ) : Object.keys(byCentre).length === 0 ? (
-        <div className="card">
-          <div className="empty">
-            <div className="empty-icon"><Users size={22} /></div>
-            <div className="empty-title">No deployments yet</div>
-            <div className="empty-text">Centres will appear here once they request departments for this schedule.</div>
-          </div>
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-          {Object.entries(byCentre).map(([root, data]) => {
-            const allocs = allocByCentre[root] || []
-            const vssTotal = Object.values(data.vssDepartments).reduce((s, n) => s + n, 0)
-            const requestedTotal = Object.values(data.departments).reduce((s, n) => s + n, 0) + vssTotal
-            const allocTotal = allocs.reduce((s, a) => s + a.max_count, 0)
-            const childCount = data.children.size - 1
-            return (
-              <div key={root} className="card" style={{ padding: '0.75rem 0.9rem' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                  <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>{root}</span>
-                  {childCount > 0 && <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>+ {childCount} SC_SP{childCount > 1 ? 's' : ''}</span>}
-                  <span className="pill pill-blue"><BarChart3 size={11} /> {requestedTotal} deployment{requestedTotal === 1 ? '' : 's'}</span>
-                  {vssTotal > 0 && <span className="pill pill-green">VSS {vssTotal}</span>}
-                  {allocTotal > 0 && (
-                    <span className={`pill ${requestedTotal > allocTotal ? 'pill-red' : 'pill-gray'}`}>Allocated {allocTotal}</span>
-                  )}
-                  {schedule?.deadline && (
-                    <span className={`pill ${deadlinePassed || schedule.status === 'done' ? 'pill-red' : 'pill-green'}`}>
-                      <CheckCircle2 size={11} /> {deadlinePassed || schedule.status === 'done' ? 'Closed' : 'Open'}
-                    </span>
-                  )}
-                </div>
-                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginTop: '0.4rem' }}>
-                  {Object.entries(data.departments).map(([dept, count]) => (
-                    <span key={`r-${dept}`} className="pill pill-blue">{dept}: {count}</span>
-                  ))}
-                  {Object.entries(data.vssDepartments).map(([dept, count]) => (
-                    <span key={`v-${dept}`} className="pill pill-green">VSS {dept}: {count}</span>
-                  ))}
-                  {Object.keys(data.departments).length === 0 && Object.keys(data.vssDepartments).length === 0 && (
-                    <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No deployments yet</span>
-                  )}
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      )}
+      <div className="print-only" style={{ fontSize: '0.9rem', fontWeight: 700, marginBottom: '0.75rem' }}>
+        DETAILED ANALYSIS OF SEWADAR DEPLOYMENT CENTRE WISE — {schedule?.name || ''}
+      </div>
+
+      <DeploymentMatrixReport
+        ref={reportRef}
+        scheduleId={selectedScheduleId}
+        scheduleName={schedule?.name}
+        onLoadingChange={setReportLoading}
+      />
     </div>
   )
 }

@@ -73,24 +73,26 @@ export default function VssDashboard() {
     return () => { mounted = false }
   }, [selectedScheduleId])
 
+  // realtime: refresh live while centres edit. Coalesced (400ms) so a burst of
+  // changes (e.g. a centre bulk-assign) causes one reload instead of dozens.
   useEffect(() => {
     if (!selectedScheduleId) return
     let mounted = true
+    let reloadTimer = null
+    const scheduleReload = () => {
+      if (!mounted) return
+      if (reloadTimer) clearTimeout(reloadTimer)
+      reloadTimer = setTimeout(() => { if (mounted) load(selectedScheduleId).then(d => setData(d)).catch(() => {}) }, 400)
+    }
     const channel = supabase
       .channel(`vss-dash-${selectedScheduleId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` }, () => {
-        if (!mounted) return
-        load(selectedScheduleId).then(d => setData(d)).catch(() => {})
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` }, () => {
-        if (!mounted) return
-        load(selectedScheduleId).then(d => setData(d)).catch(() => {})
-      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_settings' }, () => {
         fetchPortalSettings().then(setSettings).catch(() => {})
       })
       .subscribe()
-    return () => { mounted = false; supabase.removeChannel(channel) }
+    return () => { mounted = false; if (reloadTimer) clearTimeout(reloadTimer); supabase.removeChannel(channel) }
   }, [selectedScheduleId])
 
   const toggleVss = async () => {

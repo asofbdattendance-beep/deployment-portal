@@ -1,6 +1,7 @@
 import { useState, lazy, Suspense } from 'react'
 import { usePortalAuth } from './context/PortalAuthContext'
 import LoginPage from './pages/LoginPage'
+import ResetPasswordPage from './pages/ResetPasswordPage'
 import { ROLE_LABELS, ROLE_COLORS } from './lib/supabase'
 import { Calendar, Users, ClipboardCheck, ShieldCheck, Star, Tags, RefreshCw, AlertTriangle } from 'lucide-react'
 
@@ -125,7 +126,7 @@ function ProfileError({ message, onRetry, onSignOut }) {
 }
 
 export default function App() {
-  const { isAuthenticated, loading, profile, profileError, signOut, refreshProfile } = usePortalAuth()
+  const { isAuthenticated, loading, profile, profileError, signOut, refreshProfile, isRecovery } = usePortalAuth()
 
   if (loading) {
     return (
@@ -134,6 +135,10 @@ export default function App() {
       </div>
     )
   }
+
+  // User arrived via the forgot-password link — they must set a new password
+  // before the portal unlocks (PASSWORD_RECOVERY session).
+  if (isRecovery && isAuthenticated) return <ResetPasswordPage />
 
   if (!isAuthenticated) return <LoginPage />
 

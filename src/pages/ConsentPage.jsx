@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, getRootCentre, notElderlyFilter, fetchPortalSettings } from '../lib/supabase'
-import { computeDeptQuota, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, consentRowKey, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
+import { computeDeptQuota, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import ConsentDashboard from '../components/ConsentDashboard'
@@ -32,6 +32,8 @@ export default function ConsentPage() {
   const editVersionRef = useRef(0)
   const scheduleIdRef = useRef(null)
   const [subtree, setSubtree] = useState([])
+  const [subtreeError, setSubtreeError] = useState(false)
+  const [subtreeRetry, setSubtreeRetry] = useState(0)
   const [centres, setCentres] = useState([])
   const [filterCentre, setFilterCentre] = useState('all')
   const [search, setSearch] = useState('')
@@ -53,11 +55,12 @@ export default function ConsentPage() {
 
   useEffect(() => {
     if (!myCentre) return
+    setSubtreeError(false)
     fetchSubtreeCentres(myCentre).then(({ centres, subtree }) => {
       setCentres(centres)
       setSubtree(subtree)
-    }).catch(() => {})
-  }, [myCentre])
+    }).catch(() => setSubtreeError(true))
+  }, [myCentre, subtreeRetry])
 
   const loadSchedules = useCallback(async () => {
     const { data, error } = await supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false })
@@ -103,7 +106,9 @@ export default function ConsentPage() {
       const map = {}
       existing.forEach(c => { map[`${c.centre}|${c.badge_number}`] = c })
       const deployMap = {}
-      ;(deployRes.data || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d.department_id })
+      // keep the whole deployment row so the page knows which sewadars the ASO
+      // has FINALIZED — those rows are locked on the centre side
+      ;(deployRes.data || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d })
       const prevMap = {}
       ;(prevRes.data || []).forEach(p => { prevMap[p.badge_number] = p })
       const rows = {}
@@ -134,7 +139,8 @@ export default function ConsentPage() {
           available_days_count: storedDays[key],
           stay_at_bhati: ex?.stay_at_bhati || false,
           chair_pass: ex?.chair_pass || false,
-          requested_dept: deployMap[key] || '',
+          requested_dept: deployMap[key]?.department_id || '',
+          finalized: !!deployMap[key]?.deployed_department_id,
           prev_department: prev?.prev_department || null,
           prev_attendance: prev?.attendance_reported != null ? prev.attendance_reported : null,
         })
@@ -150,9 +156,15 @@ export default function ConsentPage() {
         if (Object.keys(editsByKey).length > 0) {
           // overlay ONLY user-editable fields — fresh rows keep server-side
           // values for read-only data (is_active, is_initiated, prev_*, etc.)
+          const dropped = []
           Object.keys(rows).forEach(key => {
             const edit = editsByKey[key]
-            if (edit) EDITABLE_CONSENT_FIELDS.forEach(f => { if (f in edit) rows[key][f] = edit[f] })
+            if (!edit) return
+            // the ASO finalized this row mid-refresh — the edit is moot (the
+            // row is locked centre-side) and persist would silently filter it
+            // while the UI kept showing it as saved; drop it loudly instead
+            if (rows[key].finalized) { dropped.push(key); return }
+            EDITABLE_CONSENT_FIELDS.forEach(f => { if (f in edit) rows[key][f] = edit[f] })
             // even after the overlay, days stay auto-set (5 / 3 for OE ESCORTS)
             rows[key] = autoSetDays(rows[key])
           })
@@ -165,8 +177,18 @@ export default function ConsentPage() {
           const ex = {}
           subtree.forEach(c => { ex[c] = true })
           setExpanded(ex)
-          // dirtyRef / savedConsentRef / editVersionRef stay untouched — the
-          // edits are still pending and the debounce persists them next.
+          if (dropped.length > 0) {
+            // baseline the dropped rows at their fresh (finalized) state so
+            // they no longer count as pending changes
+            const nextBaseline = { ...savedConsentRef.current }
+            dropped.forEach(k => { nextBaseline[k] = consentRowSignature(rows[k]) })
+            savedConsentRef.current = nextBaseline
+            dirtyRef.current = changedConsentRows(rows, savedConsentRef.current).length > 0
+            toast.info(`${dropped.length} sewadar${dropped.length > 1 ? 's' : ''} finalized by the ASO — pending edits discarded`)
+          }
+          // the remaining (non-dropped) edits stay pending — dirtyRef /
+          // savedConsentRef / editVersionRef keep their pre-refresh state so
+          // the debounce persists them next.
           return
         }
       }
@@ -275,9 +297,32 @@ export default function ConsentPage() {
   const liveRef = useRef({})
   const pendingSaveRef = useRef(null)
   const savingRef = useRef(false)
+  // live view of whether THIS schedule can be edited at all — persist skips
+  // the DB round-trip when the page is read-only (deadline passed / done /
+  // locked / master switch closed), because the DB rejects those writes anyway
+  const editableRef = useRef(false)
   const mountedRef = useRef(true)
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false } }, [])
+  // failed-save retry — a transient error re-arms one more save (max 3 tries)
+  const retryTimer = useRef(null)
+  const retryCountRef = useRef(0)
   liveRef.current = { scheduleId: selectedScheduleId, rows: consentRows, deployments, depts, subtree, incharges }
+
+  // Schedule a retry of the latest snapshot after a failed save (network blips,
+  // RLS hiccups). Stops after 3 attempts so a persistent error doesn't loop.
+  const scheduleRetry = useCallback(() => {
+    if (retryCountRef.current >= 3) return
+    retryCountRef.current++
+    if (retryTimer.current) clearTimeout(retryTimer.current)
+    retryTimer.current = setTimeout(() => {
+      retryTimer.current = null
+      if (!mountedRef.current) return
+      const snap = liveRef.current
+      if (snap?.scheduleId && dirtyRef.current && scheduleIdRef.current === snap.scheduleId) {
+        persistRef.current(snap)
+      }
+    }, 3000)
+  }, [])
 
   // Persist one snapshot of rows (schedule + data captured together).
   // Only rows whose signature differs from the last saved state are written;
@@ -285,28 +330,44 @@ export default function ConsentPage() {
   const persist = useCallback(async (snap) => {
     if (!snap?.scheduleId) return
     if (scheduleIdRef.current !== snap.scheduleId) return
+    // Read-only page (deadline passed / schedule done / centre locked / master
+    // switch closed): the DB rejects these writes, so skip the round-trip —
+    // otherwise a legacy-days normalization on load would spam error toasts.
+    // Clear the dirty flag: nothing on this page is saveable.
+    if (!editableRef.current) {
+      dirtyRef.current = false
+      retryCountRef.current = 0
+      if (retryTimer.current) { clearTimeout(retryTimer.current); retryTimer.current = null }
+      savingRef.current = false
+      return
+    }
     if (savingRef.current) { pendingSaveRef.current = snap; return }
     savingRef.current = true
     setSaving(true)
+    if (retryTimer.current) { clearTimeout(retryTimer.current); retryTimer.current = null }
     const versionAtStart = editVersionRef.current
     const { scheduleId, rows, deployments: depRows, depts: depList, subtree: sub, incharges: incState = {} } = snap
     try {
       const changed = changedConsentRows(rows, savedConsentRef.current)
       const deptNameById = {}
       depList.forEach(d => { deptNameById[d.id] = d.name })
-      const toUpsert = changed.map(r => ({
-        schedule_id: scheduleId,
-        centre: r.centre,
-        badge_number: r.badge_number,
-        sewadar_name: r.sewadar_name,
-        consent_given: r.consent_given,
+      const toUpsert = changed
+        // ASO-finalized rows are locked on the centre side — never write them,
+        // even from a pre-lock snapshot (debounce / unmount / switch flush)
+        .filter(r => !r.finalized)
+        .map(r => ({
+          schedule_id: scheduleId,
+          centre: r.centre,
+          badge_number: r.badge_number,
+          sewadar_name: r.sewadar_name,
+          consent_given: r.consent_given,
         available_days_count: r.consent_given ? daysForDept(deptNameById[r.requested_dept]) : null,
         stay_at_bhati: r.stay_at_bhati,
         chair_pass: r.chair_pass,
       }))
       const activeDeptIds = new Set(depList.map(d => d.id))
       const toDeploy = changed
-        .filter(r => r.consent_given && r.requested_dept && activeDeptIds.has(r.requested_dept))
+        .filter(r => !r.finalized && r.consent_given && r.requested_dept && activeDeptIds.has(r.requested_dept))
         .map(r => ({
           schedule_id: scheduleId,
           department_id: r.requested_dept,
@@ -317,18 +378,20 @@ export default function ConsentPage() {
         }))
       // toRemove scans ALL rows (not just changed) so rows whose department
       // was deactivated or whose consent was cleared elsewhere still get cleaned
+      // finalized rows (the ASO set the final department) are NEVER removed —
+      // deleting them would destroy the ASO's decision
       const toRemove = Object.values(rows)
-        .filter(r => !r.consent_given || !r.requested_dept || !activeDeptIds.has(r.requested_dept))
+        .filter(r => !r.finalized && (!r.consent_given || !r.requested_dept || !activeDeptIds.has(r.requested_dept)))
         .map(consentRowKey)
         .filter(key => depRows.some(d => `${d.centre}|${d.badge_number}` === key))
 
       if (toUpsert.length > 0) {
         const { error } = await supabase.from('sewadar_consents').upsert(toUpsert, { onConflict: 'schedule_id,centre,badge_number' })
-        if (error) { toast.error(error.message); dirtyRef.current = true; return }
+        if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
       }
       if (toDeploy.length > 0) {
         const { error } = await supabase.from('deployments').upsert(toDeploy, { onConflict: 'schedule_id,centre,badge_number' })
-        if (error) { toast.error(error.message); dirtyRef.current = true; return }
+        if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
       }
       if (toRemove.length > 0) {
         const byCentre = {}
@@ -342,7 +405,7 @@ export default function ConsentPage() {
             .eq('schedule_id', scheduleId)
             .eq('centre', centre)
             .in('badge_number', badges)
-          if (error) { toast.error(error.message); dirtyRef.current = true; return }
+          if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
         }
       }
       // ── department incharges — one per CENTRE × department ──
@@ -370,18 +433,19 @@ export default function ConsentPage() {
       })
       if (toUpsertInc.length > 0) {
         const { error } = await supabase.from('department_incharges').upsert(toUpsertInc, { onConflict: 'schedule_id,centre,department_id' })
-        if (error) { toast.error(error.message); dirtyRef.current = true; return }
+        if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
       }
       for (const key of [...new Set(toDeleteInc)]) {
         const [centre, department_id] = key.split('|')
         const { error } = await supabase.from('department_incharges')
           .delete().eq('schedule_id', scheduleId).eq('centre', centre).eq('department_id', department_id)
-        if (error) { toast.error(error.message); dirtyRef.current = true; return }
+        if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
       }
 
       // only clear dirty if no new edits landed while this save was in flight
       if (editVersionRef.current === versionAtStart) {
         dirtyRef.current = false
+        retryCountRef.current = 0
       }
       // The schedule may have changed while this save was in flight — don't
       // clobber the newly loaded schedule's dirty-tracking baseline.
@@ -398,7 +462,7 @@ export default function ConsentPage() {
         const { data: fresh } = await supabase.from('deployments').select('*').eq('schedule_id', scheduleId).in('centre', sub)
         if (fresh && mountedRef.current) setDeployments(fresh)
       }
-    } catch (err) { toast.error(err.message); dirtyRef.current = true } finally {
+    } catch (err) { toast.error(err.message); dirtyRef.current = true; scheduleRetry() } finally {
       savingRef.current = false
       setSaving(false)
       // If a newer snapshot was queued while this save was in flight, persist it
@@ -409,7 +473,7 @@ export default function ConsentPage() {
         persist(s)
       }
     }
-  }, [toast])
+  }, [toast, scheduleRetry])
   persistRef.current = persist
 
   // flush the pending (or latest) snapshot — used by unmount + schedule switch
@@ -442,6 +506,8 @@ export default function ConsentPage() {
 
   // Unmount (tab switch / logout): flush instead of dropping unsaved edits.
   useEffect(() => () => { flushRef.current && flushRef.current() }, [])
+  // Unmount: never fire a queued retry after the component is gone.
+  useEffect(() => () => { if (retryTimer.current) clearTimeout(retryTimer.current) }, [])
 
   // Warn before closing/reloading the tab with unsaved edits.
   useEffect(() => {
@@ -475,6 +541,7 @@ export default function ConsentPage() {
   const deadlinePassed = schedule?.deadline ? new Date(schedule.deadline) < new Date() : false
   const scheduleDone = schedule?.status === 'done'
   const canEdit = isEditableRole && !!schedule && schedule.status === 'open' && !deadlinePassed && !scheduleDone && !locked && settings.sewadar_deployment_open !== false
+  editableRef.current = canEdit
 
   const myAlloc = allocations.filter(a => a.centre === myRoot)
   // only departments the superadmin actually gave a quota to are offered/highlighted
@@ -561,30 +628,42 @@ export default function ConsentPage() {
     } finally { setLockBusy(false) }
   }
 
+  // ASO-finalized rows are locked — the final department belongs to the ASO
+  const isFinalizedRow = (row) => !!row?.finalized
   const setConsent = (key, value) => {
     dirtyRef.current = true
     editVersionRef.current++
-    setConsentRows(prev => ({
-      ...prev,
-      [key]: value
-        ? { ...prev[key], consent_given: true }
-        : { ...prev[key], consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: DEFAULT_AVAILABLE_DAYS, requested_dept: '' },
-    }))
+    setConsentRows(prev => {
+      if (isFinalizedRow(prev[key])) return prev
+      return {
+        ...prev,
+        [key]: value
+          ? { ...prev[key], consent_given: true }
+          : { ...prev[key], consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: DEFAULT_AVAILABLE_DAYS, requested_dept: '' },
+      }
+    })
   }
   const toggleBhati = (key) => {
     dirtyRef.current = true
     editVersionRef.current++
-    setConsentRows(prev => ({ ...prev, [key]: { ...prev[key], stay_at_bhati: !prev[key].stay_at_bhati } }))
+    setConsentRows(prev => {
+      if (isFinalizedRow(prev[key])) return prev
+      return { ...prev, [key]: { ...prev[key], stay_at_bhati: !prev[key].stay_at_bhati } }
+    })
   }
   const toggleChairPass = (key) => {
     dirtyRef.current = true
     editVersionRef.current++
-    setConsentRows(prev => ({ ...prev, [key]: { ...prev[key], chair_pass: !prev[key].chair_pass } }))
+    setConsentRows(prev => {
+      if (isFinalizedRow(prev[key])) return prev
+      return { ...prev, [key]: { ...prev[key], chair_pass: !prev[key].chair_pass } }
+    })
   }
   const setRequestedDept = (key, deptId) => {
     dirtyRef.current = true
     editVersionRef.current++
     setConsentRows(prev => {
+      if (isFinalizedRow(prev[key])) return prev
       const next = { ...prev[key], requested_dept: deptId }
       // days are auto-set by the chosen department: 5 by default, 3 for OE ESCORTS
       next.available_days_count = daysForDept(deptNameOf(deptId))
@@ -601,6 +680,23 @@ export default function ConsentPage() {
 
   if (profile?.role === 'super_admin' || profile?.role === 'aso') {
     return <ConsentDashboard />
+  }
+
+  if (subtreeError) {
+    return (
+      <div className="page">
+        <div className="card" style={{ padding: '2rem', textAlign: 'center' }}>
+          <div className="empty">
+            <div className="empty-icon"><Users size={22} /></div>
+            <div className="empty-title">Could not load your centres</div>
+            <div className="empty-text">Check your connection and try again.</div>
+            <button onClick={() => setSubtreeRetry(n => n + 1)} className="btn btn-primary" style={{ marginTop: '0.75rem' }}>
+              Retry
+            </button>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   if (!schedules.length) {
@@ -653,7 +749,8 @@ export default function ConsentPage() {
       <select
         value={r.consent_given ? 'yes' : 'no'}
         onChange={e => setConsent(`${r.centre}|${r.badge_number}`, e.target.value === 'yes')}
-        disabled={!canEdit}
+        disabled={!canEdit || r.finalized}
+        title={r.finalized ? 'Finalized by the ASO — locked' : undefined}
         className="select"
         style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
       >
@@ -668,9 +765,9 @@ export default function ConsentPage() {
         role="switch"
         aria-checked={r.stay_at_bhati}
         onClick={() => toggleBhati(`${r.centre}|${r.badge_number}`)}
-        disabled={!canEdit || !r.consent_given}
+        disabled={!canEdit || !r.consent_given || r.finalized}
         className="toggle"
-        title="Stay at bhati"
+        title={r.finalized ? 'Finalized by the ASO — locked' : 'Stay at bhati'}
       >
         <span className="toggle-knob" />
       </button>
@@ -682,9 +779,9 @@ export default function ConsentPage() {
         role="switch"
         aria-checked={r.chair_pass}
         onClick={() => toggleChairPass(`${r.centre}|${r.badge_number}`)}
-        disabled={!canEdit || !r.consent_given}
+        disabled={!canEdit || !r.consent_given || r.finalized}
         className="toggle"
-        title="Chair pass"
+        title={r.finalized ? 'Finalized by the ASO — locked' : 'Chair pass'}
       >
         <span className="toggle-knob" />
       </button>
@@ -722,21 +819,24 @@ export default function ConsentPage() {
     }).filter(Boolean)
     return (
       <td style={{ textAlign: 'center' }} data-label="Deployment">
-        <DeptDropdown
-          row={r}
-          depts={depts}
-          items={items}
-          open={open}
-          disabled={!canEdit || !r.consent_given}
-          onToggle={close => {
-            if (close === false) { setOpenDeptDropdown(null); return }
-            setOpenIncharge(null)
-            setOpenDeptDropdown(open ? null : key)
-          }}
-          onSelect={deptId => { setRequestedDept(key, deptId); setOpenDeptDropdown(null) }}
-          openReasons={openReasons}
-          setOpenReasons={setOpenReasons}
-        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', justifyContent: 'center' }}>
+          <DeptDropdown
+            row={r}
+            depts={depts}
+            items={items}
+            open={open}
+            disabled={!canEdit || !r.consent_given || r.finalized}
+            onToggle={close => {
+              if (close === false) { setOpenDeptDropdown(null); return }
+              setOpenIncharge(null)
+              setOpenDeptDropdown(open ? null : key)
+            }}
+            onSelect={deptId => { setRequestedDept(key, deptId); setOpenDeptDropdown(null) }}
+            openReasons={openReasons}
+            setOpenReasons={setOpenReasons}
+          />
+          {r.finalized && <span className="pill pill-indigo" style={{ fontSize: '0.6rem', whiteSpace: 'nowrap' }} title="Finalized by the ASO — locked">FINAL</span>}
+        </div>
       </td>
     )
   }
@@ -761,6 +861,8 @@ export default function ConsentPage() {
 
   const applyBulk = () => {
     if (!pendingBulk) return
+    // finalized rows are locked by the ASO — never apply a bulk action to them
+    const locked = selectedRows.filter(r => r.finalized && !(pendingBulk.keys && pendingBulk.keys.has(`${r.centre}|${r.badge_number}`)))
     dirtyRef.current = true
     editVersionRef.current++
     setConsentRows(prev => {
@@ -768,11 +870,13 @@ export default function ConsentPage() {
       selectedRows.forEach(r => {
         const key = `${r.centre}|${r.badge_number}`
         if (pendingBulk.keys && !pendingBulk.keys.has(key)) return
+        if (r.finalized) return
         next[key] = pendingBulk.updater(next[key])
       })
       return next
     })
     setPendingBulk(null)
+    if (locked.length > 0) toast.info(`${locked.length} finalized sewadar${locked.length > 1 ? 's' : ''} skipped — locked by the ASO`)
   }
 
   const bulkConsent = (value) => {
@@ -810,6 +914,10 @@ export default function ConsentPage() {
     let remaining = q ? q.rem : Infinity
     selectedRows.forEach(r => {
       const key = `${r.centre}|${r.badge_number}`
+      if (r.finalized) {
+        skipped.push({ name: r.sewadar_name, badge: r.badge_number, reasons: ['Finalized by the ASO — locked'] })
+        return
+      }
       const already = r.requested_dept === deptId
       let reasons
       if (!already && remaining < 1) {
@@ -969,8 +1077,7 @@ export default function ConsentPage() {
       <div className="card" style={{ padding: '1.25rem' }}>
         <div className="section-header" style={{ flexWrap: 'wrap', gap: '0.75rem' }}>
           <div>
-            <div className="section-title">Consent &amp; requested department</div>
-            <div className="card-sub">Consent · days (auto: 5, 3 for OE ESCORTS) · stay at bhati · chair pass · deployment department · prev. visit data</div>
+            <div className="section-title">Consent and deployment</div>
           </div>
           <div style={{ flex: 1 }} />
           <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
@@ -1171,7 +1278,7 @@ export default function ConsentPage() {
                               <tr key={`${r.centre}|${r.badge_number}`} style={{ background: selected[`${r.centre}|${r.badge_number}`] ? '#f5f3ff' : undefined }}>
                                 <td style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }} data-label="S.No.">{i + 1}</td>
                                 <td style={{ textAlign: 'center' }} data-label="Select">
-                                  <input type="checkbox" checked={!!selected[`${r.centre}|${r.badge_number}`]} onChange={() => toggleSelect(`${r.centre}|${r.badge_number}`)} disabled={!canEdit} style={{ cursor: canEdit ? 'pointer' : 'not-allowed' }} />
+                                  <input type="checkbox" checked={!!selected[`${r.centre}|${r.badge_number}`]} onChange={() => toggleSelect(`${r.centre}|${r.badge_number}`)} disabled={!canEdit || r.finalized} style={{ cursor: canEdit && !r.finalized ? 'pointer' : 'not-allowed' }} title={r.finalized ? 'Finalized by the ASO — locked' : undefined} />
                                 </td>
                                 <td style={{ fontFamily: 'monospace', fontSize: '0.8rem' }} data-label="Badge">
                                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>

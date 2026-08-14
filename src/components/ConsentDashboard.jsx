@@ -68,29 +68,27 @@ export default function ConsentDashboard() {
     return () => { mounted = false }
   }, [selectedScheduleId, loadMatrices])
 
-  // realtime: refresh live while centres edit
+  // realtime: refresh live while centres edit. Coalesced (400ms) so a burst of
+  // changes (e.g. a centre bulk-assign) causes one reload instead of dozens.
   useEffect(() => {
     if (!selectedScheduleId) return
     let mounted = true
+    let reloadTimer = null
+    const scheduleReload = () => {
+      if (!mounted) return
+      if (reloadTimer) clearTimeout(reloadTimer)
+      reloadTimer = setTimeout(() => { if (mounted) loadMatrices(selectedScheduleId).catch(() => {}) }, 400)
+    }
     const channel = supabase
       .channel(`consent-dash-${selectedScheduleId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` }, () => {
-        if (!mounted) return
-        loadMatrices(selectedScheduleId).catch(() => {})
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_allocations', filter: `schedule_id=eq.${selectedScheduleId}` }, () => {
-        if (!mounted) return
-        loadMatrices(selectedScheduleId).catch(() => {})
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` }, () => {
-        if (!mounted) return
-        loadMatrices(selectedScheduleId).catch(() => {})
-      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_allocations', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_settings' }, () => {
         fetchPortalSettings().then(setSettings).catch(() => {})
       })
       .subscribe()
-    return () => { mounted = false; supabase.removeChannel(channel) }
+    return () => { mounted = false; if (reloadTimer) clearTimeout(reloadTimer); supabase.removeChannel(channel) }
   }, [selectedScheduleId, loadMatrices])
 
   const unlockCentre = async (id) => {
@@ -321,7 +319,6 @@ export default function ConsentDashboard() {
             <div className="section-header" style={{ padding: '1.25rem 1.25rem 0' }}>
               <div>
                 <div className="section-title"><Building2 size={15} style={{ marginRight: '0.35rem', verticalAlign: '-2px' }} /> CENTRE consent matrix</div>
-                <div className="card-sub">Per CENTRE (incl. SC_SPs): total badges, consented, initiated / non-initiated and staying among consented — <strong>Scheduled</strong> = total allocated seats for the centre</div>
               </div>
             </div>
             <div className="table-wrap" style={{ border: 'none', borderRadius: 0, padding: '0 1.25rem 1.25rem' }}>
@@ -371,7 +368,6 @@ export default function ConsentDashboard() {
             <div className="section-header" style={{ padding: '1.25rem 1.25rem 0' }}>
               <div>
                 <div className="section-title"><LayoutGrid size={15} style={{ marginRight: '0.35rem', verticalAlign: '-2px' }} /> CENTRE department matrix</div>
-                <div className="card-sub">Allocated seats per CENTRE (incl. SC_SPs) by department — <strong>Scheduled</strong> = total allocated for the centre</div>
               </div>
             </div>
             <div className="table-wrap" style={{ border: 'none', borderRadius: 0, padding: '0 1.25rem 1.25rem' }}>

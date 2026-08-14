@@ -1,9 +1,25 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { supabase, fetchCentres } from '../lib/supabase'
+import { supabase, fetchCentres, vssPhotoUrl } from '../lib/supabase'
 import { getSubtreeCentres, computeAge, isVssAgeBlocked, vssRegistrationErrors } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from './Toast'
 import { UserPlus, Camera, Trash2, Loader2, BadgeCheck, Pencil, X, Search } from 'lucide-react'
+
+// Resolves a stored photo (legacy full URL or bare reg/... path) to a
+// time-limited signed URL — the vss-photos bucket is private (v16), so plain
+// public URLs no longer load.
+function VssPhoto({ value, alt = '', style, fallbackStyle }) {
+  const [url, setUrl] = useState(null)
+  useEffect(() => {
+    let mounted = true
+    vssPhotoUrl(value).then(u => { if (mounted) setUrl(u) }).catch(() => {})
+    return () => { mounted = false }
+  }, [value])
+  if (!url) {
+    return <span style={fallbackStyle || { color: '#cbd5e1', fontSize: '0.75rem' }}>—</span>
+  }
+  return <img src={url} alt={alt} style={style} />
+}
 
 const EMPTY_FORM = {
   centre: '',
@@ -82,8 +98,9 @@ export default function AddVssForm() {
     const path = `reg/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`
     const { error } = await supabase.storage.from('vss-photos').upload(path, file)
     if (error) throw error
-    const { data } = supabase.storage.from('vss-photos').getPublicUrl(path)
-    return data.publicUrl
+    // store the bare path — the bucket is private (v16), full public URLs
+    // would stop working; VssPhoto resolves the path to a signed URL
+    return path
   }
 
   /* ─── create ─── */
@@ -117,7 +134,7 @@ export default function AddVssForm() {
     let uploadedPath = null
     try {
       const photo_url = await uploadPhoto(photo)
-      uploadedPath = photo_url.split('/vss-photos/')[1] || null
+      uploadedPath = photo_url
       const { error } = await supabase.from('vss_registrations').insert({
         centre: form.centre,
         sewadar_name: form.sewadar_name.trim(),
@@ -187,7 +204,7 @@ export default function AddVssForm() {
       let photo_url = editReg.photo_url
       if (editPhoto) {
         photo_url = await uploadPhoto(editPhoto)
-        uploadedEditPath = photo_url.split('/vss-photos/')[1] || null
+        uploadedEditPath = photo_url
       }
       const { error } = await supabase.from('vss_registrations').update({
         centre: editForm.centre,
@@ -220,8 +237,8 @@ export default function AddVssForm() {
     setDeleting(true)
     try {
       if (deleteReg.photo_url) {
-        const path = deleteReg.photo_url.split('/vss-photos/')[1]
-        if (path) await supabase.storage.from('vss-photos').remove([path]).catch(() => {})
+        const path = deleteReg.photo_url.split('/vss-photos/')[1] || deleteReg.photo_url
+        if (path && path.startsWith('reg/')) await supabase.storage.from('vss-photos').remove([path]).catch(() => {})
       }
       const { error } = await supabase.from('vss_registrations').delete().eq('id', deleteReg.id)
       if (error) throw error
@@ -492,7 +509,7 @@ export default function AddVssForm() {
                           <span className={`pill ${assigned ? 'pill-green' : 'pill-amber'}`}>{assigned ? 'Assigned' : 'Pending'}</span>
                         </td>
                         <td data-label="Photo" style={{ textAlign: 'center' }}>
-                          {r.photo_url ? <img src={r.photo_url} alt={r.sewadar_name} style={{ width: 38, height: 38, borderRadius: 8, objectFit: 'cover', border: '1px solid #e2e8f0' }} /> : <span style={{ color: '#cbd5e1', fontSize: '0.75rem' }}>—</span>}
+                          {r.photo_url ? <VssPhoto value={r.photo_url} alt={r.sewadar_name} style={{ width: 38, height: 38, borderRadius: 8, objectFit: 'cover', border: '1px solid #e2e8f0' }} /> : <span style={{ color: '#cbd5e1', fontSize: '0.75rem' }}>—</span>}
                         </td>
                         <td data-label="Name" style={{ fontWeight: 600 }}>{r.sewadar_name}</td>
                         <td data-label="Centre" style={{ color: '#64748b', fontSize: '0.8rem' }}>{r.centre}</td>
@@ -565,7 +582,7 @@ export default function AddVssForm() {
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.9rem' }}>
                 <div style={{ width: 84, height: 84, borderRadius: 12, border: '1px dashed #cbd5e1', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', background: '#f8fafc', flexShrink: 0 }}>
                   {editPhotoPreview ? <img src={editPhotoPreview} alt="preview" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                    : editReg.photo_url ? <img src={editReg.photo_url} alt={editReg.sewadar_name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    : editReg.photo_url ? <VssPhoto value={editReg.photo_url} alt={editReg.sewadar_name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} fallbackStyle={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#cbd5e1', fontSize: '0.7rem' }} />
                     : <Camera size={26} style={{ color: '#94a3b8' }} />}
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>

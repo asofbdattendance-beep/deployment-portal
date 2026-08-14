@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react'
 import { supabase } from '../lib/supabase'
-import { notElderlyFilter, isVssBadge, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, getRootCentre } from '../lib/logic'
+import { notElderlyFilter, isVssBadge, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, getRootCentre, changedConsentRows, buildConsentSnapshot } from '../lib/logic'
 import { useToast } from '../components/Toast'
 import DeadlinePill from '../components/DeadlinePill'
 import {
@@ -15,6 +15,11 @@ import {
    The table body is memoized so toggling edit mode / editing one row does
    not re-render every other row. */
 
+// Every rendered row is forced to exactly this height so the virtual-window
+// math (scrollTop / ROW_H) matches the real scrollbar — a content-height row
+// would silently drift the window and blank out the bottom of long lists.
+const ROW_H = 44
+
 /* ─── Memoized row: re-renders only when its own data/props change ─── */
 const DeployRow = memo(function DeployRow({ row, depts, deptNames, handlers, serial }) {
   const key = `${row.centre}|${row.badge_number}`
@@ -26,7 +31,7 @@ const DeployRow = memo(function DeployRow({ row, depts, deptNames, handlers, ser
   const rowBg = overridden ? '#fff7ed' : (row.consent_given && noRequest ? '#fffbeb' : undefined)
 
   return (
-    <tr style={{ background: rowBg }}>
+    <tr style={{ height: ROW_H, background: rowBg }}>
       <td style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }} data-label="S.No.">{serial}</td>
       <td style={{ fontWeight: 600, fontSize: '0.82rem', whiteSpace: 'nowrap' }} data-label="Centre">{row.centre}</td>
       <td style={{ fontFamily: 'monospace', fontSize: '0.8rem' }} data-label="Badge">
@@ -35,8 +40,11 @@ const DeployRow = memo(function DeployRow({ row, depts, deptNames, handlers, ser
           {row.is_vss && <span className="pill pill-green" style={{ fontSize: '0.6rem' }}>VSS</span>}
         </span>
       </td>
-      <td style={{ fontWeight: 500 }} data-label="Name">{row.sewadar_name}
-        {row.is_initiated && <span className="pill pill-green" style={{ marginLeft: '0.35rem', fontSize: '0.6rem' }}>INIT</span>}
+      <td style={{ fontWeight: 500 }} data-label="Name">
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', maxWidth: 220, overflow: 'hidden' }}>
+          <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.sewadar_name}</span>
+          {row.is_initiated && <span className="pill pill-green" style={{ flexShrink: 0, fontSize: '0.6rem' }}>INIT</span>}
+        </span>
       </td>
       <td style={{ textAlign: 'center' }} data-label="Consent">
         <select value={row.consent_given ? 'yes' : 'no'} onChange={e => handlers.setConsent(key, e.target.value === 'yes')} className="select" style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}>
@@ -70,12 +78,12 @@ const DeployRow = memo(function DeployRow({ row, depts, deptNames, handlers, ser
         <select
           value={row.deployed_dept_id || ''}
           onChange={e => handlers.setDeployedDept(key, e.target.value)}
-          disabled={noRequest}
+          disabled={!row.consent_given}
           className={row.deployed_dept_id ? 'select assigned' : 'select'}
           style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem', minWidth: 160, ...(overridden ? { background: '#fffbeb', borderColor: '#fcd34d', fontWeight: 700, color: '#b45309' } : row.deployed_dept_id ? { background: '#ecfdf5', borderColor: '#a7f3d0', fontWeight: 700, color: '#047857' } : {}) }}
-          title={noRequest ? 'No department was requested for this sewadar' : overridden ? 'Finalized deployment differs from the deployment request' : 'Defaults to the deployment request — change only if needed'}
+          title={!row.consent_given ? 'Consent not given — cannot assign' : noRequest ? 'No department was requested — assign one directly' : overridden ? 'Finalized deployment differs from the deployment request' : 'Defaults to the deployment request — change only if needed'}
         >
-          <option value="">{noRequest ? 'Not requested' : '— Not assigned —'}</option>
+          <option value="">{!row.consent_given ? 'Not requested' : '— Not assigned —'}</option>
           {depts.map(d => <option key={d.id} value={d.id}>{d.name}{d.is_active ? '' : ' (inactive)'}</option>)}
         </select>
         {overridden && <span className="pill pill-amber" style={{ fontSize: '0.6rem', marginLeft: '0.35rem', verticalAlign: 'middle' }}>CHANGED</span>}
@@ -99,6 +107,16 @@ export default function DeploymentAllocationPage() {
   const [search, setSearch] = useState('')
   const [filterCentre, setFilterCentre] = useState('all')
   const [filterStatus, setFilterStatus] = useState('all')
+  // mobile CSS (≤640px) turns the table into block cards with no internal
+  // scrollbar — virtualization must be off there or rows beyond the first
+  // slice would never render
+  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 640px)').matches)
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 640px)')
+    const onChange = () => setIsMobile(mq.matches)
+    mq.addEventListener?.('change', onChange)
+    return () => mq.removeEventListener?.('change', onChange)
+  }, [])
 
   const loadedRef = useRef(false)
   const dirtyRef = useRef(false)
@@ -115,6 +133,15 @@ export default function DeploymentAllocationPage() {
   liveRef.current = { scheduleId: selectedScheduleId, rows }
   const savedDeployedRef = useRef({})
   const existingConsentRef = useRef({})
+  const savedConsentRef = useRef({})
+  const reloadTimer = useRef(null)
+  const lastSaveAtRef = useRef(0)
+  // failed-save retry — a transient error re-arms one more save (max 3 tries)
+  const retryTimer = useRef(null)
+  const retryCountRef = useRef(0)
+  const tableWrapRef = useRef(null)
+  const [scrollTop, setScrollTop] = useState(0)
+  const [viewH, setViewH] = useState(600)
   const editModeRef = useRef(editMode)
   editModeRef.current = editMode
   // handlers is memoized on stable deps, so read the dept-name lookup via a
@@ -208,6 +235,10 @@ export default function DeploymentAllocationPage() {
         savedDeployedRef.current[key] = dep?.deployed_department_id || dep?.department_id || null
         existingConsentRef.current[key] = ex ? true : false
       })
+      // Baseline the consent snapshot on the freshly-loaded rows so a save
+      // only writes rows whose editable fields actually changed (the page used
+      // to upsert every consented row on every save — thousands of writes).
+      savedConsentRef.current = buildConsentSnapshot(map)
       setRows(map)
       setDepts(deptRes.data || [])
       setCentres(centreRes.data || [])
@@ -230,18 +261,28 @@ export default function DeploymentAllocationPage() {
 
   useEffect(() => { loadData() }, [loadData])
 
-  // realtime: refresh if a centre request changes while we're viewing
+  // realtime: refresh if a centre request changes while we're viewing.
+  // Coalesced (500ms) so a burst of changes (e.g. a centre bulk-assign) causes
+  // one reload instead of dozens; also suppressed right after our own save
+  // (the batched deployment updates each fire a realtime event).
   useEffect(() => {
     if (!selectedScheduleId) return
     let mounted = true
+    const scheduleReload = () => {
+      if (!mounted || dirtyRef.current || savingRef.current) return
+      if (Date.now() - lastSaveAtRef.current < 1200) return
+      if (reloadTimer.current) clearTimeout(reloadTimer.current)
+      reloadTimer.current = setTimeout(() => { if (mounted) loadData() }, 500)
+    }
     const channel = supabase
       .channel(`deploy-alloc-${selectedScheduleId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` }, () => {
-        if (!mounted || dirtyRef.current) return
-        loadData()
-      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
       .subscribe()
-    return () => { mounted = false; supabase.removeChannel(channel) }
+    return () => {
+      mounted = false
+      supabase.removeChannel(channel)
+      if (reloadTimer.current) { clearTimeout(reloadTimer.current); reloadTimer.current = null }
+    }
   }, [selectedScheduleId, loadData])
 
   const schedule = schedules.find(s => s.id === selectedScheduleId)
@@ -312,6 +353,22 @@ export default function DeploymentAllocationPage() {
     },
   }), [markDirty])
 
+  // Schedule a retry of the latest snapshot after a failed save (network blips,
+  // RLS hiccups). Stops after 3 attempts so a persistent error doesn't loop.
+  const scheduleRetry = useCallback(() => {
+    if (retryCountRef.current >= 3) return
+    retryCountRef.current++
+    if (retryTimer.current) clearTimeout(retryTimer.current)
+    retryTimer.current = setTimeout(() => {
+      retryTimer.current = null
+      if (!mountedRef.current) return
+      const snap = liveRef.current
+      if (snap?.scheduleId && dirtyRef.current && scheduleIdRef.current === snap.scheduleId) {
+        saveAllRef.current(snap)
+      }
+    }, 3000)
+  }, [])
+
   const saveAll = useCallback(async (snap) => {
     const s = snap || liveRef.current
     if (!s?.scheduleId) return
@@ -319,13 +376,17 @@ export default function DeploymentAllocationPage() {
     if (savingRef.current) { pendingSaveRef.current = s; return }
     savingRef.current = true
     setSaving(true)
+    if (retryTimer.current) { clearTimeout(retryTimer.current); retryTimer.current = null }
     const versionAtStart = editVersionRef.current
     try {
       const entries = Object.values(s.rows)
 
-      // consent upserts — persist only rows that have a consent record already
-      // or that the finalizer just consented (avoid creating rows for everyone)
-      const toUpsert = entries
+      // consent upserts — DIFF-ONLY: only rows whose editable signature changed
+      // since the last save are written (the page used to upsert every
+      // consented row on every save — thousands of writes per keystroke).
+      // Rows the finalizer just consented are included via the existing-row
+      // check; everyone else stays untouched.
+      const toUpsert = changedConsentRows(s.rows, savedConsentRef.current)
         .filter(r => r.consent_given || existingConsentRef.current[r.centre + '|' + r.badge_number])
         .map(r => ({
           schedule_id: s.scheduleId,
@@ -340,26 +401,98 @@ export default function DeploymentAllocationPage() {
 
       if (toUpsert.length > 0) {
         const { error } = await supabase.from('sewadar_consents').upsert(toUpsert, { onConflict: 'schedule_id,centre,badge_number' })
-        if (error) { toast.error(error.message); dirtyRef.current = true; return }
+        if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
+        // rows the finalizer just consented now EXIST in the DB — a same-session
+        // toggle back to "no" must still be persisted (the existing-row check)
+        toUpsert.forEach(u => { existingConsentRef.current[`${u.centre}|${u.badge_number}`] = true })
       }
 
-      // deployed (final) department updates
-      const toUpdate = entries.filter(r => r.deployment_id && savedDeployedRef.current[r.centre + '|' + r.badge_number] !== r.deployed_dept_id)
+      // ── deployment rows: three cases ──
+      //   1) awaiting sewadars (consented, no deployment row yet) that the ASO
+      //      just assigned a final dept to → INSERT the deployment row
+      //   2) existing rows whose final dept changed → batched UPDATE
+      //   3) consent flipped to "no" (or a legacy no-consent row with a leftover
+      //      deployment) → DELETE the row, matching centre-page semantics
+      const CHUNK = 250
+      const toInsert = entries.filter(r => r.consent_given && !r.deployment_id && r.deployed_dept_id)
+      const toDelete = entries.filter(r => !r.consent_given && r.deployment_id)
+      const deleteKeys = new Set(toDelete.map(r => `${r.centre}|${r.badge_number}`))
+      const toUpdate = entries.filter(r =>
+        r.deployment_id
+        && !deleteKeys.has(`${r.centre}|${r.badge_number}`)
+        && savedDeployedRef.current[r.centre + '|' + r.badge_number] !== r.deployed_dept_id
+      )
+
+      if (toInsert.length > 0) {
+        // upsert (not insert) so a retry after an ambiguous network failure is
+        // idempotent — the row may already exist from the first attempt
+        const { data: inserted, error } = await supabase.from('deployments')
+          .upsert(toInsert.map(r => ({
+            schedule_id: s.scheduleId,
+            department_id: r.deployed_dept_id,
+            deployed_department_id: r.deployed_dept_id,
+            centre: r.centre,
+            badge_number: r.badge_number,
+            sewadar_name: r.sewadar_name,
+            status: 'requested',
+          })), { onConflict: 'schedule_id,centre,badge_number' })
+          .select('id, centre, badge_number, department_id, deployed_department_id')
+        if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
+        // keep local rows + baseline in sync so a follow-up edit in the same
+        // session updates (not re-inserts) the freshly-created row
+        ;(inserted || []).forEach(rec => {
+          const key = `${rec.centre}|${rec.badge_number}`
+          savedDeployedRef.current[key] = rec.deployed_department_id || rec.department_id || null
+          setRows(prev => prev[key]
+            ? { ...prev, [key]: { ...prev[key], deployment_id: rec.id, requested_dept_id: rec.department_id } }
+            : prev)
+        })
+      }
+
+      const idsByDept = {}
+      toUpdate.forEach(r => {
+        const key = r.deployed_dept_id || '__null__'
+        ;(idsByDept[key] = idsByDept[key] || []).push(r.deployment_id)
+      })
       const ops = []
-      for (const r of toUpdate) {
-        ops.push(supabase.from('deployments').update({ deployed_department_id: r.deployed_dept_id }).eq('id', r.deployment_id))
-      }
+      Object.entries(idsByDept).forEach(([dept, ids]) => {
+        const value = { deployed_department_id: dept === '__null__' ? null : dept }
+        for (let i = 0; i < ids.length; i += CHUNK) {
+          ops.push(supabase.from('deployments').update(value).in('id', ids.slice(i, i + CHUNK)))
+        }
+      })
       const results = await Promise.all(ops)
-      for (const res of results) if (res.error) { toast.error(res.error.message); dirtyRef.current = true; return }
+      for (const res of results) if (res.error) { toast.error(res.error.message); dirtyRef.current = true; scheduleRetry(); return }
 
-      if (editVersionRef.current === versionAtStart) dirtyRef.current = false
+      if (toDelete.length > 0) {
+        const delOps = []
+        for (let i = 0; i < toDelete.length; i += CHUNK) {
+          delOps.push(supabase.from('deployments').delete().in('id', toDelete.slice(i, i + CHUNK).map(r => r.deployment_id)))
+        }
+        const delResults = await Promise.all(delOps)
+        for (const res of delResults) if (res.error) { toast.error(res.error.message); dirtyRef.current = true; scheduleRetry(); return }
+        toDelete.forEach(r => {
+          const key = `${r.centre}|${r.badge_number}`
+          savedDeployedRef.current[key] = null
+          setRows(prev => prev[key]
+            ? { ...prev, [key]: { ...prev[key], deployment_id: null, requested_dept_id: '', deployed_dept_id: null, available_days_count: DEFAULT_AVAILABLE_DAYS } }
+            : prev)
+        })
+      }
+
+      if (editVersionRef.current === versionAtStart) {
+        dirtyRef.current = false
+        retryCountRef.current = 0
+      }
       // The schedule may have changed while this save was in flight — don't
       // clobber the newly loaded schedule's deployed-department baseline.
       if (scheduleIdRef.current === s.scheduleId) {
         toUpdate.forEach(r => { savedDeployedRef.current[r.centre + '|' + r.badge_number] = r.deployed_dept_id })
+        savedConsentRef.current = buildConsentSnapshot(s.rows)
+        lastSaveAtRef.current = Date.now()
         setSavedAt(new Date())
       }
-    } catch (err) { toast.error(err.message); dirtyRef.current = true } finally {
+    } catch (err) { toast.error(err.message); dirtyRef.current = true; scheduleRetry() } finally {
       savingRef.current = false
       setSaving(false)
       // If a newer snapshot was queued while this save was in flight, save it
@@ -370,7 +503,7 @@ export default function DeploymentAllocationPage() {
         saveAll(next)
       }
     }
-  }, [toast])
+  }, [toast, scheduleRetry])
 
   saveAllRef.current = saveAll
 
@@ -402,6 +535,8 @@ export default function DeploymentAllocationPage() {
 
   // Unmount (tab switch / logout): flush instead of dropping unsaved edits.
   useEffect(() => () => { flushRef.current && flushRef.current() }, [])
+  // Unmount: never fire a queued retry after the component is gone.
+  useEffect(() => () => { if (retryTimer.current) clearTimeout(retryTimer.current) }, [])
 
   // Warn before closing/reloading the tab with unsaved edits.
   useEffect(() => {
@@ -477,6 +612,34 @@ export default function DeploymentAllocationPage() {
     return m
   }, [visible])
   const centreNames = useMemo(() => Object.keys(byCentre).sort((a, b) => a.localeCompare(b)), [byCentre])
+
+  // ── virtual scrolling: the flat table can hold 2000+ rows; rendering all of
+  // them as DOM nodes is what made the page freeze. Render only the slice in
+  // view (plus a small overscan), with spacer rows keeping the scrollbar sane.
+  const OVERSCAN = 12
+  const vh = viewH || 600
+  const totalRows = visible.length
+  // clamp startIdx so a deep scrollTop into a shorter filtered list (or a
+  // rounding edge at the very bottom) can never produce an empty slice
+  const maxStart = Math.max(0, totalRows - 1)
+  const startIdx = isMobile ? 0 : Math.min(Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN), maxStart)
+  const endIdx = isMobile ? totalRows : Math.min(totalRows, Math.ceil((scrollTop + vh) / ROW_H) + OVERSCAN)
+  const visibleSlice = isMobile ? visible : visible.slice(startIdx, endIdx)
+
+  // jump back to the top whenever the filtered set changes (a stale scrollTop
+  // into a shorter list would otherwise land on spacer-only rows). Reset the
+  // DOM scrollbar too — state alone relies on browser scroll-anchoring.
+  useEffect(() => {
+    setScrollTop(0)
+    if (tableWrapRef.current) tableWrapRef.current.scrollTop = 0
+  }, [filterCentre, filterStatus, search, selectedScheduleId])
+
+  // measure the scroll viewport once the table mounts / data loads so the
+  // initial virtual window matches what's actually visible (before any scroll)
+  useEffect(() => {
+    if (loading || !tableWrapRef.current) return
+    setViewH(tableWrapRef.current.clientHeight || 600)
+  }, [loading, visible.length])
 
   // reuse for Excel + quota: only rows that have a deployment record can be overwritten
   const deptNameOf = useCallback((id) => deptMap.get(id)?.name || null, [deptMap])
@@ -597,7 +760,6 @@ export default function DeploymentAllocationPage() {
         <div className="section-header" style={{ flexWrap: 'wrap', gap: '0.75rem' }}>
           <div>
             <div className="section-title">Sewadar-wise allocation</div>
-            <div className="card-sub">All sewadars in one table — centre shown per row · consent · days · stay at bhati · chair pass · requested department · assigned department</div>
           </div>
           <div style={{ flex: 1 }} />
           <select value={filterCentre} onChange={e => setFilterCentre(e.target.value)} className="select">
@@ -644,7 +806,11 @@ export default function DeploymentAllocationPage() {
           /* fieldset lets editMode disable every control in one attribute —
              rows never have to re-render on toggle */
           <fieldset disabled={!editMode} style={{ border: 'none', padding: 0, margin: 0 }}>
-            <div className="table-wrap table-wrap-sticky">
+            <div
+              ref={tableWrapRef}
+              className="table-wrap table-wrap-sticky"
+              onScroll={e => { setScrollTop(e.currentTarget.scrollTop); if (e.currentTarget.clientHeight) setViewH(e.currentTarget.clientHeight) }}
+            >
               <table className="table table-sticky">
                 <thead>
                   <tr>
@@ -661,16 +827,26 @@ export default function DeploymentAllocationPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {visible.map((r, i) => (
+                  {startIdx > 0 && (
+                    <tr aria-hidden="true" style={{ height: startIdx * ROW_H }}>
+                      <td colSpan={10} style={{ padding: 0, border: 'none', height: startIdx * ROW_H }} />
+                    </tr>
+                  )}
+                  {visibleSlice.map((r, i) => (
                     <DeployRow
                       key={`${r.centre}|${r.badge_number}`}
                       row={r}
-                      serial={i + 1}
+                      serial={startIdx + i + 1}
                       depts={depts}
                       deptNames={deptNames}
                       handlers={handlers}
                     />
                   ))}
+                  {endIdx < totalRows && (
+                    <tr aria-hidden="true" style={{ height: (totalRows - endIdx) * ROW_H }}>
+                      <td colSpan={10} style={{ padding: 0, border: 'none', height: (totalRows - endIdx) * ROW_H }} />
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>

@@ -3,11 +3,17 @@ import { supabase } from '../lib/supabase'
 
 const PortalAuthContext = createContext(null)
 
+// A PASSWORD_RECOVERY session means the user came from the reset link and
+// must set a new password before using the portal. sessionStorage keeps the
+// flag across a reload while the recovery session is live.
+const RECOVERY_FLAG = 'portal_recovery_pending'
+
 export function PortalAuthProvider({ children }) {
   const [profile, setProfile] = useState(null)
   const [loading, setLoading] = useState(true)
   const [session, setSession] = useState(null)
   const [profileError, setProfileError] = useState(null)
+  const [isRecovery, setIsRecovery] = useState(false)
 
   const fetchProfile = useCallback(async () => {
     setProfileError(null)
@@ -34,6 +40,13 @@ export function PortalAuthProvider({ children }) {
     supabase.auth.getSession().then(async ({ data: { session: s } }) => {
       if (!mounted) return
       setSession(s)
+      // the reset-link session survives a reload, but the PASSWORD_RECOVERY
+      // event only fires once — the sessionStorage flag re-arms the reset UI
+      if (s?.user && sessionStorage.getItem(RECOVERY_FLAG) === '1') {
+        setIsRecovery(true)
+      } else if (!s?.user) {
+        sessionStorage.removeItem(RECOVERY_FLAG)
+      }
       if (s?.user) {
         const p = await fetchProfile()
         if (mounted) setProfile(p)
@@ -46,6 +59,14 @@ export function PortalAuthProvider({ children }) {
       // racing an unmount) — guard every state write with `mounted`
       if (!mounted) return
       setSession(s)
+      if (event === 'PASSWORD_RECOVERY' && s?.user) {
+        // user clicked the reset link — show the new-password screen first
+        sessionStorage.setItem(RECOVERY_FLAG, '1')
+        setIsRecovery(true)
+      } else if (event === 'SIGNED_OUT') {
+        sessionStorage.removeItem(RECOVERY_FLAG)
+        setIsRecovery(false)
+      }
       if (s?.user) {
         const p = await fetchProfile()
         if (mounted) setProfile(p)
@@ -61,14 +82,24 @@ export function PortalAuthProvider({ children }) {
   const signIn = async (email, password) => {
     const { error } = await supabase.auth.signInWithPassword({ email, password })
     if (error) throw error
+    // a normal sign-in means the recovery session (if any) is done
+    sessionStorage.removeItem(RECOVERY_FLAG)
+    setIsRecovery(false)
   }
 
   const signOut = async () => {
     try { await supabase.auth.signOut() } catch (e) { console.warn('signOut error', e) }
+    sessionStorage.removeItem(RECOVERY_FLAG)
+    setIsRecovery(false)
     setProfile(null)
     setSession(null)
     setProfileError(null)
   }
+
+  const clearRecovery = useCallback(() => {
+    sessionStorage.removeItem(RECOVERY_FLAG)
+    setIsRecovery(false)
+  }, [])
 
   const hasPermission = useCallback((perm) => {
     if (!profile) return false
@@ -81,6 +112,8 @@ export function PortalAuthProvider({ children }) {
     session,
     loading,
     profileError,
+    isRecovery,
+    clearRecovery,
     refreshProfile,
     signIn,
     signOut,

@@ -271,6 +271,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
     gap: 0.5rem;
     padding: 0.35rem 0.2rem;
     border-bottom: none;
+    border-right: none;
   }
   .table tbody td::before {
     content: attr(data-label);
@@ -540,6 +541,138 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   box-shadow: 0 1px 0 var(--border);
 }
 
+/* sticky first columns (matrix tables) — pin the row-label columns so they
+   stay visible while the centre columns scroll horizontally. z-index above
+   the sticky header cells (2) when inside thead, below otherwise.
+   Three sticky panes: Department (0), Count (240px), Total (336px). */
+.table-sticky th.table-sticky-col,
+.table-sticky th.table-sticky-col-2,
+.table-sticky th.table-sticky-col-3,
+.table-sticky td.table-sticky-col,
+.table-sticky td.table-sticky-col-2,
+.table-sticky td.table-sticky-col-3 {
+  position: sticky;
+  z-index: 1;
+  background: #fff;
+}
+.table-sticky .table-sticky-col { left: 0; min-width: 190px; }
+.table-sticky .table-sticky-col-2 { left: 190px; min-width: 90px; }
+.table-sticky .table-sticky-col-3 { left: 280px; min-width: 56px; }
+.table-sticky thead .table-sticky-col,
+.table-sticky thead .table-sticky-col-2,
+.table-sticky thead .table-sticky-col-3 { z-index: 3; }
+.table-sticky td.table-sticky-col,
+.table-sticky td.table-sticky-col-2,
+.table-sticky td.table-sticky-col-3 { box-shadow: 1px 0 0 var(--border); }
+
+/* ─── Deployment matrix (Overview) ─── */
+.deploy-matrix-legend {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 0.75rem;
+  color: var(--text-sec);
+}
+.legend-group { display: inline-flex; align-items: center; gap: 1.25rem; }
+.legend-item { display: inline-flex; align-items: center; gap: 0.45rem; }
+.legend-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.legend-sched { background: var(--primary); }
+.legend-deploy { background: var(--success); }
+.legend-male { background: #0ea5e9; }
+.legend-female { background: #ec4899; }
+.legend-vss { background: var(--violet); }
+.legend-deficit { background: var(--danger); }
+.legend-excess { background: var(--success); }
+
+.deploy-matrix { font-size: 0.82rem; }
+.deploy-matrix thead th { text-align: center; }
+.deploy-matrix thead th:nth-child(1),
+.deploy-matrix thead th:nth-child(2),
+.deploy-matrix thead th:nth-child(3) { text-align: left; }
+.deploy-matrix tbody td { text-align: center; }
+.deploy-matrix .matrix-num {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+/* department block headers — soft tint + accent bar so blocks read as units */
+.deploy-matrix .matrix-dept {
+  font-weight: 700;
+  text-align: left;
+  color: var(--text);
+  background: var(--primary-soft);
+  vertical-align: middle;
+  border-left: 3px solid var(--primary);
+  letter-spacing: 0.01em;
+}
+.deploy-matrix tbody tr.matrix-group-odd .matrix-dept {
+  background: #f3f4ff;
+}
+.deploy-matrix .matrix-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  background: #fff;
+  text-align: left;
+}
+.deploy-matrix .matrix-sched { color: var(--primary-dark); }
+.deploy-matrix .matrix-deploy { color: #047857; }
+.deploy-matrix .matrix-male { color: #0284c7; }
+.deploy-matrix .matrix-female { color: #db2777; }
+.deploy-matrix .matrix-vss { color: #7c3aed; }
+.deploy-matrix .matrix-total {
+  font-weight: 800;
+  background: var(--primary-soft);
+}
+.deploy-matrix thead th.table-sticky-col-3 { background: var(--primary-soft); color: var(--primary-dark); }
+/* centre columns: a solid vertical border separates every CENTRE */
+.deploy-matrix th.matrix-centre,
+.deploy-matrix td.matrix-centre { border-left: 1px solid #cbd5e1; }
+/* zebra within a block: alternate the data rows so each department reads
+   as a cohesive band (row 1 stays white, rows 2-5 get a whisper tint) */
+.deploy-matrix tbody tr.matrix-group-odd td { background: var(--surface-2); }
+.deploy-matrix tbody tr.matrix-group-odd .table-sticky-col,
+.deploy-matrix tbody tr.matrix-group-odd .table-sticky-col-2,
+.deploy-matrix tbody tr.matrix-group-odd .table-sticky-col-3,
+.deploy-matrix tbody tr.matrix-group-odd .matrix-total { background: #f1f5f9; }
+/* a solid horizontal border separates every department block */
+.deploy-matrix tbody tr.matrix-block-end td { border-bottom: 2px solid var(--text-sec); }
+/* first row of each department block gets breathing room below the
+   block separator so the eye can scan block-to-block */
+.deploy-matrix tbody tr.matrix-block-start td { padding-top: 0.8rem; }
+.deploy-matrix tbody tr:last-child td { border-bottom: 2px solid var(--text-sec); }
+.deploy-matrix tbody tr:hover td { background: #f1f5f9; }
+.deploy-matrix tbody tr:hover .table-sticky-col,
+.deploy-matrix tbody tr:hover .table-sticky-col-2,
+.deploy-matrix tbody tr:hover .table-sticky-col-3,
+.deploy-matrix tbody tr:hover .matrix-total { background: #eef2ff; }
+/* report header strips (COMPLETE REPORT / RATIO) — stronger tint + top rule */
+.deploy-matrix tbody tr.matrix-report-head td {
+  background: #f8fafc;
+  border-top: 1px solid var(--border);
+}
+.deploy-matrix tbody tr.matrix-report-head .table-sticky-col,
+.deploy-matrix tbody tr.matrix-report-head .table-sticky-col-2,
+.deploy-matrix tbody tr.matrix-report-head .table-sticky-col-3 { background: #eef2f7; }
+.deploy-matrix tbody tr.matrix-report-head:hover td { background: #f1f5f9; }
+/* full box outline per block: the block-start row carries the top edge and
+   the last data column carries the right edge, so each block (COMPLETE
+   REPORT / RATIO / department) reads as a closed box — placed after the
+   report-head rules so the 2px top wins at equal specificity */
+.deploy-matrix tbody tr.matrix-block-start td { border-top: 2px solid var(--text-sec); }
+.deploy-matrix tbody tr td:last-child { border-right: 2px solid var(--text-sec); }
+/* negative differences (deployed > scheduled) — deficit */
+.deploy-matrix .matrix-neg { color: var(--danger); font-weight: 700; }
+/* positive differences (deployed < scheduled) — excess */
+.deploy-matrix .matrix-pos { color: var(--success); font-weight: 700; }
+/* ratio cells — muted */
+.deploy-matrix .matrix-ratio { color: var(--text-sec); font-size: 0.75rem; }
+
 /* attendance pill — flex-aligns inside both table cells and mobile card rows */
 .attendance-pill {
   display: inline-flex;
@@ -738,6 +871,45 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
 @keyframes tooltip-in {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+
+/* ─── Print (Overview matrix & app-wide) ─── */
+.print-only { display: none; }
+@media print {
+  body { background: #fff; }
+  .app-header, .tab-nav, .toast-container { display: none !important; }
+  .page { padding: 0.5rem; max-width: 100%; }
+  .card { border: none; box-shadow: none; }
+  .page-header { margin-bottom: 0.5rem; }
+  .print-hide { display: none !important; }
+  .print-only { display: block; }
+  .table-wrap-sticky { max-height: none; overflow: visible; }
+  .table-sticky th.table-sticky-col,
+  .table-sticky th.table-sticky-col-2,
+  .table-sticky th.table-sticky-col-3,
+  .table-sticky td.table-sticky-col,
+  .table-sticky td.table-sticky-col-2,
+  .table-sticky td.table-sticky-col-3 { position: static; box-shadow: none; }
+  .deploy-matrix { font-size: 0.78rem; }
+  .deploy-matrix-legend { background: #fff; padding: 0.4rem 0; border-bottom: 1px solid #d1d5db; }
+  .deploy-matrix thead th,
+  .deploy-matrix thead th.table-sticky-col-3 { background: #f1f5f9; color: #0f172a; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .deploy-matrix tbody tr.matrix-group-odd td { background: #f8fafc; }
+  .deploy-matrix tbody tr.matrix-group-odd .table-sticky-col,
+  .deploy-matrix tbody tr.matrix-group-odd .table-sticky-col-2,
+  .deploy-matrix tbody tr.matrix-group-odd .table-sticky-col-3 { background: #f8fafc; }
+  .deploy-matrix tbody td.matrix-total { background: #eef2ff !important; }
+  .deploy-matrix tbody td.matrix-dept { background: #fff !important; }
+  .deploy-matrix tbody td { border-bottom: 1px solid #e5e7eb; }
+  .deploy-matrix tbody tr.matrix-block-end td { border-bottom: 2px solid #6b7280; }
+  .deploy-matrix tbody tr.matrix-block-start td { border-top: 2px solid #6b7280; }
+  .deploy-matrix tbody tr td:last-child { border-right: 2px solid #6b7280; }
+  .deploy-matrix tbody tr.matrix-report-head td { background: #f8fafc !important; }
+  .deploy-matrix tbody tr { break-inside: avoid; page-break-inside: avoid; }
+  /* keep each department block on one page — only the block-end row may
+     break so the border still lands at the bottom of the printed block */
+  .deploy-matrix tbody tr:not(.matrix-block-end) { break-after: avoid; page-break-after: avoid; }
+  .deploy-matrix tbody tr:hover td { background: inherit; }
 }
 
 /* ─── Login ─── */

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, getRootCentre, fetchPortalSettings } from '../lib/supabase'
-import { computeDeptQuota, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, consentRowKey, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
+import { computeDeptQuota, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import DeptDropdown from '../components/DeptDropdown'
@@ -65,6 +65,8 @@ function VssDeployTable() {
   const editVersionRef = useRef(0)
   const scheduleIdRef = useRef(null)
   const [subtree, setSubtree] = useState([])
+  const [subtreeError, setSubtreeError] = useState(false)
+  const [subtreeRetry, setSubtreeRetry] = useState(0)
   const [centres, setCentres] = useState([])
   const [filterCentre, setFilterCentre] = useState('all')
   const [search, setSearch] = useState('')
@@ -80,11 +82,12 @@ function VssDeployTable() {
 
   useEffect(() => {
     if (!myCentre) return
+    setSubtreeError(false)
     fetchSubtreeCentres(myCentre).then(({ centres, subtree }) => {
       setCentres(centres)
       setSubtree(subtree)
-    }).catch(() => {})
-  }, [myCentre])
+    }).catch(() => setSubtreeError(true))
+  }, [myCentre, subtreeRetry])
 
   const loadSchedules = useCallback(async () => {
     const { data, error } = await supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false })
@@ -129,7 +132,9 @@ function VssDeployTable() {
       const map = {}
       existing.forEach(c => { map[`${c.centre}|${c.badge_number}`] = c })
       const deployMap = {}
-      ;(deployRes.data || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d.department_id })
+      // keep the whole deployment row so the page knows which sewadars the ASO
+      // has FINALIZED — those rows are locked on the centre side
+      ;(deployRes.data || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d })
       const rows = {}
       const deptNameById = {}
       ;(depRes.data || []).forEach(d => { deptNameById[d.id] = d.name })
@@ -159,7 +164,8 @@ function VssDeployTable() {
           available_days_count: storedDays[key],
           stay_at_bhati: ex?.stay_at_bhati || false,
           chair_pass: ex?.chair_pass || false,
-          requested_dept: deployMap[key] || '',
+          requested_dept: deployMap[key]?.department_id || '',
+          finalized: !!deployMap[key]?.deployed_department_id,
         })
       })
 
@@ -173,9 +179,15 @@ function VssDeployTable() {
         if (Object.keys(editsByKey).length > 0) {
           // overlay ONLY user-editable fields — fresh rows keep server-side
           // values for read-only data (is_active, is_initiated, gender, etc.)
+          const dropped = []
           Object.keys(rows).forEach(key => {
             const edit = editsByKey[key]
-            if (edit) EDITABLE_CONSENT_FIELDS.forEach(f => { if (f in edit) rows[key][f] = edit[f] })
+            if (!edit) return
+            // the ASO finalized this row mid-refresh — the edit is moot (the
+            // row is locked centre-side) and persist would silently filter it
+            // while the UI kept showing it as saved; drop it loudly instead
+            if (rows[key].finalized) { dropped.push(key); return }
+            EDITABLE_CONSENT_FIELDS.forEach(f => { if (f in edit) rows[key][f] = edit[f] })
             // even after the overlay, days stay auto-set (5 / 3 for OE ESCORTS)
             rows[key] = autoSetDays(rows[key])
           })
@@ -188,8 +200,18 @@ function VssDeployTable() {
           const ex = {}
           subtree.forEach(c => { ex[c] = true })
           setExpanded(ex)
-          // dirtyRef / savedConsentRef / editVersionRef stay untouched — the
-          // edits are still pending and the debounce persists them next.
+          if (dropped.length > 0) {
+            // baseline the dropped rows at their fresh (finalized) state so
+            // they no longer count as pending changes
+            const nextBaseline = { ...savedConsentRef.current }
+            dropped.forEach(k => { nextBaseline[k] = consentRowSignature(rows[k]) })
+            savedConsentRef.current = nextBaseline
+            dirtyRef.current = changedConsentRows(rows, savedConsentRef.current).length > 0
+            toast.info(`${dropped.length} sewadar${dropped.length > 1 ? 's' : ''} finalized by the ASO — pending edits discarded`)
+          }
+          // the remaining (non-dropped) edits stay pending — dirtyRef /
+          // savedConsentRef / editVersionRef keep their pre-refresh state so
+          // the debounce persists them next.
           return
         }
       }
@@ -281,35 +303,74 @@ function VssDeployTable() {
   const liveRef = useRef({})
   const pendingSaveRef = useRef(null)
   const savingRef = useRef(false)
+  // live view of whether THIS schedule can be edited at all — persist skips
+  // the DB round-trip when the page is read-only (deadline passed / done /
+  // locked / master switch closed), because the DB rejects those writes anyway
+  const editableRef = useRef(false)
   const mountedRef = useRef(true)
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false } }, [])
+  // failed-save retry — a transient error re-arms one more save (max 3 tries)
+  const retryTimer = useRef(null)
+  const retryCountRef = useRef(0)
   liveRef.current = { scheduleId: selectedScheduleId, rows: consentRows, deployments, depts, subtree }
+
+  // Schedule a retry of the latest snapshot after a failed save (network blips,
+  // RLS hiccups). Stops after 3 attempts so a persistent error doesn't loop.
+  const scheduleRetry = useCallback(() => {
+    if (retryCountRef.current >= 3) return
+    retryCountRef.current++
+    if (retryTimer.current) clearTimeout(retryTimer.current)
+    retryTimer.current = setTimeout(() => {
+      retryTimer.current = null
+      if (!mountedRef.current) return
+      const snap = liveRef.current
+      if (snap?.scheduleId && dirtyRef.current && scheduleIdRef.current === snap.scheduleId) {
+        persistRef.current(snap)
+      }
+    }, 3000)
+  }, [])
 
   const persist = useCallback(async (snap) => {
     if (!snap?.scheduleId) return
     if (scheduleIdRef.current !== snap.scheduleId) return
+    // Read-only page (deadline passed / schedule done / centre locked / master
+    // switch closed): the DB rejects these writes, so skip the round-trip —
+    // otherwise a legacy-days normalization on load would spam error toasts.
+    // Clear the dirty flag: nothing on this page is saveable.
+    if (!editableRef.current) {
+      dirtyRef.current = false
+      retryCountRef.current = 0
+      if (retryTimer.current) { clearTimeout(retryTimer.current); retryTimer.current = null }
+      savingRef.current = false
+      return
+    }
     if (savingRef.current) { pendingSaveRef.current = snap; return }
     savingRef.current = true
     setSaving(true)
+    if (retryTimer.current) { clearTimeout(retryTimer.current); retryTimer.current = null }
     const versionAtStart = editVersionRef.current
     const { scheduleId, rows, deployments: depRows, depts: depList, subtree: sub } = snap
     try {
       const changed = changedConsentRows(rows, savedConsentRef.current)
       const deptNameById = {}
       depList.forEach(d => { deptNameById[d.id] = d.name })
-      const toUpsert = changed.map(r => ({
-        schedule_id: scheduleId,
-        centre: r.centre,
-        badge_number: r.badge_number,
-        sewadar_name: r.sewadar_name,
-        consent_given: r.consent_given,
+      const toUpsert = changed
+        // ASO-finalized rows are locked on the centre side — never write them,
+        // even from a pre-lock snapshot (debounce / unmount / switch flush)
+        .filter(r => !r.finalized)
+        .map(r => ({
+          schedule_id: scheduleId,
+          centre: r.centre,
+          badge_number: r.badge_number,
+          sewadar_name: r.sewadar_name,
+          consent_given: r.consent_given,
         available_days_count: r.consent_given ? daysForDept(deptNameById[r.requested_dept]) : null,
         stay_at_bhati: r.stay_at_bhati,
         chair_pass: r.chair_pass,
       }))
       const activeDeptIds = new Set(depList.map(d => d.id))
       const toDeploy = changed
-        .filter(r => r.consent_given && r.requested_dept && r.is_active && activeDeptIds.has(r.requested_dept))
+        .filter(r => !r.finalized && r.consent_given && r.requested_dept && r.is_active && activeDeptIds.has(r.requested_dept))
         .map(r => ({
           schedule_id: scheduleId,
           department_id: r.requested_dept,
@@ -318,18 +379,20 @@ function VssDeployTable() {
           sewadar_name: r.sewadar_name,
           status: 'requested',
         }))
+      // finalized rows (the ASO set the final department) are NEVER removed —
+      // deleting them would destroy the ASO's decision
       const toRemove = Object.values(rows)
-        .filter(r => !r.consent_given || !r.requested_dept || !r.is_active || !activeDeptIds.has(r.requested_dept))
+        .filter(r => !r.finalized && (!r.consent_given || !r.requested_dept || !r.is_active || !activeDeptIds.has(r.requested_dept)))
         .map(consentRowKey)
         .filter(key => depRows.some(d => `${d.centre}|${d.badge_number}` === key))
 
       if (toUpsert.length > 0) {
         const { error } = await supabase.from('sewadar_consents').upsert(toUpsert, { onConflict: 'schedule_id,centre,badge_number' })
-        if (error) { toast.error(error.message); dirtyRef.current = true; return }
+        if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
       }
       if (toDeploy.length > 0) {
         const { error } = await supabase.from('deployments').upsert(toDeploy, { onConflict: 'schedule_id,centre,badge_number' })
-        if (error) { toast.error(error.message); dirtyRef.current = true; return }
+        if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
       }
       if (toRemove.length > 0) {
         const byCentre = {}
@@ -343,11 +406,12 @@ function VssDeployTable() {
             .eq('schedule_id', scheduleId)
             .eq('centre', centre)
             .in('badge_number', badges)
-          if (error) { toast.error(error.message); dirtyRef.current = true; return }
+          if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
         }
       }
       if (editVersionRef.current === versionAtStart) {
         dirtyRef.current = false
+        retryCountRef.current = 0
       }
       // The schedule may have changed while this save was in flight — don't
       // clobber the newly loaded schedule's dirty-tracking baseline.
@@ -359,7 +423,7 @@ function VssDeployTable() {
         const { data: fresh } = await supabase.from('deployments').select('*').eq('schedule_id', scheduleId).in('centre', sub)
         if (fresh && mountedRef.current) setDeployments(fresh)
       }
-    } catch (err) { toast.error(err.message); dirtyRef.current = true } finally {
+    } catch (err) { toast.error(err.message); dirtyRef.current = true; scheduleRetry() } finally {
       savingRef.current = false
       setSaving(false)
       // If a newer snapshot was queued while this save was in flight, persist it
@@ -370,7 +434,7 @@ function VssDeployTable() {
         persist(s)
       }
     }
-  }, [toast])
+  }, [toast, scheduleRetry])
   persistRef.current = persist
 
   const flushPending = useCallback(() => {
@@ -401,6 +465,8 @@ function VssDeployTable() {
 
   // Unmount (tab switch / logout): flush instead of dropping unsaved edits.
   useEffect(() => () => { flushRef.current && flushRef.current() }, [])
+  // Unmount: never fire a queued retry after the component is gone.
+  useEffect(() => () => { if (retryTimer.current) clearTimeout(retryTimer.current) }, [])
 
   // Warn before closing/reloading the tab with unsaved edits.
   useEffect(() => {
@@ -441,6 +507,7 @@ function VssDeployTable() {
     done: scheduleDone,
     masterOpen,
   })
+  editableRef.current = canEdit
 
   const myAlloc = allocations.filter(a => a.centre === myRoot)
   // only departments the superadmin actually gave a quota to are offered/highlighted
@@ -472,30 +539,42 @@ function VssDeployTable() {
   }
   const deptNameOf = (deptId) => depts.find(d => d.id === deptId)?.name || ''
 
+  // ASO-finalized rows are locked — the final department belongs to the ASO
+  const isFinalizedRow = (row) => !!row?.finalized
   const setConsent = (key, value) => {
     dirtyRef.current = true
     editVersionRef.current++
-    setConsentRows(prev => ({
-      ...prev,
-      [key]: value
-        ? { ...prev[key], consent_given: true }
-        : { ...prev[key], consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: DEFAULT_AVAILABLE_DAYS, requested_dept: '' },
-    }))
+    setConsentRows(prev => {
+      if (isFinalizedRow(prev[key])) return prev
+      return {
+        ...prev,
+        [key]: value
+          ? { ...prev[key], consent_given: true }
+          : { ...prev[key], consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: DEFAULT_AVAILABLE_DAYS, requested_dept: '' },
+      }
+    })
   }
   const toggleBhati = (key) => {
     dirtyRef.current = true
     editVersionRef.current++
-    setConsentRows(prev => ({ ...prev, [key]: { ...prev[key], stay_at_bhati: !prev[key].stay_at_bhati } }))
+    setConsentRows(prev => {
+      if (isFinalizedRow(prev[key])) return prev
+      return { ...prev, [key]: { ...prev[key], stay_at_bhati: !prev[key].stay_at_bhati } }
+    })
   }
   const toggleChairPass = (key) => {
     dirtyRef.current = true
     editVersionRef.current++
-    setConsentRows(prev => ({ ...prev, [key]: { ...prev[key], chair_pass: !prev[key].chair_pass } }))
+    setConsentRows(prev => {
+      if (isFinalizedRow(prev[key])) return prev
+      return { ...prev, [key]: { ...prev[key], chair_pass: !prev[key].chair_pass } }
+    })
   }
   const setRequestedDept = (key, deptId) => {
     dirtyRef.current = true
     editVersionRef.current++
     setConsentRows(prev => {
+      if (isFinalizedRow(prev[key])) return prev
       const next = { ...prev[key], requested_dept: deptId }
       // days are auto-set by the chosen department: 5 by default, 3 for OE ESCORTS
       next.available_days_count = daysForDept(deptNameOf(deptId))
@@ -509,6 +588,23 @@ function VssDeployTable() {
     document.addEventListener('click', onDocClick)
     return () => document.removeEventListener('click', onDocClick)
   }, [openDeptDropdown])
+
+  if (subtreeError) {
+    return (
+      <div className="page">
+        <div className="card" style={{ padding: '2rem', textAlign: 'center' }}>
+          <div className="empty">
+            <div className="empty-icon"><Users size={22} /></div>
+            <div className="empty-title">Could not load your centres</div>
+            <div className="empty-text">Check your connection and try again.</div>
+            <button onClick={() => setSubtreeRetry(n => n + 1)} className="btn btn-primary" style={{ marginTop: '0.75rem' }}>
+              Retry
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   if (!schedules.length) {
     return (
@@ -545,7 +641,8 @@ function VssDeployTable() {
       <select
         value={r.consent_given ? 'yes' : 'no'}
         onChange={e => setConsent(`${r.centre}|${r.badge_number}`, e.target.value === 'yes')}
-        disabled={!canEdit || !r.is_active}
+        disabled={!canEdit || !r.is_active || r.finalized}
+        title={r.finalized ? 'Finalized by the ASO — locked' : undefined}
         className="select"
         style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
       >
@@ -560,9 +657,9 @@ function VssDeployTable() {
         role="switch"
         aria-checked={r.stay_at_bhati}
         onClick={() => toggleBhati(`${r.centre}|${r.badge_number}`)}
-        disabled={!canEdit || !r.consent_given || !r.is_active}
+        disabled={!canEdit || !r.consent_given || !r.is_active || r.finalized}
         className="toggle"
-        title="Stay at bhati"
+        title={r.finalized ? 'Finalized by the ASO — locked' : 'Stay at bhati'}
       >
         <span className="toggle-knob" />
       </button>
@@ -574,9 +671,9 @@ function VssDeployTable() {
         role="switch"
         aria-checked={r.chair_pass}
         onClick={() => toggleChairPass(`${r.centre}|${r.badge_number}`)}
-        disabled={!canEdit || !r.consent_given || !r.is_active}
+        disabled={!canEdit || !r.consent_given || !r.is_active || r.finalized}
         className="toggle"
-        title="Chair pass"
+        title={r.finalized ? 'Finalized by the ASO — locked' : 'Chair pass'}
       >
         <span className="toggle-knob" />
       </button>
@@ -615,17 +712,20 @@ function VssDeployTable() {
     const rowDisabled = !r.is_active
     return (
       <td style={{ textAlign: 'center' }} data-label="Deployment">
-        <DeptDropdown
-          row={r}
-          depts={depts}
-          items={items}
-          open={open}
-          disabled={!canEdit || !r.consent_given || rowDisabled}
-          onToggle={close => close === false ? setOpenDeptDropdown(null) : setOpenDeptDropdown(open ? null : key)}
-          onSelect={deptId => { setRequestedDept(key, deptId); setOpenDeptDropdown(null) }}
-          openReasons={openReasons}
-          setOpenReasons={setOpenReasons}
-        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', justifyContent: 'center' }}>
+          <DeptDropdown
+            row={r}
+            depts={depts}
+            items={items}
+            open={open}
+            disabled={!canEdit || !r.consent_given || rowDisabled || r.finalized}
+            onToggle={close => close === false ? setOpenDeptDropdown(null) : setOpenDeptDropdown(open ? null : key)}
+            onSelect={deptId => { setRequestedDept(key, deptId); setOpenDeptDropdown(null) }}
+            openReasons={openReasons}
+            setOpenReasons={setOpenReasons}
+          />
+          {r.finalized && <span className="pill pill-indigo" style={{ fontSize: '0.6rem', whiteSpace: 'nowrap' }} title="Finalized by the ASO — locked">FINAL</span>}
+        </div>
       </td>
     )
   }
@@ -663,6 +763,8 @@ function VssDeployTable() {
       setPendingBulk(null)
       return
     }
+    // finalized rows are locked by the ASO — never apply a bulk action to them
+    const locked = selectedRows.filter(r => r.finalized && !(pendingBulk.keys && pendingBulk.keys.has(`${r.centre}|${r.badge_number}`)))
     dirtyRef.current = true
     editVersionRef.current++
     setConsentRows(prev => {
@@ -670,11 +772,13 @@ function VssDeployTable() {
       selectedRows.forEach(r => {
         const key = `${r.centre}|${r.badge_number}`
         if (pendingBulk.keys && !pendingBulk.keys.has(key)) return
+        if (r.finalized) return
         next[key] = pendingBulk.updater(next[key])
       })
       return next
     })
     setPendingBulk(null)
+    if (locked.length > 0) toast.info(`${locked.length} finalized sewadar${locked.length > 1 ? 's' : ''} skipped — locked by the ASO`)
   }
 
   const bulkConsent = (value) => {
@@ -709,6 +813,10 @@ function VssDeployTable() {
     let remaining = q ? q.rem : Infinity
     selectedRows.forEach(r => {
       const key = `${r.centre}|${r.badge_number}`
+      if (r.finalized) {
+        skipped.push({ name: r.sewadar_name, badge: r.badge_number, reasons: ['Finalized by the ASO — locked'] })
+        return
+      }
       const already = r.requested_dept === deptId
       let reasons
       if (!already && remaining < 1) {
@@ -845,8 +953,7 @@ function VssDeployTable() {
       <div className="card" style={{ padding: '1.25rem' }}>
         <div className="section-header" style={{ flexWrap: 'wrap', gap: '0.75rem' }}>
           <div>
-            <div className="section-title">VSS consent &amp; requested department</div>
-            <div className="card-sub">Consent · days (auto: 5, 3 for OE ESCORTS) · stay at bhati · chair pass · deployment department (VSS-enabled only)</div>
+            <div className="section-title">VSS consent and deployment</div>
           </div>
           <div style={{ flex: 1 }} />
           <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">

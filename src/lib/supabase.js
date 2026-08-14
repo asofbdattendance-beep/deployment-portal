@@ -73,4 +73,22 @@ export async function fetchSubtreeCentres(centreName) {
   return { centres, subtree: getSubtreeCentres(centres, centreName) }
 }
 
+// ── vss-photos (PRIVATE bucket — v16) ───────────────────────
+// The bucket used to be public; photos stored then are full public URLs,
+// new writes store the bare path (reg/...). This resolves either form to a
+// time-limited signed URL so only authenticated users with access can view
+// a photo. Results are cached for an hour per path.
+const vssPhotoUrlCache = new Map() // path -> { url, expiresAt }
+
+export async function vssPhotoUrl(photoUrlOrPath) {
+  if (!photoUrlOrPath) return null
+  const path = String(photoUrlOrPath).split('/vss-photos/')[1] || String(photoUrlOrPath)
+  const cached = vssPhotoUrlCache.get(path)
+  if (cached && cached.expiresAt > Date.now() + 60_000) return cached.url
+  const { data, error } = await supabase.storage.from('vss-photos').createSignedUrl(path, 3600)
+  if (error || !data?.signedUrl) return null
+  vssPhotoUrlCache.set(path, { url: data.signedUrl, expiresAt: Date.now() + 3600_000 })
+  return data.signedUrl
+}
+
 export { getParentCentres, getRootCentre, getSubtreeCentres, notElderlyFilter }
