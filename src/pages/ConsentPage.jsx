@@ -95,7 +95,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
     const prevDirty = dirtyRef.current
     try {
       const [sewRes, consRes, depRes, allocRes, deployRes, prevRes] = await Promise.all([
-        supabase.from('sewadars').select('badge_number, sewadar_name, department, centre, is_initiated').or(notElderlyFilter()).in('centre', subtree).order('sewadar_name'),
+        supabase.from('sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, gender').or(notElderlyFilter()).in('centre', subtree).order('sewadar_name'),
         supabase.from('sewadar_consents').select('*').eq('schedule_id', selectedScheduleId).in('centre', subtree),
         supabase.from('deployment_departments').select('*').eq('is_active', true).order('name'),
         supabase.from('centre_allocations').select('*').eq('schedule_id', selectedScheduleId),
@@ -143,6 +143,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
           sewadar_name: sw.sewadar_name,
           department: sw.department,
           is_initiated: !!sw.is_initiated,
+          gender: sw.gender || '',
           consent_given: ex?.consent_given ?? false,
           available_days_count: storedDays[key],
           stay_at_bhati: ex?.stay_at_bhati || false,
@@ -580,6 +581,28 @@ export default function ConsentPage({ schedules, scheduleId }) {
     return counts
   }, [consentRows])
   const deptQuota = useMemo(() => computeDeptQuota(myAlloc, savedAllCounts, localCounts, savedOwnCounts), [myAlloc, savedAllCounts, localCounts, savedOwnCounts])
+
+  // seats the ASO asked this CENTRE (whole subtree) to provide, summed across
+  // every allocated department — shown right after the in-scope sewadar count
+  const totalRequestedSeats = useMemo(() => allocatedQuota.reduce((sum, a) => sum + (a.max_count || 0), 0), [allocatedQuota])
+
+  // male:female + initiated:non-initiated split of the sewadars currently
+  // occupying each department (effective dept, same as the quota bars)
+  const deptProfile = useMemo(() => {
+    const profile = {}
+    Object.values(consentRows).forEach(r => {
+      const deptId = r.final_dept || r.requested_dept
+      if (!deptId) return
+      const p = profile[deptId] || (profile[deptId] = { m: 0, f: 0, other: 0, init: 0, nonInit: 0 })
+      const g = (r.gender || '').toUpperCase()
+      if (g.startsWith('M')) p.m++
+      else if (g.startsWith('F')) p.f++
+      else p.other++
+      if (r.is_initiated) p.init++
+      else p.nonInit++
+    })
+    return profile
+  }, [consentRows])
 
   const deptNameById = useMemo(() => {
     const m = {}
@@ -1082,6 +1105,11 @@ export default function ConsentPage({ schedules, scheduleId }) {
           <div className="stat-value">{totalAll}</div>
         </div>
         <div className="stat">
+          <div className="stat-label">Seats requested by ASO</div>
+          <div className="stat-value" style={{ color: '#8b5cf6' }}>{totalRequestedSeats}</div>
+          <div className="stat-sub">across {allocatedQuota.length} department{allocatedQuota.length === 1 ? '' : 's'}</div>
+        </div>
+        <div className="stat">
           <div className="stat-label">Consented (Yes)</div>
           <div className="stat-value" style={{ color: consentedAll === totalAll && totalAll ? '#10b981' : '#6366f1' }}>{consentedAll}</div>
           <div className="stat-sub">of {totalAll}</div>
@@ -1103,13 +1131,14 @@ export default function ConsentPage({ schedules, scheduleId }) {
       </div>
 
       {allocatedQuota.length > 0 && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: '0.75rem', marginBottom: '1.25rem' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '0.75rem', marginBottom: '1.25rem' }}>
           {allocatedQuota.map(a => {
             const deptName = deptNameById[a.department_id]
             const q = deptQuota[a.department_id]
             const pct = q ? Math.round(q.effective / q.max * 100) : 0
             const over = q && q.rem < 0
             const inc = incharges[inchargeKey(a.department_id)]
+            const pf = deptProfile[a.department_id]
             return (
               <div key={a.department_id} className="card" style={{ padding: '0.85rem 1rem' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
@@ -1119,6 +1148,20 @@ export default function ConsentPage({ schedules, scheduleId }) {
                 <div className="progress">
                   <div className={`progress-bar ${over ? 'danger' : pct >= 100 ? 'success' : ''}`} style={{ width: `${Math.min(Math.max(pct, 0), 100)}%` }} />
                 </div>
+                {pf && (pf.m + pf.f + pf.init + pf.nonInit) > 0 && (
+                  <div style={{ display: 'flex', gap: '0.75rem', fontSize: '0.72rem', marginTop: '0.45rem', color: '#475569', flexWrap: 'wrap' }}>
+                    <span title="Male : Female" style={{ whiteSpace: 'nowrap' }}>
+                      <b style={{ color: '#2563eb' }}>M</b> {pf.m}
+                      <span style={{ color: '#cbd5e1', margin: '0 0.2rem' }}>·</span>
+                      <b style={{ color: '#db2777' }}>F</b> {pf.f}
+                    </span>
+                    <span title="Initiated : Non-initiated" style={{ whiteSpace: 'nowrap' }}>
+                      <b style={{ color: '#7c3aed' }}>Init</b> {pf.init}
+                      <span style={{ color: '#cbd5e1', margin: '0 0.2rem' }}>·</span>
+                      <b>Non</b> {pf.nonInit}
+                    </span>
+                  </div>
+                )}
                 <div style={{ marginTop: '0.55rem' }}>
                   <div style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#94a3b8', marginBottom: '0.3rem' }}>Incharge</div>
                   <InchargePicker

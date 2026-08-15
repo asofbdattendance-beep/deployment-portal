@@ -154,7 +154,7 @@ function VssDeployTable({ schedules, scheduleId }) {
           consent_given: ex?.consent_given ?? false,
           available_days_count: storedDays[key],
           stay_at_bhati: ex?.stay_at_bhati || false,
-          chair_pass: ex?.chair_pass || false,
+          chair_pass: false,
           requested_dept: deployMap[key]?.department_id || '',
           finalized: !!deployMap[key]?.deployed_department_id,
           final_dept: deployMap[key]?.deployed_department_id || '',
@@ -565,14 +565,6 @@ function VssDeployTable({ schedules, scheduleId }) {
       return { ...prev, [key]: { ...prev[key], stay_at_bhati: !prev[key].stay_at_bhati } }
     })
   }
-  const toggleChairPass = (key) => {
-    dirtyRef.current = true
-    editVersionRef.current++
-    setConsentRows(prev => {
-      if (isFinalizedRow(prev[key])) return prev
-      return { ...prev, [key]: { ...prev[key], chair_pass: !prev[key].chair_pass } }
-    })
-  }
   const setRequestedDept = (key, deptId) => {
     dirtyRef.current = true
     editVersionRef.current++
@@ -663,20 +655,6 @@ function VssDeployTable({ schedules, scheduleId }) {
         disabled={!canEdit || !r.consent_given || !r.is_active || r.finalized}
         className="toggle"
         title={r.finalized ? 'Finalized by the ASO — locked' : 'Stay at bhati'}
-      >
-        <span className="toggle-knob" />
-      </button>
-    </td>
-  )
-  const renderChairPassCell = (r) => (
-    <td style={{ textAlign: 'center' }} data-label="Chair Pass">
-      <button
-        role="switch"
-        aria-checked={r.chair_pass}
-        onClick={() => toggleChairPass(`${r.centre}|${r.badge_number}`)}
-        disabled={!canEdit || !r.consent_given || !r.is_active || r.finalized}
-        className="toggle"
-        title={r.finalized ? 'Finalized by the ASO — locked' : 'Chair pass'}
       >
         <span className="toggle-knob" />
       </button>
@@ -814,13 +792,6 @@ function VssDeployTable({ schedules, scheduleId }) {
       row => ({ ...row, stay_at_bhati: value }),
     )
   }
-  const bulkSetChairPass = (value) => {
-    requestBulk(
-      'Chair pass',
-      `Set chair pass to ${value ? 'Yes' : 'No'} for ${selectedRows.length} selected VSS sewadar${selectedRows.length > 1 ? 's' : ''}?`,
-      row => ({ ...row, chair_pass: value }),
-    )
-  }
   const bulkAssignDept = (deptId) => {
     const dept = depts.find(d => d.id === deptId)
     if (!dept) return
@@ -880,7 +851,6 @@ function VssDeployTable({ schedules, scheduleId }) {
       'Active': r.is_active ? 'Yes' : 'No',
       'Consent': r.consent_given ? 'Yes' : 'No',
       'Stay at Bhati': r.stay_at_bhati ? 'Yes' : 'No',
-      'Chair Pass': r.chair_pass ? 'Yes' : 'No',
       'Days': r.consent_given ? r.available_days_count : '—',
       'Deployment': deptNameOf(r.final_dept || r.requested_dept) || '',
     }))
@@ -1023,12 +993,6 @@ function VssDeployTable({ schedules, scheduleId }) {
               <option value="yes">Yes</option>
               <option value="no">No</option>
             </select>
-            <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Chair pass:</span>
-            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" onChange={e => { if (e.target.value !== '') { bulkSetChairPass(e.target.value === 'yes'); e.target.value = '' } }}>
-              <option value="" disabled>Set…</option>
-              <option value="yes">Yes</option>
-              <option value="no">No</option>
-            </select>
             <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Dept:</span>
             <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" onChange={e => { if (e.target.value) { bulkAssignDept(e.target.value); e.target.value = '' } }}>
               <option value="" disabled>Assign…</option>
@@ -1118,7 +1082,6 @@ function VssDeployTable({ schedules, scheduleId }) {
                               <th style={{ textAlign: 'center' }}>Initiated</th>
                               <th style={{ textAlign: 'center' }}>Consent</th>
                               <th style={{ textAlign: 'center' }}>Stay at Bhati</th>
-                              <th style={{ textAlign: 'center' }}>Chair Pass</th>
                               <th style={{ textAlign: 'center' }}>Days</th>
                               <th style={{ textAlign: 'center' }}>Deployment</th>
                             </tr>
@@ -1158,7 +1121,6 @@ function VssDeployTable({ schedules, scheduleId }) {
                                   </td>
                                   {renderConsentCell(r)}
                                   {renderBhatiCell(r)}
-                                  {renderChairPassCell(r)}
                                   {renderDaysCell(r)}
                                   {renderDeptCell(r)}
                                 </tr>

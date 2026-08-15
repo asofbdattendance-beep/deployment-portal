@@ -63,7 +63,9 @@ export default function InchargePicker({ id, value, currentName = '', sewadars, 
         onClick={e => { e.stopPropagation(); if (open) onToggle(false); else openMenu() }}
         disabled={disabled}
         className="select"
-        title={disabled ? 'Editing is disabled' : 'Search and pick the incharge for this department'}
+        title={disabled
+          ? 'Editing is disabled'
+          : (current ? `${current.badge_number} · ${current.sewadar_name}` : 'Search and pick the incharge for this department')}
         style={{
           width: '100%',
           textAlign: 'left',
@@ -77,9 +79,9 @@ export default function InchargePicker({ id, value, currentName = '', sewadars, 
         }}
       >
         {current ? (
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', minWidth: 0 }}>
-            <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#4f46e5', flexShrink: 0 }}>{current.badge_number}</span>
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{current.sewadar_name}</span>
+          <span style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start', gap: '0.1rem', minWidth: 0, lineHeight: 1.25, paddingRight: '0.9rem' }}>
+            <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#4f46e5', fontSize: '0.68rem', letterSpacing: '0.02em' }}>{current.badge_number}</span>
+            <span style={{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>{current.sewadar_name}</span>
           </span>
         ) : (
           <span style={{ color: '#94a3b8' }}>— None —</span>
