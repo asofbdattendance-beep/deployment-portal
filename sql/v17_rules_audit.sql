@@ -245,15 +245,12 @@ BEGIN
   v_role := public.get_portal_user_role();
   v_is_admin := v_role IN ('aso', 'super_admin');
 
-  -- INSERT: every new row matters. UPDATE: only rows whose effective
-  -- department actually changed (old_rows is empty on INSERT).
+  -- INSERT: every new row matters (multi-row inserts must not slip past the
+  -- per-row checks via a shared statement snapshot).
   FOR r IN
-    SELECT DISTINCT nr.schedule_id,
-                    COALESCE(nr.deployed_department_id, nr.department_id) AS dept_id
-    FROM new_rows nr
-    LEFT JOIN old_rows o ON nr.id = o.id
-    WHERE TG_OP = 'INSERT'
-       OR COALESCE(nr.deployed_department_id, nr.department_id) IS DISTINCT FROM COALESCE(o.deployed_department_id, o.department_id)
+    SELECT DISTINCT schedule_id,
+                    COALESCE(deployed_department_id, department_id) AS dept_id
+    FROM new_rows
   LOOP
     IF NOT v_is_admin THEN
       -- a locked centre cannot deploy (even via batched inserts/updates)
@@ -299,17 +296,101 @@ BEGIN
 END;
 $$;
 
+-- UPDATE variant: only rows whose EFFECTIVE department actually changed in
+-- this statement are re-checked (a row already occupying dept X that gets a
+-- benign update must not trip the quota gate). OLD TABLE is only legal on
+-- DELETE/UPDATE triggers, hence the separate function for UPDATE.
+CREATE OR REPLACE FUNCTION public.check_deployment_batch_upd()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  r record;
+  r2 record;
+  v_max integer;
+  v_used integer;
+  v_pre integer;
+  v_root text;
+  v_sched_status text;
+  v_deadline timestamptz;
+  v_role text;
+  v_is_admin boolean;
+BEGIN
+  v_role := public.get_portal_user_role();
+  v_is_admin := v_role IN ('aso', 'super_admin');
+
+  FOR r IN
+    SELECT DISTINCT nr.schedule_id,
+                    COALESCE(nr.deployed_department_id, nr.department_id) AS dept_id
+    FROM new_rows nr
+    JOIN old_rows o ON nr.id = o.id
+    WHERE COALESCE(nr.deployed_department_id, nr.department_id) IS DISTINCT FROM COALESCE(o.deployed_department_id, o.department_id)
+  LOOP
+    IF NOT v_is_admin THEN
+      -- a locked centre cannot deploy (even via batched updates)
+      IF EXISTS (
+        SELECT 1 FROM new_rows nr
+        WHERE nr.schedule_id = r.schedule_id
+          AND public.is_centre_locked(r.schedule_id, nr.centre)
+      ) THEN
+        RAISE EXCEPTION 'Deployment is locked by this centre — only ASO / Super Admin can change it';
+      END IF;
+
+      SELECT status, deadline INTO v_sched_status, v_deadline FROM public.deployment_schedules WHERE id = r.schedule_id;
+      IF v_sched_status IS NULL OR v_sched_status = 'done' THEN
+        RAISE EXCEPTION 'This schedule is done — editing disabled';
+      END IF;
+      IF v_deadline IS NOT NULL AND now() > v_deadline THEN
+        RAISE EXCEPTION 'Deadline has passed for this schedule';
+      END IF;
+    END IF;
+
+    -- evaluate quota from the perspective of each affected row's centre root
+    FOR r2 IN SELECT DISTINCT nr.centre FROM new_rows nr
+             WHERE nr.schedule_id = r.schedule_id
+               AND COALESCE(nr.deployed_department_id, nr.department_id) = r.dept_id LOOP
+      v_root := public.get_root_centre(r2.centre);
+      SELECT max_count INTO v_max FROM public.centre_allocations
+      WHERE schedule_id = r.schedule_id AND department_id = r.dept_id AND centre = v_root;
+      IF v_max IS NULL THEN CONTINUE; END IF;
+
+      -- runs AFTER the statement: the new rows are already in the table, so a
+      -- strict > rejects even multi-row batches that blow past the quota.
+      -- But a statement that only REDUCES a department (corrective moves out
+      -- of a legacy over-quota state) must not be blocked, so raise only when
+      -- the statement NET-increased the count (post > max AND post > pre).
+      SELECT count(*) INTO v_used FROM public.deployments d
+      WHERE d.schedule_id = r.schedule_id
+        AND COALESCE(d.deployed_department_id, d.department_id) = r.dept_id
+        AND public.get_root_centre(d.centre) = v_root;
+
+      SELECT count(*) INTO v_pre FROM old_rows o
+      WHERE o.schedule_id = r.schedule_id
+        AND COALESCE(o.deployed_department_id, o.department_id) = r.dept_id
+        AND public.get_root_centre(o.centre) = v_root;
+
+      IF v_used > v_max AND v_used > v_pre THEN
+        RAISE EXCEPTION 'Department quota already exhausted';
+      END IF;
+    END LOOP;
+  END LOOP;
+  RETURN NULL;
+END;
+$$;
+
 DROP TRIGGER IF EXISTS trg_check_deployment_batch_ins ON public.deployments;
 CREATE TRIGGER trg_check_deployment_batch_ins
   AFTER INSERT ON public.deployments
-  REFERENCING NEW TABLE AS new_rows OLD TABLE AS old_rows
+  REFERENCING NEW TABLE AS new_rows
   FOR EACH STATEMENT EXECUTE FUNCTION public.check_deployment_batch();
 
 DROP TRIGGER IF EXISTS trg_check_deployment_batch_upd ON public.deployments;
 CREATE TRIGGER trg_check_deployment_batch_upd
   AFTER UPDATE ON public.deployments
   REFERENCING NEW TABLE AS new_rows OLD TABLE AS old_rows
-  FOR EACH STATEMENT EXECUTE FUNCTION public.check_deployment_batch();
+  FOR EACH STATEMENT EXECUTE FUNCTION public.check_deployment_batch_upd();
 
 -- ------------------------------------------------------------
 -- 4. sewadar_audit_log — who changed what on which sewadar
