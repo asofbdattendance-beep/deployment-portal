@@ -1,32 +1,21 @@
-import { useState, useEffect, useRef } from 'react'
-import { supabase } from '../lib/supabase'
+import { useState, useRef } from 'react'
 import { Users, Download, Loader2 } from 'lucide-react'
 import { useToast } from '../components/Toast'
-import DeadlinePill from '../components/DeadlinePill'
 import DeploymentMatrixReport from '../components/DeploymentMatrixReport'
 
 /* ─── ASO / super_admin Overview tab ───
-   Page shell: title, schedule selector, deadline countdown, Excel export
-   button and the print-only report header. The centre-wise matrix report
+   Page shell: title, Excel export button and the print-only report header.
+   The centre-wise matrix report
    itself lives in the DeploymentMatrixReport section component (data
    loading, realtime refresh, rollups, rendering and the export all inside
    it). */
 
-export default function DeploymentPage() {
+export default function DeploymentPage({ schedules, scheduleId }) {
   const toast = useToast()
   const reportRef = useRef()
-  const [schedules, setSchedules] = useState([])
-  const [selectedScheduleId, setSelectedScheduleId] = useState('')
+  const selectedScheduleId = scheduleId
   const [reportLoading, setReportLoading] = useState(true)
   const [exporting, setExporting] = useState(false)
-
-  useEffect(() => {
-    supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false }).then(({ data, error }) => {
-      if (error) { toast.error(error.message); return }
-      setSchedules(data || [])
-      setSelectedScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
-    }).catch(() => {})
-  }, [toast])
 
   const schedule = schedules.find(s => s.id === selectedScheduleId)
 
@@ -50,12 +39,6 @@ export default function DeploymentPage() {
           <div className="page-sub">Scheduled (allocated quota) vs Deployed (finalized) per department, per CENTRE (incl. SC_SPs)</div>
         </div>
         <div className="print-hide" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-          <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
-            {schedules.map(s => (
-              <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
-            ))}
-          </select>
-          {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
           <button
             onClick={handleExport}
             disabled={reportLoading || exporting}

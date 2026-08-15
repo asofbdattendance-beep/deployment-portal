@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react'
 import { supabase } from '../lib/supabase'
 import { notElderlyFilter, isVssBadge, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, getRootCentre, changedConsentRows, buildConsentSnapshot } from '../lib/logic'
 import { useToast } from '../components/Toast'
-import DeadlinePill from '../components/DeadlinePill'
 import {
   Save, CheckCircle2, Search, ClipboardCheck, Users,
   Download, Pencil, Lock,
@@ -92,11 +91,10 @@ const DeployRow = memo(function DeployRow({ row, depts, deptNames, handlers, ser
   )
 })
 
-export default function DeploymentAllocationPage() {
+export default function DeploymentAllocationPage({ schedules, scheduleId }) {
   const toast = useToast()
+  const selectedScheduleId = scheduleId
 
-  const [schedules, setSchedules] = useState([])
-  const [selectedScheduleId, setSelectedScheduleId] = useState('')
   const [depts, setDepts] = useState([])
   const [centres, setCentres] = useState([])
   const [allocations, setAllocations] = useState([])
@@ -150,15 +148,6 @@ export default function DeploymentAllocationPage() {
   // handlers is memoized on stable deps, so read the dept-name lookup via a
   // ref to avoid a stale closure (and a use-before-init reference)
   const deptNameRef = useRef(() => null)
-
-  const loadSchedules = useCallback(async () => {
-    const { data, error } = await supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false })
-    if (error) { toast.error(error.message); return }
-    setSchedules(data || [])
-    setSelectedScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
-  }, [toast])
-
-  useEffect(() => { loadSchedules() }, [loadSchedules])
 
   const loadData = useCallback(async () => {
     if (!selectedScheduleId) return
@@ -764,14 +753,8 @@ export default function DeploymentAllocationPage() {
             <button onClick={exportExcel} disabled={exporting} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               <Download size={13} /> {exporting ? 'Exporting…' : 'Export Excel'}
             </button>
-            <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
-              {schedules.map(s => (
-                <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
-              ))}
-            </select>
           </div>
         </div>
-        {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
       </div>
 
 

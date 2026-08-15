@@ -4,7 +4,6 @@ import { computeDeptQuota, vssEligibilityReasons, isVssBadge, canEditDeployment,
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import DeptDropdown from '../components/DeptDropdown'
-import DeadlinePill, { DeadlineWarning } from '../components/DeadlinePill'
 import Tip from '../components/Tip'
 import VssDashboard from '../components/VssDashboard'
 import AddVssForm from '../components/AddVssForm'
@@ -15,7 +14,7 @@ import {
 } from 'lucide-react'
 
 /* ─── VSS: dedicated tab. Inner tabs: Deployment (+ Add VSS, placeholder). ─── */
-export default function VssPage() {
+export default function VssPage({ schedules, scheduleId }) {
   const { profile } = usePortalAuth()
   const isAso = profile?.role === 'aso' || profile?.role === 'super_admin'
   const [tab, setTab] = useState('deploy')
@@ -35,20 +34,19 @@ export default function VssPage() {
           </button>
         )}
       </div>
-      {tab === 'add' ? <AddVssForm /> : tab === 'roster' ? <VssRoster /> : isAso ? <VssDashboard /> : <VssDeployTable />}
+      {tab === 'add' ? <AddVssForm /> : tab === 'roster' ? <VssRoster /> : isAso ? <VssDashboard schedules={schedules} scheduleId={scheduleId} /> : <VssDeployTable schedules={schedules} scheduleId={scheduleId} />}
     </div>
   )
 }
 
 /* ─── VSS consent & deployment table (centre_user / centre_admin) ─── */
-function VssDeployTable() {
+function VssDeployTable({ schedules, scheduleId }) {
   const { profile } = usePortalAuth()
   const toast = useToast()
   const myCentre = profile?.centre
   const isEditableRole = profile?.role === 'centre_user' || profile?.role === 'centre_admin'
+  const selectedScheduleId = scheduleId
 
-  const [schedules, setSchedules] = useState([])
-  const [selectedScheduleId, setSelectedScheduleId] = useState('')
   const [consentRows, setConsentRows] = useState({})
   const [depts, setDepts] = useState([])
   const [allocations, setAllocations] = useState([])
@@ -90,14 +88,6 @@ function VssDeployTable() {
     }).catch(() => setSubtreeError(true))
   }, [myCentre, subtreeRetry])
 
-  const loadSchedules = useCallback(async () => {
-    const { data, error } = await supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false })
-    if (error) { toast.error(error.message); return }
-    setSchedules(data || [])
-    setSelectedScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
-  }, [toast])
-
-  useEffect(() => { loadSchedules() }, [loadSchedules])
   useEffect(() => { fetchPortalSettings().then(setSettings).catch(() => {}) }, [])
 
   const loadData = useCallback(async () => {
@@ -926,7 +916,6 @@ function VssDeployTable() {
             </button>
           </div>
         </div>
-        {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
       </div>
 
       <div className="stat-row">
@@ -989,11 +978,6 @@ function VssDeployTable() {
             <div className="section-title">VSS consent and deployment</div>
           </div>
           <div style={{ flex: 1 }} />
-          <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
-            {schedules.map(s => (
-              <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
-            ))}
-          </select>
           <select value={filterCentre} onChange={e => setFilterCentre(e.target.value)} className="select">
             <option value="all">All centres</option>
             {subtree.map(c => <option key={c} value={c}>{c}</option>)}
@@ -1023,7 +1007,6 @@ function VssDeployTable() {
             <Lock size={16} /> {scheduleDone ? 'This schedule is done.' : 'The deadline has passed.'} Editing is disabled.
           </div>
         )}
-        {canEdit && <DeadlineWarning deadline={schedule?.deadline} />}
 
         {canEdit && selectedRows.length > 0 && (
           <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.6rem', background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: 10, padding: '0.6rem 0.75rem', marginBottom: '1rem', fontSize: '0.82rem' }}>

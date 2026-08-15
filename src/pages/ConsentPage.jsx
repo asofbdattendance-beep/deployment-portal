@@ -9,14 +9,13 @@ import InchargePicker from '../components/InchargePicker'
 import DeadlinePill, { DeadlineWarning } from '../components/DeadlinePill'
 import { Save, Lock, CheckCircle2, Search, ClipboardCheck, ChevronDown, Users, AlertTriangle, CheckSquare, Download } from 'lucide-react'
 
-export default function ConsentPage() {
+export default function ConsentPage({ schedules, scheduleId }) {
   const { profile } = usePortalAuth()
   const toast = useToast()
   const myCentre = profile?.centre
   const isEditableRole = profile?.role === 'centre_user' || profile?.role === 'centre_admin'
+  const selectedScheduleId = scheduleId
 
-  const [schedules, setSchedules] = useState([])
-  const [selectedScheduleId, setSelectedScheduleId] = useState('')
   const [consentRows, setConsentRows] = useState({})
   const [depts, setDepts] = useState([])
   const [allocations, setAllocations] = useState([])
@@ -63,14 +62,6 @@ export default function ConsentPage() {
     }).catch(() => setSubtreeError(true))
   }, [myCentre, subtreeRetry])
 
-  const loadSchedules = useCallback(async () => {
-    const { data, error } = await supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false })
-    if (error) { toast.error(error.message); return }
-    setSchedules(data || [])
-    setSelectedScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
-  }, [toast])
-
-  useEffect(() => { loadSchedules() }, [loadSchedules])
   useEffect(() => { fetchPortalSettings().then(setSettings).catch(() => {}) }, [])
   // Escape closes every modal (bulk confirm, lock warnings) — the modals sit in
   // the render tree, so one listener covers them all
@@ -1157,11 +1148,6 @@ export default function ConsentPage() {
             <div className="section-title">Consent and deployment</div>
           </div>
           <div style={{ flex: 1 }} />
-          <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select" aria-label="Select schedule">
-            {schedules.map(s => (
-              <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
-            ))}
-          </select>
           <select value={filterCentre} onChange={e => setFilterCentre(e.target.value)} className="select" aria-label="Filter by centre">
             <option value="all">All centres</option>
             {subtree.map(c => <option key={c} value={c}>{c}</option>)}

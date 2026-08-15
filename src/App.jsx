@@ -1,5 +1,7 @@
-import { useState, lazy, Suspense } from 'react'
+import { useState, lazy, Suspense, useEffect, useCallback } from 'react'
 import { usePortalAuth } from './context/PortalAuthContext'
+import { supabase } from './lib/supabase'
+import { useToast } from './components/Toast'
 import LoginPage from './pages/LoginPage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
 import { ROLE_LABELS, ROLE_COLORS } from './lib/supabase'
@@ -31,20 +33,40 @@ function PageFallback() {
 
 function Dashboard() {
   const { profile, signOut } = usePortalAuth()
+  const toast = useToast()
   const visiblePages = Object.entries(PAGES).filter(([, cfg]) => cfg.roles.includes(profile?.role))
   const [activePage, setActivePage] = useState(visiblePages[0]?.[0] || 'consent')
+  const [schedules, setSchedules] = useState([])
+  const [scheduleId, setScheduleId] = useState('')
 
   const currentPage = visiblePages.some(([k]) => k === activePage) ? activePage : (visiblePages[0]?.[0] || 'consent')
 
+  // ONE schedule dropdown drives the query on every page below. ScheduleMakerPage
+  // mutates schedules (create/status/deadline/delete), so it reports back via
+  // refreshSchedules to keep this list (and the Consent page's deadline pill) fresh.
+  const loadSchedules = useCallback(async () => {
+    const { data, error } = await supabase.from('deployment_schedules').select('id, name, status, deadline').order('created_at', { ascending: false })
+    if (error) { toast.error(error.message); return }
+    setSchedules(data || [])
+    setScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
+  }, [toast])
+
+  useEffect(() => { loadSchedules() }, [loadSchedules])
+
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: '#f6f7fb' }}>
-      {/* ── top bar: brand + user ── */}
+      {/* ── top bar: brand + schedule dropdown + user ── */}
       <header className="app-header">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', flexShrink: 0, flexWrap: 'wrap' }}>
           <div className="brand-logo">
             <ShieldCheck size={18} />
           </div>
           <h1 className="brand-title">Deployment Portal</h1>
+          <select value={scheduleId} onChange={e => setScheduleId(e.target.value)} className="select" aria-label="Select schedule" style={{ marginLeft: '0.35rem', maxWidth: 260 }}>
+            {schedules.map(s => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
         </div>
         <div className="header-actions">
           <span className="header-user">{profile?.name}</span>
@@ -78,11 +100,11 @@ function Dashboard() {
 
       <main style={{ flex: 1 }}>
         <Suspense fallback={<PageFallback />}>
-          {currentPage === 'schedule' && <ScheduleMakerPage />}
-          {currentPage === 'consent' && <ConsentPage />}
-          {currentPage === 'vss' && <VssPage />}
-          {currentPage === 'deployment' && <DeploymentPage />}
-          {currentPage === 'alloc' && <DeploymentAllocationPage />}
+          {currentPage === 'schedule' && <ScheduleMakerPage refreshSchedules={loadSchedules} />}
+          {currentPage === 'consent' && <ConsentPage schedules={schedules} scheduleId={scheduleId} />}
+          {currentPage === 'vss' && <VssPage schedules={schedules} scheduleId={scheduleId} />}
+          {currentPage === 'deployment' && <DeploymentPage schedules={schedules} scheduleId={scheduleId} />}
+          {currentPage === 'alloc' && <DeploymentAllocationPage schedules={schedules} scheduleId={scheduleId} />}
         </Suspense>
       </main>
     </div>

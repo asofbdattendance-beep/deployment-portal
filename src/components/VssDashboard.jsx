@@ -4,26 +4,19 @@ import { isVssBadge } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from './Toast'
 import MasterSwitch from './MasterSwitch'
-import DeadlinePill from './DeadlinePill'
 import { BarChart3, Building2, Users, Download, AlertTriangle, Lock } from 'lucide-react'
 
 /* ─── Super admin / ASO: read-only VSS consent dashboard + master switch ─── */
-export default function VssDashboard() {
+export default function VssDashboard({ schedules, scheduleId }) {
   const { profile } = usePortalAuth()
   const toast = useToast()
-  const [schedules, setSchedules] = useState([])
-  const [selectedScheduleId, setSelectedScheduleId] = useState('')
+  const selectedScheduleId = scheduleId
   const [data, setData] = useState(null)
   const [settings, setSettings] = useState({ vss_deployment_open: false })
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false }).then(({ data, error }) => {
-      if (error) { toast.error(error.message); return }
-      setSchedules(data || [])
-      setSelectedScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
-    }).catch(() => {})
     fetchPortalSettings().then(setSettings).catch(() => {})
   }, [toast])
 
@@ -179,17 +172,11 @@ export default function VssDashboard() {
               onToggle={toggleVss}
               busy={busy}
             />
-            <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
-              {schedules.map(s => (
-                <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
-              ))}
-            </select>
             <button onClick={exportExcel} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               <Download size={13} /> Export Excel
             </button>
           </div>
         </div>
-        {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
       </div>
 
       {!settings.vss_deployment_open && (

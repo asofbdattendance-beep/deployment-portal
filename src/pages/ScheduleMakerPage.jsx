@@ -3,14 +3,13 @@ import { supabase, fetchCentres, getParentCentres } from '../lib/supabase'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import { Plus, Trash2, Edit3, Calendar, Lock, Unlock, ChevronRight } from 'lucide-react'
-import DeadlinePill from '../components/DeadlinePill'
 
 const SCHEDULE_STATUS_LABELS = {
   open: 'Open',
   done: 'Done',
 }
 
-export default function ScheduleMakerPage() {
+export default function ScheduleMakerPage({ refreshSchedules }) {
   const { profile } = usePortalAuth()
   const toast = useToast()
   const isSuper = profile?.role === 'super_admin'
@@ -43,6 +42,7 @@ export default function ScheduleMakerPage() {
         selectedScheduleId={selectedScheduleId}
         setSelectedScheduleId={setSelectedScheduleId}
         loadSchedules={loadSchedules}
+        refreshSchedules={refreshSchedules}
         isSuper={isSuper}
         toast={toast}
       />
@@ -59,7 +59,7 @@ export default function ScheduleMakerPage() {
 }
 
 /* ─── Schedules: create + deadline ─── */
-function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, loadSchedules, isSuper, toast }) {
+function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, loadSchedules, refreshSchedules, isSuper, toast }) {
   const [newName, setNewName] = useState('')
   const [newDeadline, setNewDeadline] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(null)
@@ -79,6 +79,7 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
     setNewName('')
     setNewDeadline('')
     loadSchedules()
+    refreshSchedules?.()
     toast.success('Schedule created')
   }
 
@@ -86,6 +87,7 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
     const { error } = await supabase.from('deployment_schedules').update({ status }).eq('id', id)
     if (error) { toast.error(error.message); return }
     loadSchedules()
+    refreshSchedules?.()
     toast.success(status === 'done' ? 'Schedule marked done — editing disabled' : 'Schedule reopened')
   }
 
@@ -93,6 +95,7 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
     const { error } = await supabase.from('deployment_schedules').update({ deadline: value ? new Date(value).toISOString() : null }).eq('id', id)
     if (error) { toast.error(error.message); return }
     loadSchedules()
+    refreshSchedules?.()
     toast.success(value ? 'Deadline set' : 'Deadline cleared')
   }
 
@@ -114,6 +117,7 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
     setConfirmDelete(null)
     if (selectedScheduleId === id) setSelectedScheduleId('')
     loadSchedules()
+    refreshSchedules?.()
     toast.success('Schedule deleted')
   }
 
@@ -170,7 +174,6 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
                 <span className={`pill ${s.status === "done" ? "pill-gray" : "pill-green"}`}>
                   {SCHEDULE_STATUS_LABELS[s.status] || s.status}
                 </span>
-                {s.deadline && <DeadlinePill deadline={s.deadline} small />}
                 {isSuper && (
                   <>
                     <div className="cluster" onClick={e => e.stopPropagation()} style={{ gap: '0.4rem' }}>

@@ -5,7 +5,6 @@ import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from './Toast'
 import MasterSwitch from './MasterSwitch'
 import { BarChart3, Users, Download, AlertTriangle, Building2, LayoutGrid, Lock, History } from 'lucide-react'
-import DeadlinePill from './DeadlinePill'
 
 /* ─── Super admin / ASO: comprehensive consent dashboard ───
    Two matrices:
@@ -14,11 +13,10 @@ import DeadlinePill from './DeadlinePill'
    2) Parent-centre department matrix — allocated seats per parent
       centre (incl. child centres) by department; Scheduled = total
       allocated for the centre. Both derived from centre_allocations. */
-export default function ConsentDashboard() {
+export default function ConsentDashboard({ schedules, scheduleId }) {
   const { profile } = usePortalAuth()
   const toast = useToast()
-  const [schedules, setSchedules] = useState([])
-  const [selectedScheduleId, setSelectedScheduleId] = useState('')
+  const selectedScheduleId = scheduleId
   const [centres, setCentres] = useState([])
   const [depts, setDepts] = useState([])
   const [consentMatrix, setConsentMatrix] = useState([])
@@ -31,11 +29,6 @@ export default function ConsentDashboard() {
   const [exporting, setExporting] = useState(false)
 
   useEffect(() => {
-    supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false }).then(({ data, error }) => {
-      if (error) { toast.error(error.message); return }
-      setSchedules(data || [])
-      setSelectedScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
-    }).catch(() => {})
     fetchPortalSettings().then(setSettings).catch(() => {})
     Promise.all([
       fetchCentres(),
@@ -265,17 +258,11 @@ export default function ConsentDashboard() {
               onToggle={toggleSewadars}
               busy={busy}
             />
-            <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
-              {schedules.map(s => (
-                <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
-              ))}
-            </select>
             <button onClick={exportExcel} disabled={exporting} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               <Download size={13} /> {exporting ? 'Exporting…' : 'Export Excel'}
             </button>
           </div>
         </div>
-        {schedule?.deadline && <DeadlinePill deadline={schedule.deadline} />}
       </div>
 
       {locks.length > 0 && (
