@@ -1,4 +1,4 @@
-import { useState, createContext, useContext, useCallback, useMemo } from 'react'
+import { useState, createContext, useContext, useCallback, useMemo, useRef, useEffect } from 'react'
 import { CheckCircle, XCircle, AlertTriangle, Info, X } from 'lucide-react'
 
 const ToastContext = createContext(null)
@@ -9,13 +9,26 @@ let toastSeq = 0
 
 export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([])
+  // auto-dismiss timers are tracked so a stale timeout can never fire
+  // setState after the provider unmounts
+  const timersRef = useRef(new Set())
+
+  useEffect(() => {
+    const timers = timersRef.current
+    return () => {
+      timers.forEach(clearTimeout)
+      timers.clear()
+    }
+  }, [])
 
   const addToast = useCallback((message, type = 'info', duration = 3000) => {
     const id = ++toastSeq
     setToasts(prev => [...prev, { id, message, type }])
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      timersRef.current.delete(timer)
       setToasts(prev => prev.filter(t => t.id !== id))
     }, duration)
+    timersRef.current.add(timer)
   }, [])
 
   const removeToast = useCallback((id) => {

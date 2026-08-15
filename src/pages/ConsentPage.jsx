@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, getRootCentre, notElderlyFilter, fetchPortalSettings } from '../lib/supabase'
 import { computeDeptQuota, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
@@ -72,9 +72,11 @@ export default function ConsentPage() {
   useEffect(() => { loadSchedules() }, [loadSchedules])
   useEffect(() => { fetchPortalSettings().then(setSettings).catch(() => {}) }, [])
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (silent = false) => {
     if (!selectedScheduleId || !subtree.length) return
-    setLoading(true)
+    // silent (realtime-triggered) reloads skip the skeleton + don't reset the
+    // user's expanded/collapsed accordion state
+    if (!silent) setLoading(true)
     // the lock is per schedule — never carry a previous schedule's lock state
     // over while the new schedule's lock is being fetched
     setLocked(false)
@@ -269,13 +271,18 @@ export default function ConsentPage() {
   useEffect(() => { loadData() }, [loadData])
 
   // live-update the master switch state (ASO open/close) + refresh when a
-  // peer centre edits consents/deployments for this schedule
+  // peer centre edits consents/deployments for this schedule. The channel is
+  // keyed only by schedule — loadData lives in a ref so its identity changing
+  // (subtree/centres settling in) never tears down and re-creates the channel.
+  const loadDataRef = useRef(loadData)
+  loadDataRef.current = loadData
   useEffect(() => {
     if (!selectedScheduleId) return
     const reload = () => {
       // don't clobber unsaved local edits with a stale server snapshot
       if (dirtyRef.current || savingRef.current) return
-      loadData()
+      // silent reload: refresh data in place without flashing the skeleton
+      loadDataRef.current(true)
     }
     const channel = supabase
       .channel(`consent-settings-${selectedScheduleId}`)
@@ -287,7 +294,7 @@ export default function ConsentPage() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
       .subscribe()
     return () => { supabase.removeChannel(channel) }
-  }, [selectedScheduleId, loadData])
+  }, [selectedScheduleId])
 
   // Latest committed state, kept in refs so a flush triggered by unmount or
   // a schedule switch always saves the data it belongs to (not whatever
@@ -543,19 +550,36 @@ export default function ConsentPage() {
   const canEdit = isEditableRole && !!schedule && schedule.status === 'open' && !deadlinePassed && !scheduleDone && !locked && settings.sewadar_deployment_open !== false
   editableRef.current = canEdit
 
-  const myAlloc = allocations.filter(a => a.centre === myRoot)
+  // Derived data is memoized — the table re-renders on every search keystroke
+  // / every autosave, and these are O(rows) / O(rows × depts) scans.
+  const myAlloc = useMemo(() => allocations.filter(a => a.centre === myRoot), [allocations, myRoot])
   // only departments the superadmin actually gave a quota to are offered/highlighted
-  const allocatedQuota = myAlloc.filter(a => (a.max_count || 0) > 0)
-  const savedAllCounts = {}
-  deployments.forEach(d => { savedAllCounts[d.department_id] = (savedAllCounts[d.department_id] || 0) + 1 })
-  const savedOwnCounts = {}
-  deployments.filter(d => !isVssBadge(d.badge_number)).forEach(d => { savedOwnCounts[d.department_id] = (savedOwnCounts[d.department_id] || 0) + 1 })
-  const localCounts = {}
-  Object.values(consentRows).forEach(r => { if (r.consent_given && r.requested_dept) localCounts[r.requested_dept] = (localCounts[r.requested_dept] || 0) + 1 })
-  const deptQuota = computeDeptQuota(myAlloc, savedAllCounts, localCounts, savedOwnCounts)
+  const allocatedQuota = useMemo(() => myAlloc.filter(a => (a.max_count || 0) > 0), [myAlloc])
+  const savedAllCounts = useMemo(() => {
+    const counts = {}
+    deployments.forEach(d => { counts[d.department_id] = (counts[d.department_id] || 0) + 1 })
+    return counts
+  }, [deployments])
+  const savedOwnCounts = useMemo(() => {
+    const counts = {}
+    deployments.filter(d => !isVssBadge(d.badge_number)).forEach(d => { counts[d.department_id] = (counts[d.department_id] || 0) + 1 })
+    return counts
+  }, [deployments])
+  const localCounts = useMemo(() => {
+    const counts = {}
+    Object.values(consentRows).forEach(r => { if (r.consent_given && r.requested_dept) counts[r.requested_dept] = (counts[r.requested_dept] || 0) + 1 })
+    return counts
+  }, [consentRows])
+  const deptQuota = useMemo(() => computeDeptQuota(myAlloc, savedAllCounts, localCounts, savedOwnCounts), [myAlloc, savedAllCounts, localCounts, savedOwnCounts])
+
+  const deptNameById = useMemo(() => {
+    const m = {}
+    depts.forEach(d => { m[d.id] = d.name })
+    return m
+  }, [depts])
 
   // returns a list of human-readable reasons a sewadar is not eligible for a dept
-  const rowEligibilityReasons = (key, deptId) => {
+  const rowEligibilityReasons = useCallback((key, deptId) => {
     const dept = depts.find(d => d.id === deptId)
     const row = consentRows[key]
     if (!dept || !row) return ['Department not found']
@@ -565,21 +589,24 @@ export default function ConsentPage() {
     // moved to a department that requires 5.
     const prospective = { ...row, available_days_count: daysForDept(dept.name) }
     return eligibilityReasons(prospective, dept)
-  }
-  const deptNameOf = (deptId) => depts.find(d => d.id === deptId)?.name || ''
+  }, [depts, consentRows])
+  const deptNameOf = useCallback((deptId) => deptNameById[deptId] || '', [deptNameById])
 
   // ── department incharges — one incharge per CENTRE × department ──
   // eligible sewadars: consented AND requested this department
-  const inchargeOptions = {}
-  Object.values(consentRows).forEach(r => {
-    if (r.consent_given && r.requested_dept) {
-      if (!inchargeOptions[r.requested_dept]) inchargeOptions[r.requested_dept] = []
-      inchargeOptions[r.requested_dept].push(r)
-    }
-  })
-  Object.keys(inchargeOptions).forEach(k => {
-    inchargeOptions[k].sort((a, b) => (a.sewadar_name || '').localeCompare(b.sewadar_name || '', undefined, { sensitivity: 'base' }))
-  })
+  const inchargeOptions = useMemo(() => {
+    const options = {}
+    Object.values(consentRows).forEach(r => {
+      if (r.consent_given && r.requested_dept) {
+        if (!options[r.requested_dept]) options[r.requested_dept] = []
+        options[r.requested_dept].push(r)
+      }
+    })
+    Object.keys(options).forEach(k => {
+      options[k].sort((a, b) => (a.sewadar_name || '').localeCompare(b.sewadar_name || '', undefined, { sensitivity: 'base' }))
+    })
+    return options
+  }, [consentRows])
   const inchargeKey = (deptId) => `${myRoot}|${deptId}`
   const setIncharge = (deptId, badgeNumber) => {
     dirtyRef.current = true
@@ -600,10 +627,10 @@ export default function ConsentPage() {
   // ── Lock deployment ──
   // Departments that MUST have an incharge before locking: every allocated
   // department that has at least one regular sewadar deployed to it.
-  const missingIncharges = allocatedQuota.filter(a => {
+  const missingIncharges = useMemo(() => allocatedQuota.filter(a => {
     const hasRegularAssigned = Object.values(consentRows).some(r => r.consent_given && r.requested_dept === a.department_id && !isVssBadge(r.badge_number))
     return hasRegularAssigned && !incharges[inchargeKey(a.department_id)]
-  })
+  }), [allocatedQuota, consentRows, incharges, myRoot])
   const startLock = () => {
     if (missingIncharges.length > 0) { setLockWarn(missingIncharges); return }
     setLockConfirm(true)
@@ -678,6 +705,38 @@ export default function ConsentPage() {
     return () => document.removeEventListener('click', onDocClick)
   }, [openDeptDropdown, openIncharge])
 
+  // Memoized filter/sort/group of the rows (recomputed on every render by
+  // default; the table re-renders on each search keystroke). Hoisted above the
+  // super_admin/aso early return so the hooks stay unconditional.
+  const visible = useMemo(() => Object.values(consentRows).filter(r => {
+    if (filterCentre !== 'all' && r.centre !== filterCentre) return false
+    if (search && !`${r.sewadar_name} ${r.badge_number}`.toLowerCase().includes(search.toLowerCase())) return false
+    return true
+  }).sort((a, b) => {
+    if (sortBy === 'badge') return a.badge_number.localeCompare(b.badge_number, undefined, { numeric: true })
+    return (a.sewadar_name || '').localeCompare(b.sewadar_name || '', undefined, { sensitivity: 'base' })
+  }), [consentRows, filterCentre, search, sortBy])
+
+  // group by centre
+  const byCentre = useMemo(() => {
+    const grouped = {}
+    visible.forEach(r => {
+      if (!grouped[r.centre]) grouped[r.centre] = []
+      grouped[r.centre].push(r)
+    })
+    return grouped
+  }, [visible])
+
+  const totals = useMemo(() => {
+    const rows = Object.values(consentRows)
+    return {
+      totalAll: rows.length,
+      consentedAll: rows.filter(r => r.consent_given).length,
+      requestedAll: rows.filter(r => r.consent_given && r.requested_dept).length,
+    }
+  }, [consentRows])
+  const { totalAll, consentedAll, requestedAll } = totals
+
   if (profile?.role === 'super_admin' || profile?.role === 'aso') {
     return <ConsentDashboard />
   }
@@ -708,26 +767,6 @@ export default function ConsentPage() {
       </div>
     )
   }
-
-  const visible = Object.values(consentRows).filter(r => {
-    if (filterCentre !== 'all' && r.centre !== filterCentre) return false
-    if (search && !`${r.sewadar_name} ${r.badge_number}`.toLowerCase().includes(search.toLowerCase())) return false
-    return true
-  }).sort((a, b) => {
-    if (sortBy === 'badge') return a.badge_number.localeCompare(b.badge_number, undefined, { numeric: true })
-    return (a.sewadar_name || '').localeCompare(b.sewadar_name || '', undefined, { sensitivity: 'base' })
-  })
-
-  // group by centre
-  const byCentre = {}
-  visible.forEach(r => {
-    if (!byCentre[r.centre]) byCentre[r.centre] = []
-    byCentre[r.centre].push(r)
-  })
-
-  const totalAll = Object.values(consentRows).length
-  const consentedAll = Object.values(consentRows).filter(r => r.consent_given).length
-  const requestedAll = Object.values(consentRows).filter(r => r.consent_given && r.requested_dept).length
 
   const SkeletonTable = () => (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', padding: '0.5rem' }}>

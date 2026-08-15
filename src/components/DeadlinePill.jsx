@@ -5,13 +5,13 @@ import { Check, AlertTriangle } from 'lucide-react'
 // for Days / Hours / Minutes / Seconds with zero-padded red numbers and a
 // green "active" check badge; pass small={true} for the compact version (e.g.
 // inside schedule list rows).
-export function useDeadlineCountdown(deadline) {
+export function useDeadlineCountdown(deadline, tick = true) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
-    if (!deadline) return
+    if (!deadline || !tick) return
     const t = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(t)
-  }, [deadline])
+  }, [deadline, tick])
   return now
 }
 
@@ -67,7 +67,7 @@ function CountdownBoxes({ r, small = false, badge = true, title, label }) {
 }
 
 export default function DeadlinePill({ deadline, showCountdown = true, small = false }) {
-  const now = useDeadlineCountdown(deadline)
+  const now = useDeadlineCountdown(deadline, showCountdown)
   const r = fmtRemaining(deadline, now)
   if (!r) return null
   const title = `Deadline ${new Date(deadline).toLocaleString()}`
