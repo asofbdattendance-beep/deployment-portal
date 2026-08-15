@@ -747,7 +747,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
   const { totalAll, consentedAll, requestedAll } = totals
 
   if (profile?.role === 'super_admin' || profile?.role === 'aso') {
-    return <ConsentDashboard />
+    return <ConsentDashboard schedules={schedules} scheduleId={selectedScheduleId} />
   }
 
   if (subtreeError) {
