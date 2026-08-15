@@ -77,6 +77,7 @@ function VssDeployTable() {
   const [selected, setSelected] = useState({})
   const [pendingBulk, setPendingBulk] = useState(null)
   const [locked, setLocked] = useState(false)
+  const [exporting, setExporting] = useState(false)
 
   const myRoot = getRootCentre(centres, myCentre)
 
@@ -166,6 +167,7 @@ function VssDeployTable() {
           chair_pass: ex?.chair_pass || false,
           requested_dept: deployMap[key]?.department_id || '',
           finalized: !!deployMap[key]?.deployed_department_id,
+          final_dept: deployMap[key]?.deployed_department_id || '',
         })
       })
 
@@ -279,6 +281,17 @@ function VssDeployTable() {
   }, [selectedScheduleId, subtree, myRoot, toast])
 
   useEffect(() => { loadData() }, [loadData])
+
+  // Escape closes the bulk-confirm modal
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return
+      setPendingBulk(null)
+      setOpenDeptDropdown(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   // realtime: reflect master switch + centre edits live
   useEffect(() => {
@@ -516,9 +529,9 @@ function VssDeployTable() {
   // AND gave a quota — quota bars / dropdowns show only those.
   const vssAllocatedQuota = allocatedQuota.filter(a => depts.find(d => d.id === a.department_id)?.include_vss)
   const savedAllCounts = {}
-  deployments.forEach(d => { savedAllCounts[d.department_id] = (savedAllCounts[d.department_id] || 0) + 1 })
+  deployments.forEach(d => { savedAllCounts[d.deployed_department_id || d.department_id] = (savedAllCounts[d.deployed_department_id || d.department_id] || 0) + 1 })
   const savedOwnCounts = {}
-  deployments.filter(d => isVssBadge(d.badge_number)).forEach(d => { savedOwnCounts[d.department_id] = (savedOwnCounts[d.department_id] || 0) + 1 })
+  deployments.filter(d => isVssBadge(d.badge_number)).forEach(d => { savedOwnCounts[d.deployed_department_id || d.department_id] = (savedOwnCounts[d.deployed_department_id || d.department_id] || 0) + 1 })
   const localOwnCounts = {}
   Object.values(consentRows).forEach(r => { if (r.consent_given && r.requested_dept) localOwnCounts[r.requested_dept] = (localOwnCounts[r.requested_dept] || 0) + 1 })
   const deptQuota = computeDeptQuota(myAlloc, savedAllCounts, localOwnCounts, savedOwnCounts)
@@ -697,6 +710,20 @@ function VssDeployTable() {
   const renderDeptCell = (r) => {
     const key = `${r.centre}|${r.badge_number}`
     const open = openDeptDropdown === key
+    // ASO-finalized rows are locked — show the FINAL department the ASO chose
+    // (which may differ from what the centre requested), never a dropdown.
+    if (r.finalized) {
+      return (
+        <td style={{ textAlign: 'center' }} data-label="Deployment">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', justifyContent: 'center' }}>
+            <span className="pill pill-indigo" title="Final department set by the ASO" style={{ whiteSpace: 'nowrap' }}>
+              {deptNameOf(r.final_dept) || deptNameOf(r.requested_dept) || '—'}
+            </span>
+            <span className="pill pill-indigo" style={{ fontSize: '0.6rem', whiteSpace: 'nowrap' }} title="Finalized by the ASO — locked">FINAL</span>
+          </div>
+        </td>
+      )
+    }
     // Only departments the ASO allocated a quota > 0 for AND opened for VSS
     // (include_vss) are offered — everything else is hidden entirely.
     const items = vssAllocatedQuota.map(a => {
@@ -845,12 +872,15 @@ function VssDeployTable() {
 
   // ── Excel export (centre role) — same lazy xlsx pattern as the other pages ──
   const exportExcel = async () => {
+    if (exporting) return
     if (!visible.length) {
       toast.info('Nothing to export yet')
       return
     }
-    const XLSX = await import('xlsx') // lazy — keeps xlsx (~400 kB) out of the main bundle
-    const wb = XLSX.utils.book_new()
+    setExporting(true)
+    try {
+      const XLSX = await import('xlsx') // lazy — keeps xlsx (~400 kB) out of the main bundle
+      const wb = XLSX.utils.book_new()
     const sheet = visible.map(r => ({
       'CENTRE': r.centre,
       'Badge Number': r.badge_number,
@@ -862,11 +892,14 @@ function VssDeployTable() {
       'Stay at Bhati': r.stay_at_bhati ? 'Yes' : 'No',
       'Chair Pass': r.chair_pass ? 'Yes' : 'No',
       'Days': r.consent_given ? r.available_days_count : '—',
-      'Deployment': deptNameOf(r.requested_dept) || '',
+      'Deployment': deptNameOf(r.final_dept || r.requested_dept) || '',
     }))
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), 'VSS Consent & Deployment')
     const name = (schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')
     XLSX.writeFile(wb, `${name}_vss_consent_deployment.xlsx`)
+    } catch (err) {
+      toast.error(err?.message || 'Export failed')
+    } finally { setExporting(false) }
   }
 
   return (
@@ -889,7 +922,7 @@ function VssDeployTable() {
               </button>
             )}
             <button onClick={exportExcel} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-              <Download size={13} /> Export Excel
+              <Download size={13} /> {exporting ? 'Exporting…' : 'Export Excel'}
             </button>
           </div>
         </div>
@@ -1030,7 +1063,7 @@ function VssDeployTable() {
 
         {pendingBulk && (
           <div className="modal-overlay" onClick={() => setPendingBulk(null)}>
-            <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 520, maxHeight: '80vh', overflowY: 'auto' }}>
+            <div className="modal" role="dialog" aria-modal="true" aria-label={pendingBulk.title} onClick={e => e.stopPropagation()} style={{ maxWidth: 520, maxHeight: '80vh', overflowY: 'auto' }}>
               <h4 style={{ fontSize: '0.95rem', fontWeight: 700, marginBottom: '0.5rem' }}>{pendingBulk.title}</h4>
               <p style={{ fontSize: '0.85rem', color: '#6b7280', marginBottom: '0.75rem' }}>{pendingBulk.message}</p>
               {pendingBulk.skipped && pendingBulk.skipped.length > 0 && (
@@ -1075,7 +1108,7 @@ function VssDeployTable() {
               const pct = rows.length ? Math.round(done / rows.length * 100) : 0
               return (
                 <div key={centre} className="acc-item">
-                  <div className="acc-head" onClick={() => setExpanded(e => ({ ...e, [centre]: !open }))}>
+                  <div className="acc-head" role="button" tabIndex={0} aria-expanded={open} onClick={() => setExpanded(e => ({ ...e, [centre]: !open }))} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(prev => ({ ...prev, [centre]: !prev[centre] !== false })) } }}>
                     <ChevronDown size={15} style={{ transform: open ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s', color: '#94a3b8' }} />
                     <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>{centre}</span>
                     <span className={`pill ${pct === 100 ? 'pill-blue' : 'pill-amber'}`} style={{ fontSize: '0.7rem' }}>

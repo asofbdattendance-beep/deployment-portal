@@ -4,7 +4,7 @@ import { getSubtreeCentres, getRootCentre } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from './Toast'
 import MasterSwitch from './MasterSwitch'
-import { BarChart3, Users, Download, AlertTriangle, Building2, LayoutGrid, Lock } from 'lucide-react'
+import { BarChart3, Users, Download, AlertTriangle, Building2, LayoutGrid, Lock, History } from 'lucide-react'
 import DeadlinePill from './DeadlinePill'
 
 /* ─── Super admin / ASO: comprehensive consent dashboard ───
@@ -25,8 +25,10 @@ export default function ConsentDashboard() {
   const [allocations, setAllocations] = useState([])
   const [settings, setSettings] = useState({ sewadar_deployment_open: true })
   const [locks, setLocks] = useState([])
+  const [activity, setActivity] = useState([])
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [exporting, setExporting] = useState(false)
 
   useEffect(() => {
     supabase.from('deployment_schedules').select('*').order('created_at', { ascending: false }).then(({ data, error }) => {
@@ -58,6 +60,14 @@ export default function ConsentDashboard() {
       const { data: lockData } = await supabase.from('centre_locks').select('*').eq('schedule_id', scheduleId)
       setLocks(lockData || [])
     } catch { setLocks([]) }
+    // recent major actions (v17 sewadar_audit_log) — non-fatal: card stays
+    // hidden until the migration is run and events start flowing
+    try {
+      const { data: actData } = await supabase
+        .from('sewadar_audit_log').select('*').eq('schedule_id', scheduleId)
+        .order('created_at', { ascending: false }).limit(25)
+      setActivity(actData || [])
+    } catch { setActivity([]) }
   }, [])
 
   useEffect(() => {
@@ -84,6 +94,7 @@ export default function ConsentDashboard() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_allocations', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_audit_log', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_settings' }, () => {
         fetchPortalSettings().then(setSettings).catch(() => {})
       })
@@ -160,7 +171,10 @@ export default function ConsentDashboard() {
   const pct = totals.total ? Math.round(totals.consented / totals.total * 100) : 0
 
   const exportExcel = async () => {
-    const XLSX = await import('xlsx') // lazy — keeps xlsx (~400 kB) out of the main bundle
+    if (exporting) return
+    setExporting(true)
+    try {
+      const XLSX = await import('xlsx') // lazy — keeps xlsx (~400 kB) out of the main bundle
     const wb = XLSX.utils.book_new()
 
     const consentRows = parentRows.map(r => ({
@@ -197,6 +211,9 @@ export default function ConsentDashboard() {
 
     const name = (schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')
     XLSX.writeFile(wb, `${name}.xlsx`)
+    } catch (err) {
+      toast.error(err?.message || 'Export failed')
+    } finally { setExporting(false) }
   }
 
   const cell = (key, v) => (
@@ -217,6 +234,24 @@ export default function ConsentDashboard() {
     </td>
   )
 
+  // ── recent-activity formatting (v17 sewadar_audit_log) ──
+  const actionMeta = (a) => {
+    switch (a.action) {
+      case 'finalize': return { label: 'Finalized', cls: 'pill-indigo' }
+      case 'change_final': return { label: 'Changed final dept', cls: 'pill-amber' }
+      case 'unfinalize': return { label: 'Un-finalized', cls: 'pill-gray' }
+      case 'deploy_add': return { label: 'Assigned', cls: 'pill-green' }
+      case 'deploy_remove': return { label: 'Removed deployment', cls: 'pill-red' }
+      case 'deploy_edit': return { label: 'Edited deployment', cls: 'pill-blue' }
+      case 'consent_add': return { label: 'Consent added', cls: 'pill-green' }
+      case 'consent_edit': return { label: 'Consent changed', cls: 'pill-blue' }
+      case 'consent_remove': return { label: 'Consent removed', cls: 'pill-red' }
+      case 'lock': return { label: 'Locked deployment', cls: 'pill-amber' }
+      case 'unlock': return { label: 'Unlocked deployment', cls: 'pill-green' }
+      default: return { label: a.action, cls: 'pill-gray' }
+    }
+  }
+
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
       <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
@@ -235,8 +270,8 @@ export default function ConsentDashboard() {
                 <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
               ))}
             </select>
-            <button onClick={exportExcel} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-              <Download size={13} /> Export Excel
+            <button onClick={exportExcel} disabled={exporting} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+              <Download size={13} /> {exporting ? 'Exporting…' : 'Export Excel'}
             </button>
           </div>
         </div>
@@ -402,6 +437,61 @@ export default function ConsentDashboard() {
               <strong>{totals.consented}</strong> of <strong>{totals.total}</strong> sewadars consented across {centres.length} centres ({parents.length} CENTREs)
             </div>
           </div>
+
+          {/* ── 3. Recent major actions (audit log) ── */}
+          {activity.length > 0 && (
+            <div className="card">
+              <div className="section-header" style={{ padding: '1.25rem 1.25rem 0' }}>
+                <div>
+                  <div className="section-title"><History size={15} style={{ marginRight: '0.35rem', verticalAlign: '-2px' }} /> Recent activity</div>
+                  <div style={{ fontSize: '0.78rem', color: '#64748b', fontWeight: 500, marginTop: '0.2rem' }}>Major changes only — finalization, admin fixes, lock / unlock</div>
+                </div>
+              </div>
+              <div className="table-wrap" style={{ border: 'none', borderRadius: 0, padding: '0 1.25rem 1.25rem' }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: 130 }}>When</th>
+                      <th>Who</th>
+                      <th style={{ width: 150 }}>Action</th>
+                      <th>Sewadar</th>
+                      <th>Change</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {activity.map(a => {
+                      const meta = actionMeta(a)
+                      const changeText = a.action.startsWith('consent')
+                        ? `${a.old_consent === null ? '—' : (a.old_consent ? 'Yes' : 'No')} → ${a.new_consent === null ? '—' : (a.new_consent ? 'Yes' : 'No')} consent`
+                        : (a.old_dept_name || a.new_dept_name)
+                          ? [a.old_dept_name, a.new_dept_name].filter(Boolean).join(' → ') || '—'
+                          : (a.action === 'lock' || a.action === 'unlock') && a.centre
+                            ? a.centre
+                            : '—'
+                      return (
+                        <tr key={a.id}>
+                          <td style={{ whiteSpace: 'nowrap', fontSize: '0.75rem', color: '#64748b', fontFamily: 'monospace' }}>
+                            {new Date(a.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                          </td>
+                          <td style={{ whiteSpace: 'nowrap', fontSize: '0.82rem' }}>
+                            {a.acted_by ? <strong>{a.acted_by}</strong> : <span style={{ color: '#94a3b8' }}>—</span>}
+                            {a.acted_by_role && <span className="pill pill-gray" style={{ fontSize: '0.6rem', marginLeft: '0.35rem' }}>{a.acted_by_role.replace('_', ' ')}</span>}
+                          </td>
+                          <td><span className={`pill ${meta.cls}`} style={{ fontSize: '0.68rem', whiteSpace: 'nowrap' }}>{meta.label}</span></td>
+                          <td style={{ fontSize: '0.82rem', whiteSpace: 'nowrap' }}>
+                            {a.sewadar_name
+                              ? <><span style={{ fontFamily: 'monospace', fontSize: '0.76rem', color: '#64748b' }}>{a.badge_number}</span> · {a.sewadar_name}</>
+                              : <span style={{ fontFamily: 'monospace', fontSize: '0.76rem', color: '#64748b' }}>{a.badge_number || a.centre}</span>}
+                          </td>
+                          <td style={{ fontSize: '0.8rem', color: '#475569' }}>{changeText}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

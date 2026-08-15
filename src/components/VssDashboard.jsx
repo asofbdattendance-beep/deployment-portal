@@ -32,13 +32,15 @@ export default function VssDashboard() {
       fetchCentres(),
       supabase.from('vss_sewadars').select('*'),
       supabase.from('sewadar_consents').select('*').eq('schedule_id', scheduleId),
-      supabase.from('deployments').select('centre, badge_number, department_id').eq('schedule_id', scheduleId),
+      supabase.from('deployments').select('centre, badge_number, department_id, deployed_department_id').eq('schedule_id', scheduleId),
       supabase.from('deployment_departments').select('id, name, include_vss').eq('is_active', true),
     ])
     const consentMap = {}
     ;(consents.data || []).forEach(c => { consentMap[`${c.centre}|${c.badge_number}`] = c })
     const deployMap = {}
-    ;(deps.data || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d.department_id })
+    // show the ASO's FINAL department when set (same semantics as the centre
+    // pages + the DB quota count) — a finalized override must not look stale
+    ;(deps.data || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d.deployed_department_id || d.department_id })
     const deptNameMap = {}
     ;(depts.data || []).forEach(d => { deptNameMap[d.id] = d.name })
     // centre deployment locks (v13) — non-fatal: the strip stays empty if the

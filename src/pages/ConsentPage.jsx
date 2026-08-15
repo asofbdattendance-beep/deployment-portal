@@ -50,6 +50,7 @@ export default function ConsentPage() {
   const [lockBusy, setLockBusy] = useState(false)
   const [lockWarn, setLockWarn] = useState(null)
   const [lockConfirm, setLockConfirm] = useState(false)
+  const [exporting, setExporting] = useState(false)
 
   const myRoot = getRootCentre(centres, myCentre)
 
@@ -71,6 +72,20 @@ export default function ConsentPage() {
 
   useEffect(() => { loadSchedules() }, [loadSchedules])
   useEffect(() => { fetchPortalSettings().then(setSettings).catch(() => {}) }, [])
+  // Escape closes every modal (bulk confirm, lock warnings) — the modals sit in
+  // the render tree, so one listener covers them all
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return
+      setPendingBulk(null)
+      setLockWarn(null)
+      setLockConfirm(false)
+      setOpenDeptDropdown(null)
+      setOpenIncharge(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   const loadData = useCallback(async (silent = false) => {
     if (!selectedScheduleId || !subtree.length) return
@@ -143,6 +158,7 @@ export default function ConsentPage() {
           chair_pass: ex?.chair_pass || false,
           requested_dept: deployMap[key]?.department_id || '',
           finalized: !!deployMap[key]?.deployed_department_id,
+          final_dept: deployMap[key]?.deployed_department_id || '',
           prev_department: prev?.prev_department || null,
           prev_attendance: prev?.attendance_reported != null ? prev.attendance_reported : null,
         })
@@ -557,12 +573,14 @@ export default function ConsentPage() {
   const allocatedQuota = useMemo(() => myAlloc.filter(a => (a.max_count || 0) > 0), [myAlloc])
   const savedAllCounts = useMemo(() => {
     const counts = {}
-    deployments.forEach(d => { counts[d.department_id] = (counts[d.department_id] || 0) + 1 })
+    // quota consumption follows the EFFECTIVE department — the ASO's final
+    // deployed dept when set, else the requested one (matches the DB)
+    deployments.forEach(d => { counts[d.deployed_department_id || d.department_id] = (counts[d.deployed_department_id || d.department_id] || 0) + 1 })
     return counts
   }, [deployments])
   const savedOwnCounts = useMemo(() => {
     const counts = {}
-    deployments.filter(d => !isVssBadge(d.badge_number)).forEach(d => { counts[d.department_id] = (counts[d.department_id] || 0) + 1 })
+    deployments.filter(d => !isVssBadge(d.badge_number)).forEach(d => { counts[d.deployed_department_id || d.department_id] = (counts[d.deployed_department_id || d.department_id] || 0) + 1 })
     return counts
   }, [deployments])
   const localCounts = useMemo(() => {
@@ -844,17 +862,31 @@ export default function ConsentPage() {
   const renderDeptCell = (r) => {
     const key = `${r.centre}|${r.badge_number}`
     const open = openDeptDropdown === key
+    // ASO-finalized rows are locked — show the FINAL department the ASO chose
+    // (which may differ from what the centre requested), never a dropdown.
+    if (r.finalized) {
+      return (
+        <td style={{ textAlign: 'center' }} data-label="Deployment">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', justifyContent: 'center' }}>
+            <span className="pill pill-indigo" title="Final department set by the ASO" style={{ whiteSpace: 'nowrap' }}>
+              {deptNameOf(r.final_dept) || deptNameOf(r.requested_dept) || '—'}
+            </span>
+            <span className="pill pill-indigo" style={{ fontSize: '0.6rem', whiteSpace: 'nowrap' }} title="Finalized by the ASO — locked">FINAL</span>
+          </div>
+        </td>
+      )
+    }
     // Only departments the superadmin allocated a quota > 0 for are offered —
     // zero-quota / unallocated departments are hidden entirely.
     const items = allocatedQuota.map(a => {
-      const dept = depts.find(d => d.id === a.department_id)
-      if (!dept) return null
+      const deptName = deptNameById[a.department_id]
+      if (!deptName) return null
       const q = deptQuota[a.department_id]
       const reasons = rowEligibilityReasons(key, a.department_id)
       const isCurrent = r.requested_dept === a.department_id
       const full = q && !isCurrent && q.rem < 1
       if (full) reasons.push(`Allocated quota reached (${q ? q.effective : 0}/${q ? q.max : a.max_count})`)
-      return { deptId: a.department_id, name: dept.name, q, reasons, isCurrent, full }
+      return { deptId: a.department_id, name: deptName, q, reasons, isCurrent, full }
     }).filter(Boolean)
     return (
       <td style={{ textAlign: 'center' }} data-label="Deployment">
@@ -986,12 +1018,15 @@ export default function ConsentPage() {
   // ── Excel export (centre role) — mirrors the lazy xlsx pattern used on the
   // Deployment Allocation / dashboard pages, so the bundle stays code-split ──
   const exportExcel = async () => {
+    if (exporting) return
     if (!visible.length) {
       toast.info('Nothing to export yet')
       return
     }
-    const XLSX = await import('xlsx') // lazy — keeps xlsx (~400 kB) out of the main bundle
-    const wb = XLSX.utils.book_new()
+    setExporting(true)
+    try {
+      const XLSX = await import('xlsx') // lazy — keeps xlsx (~400 kB) out of the main bundle
+      const wb = XLSX.utils.book_new()
     const sheet = visible.map(r => ({
       'CENTRE': r.centre,
       'Badge Number': r.badge_number,
@@ -1002,13 +1037,16 @@ export default function ConsentPage() {
       'Stay at Bhati': r.stay_at_bhati ? 'Yes' : 'No',
       'Chair Pass': r.chair_pass ? 'Yes' : 'No',
       'Days': r.consent_given ? r.available_days_count : '—',
-      'Deployment': deptNameOf(r.requested_dept) || '',
+      'Deployment': deptNameOf(r.final_dept || r.requested_dept) || '',
       'Prev. Dept': r.prev_department || '',
       'Attendance Reported': r.prev_attendance != null ? attendanceDisplay(r.prev_attendance, r.prev_department) : '',
     }))
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), 'Consent & Deployment')
     const name = (schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')
     XLSX.writeFile(wb, `${name}_consent_deployment.xlsx`)
+    } catch (err) {
+      toast.error(err?.message || 'Export failed')
+    } finally { setExporting(false) }
   }
 
   return (
@@ -1039,8 +1077,8 @@ export default function ConsentPage() {
                 <Lock size={13} /> {lockBusy ? 'Locking…' : 'Lock Deployment'}
               </button>
             )}
-            <button onClick={exportExcel} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-              <Download size={13} /> Export Excel
+            <button onClick={exportExcel} disabled={exporting} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+              <Download size={13} /> {exporting ? 'Exporting…' : 'Export Excel'}
             </button>
           </div>
         </div>
@@ -1076,7 +1114,7 @@ export default function ConsentPage() {
       {allocatedQuota.length > 0 && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: '0.75rem', marginBottom: '1.25rem' }}>
           {allocatedQuota.map(a => {
-            const dept = depts.find(d => d.id === a.department_id)
+            const deptName = deptNameById[a.department_id]
             const q = deptQuota[a.department_id]
             const pct = q ? Math.round(q.effective / q.max * 100) : 0
             const over = q && q.rem < 0
@@ -1084,7 +1122,7 @@ export default function ConsentPage() {
             return (
               <div key={a.department_id} className="card" style={{ padding: '0.85rem 1rem' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                  <span style={{ fontWeight: 700, fontSize: '0.85rem' }}>{dept?.name || '—'}</span>
+                  <span style={{ fontWeight: 700, fontSize: '0.85rem' }}>{deptName || '—'}</span>
                   <span style={{ fontWeight: 800, fontSize: '0.9rem', color: over ? '#ef4444' : '#0f172a' }}>{q ? q.effective : 0}<span style={{ color: '#94a3b8', fontWeight: 600, fontSize: '0.78rem' }}>/{q ? q.max : a.max_count}</span></span>
                 </div>
                 <div className="progress">
@@ -1119,22 +1157,22 @@ export default function ConsentPage() {
             <div className="section-title">Consent and deployment</div>
           </div>
           <div style={{ flex: 1 }} />
-          <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
+          <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select" aria-label="Select schedule">
             {schedules.map(s => (
               <option key={s.id} value={s.id}>{s.name} ({s.status.replace('_', ' ')})</option>
             ))}
           </select>
-          <select value={filterCentre} onChange={e => setFilterCentre(e.target.value)} className="select">
+          <select value={filterCentre} onChange={e => setFilterCentre(e.target.value)} className="select" aria-label="Filter by centre">
             <option value="all">All centres</option>
             {subtree.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
-          <select value={sortBy} onChange={e => setSortBy(e.target.value)} className="select" title="Sort rows">
+          <select value={sortBy} onChange={e => setSortBy(e.target.value)} className="select" title="Sort rows" aria-label="Sort rows">
             <option value="name">Sort: Name</option>
             <option value="badge">Sort: Badge number</option>
           </select>
           <div style={{ position: 'relative', minWidth: 200 }}>
             <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
-            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name / badge..." className="input" style={{ width: '100%', paddingLeft: 30 }} />
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name / badge..." className="input" style={{ width: '100%', paddingLeft: 30 }} aria-label="Search name or badge" />
           </div>
         </div>
 
@@ -1159,30 +1197,30 @@ export default function ConsentPage() {
           <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.6rem', background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: 10, padding: '0.6rem 0.75rem', marginBottom: '1rem', fontSize: '0.82rem' }}>
             <span style={{ fontWeight: 700, color: '#3730a3' }}><CheckSquare size={13} style={{ verticalAlign: '-2px', marginRight: '0.25rem' }} />{selectedRows.length} selected</span>
             <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Consent:</span>
-            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" onChange={e => { if (e.target.value !== '') { bulkConsent(e.target.value === 'yes'); e.target.value = '' } }}>
+            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" aria-label="Set consent" onChange={e => { if (e.target.value !== '') { bulkConsent(e.target.value === 'yes'); e.target.value = '' } }}>
               <option value="" disabled>Set…</option>
               <option value="yes">Yes</option>
               <option value="no">No</option>
             </select>
             <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Stay:</span>
-            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" onChange={e => { if (e.target.value !== '') { bulkSetBhati(e.target.value === 'yes'); e.target.value = '' } }}>
+            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" aria-label="Set stay at bhati" onChange={e => { if (e.target.value !== '') { bulkSetBhati(e.target.value === 'yes'); e.target.value = '' } }}>
               <option value="" disabled>Set…</option>
               <option value="yes">Yes</option>
               <option value="no">No</option>
             </select>
             <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Chair pass:</span>
-            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" onChange={e => { if (e.target.value !== '') { bulkSetChairPass(e.target.value === 'yes'); e.target.value = '' } }}>
+            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" aria-label="Set chair pass" onChange={e => { if (e.target.value !== '') { bulkSetChairPass(e.target.value === 'yes'); e.target.value = '' } }}>
               <option value="" disabled>Set…</option>
               <option value="yes">Yes</option>
               <option value="no">No</option>
             </select>
             <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Dept:</span>
-            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" onChange={e => { if (e.target.value) { bulkAssignDept(e.target.value); e.target.value = '' } }}>
+            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" aria-label="Assign to department" onChange={e => { if (e.target.value) { bulkAssignDept(e.target.value); e.target.value = '' } }}>
               <option value="" disabled>Assign…</option>
               {allocatedQuota.map(a => {
-                const dept = depts.find(d => d.id === a.department_id)
-                if (!dept) return null
-                return <option key={a.department_id} value={a.department_id}>{dept.name} ({deptQuota[a.department_id]?.effective || 0}/{deptQuota[a.department_id]?.max || a.max_count})</option>
+                const deptName = deptNameById[a.department_id]
+                if (!deptName) return null
+                return <option key={a.department_id} value={a.department_id}>{deptName} ({deptQuota[a.department_id]?.effective || 0}/{deptQuota[a.department_id]?.max || a.max_count})</option>
               })}
             </select>
             <div style={{ flex: 1 }} />
@@ -1194,7 +1232,7 @@ export default function ConsentPage() {
 
         {pendingBulk && (
           <div className="modal-overlay" onClick={() => setPendingBulk(null)}>
-            <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 520, maxHeight: '80vh', overflowY: 'auto' }}>
+            <div className="modal" role="dialog" aria-modal="true" aria-label={pendingBulk.title} onClick={e => e.stopPropagation()} style={{ maxWidth: 520, maxHeight: '80vh', overflowY: 'auto' }}>
               <h4 style={{ fontSize: '0.95rem', fontWeight: 700, marginBottom: '0.5rem' }}>{pendingBulk.title}</h4>
               <p style={{ fontSize: '0.85rem', color: '#6b7280', marginBottom: '0.75rem' }}>{pendingBulk.message}</p>
               {pendingBulk.skipped && pendingBulk.skipped.length > 0 && (
@@ -1222,17 +1260,17 @@ export default function ConsentPage() {
 
         {lockWarn && (
           <div className="modal-overlay" onClick={() => setLockWarn(null)}>
-            <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 480 }}>
+            <div className="modal" role="dialog" aria-modal="true" aria-label="Add incharges before locking" onClick={e => e.stopPropagation()} style={{ maxWidth: 480 }}>
               <h4 style={{ fontSize: '0.95rem', fontWeight: 700, marginBottom: '0.5rem' }}>Add incharges before locking</h4>
               <p style={{ fontSize: '0.85rem', color: '#6b7280', marginBottom: '0.75rem' }}>
                 Every department with deployed sewadars needs an incharge before you can lock deployment. Missing:
               </p>
               <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: '0.6rem 0.75rem', marginBottom: '0.75rem' }}>
                 {lockWarn.map(a => {
-                  const dept = depts.find(d => d.id === a.department_id)
+                  const deptName = deptNameById[a.department_id]
                   return (
                     <div key={a.department_id} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.25rem 0', borderBottom: '1px solid #fde68a', fontSize: '0.82rem', fontWeight: 600, color: '#78350f' }}>
-                      <span>{dept?.name || '—'}</span>
+                      <span>{deptName || '—'}</span>
                       <span style={{ color: '#b45309', fontWeight: 500 }}>no incharge</span>
                     </div>
                   )
@@ -1247,7 +1285,7 @@ export default function ConsentPage() {
 
         {lockConfirm && (
           <div className="modal-overlay" onClick={() => setLockConfirm(false)}>
-            <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 460 }}>
+            <div className="modal" role="dialog" aria-modal="true" aria-label="Lock deployment" onClick={e => e.stopPropagation()} style={{ maxWidth: 460 }}>
               <h4 style={{ fontSize: '0.95rem', fontWeight: 700, marginBottom: '0.5rem' }}>Lock deployment for {myCentre}?</h4>
               <p style={{ fontSize: '0.85rem', color: '#6b7280', marginBottom: '0.75rem' }}>
                 All required incharges are set. After locking, consent, deployment and incharges (including VSS) become read-only for your centre — only the ASO / Super Admin can reopen it.
@@ -1278,7 +1316,7 @@ export default function ConsentPage() {
               const pct = rows.length ? Math.round(done / rows.length * 100) : 0
               return (
                 <div key={centre} className="acc-item">
-                  <div className="acc-head" onClick={() => setExpanded(e => ({ ...e, [centre]: !open }))}>
+                  <div className="acc-head" role="button" tabIndex={0} aria-expanded={open} onClick={() => setExpanded(e => ({ ...e, [centre]: !open }))} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(prev => ({ ...prev, [centre]: !prev[centre] !== false })) } }}>
                     <ChevronDown size={15} style={{ transform: open ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s', color: '#94a3b8' }} />
                     <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>{centre}</span>
                     <span className={`pill ${pct === 100 ? 'pill-blue' : 'pill-amber'}`} style={{ fontSize: '0.7rem' }}>
@@ -1297,7 +1335,7 @@ export default function ConsentPage() {
                             <tr>
                               <th style={{ width: 40, textAlign: 'center' }}>S.No.</th>
                               <th style={{ width: 30, textAlign: 'center' }}>
-                                <input type="checkbox" checked={rows.length > 0 && rows.every(r => selected[`${r.centre}|${r.badge_number}`])} onChange={() => selectAllCentre(rows)} disabled={!canEdit} style={{ cursor: canEdit ? 'pointer' : 'not-allowed' }} title="Select all in this centre" />
+                                <input type="checkbox" checked={rows.length > 0 && rows.every(r => selected[`${r.centre}|${r.badge_number}`])} ref={el => { if (el) el.indeterminate = rows.some(r => selected[`${r.centre}|${r.badge_number}`]) && !rows.every(r => selected[`${r.centre}|${r.badge_number}`]) }} onChange={() => selectAllCentre(rows)} disabled={!canEdit} style={{ cursor: canEdit ? 'pointer' : 'not-allowed' }} title="Select all in this centre" aria-label={`Select all in ${centre}`} />
                               </th>
                               <th>Badge</th>
                               <th>Name</th>

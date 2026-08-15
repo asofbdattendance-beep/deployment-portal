@@ -99,10 +99,13 @@ export default function DeploymentAllocationPage() {
   const [selectedScheduleId, setSelectedScheduleId] = useState('')
   const [depts, setDepts] = useState([])
   const [centres, setCentres] = useState([])
+  const [allocations, setAllocations] = useState([])
   const [rows, setRows] = useState({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [savedAt, setSavedAt] = useState(null)
+  const [exporting, setExporting] = useState(false)
+  const exportingRef = useRef(false)
   const [editMode, setEditMode] = useState(false)
   const [search, setSearch] = useState('')
   const [filterCentre, setFilterCentre] = useState('all')
@@ -166,18 +169,19 @@ export default function DeploymentAllocationPage() {
     const prevRows = liveRef.current.rows
     const prevDirty = dirtyRef.current
     try {
-      const [sewRes, vssRes, consRes, deptRes, deployRes, centreRes] = await Promise.all([
+      const [sewRes, vssRes, consRes, deptRes, deployRes, centreRes, allocRes] = await Promise.all([
         supabase.from('sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, badge_status').or(notElderlyFilter()).order('sewadar_name'),
         supabase.from('vss_sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, is_active, badge_status').order('sewadar_name'),
         supabase.from('sewadar_consents').select('*').eq('schedule_id', selectedScheduleId),
         supabase.from('deployment_departments').select('*').order('name'),
         supabase.from('deployments').select('*').eq('schedule_id', selectedScheduleId),
         supabase.from('centres').select('name, parent_centre').order('name'),
+        supabase.from('centre_allocations').select('department_id, centre, max_count').eq('schedule_id', selectedScheduleId),
       ])
 
       // Abort if any query failed — empty rows here would reset the save
       // baseline and could let a later save clobber real consent data.
-      const failed = [sewRes, vssRes, consRes, deptRes, deployRes, centreRes].find(r => r?.error)
+      const failed = [sewRes, vssRes, consRes, deptRes, deployRes, centreRes, allocRes].find(r => r?.error)
       if (failed) throw failed.error
 
       const sewadars = [...(sewRes.data || []), ...(vssRes.data || [])]
@@ -242,14 +246,20 @@ export default function DeploymentAllocationPage() {
       setRows(map)
       setDepts(deptRes.data || [])
       setCentres(centreRes.data || [])
+      setAllocations(allocRes.data || [])
       dirtyRef.current = false
       editVersionRef.current = 0
       loadedRef.current = true
       scheduleIdRef.current = selectedScheduleId
-      setFilterCentre('all')
-      setFilterStatus('all')
-      setSearch('')
-      setEditMode(false)
+      // Reset the UI filters only on an actual schedule switch — a realtime
+      // refresh of the SAME schedule must not wipe the ASO's filter/search/
+      // edit-mode state mid-work.
+      if (prevLoadedSchedule !== selectedScheduleId) {
+        setFilterCentre('all')
+        setFilterStatus('all')
+        setSearch('')
+        setEditMode(false)
+      }
     } catch (err) {
       // A failed refresh must not look like a successful load — keep the
       // previous rows and any unsaved edits, and tell the user why.
@@ -645,9 +655,35 @@ export default function DeploymentAllocationPage() {
   const deptNameOf = useCallback((id) => deptMap.get(id)?.name || null, [deptMap])
   deptNameRef.current = deptNameOf
 
+  // Quota visibility for the ASO: per department, assigned vs max within the
+  // current filter scope (one CENTRE or all centres). Quota is enforced by the
+  // DB (v17) — this strip makes an over-quota assignment visible BEFORE saving.
+  const quotaStrip = useMemo(() => {
+    const rootOfFilter = filterCentre === 'all' ? null : getRootCentre(centres, filterCentre)
+    const used = {}
+    all.forEach(r => {
+      if (rootOfFilter !== null && getRootCentre(centres, r.centre) !== rootOfFilter) return
+      const d = r.deployed_dept_id || r.requested_dept_id
+      if (d) used[d] = (used[d] || 0) + 1
+    })
+    const max = {}
+    ;(allocations || []).forEach(a => {
+      if (rootOfFilter !== null && a.centre !== rootOfFilter) return
+      max[a.department_id] = (max[a.department_id] || 0) + a.max_count
+    })
+    return Object.entries(max)
+      .filter(([, m]) => m > 0)
+      .map(([deptId, m]) => ({ deptId, name: deptMap.get(deptId)?.name || deptId, used: used[deptId] || 0, max: m }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }, [all, allocations, filterCentre, centres, deptMap])
+
   // ── Excel export ──
   const exportExcel = useCallback(async () => {
-    const XLSX = await import('xlsx') // lazy — keeps xlsx (~400 kB) out of the main bundle
+    if (exportingRef.current) return
+    exportingRef.current = true
+    setExporting(true)
+    try {
+      const XLSX = await import('xlsx') // lazy — keeps xlsx (~400 kB) out of the main bundle
     const wb = XLSX.utils.book_new()
     const main = visible.map(r => {
       const autoAssigned = r.deployed_dept_id && r.deployed_dept_id === r.requested_dept_id
@@ -701,7 +737,13 @@ export default function DeploymentAllocationPage() {
 
     const name = (schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')
     XLSX.writeFile(wb, `${name}_finalize_deployment.xlsx`)
-  }, [visible, deptNameOf, schedule])
+    } catch (err) {
+      toast.error(err?.message || 'Export failed')
+    } finally {
+      exportingRef.current = false
+      setExporting(false)
+    }
+  }, [visible, deptNameOf, schedule, toast])
 
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
@@ -719,8 +761,8 @@ export default function DeploymentAllocationPage() {
             <button onClick={saveDraft} className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               <Save size={13} /> Save Draft
             </button>
-            <button onClick={exportExcel} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-              <Download size={13} /> Export Excel
+            <button onClick={exportExcel} disabled={exporting} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+              <Download size={13} /> {exporting ? 'Exporting…' : 'Export Excel'}
             </button>
             <select value={selectedScheduleId} onChange={e => setSelectedScheduleId(e.target.value)} className="select">
               {schedules.map(s => (
@@ -755,6 +797,30 @@ export default function DeploymentAllocationPage() {
           <div className="stat-sub">consented, no dept requested</div>
         </div>
       </div>
+
+      {quotaStrip.length > 0 && (
+        <div className="card" style={{ padding: '0.85rem 1.25rem', marginBottom: '1rem' }}>
+          <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', alignItems: 'center' }}>
+            <span style={{ fontWeight: 800, fontSize: '0.8rem', color: '#475569', marginRight: '0.35rem' }}>
+              {filterCentre === 'all' ? 'All centres' : filterCentre} — quota
+            </span>
+            {quotaStrip.map(s => {
+              const over = s.used > s.max
+              const full = !over && s.used >= s.max
+              return (
+                <span
+                  key={s.deptId}
+                  className={`pill ${over ? 'pill-red' : full ? 'pill-amber' : 'pill-gray'}`}
+                  style={{ fontSize: '0.72rem' }}
+                  title={over ? `Over allocated quota — the server rejects new assignments (${s.used} of ${s.max})` : `${s.used} of ${s.max} assigned`}
+                >
+                  {s.name} <b>{s.used}</b>/{s.max}{over ? ' ⚠' : ''}
+                </span>
+              )
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="card" style={{ padding: '1.25rem' }}>
         <div className="section-header" style={{ flexWrap: 'wrap', gap: '0.75rem' }}>
