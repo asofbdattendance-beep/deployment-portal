@@ -433,7 +433,7 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
   SELECT COALESCE(
-    (SELECT name FROM public.sewadars WHERE badge_number = p_badge LIMIT 1),
+    (SELECT sewadar_name FROM public.sewadars WHERE badge_number = p_badge LIMIT 1),
     (SELECT sewadar_name FROM public.vss_sewadars WHERE badge_number = p_badge LIMIT 1),
     p_badge
   );
