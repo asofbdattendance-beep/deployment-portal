@@ -721,7 +721,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
 }
 .deadline-boxes-label {
   font-size: 0.68rem;
-  font-weight: 700;
+  font-weight: 1000;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-sec);
@@ -773,6 +773,15 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-muted);
+}
+.deadline-boxes-date {
+  font-size: 0.72rem;
+  font-weight: 1000;
+  color: var(--text-sec);
+  white-space: nowrap;
+  padding-top: 0.35rem;
+  border-top: 1px solid #f1f5f9;
+  margin-top: 0.15rem;
 }
 .deadline-date {
   font-size: 0.82rem;

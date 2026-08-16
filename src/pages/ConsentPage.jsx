@@ -1105,7 +1105,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
           <div className="stat-value">{totalAll}</div>
         </div>
         <div className="stat">
-          <div className="stat-label">Seats requested by ASO</div>
+          <div className="stat-label">Scheduled Count</div>
           <div className="stat-value" style={{ color: '#8b5cf6' }}>{totalRequestedSeats}</div>
           <div className="stat-sub">across {allocatedQuota.length} department{allocatedQuota.length === 1 ? '' : 's'}</div>
         </div>
@@ -1115,20 +1115,11 @@ export default function ConsentPage({ schedules, scheduleId }) {
           <div className="stat-sub">of {totalAll}</div>
         </div>
         <div className="stat">
-          <div className="stat-label">Deployment</div>
+          <div className="stat-label">DEPLOYED</div>
           <div className="stat-value" style={{ color: requestedAll === consentedAll && consentedAll ? '#10b981' : '#8b5cf6' }}>{requestedAll}</div>
           <div className="stat-sub">of {consentedAll} consented</div>
         </div>
-        <div className="stat">
-          <div className="stat-label">Consent completion</div>
-          <div className="stat-value" style={{ fontSize: '1.1rem', paddingTop: '0.35rem' }}>
-            <div className="progress" style={{ height: 10 }}>
-              <div className="progress-bar" style={{ width: `${totalAll ? Math.round(consentedAll / totalAll * 100) : 0}%` }} />
-            </div>
-          </div>
-          <div className="stat-sub">{totalAll ? Math.round(consentedAll / totalAll * 100) : 0}% consented</div>
         </div>
-      </div>
 
       {allocatedQuota.length > 0 && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '0.75rem', marginBottom: '1.25rem' }}>

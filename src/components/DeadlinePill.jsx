@@ -42,7 +42,7 @@ function CountdownBox({ value, label }) {
 
 // Four-box countdown group with a green "active" check badge on the corner
 // and an optional heading line rendered above the boxes.
-function CountdownBoxes({ r, small = false, badge = true, title, label }) {
+function CountdownBoxes({ r, small = false, badge = true, title, label, date }) {
   return (
     <span
       className={`deadline-boxes${small ? ' deadline-boxes-small' : ''}`}
@@ -62,6 +62,7 @@ function CountdownBoxes({ r, small = false, badge = true, title, label }) {
         <CountdownBox value={r.mins} label="Minutes" />
         <CountdownBox value={r.secs} label="Seconds" />
       </span>
+      {date && <span className="deadline-boxes-date">END Date :- {date}</span>}
     </span>
   )
 }
@@ -81,7 +82,7 @@ export default function DeadlinePill({ deadline, showCountdown = true, small = f
       </span>
     )
   }
-  return <CountdownBoxes r={r} small={small} title={title} label={small ? undefined : 'Deployment Submission Window Closes In'} />
+  return <CountdownBoxes r={r} small={small} title={title} label={small ? undefined : 'Deployment Submission Window Closes In'} date={small ? undefined : new Date(deadline).toLocaleString()} />
 }
 
 // Self-contained amber warning shown only when a deadline is < 1 day away.
