@@ -73,6 +73,25 @@ body {
   line-height: 1.5;
 }
 
+/* ─── Global feel ─── */
+/* Branded text selection */
+::selection { background: rgba(99, 102, 241, 0.18); }
+/* Native checkboxes/radios pick up the theme (lock confirm, bulk select) */
+input[type='checkbox'], input[type='radio'] { accent-color: var(--primary); }
+/* Kill the grey tap flash on touch devices — our hover/focus states cover it */
+html { -webkit-tap-highlight-color: transparent; }
+/* Slim themed scrollbars — long tables and the page itself feel lighter */
+* { scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: #94a3b8; }
+
 @keyframes spin { to { transform: rotate(360deg); } }
 
 button { font-family: inherit; }
@@ -106,6 +125,12 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   padding: 1.5rem;
   max-width: 100%;
   margin: 0 auto;
+  /* gentle entrance on tab switch — replays only when the page remounts */
+  animation: page-in 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes page-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
 }
 
 .page-header {
@@ -175,9 +200,11 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   border-radius: var(--radius);
   padding: 0.85rem 1rem;
   box-shadow: var(--shadow);
+  transition: box-shadow 0.18s ease, border-color 0.18s ease;
 }
+.stat:hover { box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08); border-color: #cbd5e1; }
 .stat-label { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-sec); }
-.stat-value { font-size: 1.4rem; font-weight: 800; margin-top: 0.15rem; letter-spacing: -0.02em; }
+.stat-value { font-size: 1.4rem; font-weight: 800; margin-top: 0.15rem; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .stat-sub { font-size: 0.72rem; color: var(--text-muted); margin-top: 0.1rem; }
 
 /* ─── Skeleton loading ─── */
@@ -457,6 +484,14 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
 }
 .btn:hover { background: var(--surface-2); color: var(--text); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* solid buttons get a subtle lift + press for tactility */
+.btn-primary, .btn-success, .btn-warning, .btn-danger { box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08); }
+.btn-primary:not(:disabled):hover, .btn-success:not(:disabled):hover,
+.btn-warning:not(:disabled):hover, .btn-danger:not(:disabled):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.16);
+}
+.btn:not(:disabled):active { transform: translateY(0); transition-duration: 0.05s; }
 
 .btn-primary {
   background: var(--primary);
@@ -488,6 +523,15 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 .input:focus, .select:focus { border-color: var(--primary); }
+/* hover affordance on the idle border */
+.input:not(:disabled):not(:focus):hover, .select:not(:disabled):not(:focus):hover { border-color: #cbd5e1; }
+/* keep browser autofill from painting its yellow over the theme */
+input:-webkit-autofill, input:-webkit-autofill:hover, input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px var(--surface) inset;
+  -webkit-text-fill-color: var(--text);
+  caret-color: var(--text);
+  transition: background-color 9999s ease-out;
+}
 
 .select:disabled, .input:disabled { background: var(--surface-2); color: var(--text-muted); cursor: not-allowed; }
 
@@ -527,8 +571,10 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   padding: 0.5rem 0.8rem;
   border-bottom: 1px solid #f1f5f9;
   vertical-align: middle;
+  font-variant-numeric: tabular-nums;
 }
 .table tbody tr:last-child td { border-bottom: none; }
+.table tbody tr { transition: background-color 0.12s ease; }
 .table tbody tr:hover { background: #fafbfd; }
 
 /* sticky header row — lives here (after the base thead rule) so its
@@ -941,6 +987,11 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   box-shadow: var(--shadow-lg);
   width: 100%;
   max-width: 380px;
+  animation: rise-in 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(14px) scale(0.985); }
+  to { opacity: 1; transform: none; }
 }
 
 .login-card h1 { font-size: 1.35rem; font-weight: 800; margin-bottom: 0.15rem; letter-spacing: -0.02em; }
@@ -976,6 +1027,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   z-index: 50;
   padding: 1rem;
   backdrop-filter: blur(2px);
+  animation: overlay-in 0.18s ease-out;
 }
 .modal {
   background: var(--surface);
@@ -985,4 +1037,19 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   padding: 1.25rem;
   box-shadow: var(--shadow-lg);
   border: 1px solid var(--border);
+  animation: modal-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ─── Reduced motion: honour the OS setting everywhere ─── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

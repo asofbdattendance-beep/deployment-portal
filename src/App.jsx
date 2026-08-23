@@ -41,6 +41,11 @@ function Dashboard() {
 
   const currentPage = visiblePages.some(([k]) => k === activePage) ? activePage : (visiblePages[0]?.[0] || 'consent')
 
+  // keep the browser tab title in sync with the visible page
+  useEffect(() => {
+    document.title = `${PAGES[currentPage]?.label || 'Deployment Portal'} · Deployment Portal`
+  }, [currentPage])
+
   // ONE schedule dropdown drives the query on every page below. ScheduleMakerPage
   // mutates schedules (create/status/deadline/delete), so it reports back via
   // refreshSchedules to keep this list (and the Consent page's deadline pill) fresh.
