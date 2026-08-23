@@ -51,6 +51,7 @@ export async function fetchPortalSettings() {
   return {
     sewadar_deployment_open: data?.sewadar_deployment_open !== false,
     vss_deployment_open: data?.vss_deployment_open === true,
+    vss_creation_open: data?.vss_creation_open === true,
     updated_by: data?.updated_by || null,
     updated_at: data?.updated_at || null,
   }

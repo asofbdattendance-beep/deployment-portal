@@ -12,8 +12,9 @@ export default function VssDashboard({ schedules, scheduleId }) {
   const toast = useToast()
   const selectedScheduleId = scheduleId
   const [data, setData] = useState(null)
-  const [settings, setSettings] = useState({ vss_deployment_open: false })
+  const [settings, setSettings] = useState({ vss_deployment_open: false, vss_creation_open: false })
   const [busy, setBusy] = useState(false)
+  const [busyCreation, setBusyCreation] = useState(false)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -103,6 +104,21 @@ export default function VssDashboard({ schedules, scheduleId }) {
     } finally { setBusy(false) }
   }
 
+  // "Add VSS" master switch — centres cannot create VSS registrations until
+  // this is open (deadline gate applies separately; v19)
+  const toggleCreation = async () => {
+    if (busyCreation) return
+    setBusyCreation(true)
+    const next = !settings.vss_creation_open
+    try {
+      await setPortalSetting('vss_creation_open', next, profile?.name || null)
+      setSettings(s => ({ ...s, vss_creation_open: next }))
+      toast.success(next ? 'Add VSS is now OPEN — centres can create VSS records' : 'Add VSS is now CLOSED')
+    } catch (err) {
+      toast.error(err.message || 'Could not update setting')
+    } finally { setBusyCreation(false) }
+  }
+
   const schedule = schedules.find(s => s.id === selectedScheduleId)
   const allCentreNames = (data?.centres || []).map(c => c.name)
   const consentedList = (data?.vss || []).filter(sw => data?.consentMap[`${sw.centre}|${sw.badge_number}`]?.consent_given)
@@ -171,6 +187,12 @@ export default function VssDashboard({ schedules, scheduleId }) {
               open={settings.vss_deployment_open}
               onToggle={toggleVss}
               busy={busy}
+            />
+            <MasterSwitch
+              label="Add VSS"
+              open={settings.vss_creation_open}
+              onToggle={toggleCreation}
+              busy={busyCreation}
             />
             <button onClick={exportExcel} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               <Download size={13} /> Export Excel

@@ -114,6 +114,10 @@ export function eligibilityReasons(consentRow, dept) {
 
 /* ─── VSS eligibility (only for departments with include_vss = true) ─── */
 
+// gender values are stored uppercase ('MALE'/'FEMALE'); compare normalized so
+// a stray 'Male' in the data doesn't silently fail the requirement
+const normGender = (g) => String(g ?? '').trim().toUpperCase()
+
 export function isEligibleVss(consentRow, vssSewadar, dept) {
   if (!consentRow || !dept) return false
   if (!dept.include_vss) return false
@@ -122,7 +126,7 @@ export function isEligibleVss(consentRow, vssSewadar, dept) {
   const daysOk = (consentRow.available_days_count ?? 0) >= (dept.vss_min_days ?? 1)
   const bhatiOk = !dept.vss_requires_stay_at_bhati || !!consentRow.stay_at_bhati
   const initiatedOk = !dept.vss_requires_initiated || !!vssSewadar?.is_initiated
-  const genderOk = !dept.vss_requires_gender || (vssSewadar?.gender || '') === dept.vss_requires_gender
+  const genderOk = !dept.vss_requires_gender || normGender(vssSewadar?.gender) === normGender(dept.vss_requires_gender)
   return daysOk && bhatiOk && initiatedOk && genderOk
 }
 
@@ -144,7 +148,7 @@ export function vssEligibilityReasons(consentRow, vssSewadar, dept) {
   if (dept.vss_requires_initiated && !vssSewadar?.is_initiated) {
     reasons.push('Requires initiated VSS sewadar')
   }
-  if (dept.vss_requires_gender && (vssSewadar?.gender || '') !== dept.vss_requires_gender) {
+  if (dept.vss_requires_gender && normGender(vssSewadar?.gender) !== normGender(dept.vss_requires_gender)) {
     reasons.push(`Requires ${dept.vss_requires_gender} VSS sewadar`)
   }
   return reasons
@@ -231,9 +235,14 @@ export function daysForDept(deptName) {
 
 export const TRAFFIC_OUTSIDE_BHATI = 'TRAFFIC OUTSIDE BHATI'
 
+// normalize a department label for comparison — imported Excel data may vary
+// in case/whitespace and silently flipping the attendance denominator would
+// misstate every row for that department
+const normDept = (s) => String(s ?? '').trim().toUpperCase()
+
 // Attendance denominator: 3 for TRAFFIC OUTSIDE BHATI, otherwise 5
 export function attendanceDenominator(prevDepartment) {
-  return prevDepartment === TRAFFIC_OUTSIDE_BHATI ? 3 : 5
+  return normDept(prevDepartment) === TRAFFIC_OUTSIDE_BHATI ? 3 : 5
 }
 
 export function attendanceDisplay(prevAttendance, prevDepartment) {
@@ -246,7 +255,7 @@ export function attendanceDisplay(prevAttendance, prevDepartment) {
 export function isLowAttendance(prevAttendance, prevDepartment) {
   if (prevAttendance == null) return false
   if (prevAttendance <= 1) return true
-  return prevAttendance === 2 && prevDepartment !== TRAFFIC_OUTSIDE_BHATI
+  return prevAttendance === 2 && normDept(prevDepartment) !== TRAFFIC_OUTSIDE_BHATI
 }
 
 /* ─── Dirty-row detection for auto-save ───

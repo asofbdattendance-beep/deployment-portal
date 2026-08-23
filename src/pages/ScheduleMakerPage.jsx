@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { supabase, fetchCentres, getParentCentres } from '../lib/supabase'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
-import { Plus, Trash2, Edit3, Calendar, Lock, Unlock, ChevronRight } from 'lucide-react'
+import { Plus, Trash2, Edit3, Calendar, Lock, Unlock, ChevronRight, X } from 'lucide-react'
 
 const SCHEDULE_STATUS_LABELS = {
   open: 'Open',
@@ -50,7 +50,9 @@ export default function ScheduleMakerPage({ refreshSchedules }) {
       {selectedSchedule && (
         <>
           <DepartmentsPanel isSuper={isSuper} toast={toast} />
-          <AllocationsPanel schedule={selectedSchedule} isSuper={isSuper} toast={toast} />
+          {/* key remounts the panel per schedule — stale form/expanded-editor
+              counts from schedule A must never be saved under schedule B */}
+          <AllocationsPanel key={selectedSchedule?.id || 'none'} schedule={selectedSchedule} isSuper={isSuper} toast={toast} />
           <ReadOnlySummary schedule={selectedSchedule} />
         </>
       )}
@@ -63,7 +65,13 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
   const [newName, setNewName] = useState('')
   const [newDeadline, setNewDeadline] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(null)
+  const [confirmClearDeadline, setConfirmClearDeadline] = useState(null)
   const { profile } = usePortalAuth()
+
+  // datetime-local inputs emit PARTIAL values while typing ("2026-08",
+  // "2026-08-20T1:") — committing those throws on toISOString() or parses
+  // as UTC midnight. Only complete values are ever sent to the DB.
+  const COMPLETE_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/
 
   const createSchedule = async () => {
     if (!newName.trim()) return
@@ -73,7 +81,12 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
       return
     }
     const payload = { name, created_by: profile?.name }
-    if (newDeadline) payload.deadline = new Date(newDeadline).toISOString()
+    if (newDeadline) {
+      if (!COMPLETE_DATETIME.test(newDeadline)) { toast.error('Pick a complete deadline (date + time)'); return }
+      const d = new Date(newDeadline)
+      if (isNaN(d.getTime())) { toast.error('Invalid deadline date/time'); return }
+      payload.deadline = d.toISOString()
+    }
     const { error } = await supabase.from('deployment_schedules').insert(payload)
     if (error) { toast.error(error.message); return }
     setNewName('')
@@ -92,16 +105,32 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
   }
 
   const setDeadline = async (id, value) => {
-    const { error } = await supabase.from('deployment_schedules').update({ deadline: value ? new Date(value).toISOString() : null }).eq('id', id)
+    // ignore transient/partial input — only a complete value commits here;
+    // clearing goes through the explicit confirm flow below
+    if (!COMPLETE_DATETIME.test(value)) return
+    const d = new Date(value)
+    if (isNaN(d.getTime())) { toast.error('Invalid deadline date/time'); return }
+    const { error } = await supabase.from('deployment_schedules').update({ deadline: d.toISOString() }).eq('id', id)
     if (error) { toast.error(error.message); return }
     loadSchedules()
     refreshSchedules?.()
-    toast.success(value ? 'Deadline set' : 'Deadline cleared')
+    toast.success('Deadline set')
+  }
+
+  const clearDeadline = async (id) => {
+    const { error } = await supabase.from('deployment_schedules').update({ deadline: null }).eq('id', id)
+    if (error) { toast.error(error.message); return }
+    setConfirmClearDeadline(null)
+    loadSchedules()
+    refreshSchedules?.()
+    toast.success('Deadline cleared')
   }
 
   const deleteSchedule = async (id) => {
     const sched = schedules.find(s => s.id === id)
-    // audit log the deletion so it can be undone / reviewed
+    const { error } = await supabase.from('deployment_schedules').delete().eq('id', id)
+    if (error) { toast.error(error.message); return }
+    // audit AFTER a successful delete — a failed delete must not leave a phantom log
     {
       const { error: auditErr } = await supabase.from('audit_log').insert({
         action: 'DELETE',
@@ -113,8 +142,6 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
       })
       if (auditErr) console.warn('audit_log insert failed:', auditErr.message) // best-effort
     }
-    const { error } = await supabase.from('deployment_schedules').delete().eq('id', id)
-    if (error) { toast.error(error.message); return }
     setConfirmDelete(null)
     if (selectedScheduleId === id) setSelectedScheduleId('')
     loadSchedules()
@@ -186,6 +213,11 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
                         style={{ padding: '0.25rem 0.4rem', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: '0.75rem' }}
                         title="Set/edit deadline — after this, all editing is disabled"
                       />
+                      {s.deadline && (
+                        <button onClick={() => setConfirmClearDeadline(s)} className="btn btn-ghost" style={{ padding: '0.2rem 0.35rem', fontSize: '0.7rem', color: '#b91c1c' }} title="Clear the deadline">
+                          <X size={12} />
+                        </button>
+                      )}
                     </div>
                     <div className="cluster" onClick={e => e.stopPropagation()}>
                       {s.status === 'open' && (
@@ -224,6 +256,21 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
           </div>
         </div>
       )}
+
+      {confirmClearDeadline && (
+        <div className="modal-overlay" onClick={() => setConfirmClearDeadline(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <h4 style={{ fontSize: '0.95rem', fontWeight: 700, marginBottom: '0.5rem' }}>Clear the deadline?</h4>
+            <p style={{ fontSize: '0.82rem', color: '#64748b', marginBottom: '1rem' }}>
+              <b>{confirmClearDeadline.name}</b> will no longer have a deadline — deadline-based editing blocks are lifted for this schedule (the master switches and centre locks still apply).
+            </p>
+            <div style={{ display: 'flex', gap: '0.6rem', justifyContent: 'flex-end' }}>
+              <button onClick={() => setConfirmClearDeadline(null)} className="btn">Cancel</button>
+              <button onClick={() => clearDeadline(confirmClearDeadline.id)} className="btn btn-warning">Clear deadline</button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   )
 }
@@ -243,9 +290,10 @@ function DepartmentsPanel({ isSuper, toast }) {
   })
 
   const loadDepts = useCallback(async () => {
-    const { data } = await supabase.from('deployment_departments').select('*').order('name')
-    if (data) setDepts(data)
-  }, [])
+    const { data, error } = await supabase.from('deployment_departments').select('*').order('name')
+    if (error) { toast.error(`Could not load departments: ${error.message}`); return }
+    setDepts(data || [])
+  }, [toast])
 
   useEffect(() => { loadDepts() }, [loadDepts])
 
@@ -276,6 +324,9 @@ function DepartmentsPanel({ isSuper, toast }) {
   const [confirmDeleteDept, setConfirmDeleteDept] = useState(null)
 
   const deleteDept = async (id) => {
+    const { error } = await supabase.from('deployment_departments').delete().eq('id', id)
+    if (error) { toast.error(error.message); return }
+    // audit AFTER a successful delete — a failed delete must not leave a phantom log
     {
       const { error: auditErr } = await supabase.from('audit_log').insert({
         action: 'DELETE',
@@ -286,8 +337,6 @@ function DepartmentsPanel({ isSuper, toast }) {
       })
       if (auditErr) console.warn('audit_log insert failed:', auditErr.message) // best-effort
     }
-    const { error } = await supabase.from('deployment_departments').delete().eq('id', id)
-    if (error) { toast.error(error.message); return }
     setConfirmDeleteDept(null)
     loadDepts()
     toast.success('Department deleted')
@@ -509,7 +558,9 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
 
   const buildPlan = (deptId) => {
     const counts = formDeptId === deptId ? formCounts : editCounts
-    const entries = centres.map(c => ({ centre: c.name, count: parseInt(counts[c.name]) })).filter(e => e.count > 0)
+    // Number() not parseInt: type=number inputs accept "1e3" which parseInt
+    // silently truncates to 1
+    const entries = centres.map(c => ({ centre: c.name, count: Number(String(counts[c.name]).trim()) })).filter(e => Number.isInteger(e.count) && e.count > 0)
     const existing = deptAlloc(deptId)
     const existingMap = {}
     existing.forEach(a => { existingMap[a.centre] = a })
@@ -547,21 +598,31 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
     }
 
     const ops = []
-    if (plan.toInsert.length) ops.push(supabase.from('centre_allocations').insert(plan.toInsert))
+    if (plan.toInsert.length) ops.push(supabase.from('centre_allocations').upsert(plan.toInsert, { onConflict: 'schedule_id,department_id,centre' }))
     for (const u of plan.toUpdate) ops.push(supabase.from('centre_allocations').update({ max_count: u.max_count }).eq('id', u.id))
     for (const d of plan.toDelete) ops.push(supabase.from('centre_allocations').delete().eq('id', d.id))
 
     const results = await Promise.all(ops)
-    for (const r of results) if (r.error) { toast.error(r.error.message); return }
+    const failures = results.filter(r => r?.error)
+    // always reset UI to PERSISTED state — inserts are upserted, so a retry
+    // from the reloaded data is safe even after a partial failure
     setConfirmPlan(null)
     setFormDeptId('')
     setFormCounts({})
     await load()
     if (expandedDept) setEditCounts(buildCounts(expandedDept))
+    if (failures.length > 0) {
+      console.warn('allocation save failures:', failures.map(f => f.error?.message))
+      toast.error(`${failures.length} allocation operation${failures.length === 1 ? '' : 's'} failed — the list has been refreshed with what actually saved`)
+      return
+    }
     toast.success('Allocations saved')
   }
 
   const removeAllocation = async (id) => {
+    const { error } = await supabase.from('centre_allocations').delete().eq('id', id)
+    if (error) { toast.error(error.message); return }
+    // audit AFTER a successful delete — a failed delete must not leave a phantom log
     {
       const { error: auditErr } = await supabase.from('audit_log').insert({
         action: 'DELETE',
@@ -573,15 +634,17 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
       })
       if (auditErr) console.warn('audit_log insert failed:', auditErr.message) // best-effort
     }
-    const { error } = await supabase.from('centre_allocations').delete().eq('id', id)
-    if (error) { toast.error(error.message); return }
     await load()
     if (expandedDept) setEditCounts(buildCounts(expandedDept))
   }
 
   const removeDeptAll = async (deptId) => {
+    // capture rows BEFORE the delete so the audit payload records what was removed
+    const existing = await supabase.from('centre_allocations').select('*').eq('schedule_id', schedule.id).eq('department_id', deptId)
+    const { error } = await supabase.from('centre_allocations').delete().eq('schedule_id', schedule.id).eq('department_id', deptId)
+    if (error) { toast.error(error.message); return }
+    // audit AFTER a successful delete — a failed delete must not leave a phantom log
     {
-      const existing = await supabase.from('centre_allocations').select('*').eq('schedule_id', schedule.id).eq('department_id', deptId)
       const { error: auditErr } = await supabase.from('audit_log').insert({
         action: 'REMOVE_ALL',
         table_name: 'centre_allocations',
@@ -591,8 +654,6 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
       })
       if (auditErr) console.warn('audit_log insert failed:', auditErr.message) // best-effort
     }
-    const { error } = await supabase.from('centre_allocations').delete().eq('schedule_id', schedule.id).eq('department_id', deptId)
-    if (error) { toast.error(error.message); return }
     setConfirmRemoveDept(null)
     setExpandedDept(null)
     load()
@@ -606,6 +667,18 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
   }
 
   const setEditCount = (centre, value) => setEditCounts(c => ({ ...c, [centre]: value }))
+
+  // centres/allocations can land AFTER selectDept/expandDept snapshotted their
+  // counts (fetchCentres failures are swallowed upstream) — without this
+  // rebuild, untouched inputs read '' and an untouched Save would plan
+  // spurious "Remove" rows for allocations that actually exist.
+  // Deliberately keyed on the DATA, not on the count states, so typing is
+  // never clobbered mid-edit.
+  useEffect(() => {
+    if (formDeptId) setFormCounts(buildCounts(formDeptId))
+    if (expandedDept) setEditCounts(buildCounts(expandedDept))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [centres, allocations, formDeptId, expandedDept])
 
   const groupedDeptIds = [...new Set(allocations.map(a => a.department_id))]
   const centreNames = centres.map(c => c.name)
@@ -773,11 +846,13 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
 function ReadOnlySummary({ schedule }) {
   const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(null)
 
   useEffect(() => {
     let mounted = true
     ;(async () => {
       setLoading(true)
+      setLoadError(null)
       try {
         // fetch department names separately instead of relying on a hard-coded
         // FK constraint name in the select hint (that name can differ between DBs)
@@ -785,11 +860,16 @@ function ReadOnlySummary({ schedule }) {
           supabase.from('deployments').select('centre, department_id').eq('schedule_id', schedule.id),
           supabase.from('deployment_departments').select('id, name'),
         ])
+        const failed = [dRes, depRes].find(r => r?.error)
+        if (failed) throw failed.error
         if (mounted) {
           const deptNameById = {}
           ;(depRes.data || []).forEach(d => { deptNameById[d.id] = d.name })
           setRows((dRes.data || []).map(r => ({ ...r, dept_name: deptNameById[r.department_id] || '—' })))
         }
+      } catch (err) {
+        console.warn('summary load failed:', err?.message)
+        if (mounted) setLoadError(err?.message || 'unknown error')
       } finally { if (mounted) setLoading(false) }
     })()
     return () => { mounted = false }
@@ -805,6 +885,15 @@ function ReadOnlySummary({ schedule }) {
   const centres = Object.keys(byCentre)
 
   if (loading) return <section className="card" style={{ padding: '1.25rem' }}><p style={{ color: '#9ca3af', fontSize: '0.85rem' }}>Loading summary...</p></section>
+
+  if (loadError) {
+    return (
+      <section className="card" style={{ padding: '1.25rem' }}>
+        <div className="section-header"><div className="section-title">Deployment Summary — {schedule.name}</div></div>
+        <p style={{ color: '#dc2626', fontSize: '0.85rem' }}>Could not load the deployment summary: {loadError}</p>
+      </section>
+    )
+  }
 
   return (
     <section className="card" style={{ padding: '1.25rem' }}>

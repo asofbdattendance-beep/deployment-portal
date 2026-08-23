@@ -154,6 +154,11 @@ describe('VSS eligibility', () => {
     expect(isEligibleVss(consent, vss, d)).toBe(false)
     expect(vssEligibilityReasons(consent, vss, d)).toEqual(['Requires FEMALE VSS sewadar'])
   })
+  it('compares gender case/whitespace-insensitively', () => {
+    const d = { ...dept, vss_requires_gender: 'FEMALE' }
+    expect(isEligibleVss(consent, { ...vss, gender: 'female' }, d)).toBe(true)
+    expect(isEligibleVss(consent, { ...vss, gender: ' Female ' }, d)).toBe(true)
+  })
 })
 
 describe('canEditDeployment', () => {
@@ -340,6 +345,17 @@ describe('prev-year attendance', () => {
     expect(isLowAttendance(3, 'TRAFFIC OUTSIDE BHATI')).toBe(false)
     expect(isLowAttendance(5, 'LANGAR')).toBe(false)
     expect(isLowAttendance(null, 'LANGAR')).toBe(false)
+  })
+  it('normalizes department labels (case/whitespace) before comparing', () => {
+    expect(attendanceDenominator('traffic outside bhati')).toBe(3)
+    expect(attendanceDenominator(' Traffic Outside Bhati ')).toBe(3)
+    expect(isLowAttendance(2, 'traffic OUTSIDE bhati')).toBe(false)
+    expect(isLowAttendance(2, 'Traffic Outside Bhati ')).toBe(false)
+  })
+  it('handles nullish departments safely', () => {
+    expect(attendanceDenominator(null)).toBe(5)
+    expect(attendanceDenominator(undefined)).toBe(5)
+    expect(isLowAttendance(2, null)).toBe(true)
   })
 })
 

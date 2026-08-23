@@ -18,6 +18,17 @@ export default function VssPage({ schedules, scheduleId }) {
   const { profile } = usePortalAuth()
   const isAso = profile?.role === 'aso' || profile?.role === 'super_admin'
   const [tab, setTab] = useState('deploy')
+  // Add-VSS creation gate (v19): the ASO's master switch + the deadline window.
+  // Re-checked every time the Add VSS tab is opened so an ASO toggle is picked
+  // up without a full reload; the DB guard remains authoritative.
+  const [creationOpen, setCreationOpen] = useState(false)
+  useEffect(() => {
+    if (tab !== 'add') return
+    fetchPortalSettings().then(s => setCreationOpen(!!s.vss_creation_open)).catch(() => {})
+  }, [tab])
+  const schedule = schedules.find(s => s.id === scheduleId)
+  // NULL deadline never blocks (deadline optional); done schedules close the window
+  const windowOpen = !!schedule && schedule.status !== 'done' && (!schedule.deadline || new Date(schedule.deadline) > new Date())
 
   return (
     <div>
@@ -34,7 +45,9 @@ export default function VssPage({ schedules, scheduleId }) {
           </button>
         )}
       </div>
-      {tab === 'add' ? <AddVssForm /> : tab === 'roster' ? <VssRoster /> : isAso ? <VssDashboard schedules={schedules} scheduleId={scheduleId} /> : <VssDeployTable schedules={schedules} scheduleId={scheduleId} />}
+      {tab === 'add'
+        ? <AddVssForm creationOpen={creationOpen} windowOpen={windowOpen} />
+        : tab === 'roster' ? <VssRoster /> : isAso ? <VssDashboard schedules={schedules} scheduleId={scheduleId} /> : <VssDeployTable schedules={schedules} scheduleId={scheduleId} />}
     </div>
   )
 }

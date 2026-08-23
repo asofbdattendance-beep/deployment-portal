@@ -3,7 +3,7 @@ import { supabase, fetchCentres, vssPhotoUrl } from '../lib/supabase'
 import { getSubtreeCentres, computeAge, isVssAgeBlocked, vssRegistrationErrors } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from './Toast'
-import { UserPlus, Camera, Trash2, Loader2, BadgeCheck, Pencil, X, Search } from 'lucide-react'
+import { UserPlus, Camera, Trash2, Loader2, BadgeCheck, Pencil, X, Search, Lock } from 'lucide-react'
 
 // Resolves a stored photo (legacy full URL or bare reg/... path) to a
 // time-limited signed URL — the vss-photos bucket is private (v16), so plain
@@ -38,12 +38,18 @@ const EMPTY_FORM = {
    centre_user/centre_admin: create/edit/delete for own subtree (read-only list)
    aso/super_admin: create for any centre + assign the VSFB number
    (moves the record into the vss_sewadars roster), with a duplicate
-   warning when the name / Aadhar already exists.                    */
-export default function AddVssForm() {
+   warning when the name / Aadhar already exists.
+   Creation is gated (v19): centre roles need BOTH the ASO's "Add VSS"
+   master switch open AND an open deadline window. Once a registration
+   is assigned its VSFB number it freezes for centres (DB-enforced). */
+export default function AddVssForm({ creationOpen = false, windowOpen = false }) {
   const { profile } = usePortalAuth()
   const toast = useToast()
   const isAllCentres = profile?.role === 'aso' || profile?.role === 'super_admin'
   const canAssign = profile?.role === 'aso' || profile?.role === 'super_admin'
+  // centres are gated by switch + deadline; admins bypass both
+  const centreGated = !isAllCentres && (!creationOpen || !windowOpen)
+  const editGated = !isAllCentres && !windowOpen
 
   const [centres, setCentres] = useState([])
   const [form, setForm] = useState(EMPTY_FORM)
@@ -127,6 +133,11 @@ export default function AddVssForm() {
 
   const handleSubmit = async (e) => {
     e.preventDefault()
+    // belt-and-braces: the DB guard (v19) is authoritative, this keeps the UX clean
+    if (centreGated) {
+      toast.error(!creationOpen ? 'Adding VSS is currently closed by the ASO' : 'The deadline has passed — adding VSS is disabled')
+      return
+    }
     const e2 = vssRegistrationErrors(form, { hasPhoto: !!photo, photoSize: photo?.size || 0 })
     setErrors(e2)
     if (Object.keys(e2).some(k => e2[k])) { toast.error('Please fix the highlighted fields'); return }
@@ -165,6 +176,8 @@ export default function AddVssForm() {
 
   /* ─── edit ─── */
   const openEdit = (reg) => {
+    // frozen once the ASO allocated a VSFB number (v9 RLS blocks it server-side too)
+    if (reg?.status === 'assigned') return
     setEditReg(reg)
     setEditForm({
       centre: reg.centre,
@@ -195,6 +208,8 @@ export default function AddVssForm() {
     setEditPhotoPreview(URL.createObjectURL(file))
   }
   const saveEdit = async () => {
+    if (!editReg || editReg.status === 'assigned') return
+    if (editGated && !isAllCentres) { toast.error('The deadline has passed — VSS records can no longer be edited'); return }
     const e2 = vssRegistrationErrors(editForm, { hasPhoto: true, photoSize: editPhoto ? editPhoto.size : 0 })
     setEditErrors(e2)
     if (Object.keys(e2).some(k => e2[k])) { toast.error('Please fix the highlighted fields'); return }
@@ -234,6 +249,7 @@ export default function AddVssForm() {
   /* ─── delete ─── */
   const doDelete = async () => {
     if (!deleteReg) return
+    if (editGated && !isAllCentres) { toast.error('The deadline has passed — VSS records can no longer be deleted'); return }
     setDeleting(true)
     try {
       if (deleteReg.photo_url) {
@@ -397,8 +413,19 @@ export default function AddVssForm() {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-        {/* ── creation form ── */}
-        <form className="card" style={{ padding: '1.25rem' }} onSubmit={handleSubmit} noValidate>
+      {/* ── creation gate (v19): ASO switch + deadline window ── */}
+      {centreGated && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
+          <Lock size={16} />
+          {!creationOpen
+            ? <>Adding VSS is currently <strong>CLOSED by the ASO</strong> — you cannot create VSS records until it is opened.</>
+            : <>The deadline has passed — adding and editing VSS is disabled.</>}
+        </div>
+      )}
+
+      {/* ── creation form ── */}
+      <form className="card" style={{ padding: '1.25rem' }} onSubmit={handleSubmit} noValidate>
+        <fieldset disabled={centreGated} style={{ border: 'none', margin: 0, padding: 0, minWidth: 0, opacity: centreGated ? 0.55 : 1 }}>
           <div className="section-header" style={{ marginBottom: '1rem' }}>
             <div className="section-title">New VSS record</div>
           </div>
@@ -438,7 +465,8 @@ export default function AddVssForm() {
               {submitting ? 'Creating…' : 'Create VSS record'}
             </button>
           </div>
-        </form>
+        </fieldset>
+      </form>
 
         {/* ── created records list ── */}
         <div className="card" style={{ padding: '1.25rem' }}>
@@ -522,14 +550,28 @@ export default function AddVssForm() {
                         <td data-label="Aadhar" style={{ fontFamily: 'monospace', fontSize: '0.78rem' }}>{r.aadhar_number || '—'}</td>
                         <td data-label="Actions" style={{ textAlign: 'center' }}>
                           {assigned ? (
-                            <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>{r.assigned_by ? `by ${r.assigned_by}` : 'Assigned'}</span>
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8' }} title="VSFB allocated — this record is locked and can no longer be edited or deleted">
+                              <Lock size={11} /> Locked{r.assigned_by ? ` · by ${r.assigned_by}` : ''}
+                            </span>
                           ) : (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', alignItems: 'center' }}>
                               <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
-                                <button onClick={() => openEdit(r)} className="btn btn-ghost" style={{ padding: '0.28rem 0.5rem', fontSize: '0.74rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }} title="Edit registration">
+                                <button
+                                  onClick={() => openEdit(r)}
+                                  disabled={editGated}
+                                  className="btn btn-ghost"
+                                  style={{ padding: '0.28rem 0.5rem', fontSize: '0.74rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}
+                                  title={editGated ? 'The deadline has passed — editing is disabled' : 'Edit registration'}
+                                >
                                   <Pencil size={12} /> Edit
                                 </button>
-                                <button onClick={() => setDeleteReg(r)} className="btn btn-ghost" style={{ padding: '0.28rem 0.5rem', fontSize: '0.74rem', color: '#dc2626', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }} title="Delete registration">
+                                <button
+                                  onClick={() => setDeleteReg(r)}
+                                  disabled={editGated}
+                                  className="btn btn-ghost"
+                                  style={{ padding: '0.28rem 0.5rem', fontSize: '0.74rem', color: '#dc2626', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}
+                                  title={editGated ? 'The deadline has passed — deleting is disabled' : 'Delete registration'}
+                                >
                                   <Trash2 size={12} />
                                 </button>
                               </div>
