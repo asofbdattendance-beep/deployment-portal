@@ -29,7 +29,7 @@ export const ROLE_LABELS = {
   centre_user: 'Centre User',
   centre_admin: 'Centre Admin',
   aso: 'ASO',
-  super_admin: 'Super Admin',
+  super_admin: 'ASO',
 }
 
 export const ROLE_COLORS = {

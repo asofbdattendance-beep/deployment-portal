@@ -49,6 +49,8 @@ export default function ConsentPage({ schedules, scheduleId }) {
   const [lockBusy, setLockBusy] = useState(false)
   const [lockWarn, setLockWarn] = useState(null)
   const [lockConfirm, setLockConfirm] = useState(false)
+  // required tick-box acknowledgement when locking with departments below quota
+  const [lockAck, setLockAck] = useState(false)
   const [exporting, setExporting] = useState(false)
 
   const myRoot = getRootCentre(centres, myCentre)
@@ -71,6 +73,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
       setPendingBulk(null)
       setLockWarn(null)
       setLockConfirm(false)
+      setLockAck(false)
       setOpenDeptDropdown(null)
       setOpenIncharge(null)
     }
@@ -440,11 +443,13 @@ export default function ConsentPage({ schedules, scheduleId }) {
       Object.keys(savedInchargesRef.current).forEach(key => {
         if (!incState[key]) toDeleteInc.push(key)
       })
-      // stale: the incharge's sewadar no longer consents / is no longer
-      // assigned to that department
+      // stale: the incharge's sewadar no longer consents / no longer OCCUPIES
+      // that department — occupancy follows the EFFECTIVE dept (final else
+      // requested), matching trg_check_incharge (v17)
       Object.entries(incState).forEach(([key, inc]) => {
         const row = rowByBadge[inc.badge_number]
-        if (!row || !row.consent_given || row.requested_dept !== inc.department_id) toDeleteInc.push(key)
+        const effDept = row ? (row.final_dept || row.requested_dept) : null
+        if (!row || !row.consent_given || effDept !== inc.department_id) toDeleteInc.push(key)
       })
       if (toUpsertInc.length > 0) {
         const { error } = await supabase.from('department_incharges').upsert(toUpsertInc, { onConflict: 'schedule_id,centre,department_id' })
@@ -625,13 +630,16 @@ export default function ConsentPage({ schedules, scheduleId }) {
   const deptNameOf = useCallback((deptId) => deptNameById[deptId] || '', [deptNameById])
 
   // ── department incharges — one incharge per CENTRE × department ──
-  // eligible sewadars: consented AND requested this department
+  // eligible sewadars: consented AND occupying the department — judged by the
+  // EFFECTIVE department (ASO's final deployed dept, else requested), the same
+  // rule the DB's trg_check_incharge enforces since v17
   const inchargeOptions = useMemo(() => {
     const options = {}
     Object.values(consentRows).forEach(r => {
-      if (r.consent_given && r.requested_dept) {
-        if (!options[r.requested_dept]) options[r.requested_dept] = []
-        options[r.requested_dept].push(r)
+      const effDept = r.final_dept || r.requested_dept
+      if (r.consent_given && effDept) {
+        if (!options[effDept]) options[effDept] = []
+        options[effDept].push(r)
       }
     })
     Object.keys(options).forEach(k => {
@@ -639,7 +647,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
     })
     return options
   }, [consentRows])
-  const inchargeKey = (deptId) => `${myRoot}|${deptId}`
+  const inchargeKey = useCallback((deptId) => `${myRoot}|${deptId}`, [myRoot])
   const setIncharge = (deptId, badgeNumber) => {
     dirtyRef.current = true
     editVersionRef.current++
@@ -649,12 +657,24 @@ export default function ConsentPage({ schedules, scheduleId }) {
       if (!badgeNumber) {
         delete next[key]
       } else {
-        const row = Object.values(consentRows).find(r => r.badge_number === badgeNumber && r.requested_dept === deptId)
+        const row = Object.values(consentRows).find(r => r.badge_number === badgeNumber && r.consent_given && (r.final_dept || r.requested_dept) === deptId)
         if (row) next[key] = { centre: myRoot, department_id: deptId, badge_number: badgeNumber, sewadar_name: row.sewadar_name }
       }
       return next
     })
   }
+
+  // departments this centre is filling BELOW the assigned quota — shown as a
+  // summary table with a required acknowledgement before Lock Deployment.
+  // Uses deptQuota so the numbers match the quota bars exactly.
+  const underQuotaDepts = useMemo(() => allocatedQuota
+    .filter(a => { const q = deptQuota[a.department_id]; return q && q.effective < a.max_count })
+    .map(a => ({
+      id: a.department_id,
+      name: deptNameById[a.department_id] || '—',
+      max: a.max_count,
+      allotted: deptQuota[a.department_id].effective,
+    })), [allocatedQuota, deptQuota, deptNameById])
 
   // ── Lock deployment ──
   // Departments that MUST have an incharge before locking: every allocated
@@ -662,9 +682,10 @@ export default function ConsentPage({ schedules, scheduleId }) {
   const missingIncharges = useMemo(() => allocatedQuota.filter(a => {
     const hasRegularAssigned = Object.values(consentRows).some(r => r.consent_given && r.requested_dept === a.department_id && !isVssBadge(r.badge_number))
     return hasRegularAssigned && !incharges[inchargeKey(a.department_id)]
-  }), [allocatedQuota, consentRows, incharges, myRoot])
+  }), [allocatedQuota, consentRows, incharges, inchargeKey])
   const startLock = () => {
     if (missingIncharges.length > 0) { setLockWarn(missingIncharges); return }
+    setLockAck(false)
     setLockConfirm(true)
   }
   const confirmLock = async () => {
@@ -681,7 +702,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
         .insert({ schedule_id: selectedScheduleId, centre: myRoot, locked_by: profile?.name || null })
       if (error) throw error
       setLocked(true)
-      toast.success('Deployment locked — only the ASO / Super Admin can reopen it')
+      toast.success('Deployment locked — only the ASO can reopen it')
     } catch (err) {
       toast.error(err?.message || 'Could not lock deployment')
     } finally { setLockBusy(false) }
@@ -794,7 +815,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
     return (
       <div className="page">
         <div className="card" style={{ padding: '2rem', textAlign: 'center', color: '#64748b' }}>
-          <p style={{ fontSize: '0.9rem' }}>No schedules available yet. Contact your super admin.</p>
+          <p style={{ fontSize: '0.9rem' }}>No schedules available yet. Contact your ASO.</p>
         </div>
       </div>
     )
@@ -1083,13 +1104,18 @@ export default function ConsentPage({ schedules, scheduleId }) {
               </button>
             )}
             {locked ? (
-              <span className="pill pill-red" style={{ fontSize: '0.75rem', fontWeight: 700 }} title="Only the ASO / Super Admin can reopen this deployment">
+              <span className="pill pill-red" style={{ fontSize: '0.75rem', fontWeight: 700 }} title="Only the ASO can reopen this deployment">
                 <Lock size={12} style={{ verticalAlign: '-1px', marginRight: '0.25rem' }} /> Deployment Locked
               </span>
-            ) : canEdit && (
+            ) : canEdit && myCentre === myRoot && (
               <button onClick={startLock} disabled={lockBusy} className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem', color: '#b91c1c', borderColor: '#fecaca', background: '#fef2f2' }}>
                 <Lock size={13} /> {lockBusy ? 'Locking…' : 'Lock Deployment'}
               </button>
+            )}
+            {!locked && canEdit && myCentre !== myRoot && (
+              <span className="pill" style={{ fontSize: '0.72rem', fontWeight: 600, color: '#64748b', background: '#f1f5f9', border: '1px solid #e2e8f0' }} title="Only the CENTRE account locks the deployment — this covers your SC_SP too">
+                <Lock size={11} style={{ verticalAlign: '-1px', marginRight: '0.25rem' }} /> Locked at CENTRE level
+              </span>
             )}
             <button onClick={exportExcel} disabled={exporting} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               <Download size={13} /> {exporting ? 'Exporting…' : 'Export Excel'}
@@ -1208,7 +1234,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
         )}
         {locked && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
-            <Lock size={16} /> Deployment is locked by your centre — consent, deployment and incharges are read-only. Only the ASO / Super Admin can reopen it.
+            <Lock size={16} /> Deployment is locked by your centre — consent, deployment and incharges are read-only. Only the ASO can reopen it.
           </div>
         )}
         {canEdit && <DeadlineWarning deadline={schedule?.deadline} />}
@@ -1305,14 +1331,49 @@ export default function ConsentPage({ schedules, scheduleId }) {
 
         {lockConfirm && (
           <div className="modal-overlay" onClick={() => setLockConfirm(false)}>
-            <div className="modal" role="dialog" aria-modal="true" aria-label="Lock deployment" onClick={e => e.stopPropagation()} style={{ maxWidth: 460 }}>
+            <div className="modal" role="dialog" aria-modal="true" aria-label="Lock deployment" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
               <h4 style={{ fontSize: '0.95rem', fontWeight: 700, marginBottom: '0.5rem' }}>Lock deployment for {myCentre}?</h4>
               <p style={{ fontSize: '0.85rem', color: '#6b7280', marginBottom: '0.75rem' }}>
-                All required incharges are set. After locking, consent, deployment and incharges (including VSS) become read-only for your centre — only the ASO / Super Admin can reopen it.
+                All required incharges are set. After locking, consent, deployment and incharges (including VSS) become read-only for your centre — only the ASO can reopen it.
               </p>
+              {underQuotaDepts.length > 0 && (
+                <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, padding: '0.7rem 0.8rem', marginBottom: '0.75rem' }}>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#b91c1c', marginBottom: '0.45rem' }}>
+                    Departments below assigned quota
+                  </div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem', marginBottom: '0.55rem' }}>
+                    <thead>
+                      <tr style={{ color: '#991b1b', textAlign: 'left' }}>
+                        <th style={{ padding: '0.2rem 0.4rem', borderBottom: '1px solid #fecaca', fontWeight: 700 }}>Department</th>
+                        <th style={{ padding: '0.2rem 0.4rem', borderBottom: '1px solid #fecaca', fontWeight: 700, textAlign: 'center' }}>Quota Assigned</th>
+                        <th style={{ padding: '0.2rem 0.4rem', borderBottom: '1px solid #fecaca', fontWeight: 700, textAlign: 'center' }}>Sewadars Allotted</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {underQuotaDepts.map(d => (
+                        <tr key={d.id}>
+                          <td style={{ padding: '0.25rem 0.4rem', borderBottom: '1px solid #fee2e2', fontWeight: 600, color: '#7f1d1d' }}>{d.name}</td>
+                          <td style={{ padding: '0.25rem 0.4rem', borderBottom: '1px solid #fee2e2', textAlign: 'center', color: '#7f1d1d' }}>{d.max}</td>
+                          <td style={{ padding: '0.25rem 0.4rem', borderBottom: '1px solid #fee2e2', textAlign: 'center', fontWeight: 700, color: '#dc2626' }}>{d.allotted}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.45rem', fontSize: '0.82rem', fontWeight: 600, color: '#7f1d1d', cursor: 'pointer' }}>
+                    <input type="checkbox" checked={lockAck} onChange={e => setLockAck(e.target.checked)} style={{ marginTop: 2 }} />
+                    I have checked the list above and confirm that this deployment is correct.
+                  </label>
+                </div>
+              )}
               <div style={{ display: 'flex', gap: '0.6rem', justifyContent: 'flex-end' }}>
                 <button onClick={() => setLockConfirm(false)} className="btn" style={{ padding: '0.45rem 0.9rem', fontSize: '0.85rem' }}>Cancel</button>
-                <button onClick={confirmLock} disabled={lockBusy} className="btn btn-primary" style={{ padding: '0.45rem 0.9rem', fontSize: '0.85rem', background: '#dc2626', borderColor: '#dc2626' }}>
+                <button
+                  onClick={confirmLock}
+                  disabled={lockBusy || (underQuotaDepts.length > 0 && !lockAck)}
+                  title={underQuotaDepts.length > 0 && !lockAck ? 'Tick the confirmation box above to enable locking' : undefined}
+                  className="btn btn-primary"
+                  style={{ padding: '0.45rem 0.9rem', fontSize: '0.85rem', background: '#dc2626', borderColor: '#dc2626' }}
+                >
                   <Lock size={13} style={{ verticalAlign: '-2px', marginRight: '0.3rem' }} /> {lockBusy ? 'Locking…' : 'Lock Deployment'}
                 </button>
               </div>

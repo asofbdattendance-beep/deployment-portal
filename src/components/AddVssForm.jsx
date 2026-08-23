@@ -390,7 +390,7 @@ export default function AddVssForm() {
           <h2 className="page-title"><UserPlus size={22} /> Add / Manage VSS</h2>
           <div className="page-sub">
             {isAllCentres
-              ? 'Create new VSS records for any centre — super admin / ASO assigns the final VSFB number'
+              ? 'Create new VSS records for any centre — the ASO assigns the final VSFB number'
               : `Create new VSS records for ${profile?.centre} and its SC_SPs`}
           </div>
         </div>

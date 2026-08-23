@@ -52,6 +52,13 @@ export function PortalAuthProvider({ children }) {
         if (mounted) setProfile(p)
       }
       setLoading(false)
+    }).catch((err) => {
+      // Never leave the app stuck on the boot spinner (e.g. Supabase
+      // unreachable) — route into the recoverable profile-error screen.
+      console.error('Boot session load failed:', err)
+      if (!mounted) return
+      setProfileError(err?.message || 'Could not reach the authentication service')
+      setLoading(false)
     })
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, s) => {
@@ -67,10 +74,12 @@ export function PortalAuthProvider({ children }) {
         sessionStorage.removeItem(RECOVERY_FLAG)
         setIsRecovery(false)
       }
-      if (s?.user) {
+      // INITIAL_SESSION duplicates the getSession() boot path above — skip it
+      // so the profile RPC doesn't fire twice on every load
+      if (s?.user && event !== 'INITIAL_SESSION') {
         const p = await fetchProfile()
         if (mounted) setProfile(p)
-      } else {
+      } else if (!s?.user) {
         setProfile(null)
         setProfileError(null)
       }

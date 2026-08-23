@@ -102,8 +102,8 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
   const deleteSchedule = async (id) => {
     const sched = schedules.find(s => s.id === id)
     // audit log the deletion so it can be undone / reviewed
-    try {
-      await supabase.from('audit_log').insert({
+    {
+      const { error: auditErr } = await supabase.from('audit_log').insert({
         action: 'DELETE',
         table_name: 'deployment_schedules',
         record_id: id,
@@ -111,7 +111,8 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
         payload: sched || {},
         acted_by: profile?.name || profile?.email || null,
       })
-    } catch { /* audit is best-effort */ }
+      if (auditErr) console.warn('audit_log insert failed:', auditErr.message) // best-effort
+    }
     const { error } = await supabase.from('deployment_schedules').delete().eq('id', id)
     if (error) { toast.error(error.message); return }
     setConfirmDelete(null)
@@ -275,15 +276,16 @@ function DepartmentsPanel({ isSuper, toast }) {
   const [confirmDeleteDept, setConfirmDeleteDept] = useState(null)
 
   const deleteDept = async (id) => {
-    try {
-      await supabase.from('audit_log').insert({
+    {
+      const { error: auditErr } = await supabase.from('audit_log').insert({
         action: 'DELETE',
         table_name: 'deployment_departments',
         record_id: id,
         payload: { department: depts.find(d => d.id === id) || {} },
         acted_by: profile?.name || profile?.email || null,
       })
-    } catch { /* audit is best-effort */ }
+      if (auditErr) console.warn('audit_log insert failed:', auditErr.message) // best-effort
+    }
     const { error } = await supabase.from('deployment_departments').delete().eq('id', id)
     if (error) { toast.error(error.message); return }
     setConfirmDeleteDept(null)
@@ -560,8 +562,8 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
   }
 
   const removeAllocation = async (id) => {
-    try {
-      await supabase.from('audit_log').insert({
+    {
+      const { error: auditErr } = await supabase.from('audit_log').insert({
         action: 'DELETE',
         table_name: 'centre_allocations',
         record_id: id,
@@ -569,7 +571,8 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
         payload: { allocation_id: id },
         acted_by: profile?.name || profile?.email || null,
       })
-    } catch { /* audit is best-effort */ }
+      if (auditErr) console.warn('audit_log insert failed:', auditErr.message) // best-effort
+    }
     const { error } = await supabase.from('centre_allocations').delete().eq('id', id)
     if (error) { toast.error(error.message); return }
     await load()
@@ -577,16 +580,17 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
   }
 
   const removeDeptAll = async (deptId) => {
-    try {
+    {
       const existing = await supabase.from('centre_allocations').select('*').eq('schedule_id', schedule.id).eq('department_id', deptId)
-      await supabase.from('audit_log').insert({
+      const { error: auditErr } = await supabase.from('audit_log').insert({
         action: 'REMOVE_ALL',
         table_name: 'centre_allocations',
         schedule_id: schedule.id,
         payload: { department_id: deptId, allocations: existing.data || [] },
         acted_by: profile?.name || profile?.email || null,
       })
-    } catch { /* audit is best-effort */ }
+      if (auditErr) console.warn('audit_log insert failed:', auditErr.message) // best-effort
+    }
     const { error } = await supabase.from('centre_allocations').delete().eq('schedule_id', schedule.id).eq('department_id', deptId)
     if (error) { toast.error(error.message); return }
     setConfirmRemoveDept(null)

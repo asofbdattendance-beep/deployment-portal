@@ -69,7 +69,7 @@ export default function DeptDropdown({
         >
           {items.length === 0 && (
             <div style={{ padding: '0.75rem', fontSize: '0.78rem', color: '#94a3b8' }}>
-              No departments with an allocated quota for your centre yet. Contact your super admin.
+              No departments with an allocated quota for your centre yet. Contact your ASO.
             </div>
           )}
           {current && (

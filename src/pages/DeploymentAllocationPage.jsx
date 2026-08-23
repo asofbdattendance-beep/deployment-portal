@@ -160,7 +160,7 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
     try {
       const [sewRes, vssRes, consRes, deptRes, deployRes, centreRes, allocRes] = await Promise.all([
         supabase.from('sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, badge_status').or(notElderlyFilter()).order('sewadar_name'),
-        supabase.from('vss_sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, is_active, badge_status').order('sewadar_name'),
+        supabase.from('vss_sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, is_active, badge_status').or(notElderlyFilter()).order('sewadar_name'),
         supabase.from('sewadar_consents').select('*').eq('schedule_id', selectedScheduleId),
         supabase.from('deployment_departments').select('*').order('name'),
         supabase.from('deployments').select('*').eq('schedule_id', selectedScheduleId),
@@ -739,7 +739,7 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
       <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
         <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
           <h2 className="page-title"><ClipboardCheck size={22} /> Finalize Deployment</h2>
-          <div className="page-sub">Set the Finalized Deployment · ASO / Super Admin · defaults to each sewadar's request</div>
+          <div className="page-sub">Set the Finalized Deployment · ASO · defaults to each sewadar's request</div>
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
             {saving ? <span className="pill pill-amber"><Save size={12} /> Saving...</span> : savedAt ? <span className="pill pill-green"><CheckCircle2 size={12} /> Saved {savedAt.toLocaleTimeString()}</span> : null}
             <label style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer', padding: '0.3rem 0.6rem', borderRadius: 8, background: editMode ? '#eef2ff' : '#f1f5f9', border: `1px solid ${editMode ? '#c7d2fe' : '#e2e8f0'}` }}>

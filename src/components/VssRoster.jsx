@@ -121,7 +121,7 @@ export default function VssRoster() {
 
       {!isSuper && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, padding: '0.6rem 0.75rem', fontSize: '0.82rem', color: '#92400e', marginBottom: '1rem' }}>
-          <Lock size={14} /> Read-only — only super admin can edit the roster.
+          <Lock size={14} /> Read-only — only the ASO can edit the roster.
         </div>
       )}
 

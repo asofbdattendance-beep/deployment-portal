@@ -605,7 +605,7 @@ function VssDeployTable({ schedules, scheduleId }) {
     return (
       <div className="page">
         <div className="card" style={{ padding: '2rem', textAlign: 'center', color: '#64748b' }}>
-          <p style={{ fontSize: '0.9rem' }}>No schedules available yet. Contact your super admin.</p>
+          <p style={{ fontSize: '0.9rem' }}>No schedules available yet. Contact your ASO.</p>
         </div>
       </div>
     )
@@ -969,7 +969,7 @@ function VssDeployTable({ schedules, scheduleId }) {
         )}
         {locked && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
-            <Lock size={16} /> Deployment is locked by your centre — VSS consent and deployment are read-only. Only the ASO / Super Admin can reopen it.
+            <Lock size={16} /> Deployment is locked by your centre — VSS consent and deployment are read-only. Only the ASO can reopen it.
           </div>
         )}
         {(scheduleDone || deadlinePassed) && (
