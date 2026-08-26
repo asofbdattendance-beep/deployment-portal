@@ -283,7 +283,7 @@ BEGIN
   END IF;
   v_root := public.get_root_centre(v_centre);
   SELECT bool_or(o.department_id IS NULL AND (o.undeployed_only IS NOT TRUE)),
-         bool_or(o.undeployed_only),
+         bool_or(o.undeployed_only AND o.department_id IS NULL),
          array_agg(o.department_id) FILTER (WHERE o.department_id IS NOT NULL AND (o.undeployed_only IS NOT TRUE))
     INTO v_open_all, v_undeployed, v_open_depts
     FROM public.centre_overrides o
@@ -346,14 +346,27 @@ BEGIN
   -- UNDEPLOYED-ONLY override: already-deployed sewadars stay frozen even while
   -- the undeployed cohort is open. "Already deployed" = a deployment row with a
   -- requested/final department. Consent edits on those rows are also blocked.
-  -- This gate fires whenever an undeployed override is active for the centre,
-  -- UNLESS a normal (non-undeployed) override is also active — that one takes
-  -- precedence and opens everything. We key on is_any_normal_override_open() so a
-  -- department-scoped normal override (which makes is_any_centre_override_open()
-  -- true) still counts as "a normal override is present".
-  IF v_undeployed AND NOT public.is_any_normal_override_open(NEW.schedule_id, NEW.centre) THEN
+  -- A normal (non-undeployed) override takes precedence and opens everything.
+  -- The deployment branch uses the dept-specific v_override (consistent with
+  -- check_deployment); the consent branch uses is_any_normal_override_open()
+  -- because consents have no department column.
+  IF v_undeployed THEN
     IF TG_RELID = 'public.deployments'::regclass THEN
-      IF TG_OP = 'INSERT' THEN
+      IF NOT v_override THEN
+        IF TG_OP = 'INSERT' THEN
+          IF EXISTS (
+            SELECT 1 FROM public.deployments d
+            WHERE d.schedule_id = NEW.schedule_id AND d.centre = NEW.centre
+              AND d.badge_number = NEW.badge_number AND d.department_id IS NOT NULL
+          ) THEN
+            RAISE EXCEPTION 'Already deployed — locked under this override';
+          END IF;
+        ELSIF OLD.department_id IS NOT NULL THEN
+          RAISE EXCEPTION 'Already deployed — locked under this override';
+        END IF;
+      END IF;
+    ELSE
+      IF NOT public.is_any_normal_override_open(NEW.schedule_id, NEW.centre) THEN
         IF EXISTS (
           SELECT 1 FROM public.deployments d
           WHERE d.schedule_id = NEW.schedule_id AND d.centre = NEW.centre
@@ -361,15 +374,7 @@ BEGIN
         ) THEN
           RAISE EXCEPTION 'Already deployed — locked under this override';
         END IF;
-      ELSIF OLD.department_id IS NOT NULL THEN
-        RAISE EXCEPTION 'Already deployed — locked under this override';
       END IF;
-    ELSIF EXISTS (
-      SELECT 1 FROM public.deployments d
-      WHERE d.schedule_id = NEW.schedule_id AND d.centre = NEW.centre
-        AND d.badge_number = NEW.badge_number AND d.department_id IS NOT NULL
-    ) THEN
-      RAISE EXCEPTION 'Already deployed — locked under this override';
     END IF;
   END IF;
 
