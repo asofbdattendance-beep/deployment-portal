@@ -15,6 +15,9 @@ import { BarChart3, Users, Download, AlertTriangle, Building2, LayoutGrid, Lock,
       allocated for the centre. Both derived from centre_allocations. */
 export default function ConsentDashboard({ schedules, scheduleId }) {
   const { profile } = usePortalAuth()
+  // phase-2 hardening: aso is view/download-only — switch toggles and
+  // centre-lock unlocks are super_admin actions now (DB: v20).
+  const isSuperAdmin = profile?.role === 'super_admin'
   const toast = useToast()
   const selectedScheduleId = scheduleId
   const [centres, setCentres] = useState([])
@@ -252,12 +255,18 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
           <h2 className="page-title"><BarChart3 size={22} /> Consent Dashboard</h2>
           <div className="page-sub">CENTRE consent &amp; allocated-seat matrices</div>
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-            <MasterSwitch
-              label="Sewadar Deployment"
-              open={settings.sewadar_deployment_open}
-              onToggle={toggleSewadars}
-              busy={busy}
-            />
+            {isSuperAdmin ? (
+              <MasterSwitch
+                label="Sewadar Deployment"
+                open={settings.sewadar_deployment_open}
+                onToggle={toggleSewadars}
+                busy={busy}
+              />
+            ) : (
+              <span className="pill" title="View-only access — changes are not permitted for ASO accounts (v20)" style={{ background: '#f1f5f9', color: '#64748b', fontWeight: 600 }}>
+                <Lock size={12} /> View-only
+              </span>
+            )}
             <button onClick={exportExcel} disabled={exporting} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               <Download size={13} /> {exporting ? 'Exporting…' : 'Export Excel'}
             </button>
@@ -272,7 +281,9 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
             <span key={l.id} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', background: '#fff', border: '1px solid #fde68a', borderRadius: 999, padding: '0.2rem 0.5rem 0.2rem 0.7rem' }}>
               <span style={{ fontWeight: 700 }}>{l.centre}</span>
               {l.locked_by && <span style={{ color: '#b45309', fontSize: '0.72rem' }}>{l.locked_by}</span>}
-              <button onClick={() => unlockCentre(l.id)} className="btn btn-ghost" style={{ padding: '0.15rem 0.45rem', fontSize: '0.7rem', color: '#b91c1c' }}>Unlock</button>
+              {isSuperAdmin && (
+                <button onClick={() => unlockCentre(l.id)} className="btn btn-ghost" style={{ padding: '0.15rem 0.45rem', fontSize: '0.7rem', color: '#b91c1c' }}>Unlock</button>
+              )}
             </span>
           ))}
         </div>

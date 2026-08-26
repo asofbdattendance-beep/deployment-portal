@@ -1053,3 +1053,42 @@ input:-webkit-autofill, input:-webkit-autofill:hover, input:-webkit-autofill:foc
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ─── Control Panel (v21) ─────────────────────────────────── */
+.control-layout {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 1.1rem;
+  align-items: start;
+}
+.control-tree {
+  position: sticky;
+  top: calc(var(--header-h, 56px) + 60px);
+  max-height: calc(100vh - 160px);
+  overflow-y: auto;
+}
+.control-tree-item {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
+}
+.control-tree-item:hover { background: var(--surface-2); }
+.control-tree-item svg { flex-shrink: 0; color: #64748b; }
+.control-tree-active { background: #eef2ff !important; color: #4f46e5; }
+.control-tree-active svg { color: #4f46e5; }
+.control-tree-child { padding-left: 2rem; font-weight: 500; color: var(--text-sec); }
+
+@media (max-width: 900px) {
+  .control-layout { grid-template-columns: 1fr; }
+  .control-tree { position: static; max-height: 300px; }
+}

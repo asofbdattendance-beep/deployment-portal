@@ -45,11 +45,17 @@ const EMPTY_FORM = {
 export default function AddVssForm({ creationOpen = false, windowOpen = false }) {
   const { profile } = usePortalAuth()
   const toast = useToast()
-  const isAllCentres = profile?.role === 'aso' || profile?.role === 'super_admin'
-  const canAssign = profile?.role === 'aso' || profile?.role === 'super_admin'
-  // centres are gated by switch + deadline; admins bypass both
-  const centreGated = !isAllCentres && (!creationOpen || !windowOpen)
-  const editGated = !isAllCentres && !windowOpen
+  // phase-2 hardening (v20): aso accounts are read-only everywhere —
+  // creation, edits, deletes and VSFB assignment are super_admin actions now.
+  const isAso = profile?.role === 'aso'
+  const isSuperAdmin = profile?.role === 'super_admin'
+  const readOnlyAdmin = isAso
+  const isAllCentres = isAso || isSuperAdmin
+  const canAssign = isSuperAdmin
+  // centres are gated by switch + deadline; super_admin bypasses both;
+  // aso never gets the form (view-only)
+  const centreGated = readOnlyAdmin || (!isAllCentres && (!creationOpen || !windowOpen))
+  const editGated = readOnlyAdmin || (!isAllCentres && !windowOpen)
 
   const [centres, setCentres] = useState([])
   const [form, setForm] = useState(EMPTY_FORM)
@@ -135,7 +141,9 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false })
     e.preventDefault()
     // belt-and-braces: the DB guard (v19) is authoritative, this keeps the UX clean
     if (centreGated) {
-      toast.error(!creationOpen ? 'Adding VSS is currently closed by the ASO' : 'The deadline has passed — adding VSS is disabled')
+      toast.error(readOnlyAdmin
+        ? 'View-only access — ASO accounts cannot create VSS records'
+        : !creationOpen ? 'Adding VSS is currently closed by the ASO' : 'The deadline has passed — adding VSS is disabled')
       return
     }
     const e2 = vssRegistrationErrors(form, { hasPhoto: !!photo, photoSize: photo?.size || 0 })
@@ -209,7 +217,7 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false })
   }
   const saveEdit = async () => {
     if (!editReg || editReg.status === 'assigned') return
-    if (editGated && !isAllCentres) { toast.error('The deadline has passed — VSS records can no longer be edited'); return }
+    if (editGated && !isSuperAdmin) { toast.error(readOnlyAdmin ? 'View-only access — ASO accounts cannot edit VSS records' : 'The deadline has passed — VSS records can no longer be edited'); return }
     const e2 = vssRegistrationErrors(editForm, { hasPhoto: true, photoSize: editPhoto ? editPhoto.size : 0 })
     setEditErrors(e2)
     if (Object.keys(e2).some(k => e2[k])) { toast.error('Please fix the highlighted fields'); return }
@@ -249,7 +257,7 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false })
   /* ─── delete ─── */
   const doDelete = async () => {
     if (!deleteReg) return
-    if (editGated && !isAllCentres) { toast.error('The deadline has passed — VSS records can no longer be deleted'); return }
+    if (editGated && !isSuperAdmin) { toast.error(readOnlyAdmin ? 'View-only access — ASO accounts cannot delete VSS records' : 'The deadline has passed — VSS records can no longer be deleted'); return }
     setDeleting(true)
     try {
       if (deleteReg.photo_url) {
@@ -417,13 +425,16 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false })
       {centreGated && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
           <Lock size={16} />
-          {!creationOpen
-            ? <>Adding VSS is currently <strong>CLOSED by the ASO</strong> — you cannot create VSS records until it is opened.</>
-            : <>The deadline has passed — adding and editing VSS is disabled.</>}
+          {readOnlyAdmin
+            ? <>View-only access — ASO accounts cannot create, edit or assign VSS records.</>
+            : !creationOpen
+              ? <>Adding VSS is currently <strong>CLOSED by the ASO</strong> — you cannot create VSS records until it is opened.</>
+              : <>The deadline has passed — adding and editing VSS is disabled.</>}
         </div>
       )}
 
-      {/* ── creation form ── */}
+      {/* ── creation form (hidden for view-only aso accounts) ── */}
+      {!readOnlyAdmin && (
       <form className="card" style={{ padding: '1.25rem' }} onSubmit={handleSubmit} noValidate>
         <fieldset disabled={centreGated} style={{ border: 'none', margin: 0, padding: 0, minWidth: 0, opacity: centreGated ? 0.55 : 1 }}>
           <div className="section-header" style={{ marginBottom: '1rem' }}>
@@ -467,6 +478,7 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false })
           </div>
         </fieldset>
       </form>
+      )}
 
         {/* ── created records list ── */}
         <div className="card" style={{ padding: '1.25rem' }}>
@@ -561,7 +573,7 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false })
                                   disabled={editGated}
                                   className="btn btn-ghost"
                                   style={{ padding: '0.28rem 0.5rem', fontSize: '0.74rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}
-                                  title={editGated ? 'The deadline has passed — editing is disabled' : 'Edit registration'}
+                                  title={readOnlyAdmin ? 'View-only access (v20)' : editGated ? 'The deadline has passed — editing is disabled' : 'Edit registration'}
                                 >
                                   <Pencil size={12} /> Edit
                                 </button>
@@ -570,7 +582,7 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false })
                                   disabled={editGated}
                                   className="btn btn-ghost"
                                   style={{ padding: '0.28rem 0.5rem', fontSize: '0.74rem', color: '#dc2626', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}
-                                  title={editGated ? 'The deadline has passed — deleting is disabled' : 'Delete registration'}
+                                  title={readOnlyAdmin ? 'View-only access (v20)' : editGated ? 'The deadline has passed — deleting is disabled' : 'Delete registration'}
                                 >
                                   <Trash2 size={12} />
                                 </button>

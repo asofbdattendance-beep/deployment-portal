@@ -1,6 +1,7 @@
 // Pure domain logic — no Supabase client, so it's unit-testable.
 
 export const ELDERLY_BADGE_STATUS = 'ELDERLY'
+export const ELIGIBLE_BADGE_STATUSES = ['OPEN', 'PERMANENT']
 
 // Supabase filter fragment that excludes elderly badges (null-safe)
 export function notElderlyFilter() {
@@ -10,6 +11,38 @@ export function notElderlyFilter() {
 export function isElderly(badge_status) {
   return String(badge_status || '').toUpperCase() === ELDERLY_BADGE_STATUS
 }
+
+export function badgeStatusEligible(badge_status) {
+  return ELIGIBLE_BADGE_STATUSES.includes(String(badge_status || '').trim().toUpperCase())
+}
+
+// Supabase OR filter: badge_status IS NULL OR IN ('OPEN','PERMANENT')
+export function eligibleBadgeStatusFilter() {
+  return 'badge_status.is.null,badge_status.in.(OPEN,PERMANENT)'
+}
+
+/* ─── AREA SECRETARY OFFICE restriction ─── */
+
+export const ASO_DEPARTMENT = 'AREA SECRETARY OFFICE'
+
+export function isAssoDepartment(dept) {
+  return String(dept || '').trim().toUpperCase() === ASO_DEPARTMENT
+}
+
+export function canCentreDeploy(consentRow, userRole) {
+  if (!consentRow || !userRole) return false
+  if (userRole === 'super_admin') return true
+  return !isAssoDepartment(consentRow.department)
+}
+
+/* ─── Consent-page visibility gating ─── */
+
+export function shouldHideFromConsent(sewadar) {
+  if (!sewadar) return true
+  if (isElderly(sewadar.badge_status)) return true
+  return isAssoDepartment(sewadar.department)
+}
+
 
 /* ─── Centre hierarchy ─── */
 
@@ -156,10 +189,108 @@ export function vssEligibilityReasons(consentRow, vssSewadar, dept) {
 
 /* ─── Editing gating ─── */
 
-export function canEditDeployment({ editableRole, schedule, deadlinePassed, done, masterOpen }) {
+export function canEditDeployment({ editableRole, schedule, deadlinePassed, done, masterOpen, locked = false, overrideOpen = false }) {
   if (!editableRole || !schedule) return false
-  if (schedule.status !== 'open' || done || deadlinePassed) return false
+  if (schedule.status !== 'open' || done) return false
+  // v21: the super_admin's Control Panel can reopen a centre even while the
+  // switch is off / deadline passed / centre locked ('done' stays terminal)
+  if (overrideOpen) return true
+  if (deadlinePassed || locked) return false
   return masterOpen !== false
+}
+
+/* ─── v21 Control Panel edit gates ───
+   A Control Panel override reopens editing past the switch / deadline / centre
+   lock — never past a 'done' schedule. The scope of what reopens depends on the
+   override:
+     • CONSENT rows (consent / stay-at-bhati / chair-pass) reopen ONLY via a
+       CENTRE-WIDE (department_id IS NULL) or global override — a department-
+       scoped unlock leaves consent frozen.
+     • DEPLOYMENT (the requested-department assignment) reopens via ANY
+       override (centre-wide OR department-scoped). Under a department-scoped
+       unlock the consent-given requirement also relaxes, so a sewadar whose
+       consent is No may still be deployed to that department (the DB trigger
+       enforces this; see check_deployment in v21).
+   `centreWideOverrideOpen` and `anyOverrideOpen` come from the
+   get_my_effective_gates RPC; `masterOpen` is the effective master switch. */
+
+export function computeEditGates({
+  isEditableRole,
+  schedule,
+  scheduleDone,
+  deadlinePassed,
+  locked,
+  masterOpen,
+  anyOverrideOpen = false,
+}) {
+  const open = !!isEditableRole && !!schedule && schedule.status === 'open' && !scheduleDone
+  if (!open) return { consentEditable: false, deploymentEditable: false }
+  const normal = !deadlinePassed && !locked && masterOpen !== false
+  return {
+    // Consent rows carry no department, so any override (centre-wide OR
+    // department-scoped) reopens consent editing for the centre.
+    consentEditable: anyOverrideOpen || normal,
+    deploymentEditable: anyOverrideOpen || normal,
+  }
+}
+
+/* Is a department selectable in the deployment dropdown under a Control Panel
+   override? When no override is active the normal gate governs and every
+   allocated department stays selectable. A centre-wide/global override opens
+   everything; a department-scoped override opens only the listed departments
+   (the row's CURRENT department always stays selectable). */
+export function isDeptSelectable(deptId, { isCurrent, anyOverrideOpen, openDepartments }) {
+  if (isCurrent) return true
+  if (!anyOverrideOpen) return true
+  if (openDepartments == null) return true
+  return openDepartments.includes(deptId)
+}
+
+/* A sewadar is in the "undeployed" cohort (eligible to be deployed under a
+   Control Panel UNDEPLOYED-ONLY override) when they have NOT yet been assigned
+   a requested department and are not ASO-finalized. Already-deployed sewadars
+   (a deployment row with a requested department) must stay frozen at both the
+   UI and the DB. Mirrors the SQL cohort check in block_after_deadline /
+   check_deployment. */
+export function isUndeployedCohort(row) {
+  return !row.finalized && !row.requested_dept
+}
+
+/* ─── Control Panel overrides (v21) ───
+   A presence of a centre_overrides row OPENS deployment writing for its
+   scope: centre '*' = all centres, otherwise the ROOT CENTRE (SC_SPs
+   inherit); department_id null = centre-wide, otherwise just that
+   department. Mirrors the SQL helper is_centre_override_open(). */
+
+export const OVERRIDE_ALL_CENTRES = '*'
+
+export function resolveOverride(overrides, { rootCentre, departmentId = null }) {
+  if (!Array.isArray(overrides)) return false
+  return overrides.some(o =>
+    o &&
+    (o.centre === OVERRIDE_ALL_CENTRES || (rootCentre != null && o.centre === rootCentre)) &&
+    (departmentId == null
+      ? o.department_id == null
+      : (o.department_id == null || o.department_id === departmentId))
+  )
+}
+
+// Tri-state VSS knob lookup: null = inherit the global value. A
+// centre-specific row wins over the '*' wildcard row.
+export function resolveVssOverride(vssOverrides, { rootCentre, key }) {
+  if (!Array.isArray(vssOverrides)) return null
+  if (rootCentre == null) return null
+  const specific = vssOverrides.find(o => o?.centre === rootCentre)
+  const wildcard = vssOverrides.find(o => o?.centre === OVERRIDE_ALL_CENTRES)
+  const row = specific || wildcard
+  return row ? (row[key] ?? null) : null
+}
+
+// Effective VSS CREATION gate: per-centre override wins, else the global
+// switch AND the open-schedule window (same composition as the DB guard).
+export function effectiveVssCreation({ overrideValue, globalOpen, windowOpen }) {
+  if (overrideValue != null) return overrideValue
+  return !!globalOpen && !!windowOpen
 }
 
 /* ─── VSS registration (new creation) ─── */

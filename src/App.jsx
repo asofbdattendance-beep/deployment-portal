@@ -5,7 +5,7 @@ import { useToast } from './components/Toast'
 import LoginPage from './pages/LoginPage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
 import { ROLE_LABELS, ROLE_COLORS } from './lib/supabase'
-import { Calendar, Users, ClipboardCheck, ShieldCheck, Star, Tags, RefreshCw, AlertTriangle } from 'lucide-react'
+import { Calendar, Users, ClipboardCheck, ShieldCheck, Star, Tags, SlidersHorizontal, RefreshCw, AlertTriangle } from 'lucide-react'
 
 // Code-split each page so the initial bundle stays small (xlsx etc. only
 // loads when the page that uses it is actually opened).
@@ -14,6 +14,7 @@ const ScheduleMakerPage = lazy(() => import('./pages/ScheduleMakerPage'))
 const ConsentPage = lazy(() => import('./pages/ConsentPage'))
 const VssPage = lazy(() => import('./pages/VssPage'))
 const DeploymentAllocationPage = lazy(() => import('./pages/DeploymentAllocationPage'))
+const ControlPanelPage = lazy(() => import('./pages/ControlPanelPage'))
 
 const PAGES = {
   schedule: { label: 'Schedule', icon: Calendar, roles: ['aso', 'super_admin'] },
@@ -21,6 +22,8 @@ const PAGES = {
   vss: { label: 'VSS', icon: Star, roles: ['centre_user', 'centre_admin', 'aso', 'super_admin'] },
   alloc: { label: 'Finalize Deployment', icon: Tags, roles: ['aso', 'super_admin'] },
   deployment: { label: 'Overview', icon: Users, roles: ['aso', 'super_admin'] },
+  // phase-2 hardening: per-centre permission overrides — super_admin only
+  control: { label: 'Control Panel', icon: SlidersHorizontal, roles: ['super_admin'] },
 }
 
 function PageFallback() {
@@ -110,6 +113,7 @@ function Dashboard() {
           {currentPage === 'vss' && <VssPage schedules={schedules} scheduleId={scheduleId} />}
           {currentPage === 'deployment' && <DeploymentPage schedules={schedules} scheduleId={scheduleId} />}
           {currentPage === 'alloc' && <DeploymentAllocationPage schedules={schedules} scheduleId={scheduleId} />}
+          {currentPage === 'control' && <ControlPanelPage schedules={schedules} scheduleId={scheduleId} refreshSchedules={loadSchedules} />}
         </Suspense>
       </main>
     </div>

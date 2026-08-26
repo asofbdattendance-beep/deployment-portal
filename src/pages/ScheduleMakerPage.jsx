@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase, fetchCentres, getParentCentres } from '../lib/supabase'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
@@ -7,6 +7,56 @@ import { Plus, Trash2, Edit3, Calendar, Lock, Unlock, ChevronRight, X } from 'lu
 const SCHEDULE_STATUS_LABELS = {
   open: 'Open',
   done: 'Done',
+}
+
+// datetime-local inputs emit PARTIAL values while typing ("2026-08",
+// "2026-08-20T1:") and some browsers append seconds ("T10:30:00") — only
+// complete values are ever sent to the DB.
+const COMPLETE_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/
+
+const pad2 = n => String(n).padStart(2, '0')
+const toLocalInput = (iso) => {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+}
+
+/* A datetime-local field that keeps its own draft while typing. The naive
+   version derived value straight from the saved deadline and ignored
+   incomplete changes — every re-render (toast, refresh) snapped the field
+   back mid-edit, making deadlines nearly uneditable by keyboard. */
+function DeadlineDraftInput({ iso, onCommit, style, title }) {
+  const [draft, setDraft] = useState(() => toLocalInput(iso))
+  // resync when the saved value actually changes (commit / clear / reload)
+  const savedRef = useRef(iso)
+  useEffect(() => {
+    if (iso !== savedRef.current) {
+      savedRef.current = iso
+      setDraft(toLocalInput(iso))
+    }
+  }, [iso])
+  return (
+    <input
+      type="datetime-local"
+      value={draft}
+      onChange={e => { setDraft(e.target.value); onCommit(e.target.value) }}
+      style={style}
+      title={title}
+    />
+  )
+}
+
+/* Temporary "30 → 40" chip shown under a count input while its draft differs
+   from the persisted value. Disappears the moment the numbers match again or
+   a save refreshes the baseline — purely an edit-time affordance. */
+function CountChangeChip({ saved, draft }) {
+  const n = parseInt(draft, 10)
+  if (!Number.isInteger(n) || n === saved) return null
+  return (
+    <span className="pill pill-amber" style={{ fontSize: '0.56rem', padding: '0.05rem 0.35rem', whiteSpace: 'nowrap' }} title={`Currently saved: ${saved}`}>
+      {saved} → {n}
+    </span>
+  )
 }
 
 export default function ScheduleMakerPage({ refreshSchedules }) {
@@ -70,8 +120,8 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
 
   // datetime-local inputs emit PARTIAL values while typing ("2026-08",
   // "2026-08-20T1:") — committing those throws on toISOString() or parses
-  // as UTC midnight. Only complete values are ever sent to the DB.
-  const COMPLETE_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/
+  // as UTC midnight. Only complete values are ever sent to the DB
+  // (COMPLETE_DATETIME at module scope).
 
   const createSchedule = async () => {
     if (!newName.trim()) return
@@ -97,6 +147,8 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
   }
 
   const setStatus = async (id, status) => {
+    // marking done silently freezes EVERY centre portal-wide — worth a beat
+    if (status === 'done' && !window.confirm('Mark this schedule DONE? All consent/deployment editing across every centre will be frozen (Control Panel overrides included).')) return
     const { error } = await supabase.from('deployment_schedules').update({ status }).eq('id', id)
     if (error) { toast.error(error.message); return }
     loadSchedules()
@@ -149,13 +201,6 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
     toast.success('Schedule deleted')
   }
 
-  const toLocalInput = (iso) => {
-    if (!iso) return ''
-    const d = new Date(iso)
-    const pad = n => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
-  }
-
   return (
     <section className="card" style={{ padding: "1.25rem", marginBottom: "1.25rem" }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
@@ -206,10 +251,9 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
                   <>
                     <div className="cluster" onClick={e => e.stopPropagation()} style={{ gap: '0.4rem' }}>
                       <span style={{ fontSize: '0.7rem', fontWeight: 700, color: deadlinePassed ? '#b91c1c' : '#64748b' }}>Deadline</span>
-                      <input
-                        type="datetime-local"
-                        value={toLocalInput(s.deadline)}
-                        onChange={e => setDeadline(s.id, e.target.value)}
+                      <DeadlineDraftInput
+                        iso={s.deadline}
+                        onCommit={value => setDeadline(s.id, value)}
                         style={{ padding: '0.25rem 0.4rem', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: '0.75rem' }}
                         title="Set/edit deadline — after this, all editing is disabled"
                       />
@@ -376,7 +420,10 @@ function DepartmentsPanel({ isSuper, toast }) {
     const { error } = await supabase.from('deployment_departments')
       .update({
         min_days: minDays, requires_stay_at_bhati: rules.requires_stay_at_bhati, requires_initiated: rules.requires_initiated,
-        include_vss: rules.include_vss, vss_min_days: vssMinDays,
+        include_vss: rules.include_vss,
+        // NaN serializes to null and the DB rejects it — when VSS is unchecked
+        // (or the hidden input was cleared) fall back to a safe default instead
+        vss_min_days: (vssMinDays >= 1 && vssMinDays <= 5) ? vssMinDays : 1,
         vss_requires_stay_at_bhati: rules.vss_requires_stay_at_bhati, vss_requires_initiated: rules.vss_requires_initiated,
         vss_requires_gender: rules.vss_requires_gender || null,
       })
@@ -525,6 +572,10 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
   const [formCounts, setFormCounts] = useState({})
   const [expandedDept, setExpandedDept] = useState(null)
   const [editCounts, setEditCounts] = useState({})
+  // a centre picked from the "Add centre" picker in the expanded editor —
+  // staged until Save commits it as an insert (never a second row: the
+  // picker only lists centres without an allocation for this department)
+  const [stagedNewCentre, setStagedNewCentre] = useState(null)
 
   const load = useCallback(async () => {
     const [aRes, dRes] = await Promise.all([
@@ -535,7 +586,14 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
     if (failed) { toast.error(failed.error.message); return }
     setAllocations(aRes.data || [])
     setDepts(dRes.data || [])
-    try { setCentres(getParentCentres(await fetchCentres())) } catch { /* ignore */ }
+    // fetchCentres() resolves straight to the row array and THROWS on error
+    // (unlike the raw supabase calls above) — surface the failure instead of
+    // silently rendering an editor with no centres to edit or add
+    try {
+      setCentres(getParentCentres(await fetchCentres()))
+    } catch (err) {
+      toast.error(`Could not load centres: ${err?.message || 'unknown error'}`)
+    }
   }, [schedule.id, toast])
 
   useEffect(() => { load() }, [load])
@@ -556,8 +614,14 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
 
   const setFormCount = (centre, value) => setFormCounts(f => ({ ...f, [centre]: value }))
 
-  const buildPlan = (deptId) => {
-    const counts = formDeptId === deptId ? formCounts : editCounts
+  // source: which editor the Save came from — 'form' (top picker) or 'editor'
+  // (expanded department row). When BOTH target the same department they hold
+  // independent count drafts; keying off `formDeptId === deptId` alone made an
+  // expanded-editor Save silently apply the top form's numbers instead.
+  const buildPlan = (deptId, source = 'auto') => {
+    const counts = source === 'form' ? formCounts
+      : source === 'editor' ? editCounts
+      : (formDeptId === deptId ? formCounts : editCounts)
     // Number() not parseInt: type=number inputs accept "1e3" which parseInt
     // silently truncates to 1
     const entries = centres.map(c => ({ centre: c.name, count: Number(String(counts[c.name]).trim()) })).filter(e => Number.isInteger(e.count) && e.count > 0)
@@ -587,13 +651,13 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
   const [confirmPlan, setConfirmPlan] = useState(null)
   const [confirmRemoveDept, setConfirmRemoveDept] = useState(null)
 
-  const saveAll = async (deptId, confirmed = false) => {
-    const plan = buildPlan(deptId)
+  const saveAll = async (deptId, confirmed = false, source = 'auto') => {
+    const plan = buildPlan(deptId, source)
     if (plan.entries.length === 0) { toast.error('Enter at least one centre count'); return }
 
     // If this department already has allocations and we're changing them, ask first
     if (!confirmed && (plan.toUpdate.length > 0 || plan.toDelete.length > 0)) {
-      setConfirmPlan({ deptId, ...plan })
+      setConfirmPlan({ deptId, source, ...plan })
       return
     }
 
@@ -609,6 +673,7 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
     setConfirmPlan(null)
     setFormDeptId('')
     setFormCounts({})
+    setStagedNewCentre(null)
     await load()
     if (expandedDept) setEditCounts(buildCounts(expandedDept))
     if (failures.length > 0) {
@@ -619,17 +684,19 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
     toast.success('Allocations saved')
   }
 
-  const removeAllocation = async (id) => {
-    const { error } = await supabase.from('centre_allocations').delete().eq('id', id)
+  const removeAllocation = async (alloc) => {
+    const deptName = depts.find(d => d.id === alloc.department_id)?.name || 'this department'
+    if (!window.confirm(`Remove the ${alloc.centre} allocation for ${deptName}? The centre loses that quota immediately.`)) return
+    const { error } = await supabase.from('centre_allocations').delete().eq('id', alloc.id)
     if (error) { toast.error(error.message); return }
     // audit AFTER a successful delete — a failed delete must not leave a phantom log
     {
       const { error: auditErr } = await supabase.from('audit_log').insert({
         action: 'DELETE',
         table_name: 'centre_allocations',
-        record_id: id,
+        record_id: alloc.id,
         schedule_id: schedule.id,
-        payload: { allocation_id: id },
+        payload: { allocation_id: alloc.id, centre: alloc.centre, max_count: alloc.max_count, department_id: alloc.department_id },
         acted_by: profile?.name || profile?.email || null,
       })
       if (auditErr) console.warn('audit_log insert failed:', auditErr.message) // best-effort
@@ -656,6 +723,7 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
     }
     setConfirmRemoveDept(null)
     setExpandedDept(null)
+    setStagedNewCentre(null)
     load()
     toast.success('Department allocations removed')
   }
@@ -663,20 +731,30 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
   const expandDept = (deptId) => {
     const next = expandedDept === deptId ? null : deptId
     setExpandedDept(next)
+    setStagedNewCentre(null)
     if (next) setEditCounts(buildCounts(deptId))
   }
 
   const setEditCount = (centre, value) => setEditCounts(c => ({ ...c, [centre]: value }))
 
   // centres/allocations can land AFTER selectDept/expandDept snapshotted their
-  // counts (fetchCentres failures are swallowed upstream) — without this
+  // counts (fetchCentres failures used to be swallowed upstream) — without this
   // rebuild, untouched inputs read '' and an untouched Save would plan
   // spurious "Remove" rows for allocations that actually exist.
   // Deliberately keyed on the DATA, not on the count states, so typing is
-  // never clobbered mid-edit.
+  // never clobbered mid-edit — except an in-progress count on the STAGED new
+  // centre, which is preserved across data refreshes.
   useEffect(() => {
     if (formDeptId) setFormCounts(buildCounts(formDeptId))
-    if (expandedDept) setEditCounts(buildCounts(expandedDept))
+    if (expandedDept) {
+      setEditCounts(prev => {
+        const fresh = buildCounts(expandedDept)
+        if (stagedNewCentre && prev[stagedNewCentre] != null && prev[stagedNewCentre] !== '') {
+          fresh[stagedNewCentre] = prev[stagedNewCentre]
+        }
+        return fresh
+      })
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [centres, allocations, formDeptId, expandedDept])
 
@@ -694,22 +772,32 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
           <label style={{ display: 'block', fontSize: '0.7rem', fontWeight: 600, color: '#6b7280', marginBottom: '0.25rem', textTransform: 'uppercase' }}>Department</label>
           <select value={formDeptId} onChange={e => selectDept(e.target.value)} style={{ padding: '0.4rem 0.6rem', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: '0.85rem', width: '100%', maxWidth: 360 }}>
             <option value="">Select department to allocate...</option>
-            {depts.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+            {/* inactive departments are invisible to every centre page (they
+                fetch active-only) — never offer them for new allocations */}
+            {depts.filter(d => d.is_active).map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
           </select>
 
           {formDeptId && (
             <div style={{ marginTop: '0.75rem' }}>
-              <p style={{ fontSize: '0.78rem', color: '#6b7280', marginBottom: '0.5rem' }}>Enter max count per CENTRE — centres left blank are skipped:</p>
+              <p style={{ fontSize: '0.78rem', color: '#6b7280', marginBottom: '0.5rem' }}>
+                Max count per CENTRE — centres already allotted show their current count (edit it to increase/decrease); blank centres are skipped:
+              </p>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '0.5rem' }}>
-                {centres.map(c => (
-                  <label key={c.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', padding: '0.35rem 0.6rem', border: '1px solid #eef2f7', borderRadius: 6, fontSize: '0.8rem', fontWeight: 500 }}>
-                    <span>{c.name}</span>
-                    <input type="number" min="1" value={formCounts[c.name] || ''} onChange={e => setFormCount(c.name, e.target.value)} placeholder="0" style={{ width: 64, padding: '0.25rem 0.4rem', border: '1px solid #e5e7eb', borderRadius: 4, fontSize: '0.8rem', textAlign: 'center' }} />
-                  </label>
-                ))}
+                {centres.map(c => {
+                  const savedCount = deptAlloc(formDeptId).find(a => a.centre === c.name)?.max_count
+                  return (
+                    <label key={c.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', padding: '0.35rem 0.6rem', border: '1px solid #eef2f7', borderRadius: 6, fontSize: '0.8rem', fontWeight: 500 }}>
+                      <span>{c.name}{savedCount != null ? <span style={{ display: 'block', fontSize: '0.62rem', color: '#94a3b8', fontWeight: 400 }}>allotted</span> : null}</span>
+                      <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                        <input type="number" min="1" value={formCounts[c.name] || ''} onChange={e => setFormCount(c.name, e.target.value)} placeholder="0" style={{ width: 64, padding: '0.25rem 0.4rem', border: '1px solid #e5e7eb', borderRadius: 4, fontSize: '0.8rem', textAlign: 'center' }} />
+                        {savedCount != null && <CountChangeChip saved={savedCount} draft={formCounts[c.name]} />}
+                      </span>
+                    </label>
+                  )
+                })}
               </div>
               <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem' }}>
-                <button onClick={() => saveAll(formDeptId)} style={{ padding: '0.4rem 0.9rem', border: 'none', borderRadius: 6, background: '#2563eb', color: '#fff', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                <button onClick={() => saveAll(formDeptId, false, 'form')} style={{ padding: '0.4rem 0.9rem', border: 'none', borderRadius: 6, background: '#2563eb', color: '#fff', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
                   <Plus size={14} /> Save Allocations
                 </button>
                 <button onClick={() => { setFormDeptId(''); setFormCounts({}) }} style={{ padding: '0.4rem 0.9rem', border: '1px solid #e5e7eb', borderRadius: 6, background: '#fff', cursor: 'pointer', fontSize: '0.85rem', color: '#6b7280' }}>
@@ -747,39 +835,89 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
                     </div>
                   )}
                 </div>
-                {expanded && (
-                  <div style={{ padding: '0.5rem 0.75rem', borderTop: '1px solid #eef2f7' }}>
-                    {centreNames.length === 0 ? (
-                      <p style={{ fontSize: '0.8rem', color: '#9ca3af' }}>No CENTREs found.</p>
-                    ) : (
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '0.5rem' }}>
-                        {centreNames.map(name => {
-                          const alloc = list.find(a => a.centre === name)
-                          return (
-                            <div key={name} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.35rem 0.6rem', border: '1px solid #eef2f7', borderRadius: 6, fontSize: '0.8rem' }}>
-                              <span style={{ flex: 1, fontWeight: 500, color: alloc ? '#111827' : '#9ca3af' }}>{name}</span>
-                              {alloc ? (
-                                <>
-                                  <input type="number" min="1" value={editCounts[name] || ''} onChange={e => setEditCount(name, e.target.value)} style={{ width: 56, padding: '0.2rem 0.3rem', border: '1px solid #e5e7eb', borderRadius: 4, fontSize: '0.8rem', textAlign: 'center' }} />
-                                  <button onClick={() => removeAllocation(alloc.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#dc2626', padding: '0.2rem' }} title="Remove"><Trash2 size={13} /></button>
-                                </>
-                              ) : (
-                                <>
-                                  <input type="number" min="1" value={editCounts[name] || ''} onChange={e => setEditCount(name, e.target.value)} placeholder="0" style={{ width: 56, padding: '0.2rem 0.3rem', border: '1px solid #e5e7eb', borderRadius: 4, fontSize: '0.8rem', textAlign: 'center' }} />
-                                </>
+                {expanded && (() => {
+                  // Edit view: ONLY the centres already allotted (increase /
+                  // decrease / remove) plus an explicit "Add centre" picker
+                  // listing centres WITHOUT an allotment for this department
+                  // in this schedule. One row per centre, ever — the DB unique
+                  // constraint is the backstop.
+                  // Allotted rows come from `allocations` and carry their own
+                  // names, so they render even if the centres list failed to
+                  // load — only the ADD picker needs the centres table.
+                  const stagedHere = expandedDept === deptId ? stagedNewCentre : null
+                  const allocatedNames = list.map(a => a.centre)
+                  const addable = centreNames.filter(n => !allocatedNames.includes(n) && n !== stagedHere)
+                  const inputStyle = { width: 56, padding: '0.2rem 0.3rem', border: '1px solid #e5e7eb', borderRadius: 4, fontSize: '0.8rem', textAlign: 'center' }
+                  return (
+                    <div style={{ padding: '0.5rem 0.75rem', borderTop: '1px solid #eef2f7' }}>
+                      {list.length === 0 && centreNames.length === 0 ? (
+                        <p style={{ fontSize: '0.8rem', color: '#9ca3af' }}>No CENTREs found.</p>
+                      ) : (
+                        <>
+                          {list.length > 0 || stagedHere ? (
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '0.5rem' }}>
+                              {list.map(a => (
+                                <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.35rem 0.6rem', border: '1px solid #eef2f7', borderRadius: 6, fontSize: '0.8rem' }}>
+                                  <span style={{ flex: 1, fontWeight: 500, color: '#111827' }}>{a.centre}</span>
+                                  <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                                    <input type="number" min="1" value={editCounts[a.centre] ?? ''} onChange={e => setEditCount(a.centre, e.target.value)} title={`Change ${a.centre}'s count (currently ${a.max_count})`} style={inputStyle} />
+                                    <CountChangeChip saved={a.max_count} draft={editCounts[a.centre]} />
+                                  </span>
+                                  <button onClick={() => removeAllocation(a)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#dc2626', padding: '0.2rem' }} title="Remove"><Trash2 size={13} /></button>
+                                </div>
+                              ))}
+                              {stagedHere && (
+                                <div key="__staged__" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.35rem 0.6rem', border: '1px dashed #93c5fd', background: '#eff6ff', borderRadius: 6, fontSize: '0.8rem' }}>
+                                  <span style={{ flex: 1, fontWeight: 500 }}>
+                                    {stagedHere}
+                                    <span className="pill pill-blue" style={{ fontSize: '0.58rem', marginLeft: '0.35rem' }}>NEW</span>
+                                  </span>
+                                  <input type="number" min="1" autoFocus value={editCounts[stagedHere] || ''} onChange={e => setEditCount(stagedHere, e.target.value)} placeholder="count" style={inputStyle} />
+                                  <button onClick={() => { setEditCount(stagedHere, ''); setStagedNewCentre(null) }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', padding: '0.2rem' }} title="Cancel adding">✕</button>
+                                </div>
                               )}
                             </div>
-                          )
-                        })}
-                      </div>
-                    )}
-                    {isSuper && (
-                      <button onClick={() => saveAll(deptId)} style={{ marginTop: '0.6rem', padding: '0.35rem 0.8rem', border: 'none', borderRadius: 6, background: '#16a34a', color: '#fff', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600 }}>
-                        Save
-                      </button>
-                    )}
-                  </div>
-                )}
+                          ) : (
+                            <p style={{ fontSize: '0.8rem', color: '#9ca3af', margin: 0 }}>No centres allotted yet — add one below.</p>
+                          )}
+
+                          {centreNames.length > 0 && (
+                            <div style={{ marginTop: '0.6rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                              {addable.length > 0 ? (
+                                <>
+                                  <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#6b7280' }}>Add centre:</span>
+                                  <select
+                                    value=""
+                                    onChange={e => {
+                                      const name = e.target.value
+                                      if (!name) return
+                                      setStagedNewCentre(name)
+                                      setEditCount(name, '')
+                                    }}
+                                    style={{ padding: '0.25rem 0.4rem', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: '0.78rem' }}
+                                    title="Only centres without an allotment for this department are listed"
+                                  >
+                                    <option value="">Select a CENTRE to add…</option>
+                                    {addable.map(name => <option key={name} value={name}>{name}</option>)}
+                                  </select>
+                                  <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>then set its count and Save</span>
+                                </>
+                              ) : list.length + (stagedHere ? 1 : 0) > 0 ? (
+                                <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>All CENTREs already have an allotment for this department.</span>
+                              ) : null}
+                            </div>
+                          )}
+
+                          {isSuper && (
+                            <button onClick={() => saveAll(deptId, false, 'editor')} style={{ marginTop: '0.6rem', padding: '0.35rem 0.8rem', border: 'none', borderRadius: 6, background: '#16a34a', color: '#fff', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600 }}>
+                              Save
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )
+                })()}
               </div>
             )
           })}
@@ -814,7 +952,7 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
               <button onClick={() => setConfirmPlan(null)} style={{ padding: '0.45rem 0.9rem', border: '1px solid #e5e7eb', borderRadius: 6, background: '#fff', cursor: 'pointer', fontSize: '0.85rem', color: '#6b7280', fontWeight: 600 }}>
                 Cancel
               </button>
-              <button onClick={() => saveAll(confirmPlan.deptId, true)} style={{ padding: '0.45rem 0.9rem', border: 'none', borderRadius: 6, background: '#2563eb', color: '#fff', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600 }}>
+              <button onClick={() => saveAll(confirmPlan.deptId, true, confirmPlan.source)} style={{ padding: '0.45rem 0.9rem', border: 'none', borderRadius: 6, background: '#2563eb', color: '#fff', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600 }}>
                 Confirm Update
               </button>
             </div>
@@ -857,7 +995,7 @@ function ReadOnlySummary({ schedule }) {
         // fetch department names separately instead of relying on a hard-coded
         // FK constraint name in the select hint (that name can differ between DBs)
         const [dRes, depRes] = await Promise.all([
-          supabase.from('deployments').select('centre, department_id').eq('schedule_id', schedule.id),
+          supabase.from('deployments').select('centre, department_id, deployed_department_id').eq('schedule_id', schedule.id),
           supabase.from('deployment_departments').select('id, name'),
         ])
         const failed = [dRes, depRes].find(r => r?.error)
@@ -865,7 +1003,13 @@ function ReadOnlySummary({ schedule }) {
         if (mounted) {
           const deptNameById = {}
           ;(depRes.data || []).forEach(d => { deptNameById[d.id] = d.name })
-          setRows((dRes.data || []).map(r => ({ ...r, dept_name: deptNameById[r.department_id] || '—' })))
+          // count by the EFFECTIVE department (ASO's final when set, else
+          // requested) — same semantics as every dashboard and the DB quota math
+          setRows((dRes.data || []).map(r => ({
+            ...r,
+            dept_name: deptNameById[r.deployed_department_id || r.department_id] || '—',
+            overridden: !!r.deployed_department_id && r.deployed_department_id !== r.department_id,
+          })))
         }
       } catch (err) {
         console.warn('summary load failed:', err?.message)

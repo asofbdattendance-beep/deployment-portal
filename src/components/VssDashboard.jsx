@@ -9,6 +9,9 @@ import { BarChart3, Building2, Users, Download, AlertTriangle, Lock } from 'luci
 /* ─── Super admin / ASO: read-only VSS consent dashboard + master switch ─── */
 export default function VssDashboard({ schedules, scheduleId }) {
   const { profile } = usePortalAuth()
+  // phase-2 hardening: aso is view/download-only — the master switches are
+  // super_admin actions now (DB: v20; Control Panel also has per-centre overrides).
+  const isSuperAdmin = profile?.role === 'super_admin'
   const toast = useToast()
   const selectedScheduleId = scheduleId
   const [data, setData] = useState(null)
@@ -182,18 +185,26 @@ export default function VssDashboard({ schedules, scheduleId }) {
           <h2 className="page-title"><BarChart3 size={22} /> VSS Deployment Dashboard</h2>
           <div className="page-sub">Collective VSS overview across every centre · visit-time sewadars</div>
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-            <MasterSwitch
-              label="VSS Deployment"
-              open={settings.vss_deployment_open}
-              onToggle={toggleVss}
-              busy={busy}
-            />
-            <MasterSwitch
-              label="Add VSS"
-              open={settings.vss_creation_open}
-              onToggle={toggleCreation}
-              busy={busyCreation}
-            />
+            {isSuperAdmin ? (
+              <>
+                <MasterSwitch
+                  label="VSS Deployment"
+                  open={settings.vss_deployment_open}
+                  onToggle={toggleVss}
+                  busy={busy}
+                />
+                <MasterSwitch
+                  label="Add VSS"
+                  open={settings.vss_creation_open}
+                  onToggle={toggleCreation}
+                  busy={busyCreation}
+                />
+              </>
+            ) : (
+              <span className="pill" title="View-only access — changes are not permitted for ASO accounts (v20)" style={{ background: '#f1f5f9', color: '#64748b', fontWeight: 600 }}>
+                <Lock size={12} /> View-only
+              </span>
+            )}
             <button onClick={exportExcel} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               <Download size={13} /> Export Excel
             </button>

@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from 'vitest'
 import {
   notElderlyFilter,
   isElderly,
+  badgeStatusEligible,
+  eligibleBadgeStatusFilter,
   getParentCentres,
   getRootCentre,
   getSubtreeCentres,
@@ -28,6 +30,16 @@ import {
   OE_ESCORTS_DAYS,
   isOeEscortsDept,
   daysForDept,
+  resolveOverride,
+  resolveVssOverride,
+  effectiveVssCreation,
+  ASO_DEPARTMENT,
+  isAssoDepartment,
+  canCentreDeploy,
+  shouldHideFromConsent,
+  computeEditGates,
+  isDeptSelectable,
+  isUndeployedCohort,
 } from '../lib/logic'
 
 const CENTRES = [
@@ -49,6 +61,71 @@ describe('notElderlyFilter / isElderly', () => {
     expect(isElderly(null)).toBe(false)
   })
 })
+describe('badgeStatusEligible / eligibleBadgeStatusFilter', () => {
+  it('returns true for OPEN and PERMANENT', () => {
+    expect(badgeStatusEligible('OPEN')).toBe(true)
+    expect(badgeStatusEligible('PERMANENT')).toBe(true)
+    expect(badgeStatusEligible('open')).toBe(true)
+    expect(badgeStatusEligible(' permanent ')).toBe(true)
+  })
+  it('returns false for ELDERLY and other statuses', () => {
+    expect(badgeStatusEligible('ELDERLY')).toBe(false)
+    expect(badgeStatusEligible('CLOSED')).toBe(false)
+    expect(badgeStatusEligible('')).toBe(false)
+  })
+  it('is null-safe', () => {
+    expect(badgeStatusEligible(null)).toBe(false)
+    expect(badgeStatusEligible(undefined)).toBe(false)
+  })
+  it('produces the correct Supabase OR filter', () => {
+    expect(eligibleBadgeStatusFilter()).toBe('badge_status.is.null,badge_status.in.(OPEN,PERMANENT)')
+  })
+})
+
+describe('AREA SECRETARY OFFICE restriction', () => {
+  it('isAssoDepartment matches exactly (case-insensitive, trimmed)', () => {
+    expect(isAssoDepartment('AREA SECRETARY OFFICE')).toBe(true)
+    expect(isAssoDepartment('area secretary office')).toBe(true)
+    expect(isAssoDepartment('  AREA SECRETARY OFFICE  ')).toBe(true)
+    expect(isAssoDepartment('AREA SECRETARY')).toBe(false)
+    expect(isAssoDepartment('')).toBe(false)
+    expect(isAssoDepartment(null)).toBe(false)
+  })
+  it('canCentreDeploy blocks centre_admin for ASO department sewadars', () => {
+    const asoRow = { department: 'AREA SECRETARY OFFICE' }
+    const normalRow = { department: 'LANGAR' }
+    expect(canCentreDeploy(asoRow, 'centre_admin')).toBe(false)
+    expect(canCentreDeploy(asoRow, 'centre_user')).toBe(false)
+    expect(canCentreDeploy(asoRow, 'super_admin')).toBe(true)
+    expect(canCentreDeploy(normalRow, 'centre_admin')).toBe(true)
+    expect(canCentreDeploy(normalRow, 'super_admin')).toBe(true)
+  })
+  it('canCentreDeploy is null-safe', () => {
+    expect(canCentreDeploy(null, 'centre_admin')).toBe(false)
+    expect(canCentreDeploy({ department: 'LANGAR' }, null)).toBe(false)
+  })
+})
+
+describe('shouldHideFromConsent', () => {
+  it('returns true for elderly sewadars', () => {
+    expect(shouldHideFromConsent({ badge_status: 'ELDERLY', department: 'LANGAR' })).toBe(true)
+    expect(shouldHideFromConsent({ badge_status: 'elderly', department: 'LANGAR' })).toBe(true)
+  })
+  it('returns true for AREA SECRETARY OFFICE department sewadars', () => {
+    expect(shouldHideFromConsent({ badge_status: 'OPEN', department: 'AREA SECRETARY OFFICE' })).toBe(true)
+    expect(shouldHideFromConsent({ badge_status: 'PERMANENT', department: 'area secretary office' })).toBe(true)
+  })
+  it('returns false for normal sewadars', () => {
+    expect(shouldHideFromConsent({ badge_status: 'OPEN', department: 'LANGAR' })).toBe(false)
+    expect(shouldHideFromConsent({ badge_status: 'PERMANENT', department: 'TRAFFIC' })).toBe(false)
+    expect(shouldHideFromConsent({ badge_status: null, department: 'ESCORTS' })).toBe(false)
+  })
+  it('returns true for null/undefined', () => {
+    expect(shouldHideFromConsent(null)).toBe(true)
+    expect(shouldHideFromConsent(undefined)).toBe(true)
+  })
+})
+
 
 describe('centre hierarchy', () => {
   it('getParentCentres returns only root centres', () => {
@@ -175,6 +252,141 @@ describe('canEditDeployment', () => {
   })
   it('blocked for non-editable roles', () => {
     expect(canEditDeployment({ editableRole: false, schedule, deadlinePassed: false, done: false, masterOpen: true })).toBe(false)
+  })
+})
+
+describe('canEditDeployment override (v21)', () => {
+  const schedule = { status: 'open' }
+  it('override reopens past the switch, the deadline and a centre lock', () => {
+    const base = { editableRole: true, schedule, overrideOpen: true }
+    expect(canEditDeployment({ ...base, deadlinePassed: false, done: false, masterOpen: false })).toBe(true)
+    expect(canEditDeployment({ ...base, deadlinePassed: true, done: false, masterOpen: false })).toBe(true)
+    expect(canEditDeployment({ ...base, deadlinePassed: true, done: false, masterOpen: true, locked: true })).toBe(true)
+  })
+  it('override never reopens a done schedule or a non-editable role', () => {
+    expect(canEditDeployment({ editableRole: true, schedule: { status: 'done' }, deadlinePassed: false, done: true, masterOpen: true, overrideOpen: true })).toBe(false)
+    expect(canEditDeployment({ editableRole: false, schedule, deadlinePassed: true, done: false, masterOpen: false, overrideOpen: true })).toBe(false)
+  })
+  it('locked alone still blocks (back-compat default)', () => {
+    expect(canEditDeployment({ editableRole: true, schedule, deadlinePassed: false, done: false, masterOpen: true, locked: true })).toBe(false)
+  })
+})
+
+describe('computeEditGates (v21 override scope)', () => {
+  const schedule = { status: 'open' }
+  const base = { isEditableRole: true, schedule, scheduleDone: false, deadlinePassed: false, locked: false, masterOpen: true }
+
+  it('no override + open switch → both consent and deployment editable', () => {
+    expect(computeEditGates({ ...base, centreWideOverrideOpen: false, anyOverrideOpen: false }))
+      .toEqual({ consentEditable: true, deploymentEditable: true })
+  })
+  it('locked centre with no override → both locked', () => {
+    expect(computeEditGates({ ...base, locked: true, centreWideOverrideOpen: false, anyOverrideOpen: false }))
+      .toEqual({ consentEditable: false, deploymentEditable: false })
+  })
+  it('centre-wide override reopens CONSENT and DEPLOYMENT even when locked/closed', () => {
+    const g = computeEditGates({ ...base, locked: true, masterOpen: false, deadlinePassed: true, centreWideOverrideOpen: true, anyOverrideOpen: true })
+    expect(g).toEqual({ consentEditable: true, deploymentEditable: true })
+  })
+  it('department-scoped override reopens both CONSENT and DEPLOYMENT (consent rows have no department to scope against)', () => {
+    const g = computeEditGates({ ...base, locked: true, centreWideOverrideOpen: false, anyOverrideOpen: true })
+    expect(g).toEqual({ consentEditable: true, deploymentEditable: true })
+  })
+  it('department-scoped override still reopens deployment on a closed switch / passed deadline', () => {
+    const g = computeEditGates({ ...base, masterOpen: false, deadlinePassed: true, centreWideOverrideOpen: false, anyOverrideOpen: true })
+    expect(g.deploymentEditable).toBe(true)
+    expect(g.consentEditable).toBe(true)
+  })
+  it('a done schedule is terminal regardless of override', () => {
+    expect(computeEditGates({ ...base, scheduleDone: true, centreWideOverrideOpen: true, anyOverrideOpen: true }))
+      .toEqual({ consentEditable: false, deploymentEditable: false })
+  })
+  it('non-editable role is always locked', () => {
+    expect(computeEditGates({ ...base, isEditableRole: false, centreWideOverrideOpen: true, anyOverrideOpen: true }))
+      .toEqual({ consentEditable: false, deploymentEditable: false })
+  })
+})
+
+describe('isDeptSelectable (v21 department-scoped override)', () => {
+  it('current department is always selectable', () => {
+    expect(isDeptSelectable('d1', { isCurrent: true, anyOverrideOpen: true, openDepartments: ['d2'] })).toBe(true)
+  })
+  it('no override → every department selectable', () => {
+    expect(isDeptSelectable('d3', { isCurrent: false, anyOverrideOpen: false, openDepartments: null })).toBe(true)
+  })
+  it('centre-wide override (openDepartments null) → every department selectable', () => {
+    expect(isDeptSelectable('d3', { isCurrent: false, anyOverrideOpen: true, openDepartments: null })).toBe(true)
+  })
+  it('department-scoped override → only the opened departments selectable', () => {
+    const ctx = { isCurrent: false, anyOverrideOpen: true, openDepartments: ['d1', 'd2'] }
+    expect(isDeptSelectable('d1', ctx)).toBe(true)
+    expect(isDeptSelectable('d2', ctx)).toBe(true)
+    expect(isDeptSelectable('d3', ctx)).toBe(false)
+  })
+  it('department-scoped override with empty array → nothing selectable (except current)', () => {
+    expect(isDeptSelectable('d3', { isCurrent: false, anyOverrideOpen: true, openDepartments: [] })).toBe(false)
+  })
+})
+
+describe('isUndeployedCohort (v21 undeployed-only override)', () => {
+  it('a sewadar with no requested department and not finalized is in the cohort', () => {
+    expect(isUndeployedCohort({ finalized: false, requested_dept: '' })).toBe(true)
+    expect(isUndeployedCohort({ finalized: false, requested_dept: null })).toBe(true)
+  })
+  it('a sewadar who already has a requested department is NOT in the cohort', () => {
+    expect(isUndeployedCohort({ finalized: false, requested_dept: 'd1' })).toBe(false)
+  })
+  it('an ASO-finalized sewadar is NOT in the cohort', () => {
+    expect(isUndeployedCohort({ finalized: true, requested_dept: '' })).toBe(false)
+  })
+})
+
+describe('Control Panel overrides (v21 helpers)', () => {
+  const OVERRIDES = [
+    { centre: '*', department_id: null },
+    { centre: 'GURGAON', department_id: null },
+    { centre: 'ANKHEER', department_id: 'd1' },
+  ]
+
+  it('resolveOverride honours wildcard and root-centre scopes', () => {
+    // global '*' opens everything
+    expect(resolveOverride(OVERRIDES, { centre: 'HODAL', rootCentre: 'GURGAON', departmentId: null })).toBe(true)
+    // root row opens SC_SP writes too
+    expect(resolveOverride(OVERRIDES.filter(o => o.centre !== '*'), { centre: 'HODAL', rootCentre: 'GURGAON', departmentId: null })).toBe(true)
+    // dept-scoped rows only open that department
+    expect(resolveOverride([{ centre: 'ANKHEER', department_id: 'd1' }], { centre: 'BADHA SIKENDERPUR', rootCentre: 'ANKHEER', departmentId: null })).toBe(false)
+    expect(resolveOverride([{ centre: 'ANKHEER', department_id: 'd1' }], { centre: 'BADHA SIKENDERPUR', rootCentre: 'ANKHEER', departmentId: 'd2' })).toBe(false)
+    expect(resolveOverride([{ centre: 'ANKHEER', department_id: 'd1' }], { centre: 'BADHA SIKENDERPUR', rootCentre: 'ANKHEER', departmentId: 'd1' })).toBe(true)
+    // an unrelated centre stays closed
+    expect(resolveOverride(OVERRIDES, { centre: 'NOWHERE', rootCentre: null, departmentId: null })).toBe(true) // '*' matches
+    expect(resolveOverride(OVERRIDES.filter(o => o.centre !== '*'), { centre: 'NOWHERE', rootCentre: null, departmentId: null })).toBe(false)
+  })
+  it('resolveOverride is null/false-safe', () => {
+    expect(resolveOverride(null, { centre: 'X', rootCentre: 'X' })).toBe(false)
+    expect(resolveOverride(undefined, { centre: 'X', rootCentre: 'X', departmentId: 'd1' })).toBe(false)
+    expect(resolveOverride([null], { centre: 'X', rootCentre: 'X' })).toBe(false)
+  })
+
+  it('resolveVssOverride prefers the centre-specific row over the wildcard and returns tri-state values', () => {
+    const rows = [
+      { centre: '*', creation_open: true, deployment_open: false },
+      { centre: 'GURGAON', creation_open: false, deployment_open: null },
+    ]
+    expect(resolveVssOverride(rows, { rootCentre: 'GURGAON', key: 'creation_open' })).toBe(false)
+    expect(resolveVssOverride(rows, { rootCentre: 'GURGAON', key: 'deployment_open' })).toBeNull() // inherit
+    expect(resolveVssOverride(rows, { rootCentre: 'ANKHEER', key: 'creation_open' })).toBe(true) // wildcard
+    expect(resolveVssOverride(rows, { rootCentre: 'ANKHEER', key: 'deployment_open' })).toBe(false)
+    expect(resolveVssOverride([], { rootCentre: 'ANY', key: 'creation_open' })).toBeNull()
+    expect(resolveVssOverride(null, { rootCentre: 'ANY', key: 'creation_open' })).toBeNull()
+    expect(resolveVssOverride(rows, { rootCentre: null, key: 'creation_open' })).toBeNull()
+  })
+
+  it('effectiveVssCreation composes override > (switch ∧ window)', () => {
+    expect(effectiveVssCreation({ overrideValue: true, globalOpen: false, windowOpen: false })).toBe(true)
+    expect(effectiveVssCreation({ overrideValue: false, globalOpen: true, windowOpen: true })).toBe(false)
+    expect(effectiveVssCreation({ overrideValue: null, globalOpen: true, windowOpen: true })).toBe(true)
+    expect(effectiveVssCreation({ overrideValue: null, globalOpen: true, windowOpen: false })).toBe(false)
+    expect(effectiveVssCreation({ overrideValue: null, globalOpen: false, windowOpen: true })).toBe(false)
   })
 })
 

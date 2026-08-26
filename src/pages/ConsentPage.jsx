@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { supabase, fetchSubtreeCentres, getRootCentre, notElderlyFilter, fetchPortalSettings } from '../lib/supabase'
-import { computeDeptQuota, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
+import { supabase, fetchSubtreeCentres, getRootCentre, eligibleBadgeStatusFilter, isAssoDepartment, fetchPortalSettings, shouldHideFromConsent } from '../lib/supabase'
+import { computeEditGates, isDeptSelectable, isUndeployedCohort, computeDeptQuota, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import ConsentDashboard from '../components/ConsentDashboard'
 import DeptDropdown from '../components/DeptDropdown'
 import InchargePicker from '../components/InchargePicker'
 import DeadlinePill, { DeadlineWarning } from '../components/DeadlinePill'
-import { Save, Lock, CheckCircle2, Search, ClipboardCheck, ChevronDown, Users, AlertTriangle, CheckSquare, Download } from 'lucide-react'
+import { Save, Lock, Unlock, CheckCircle2, Search, ClipboardCheck, ChevronDown, Users, AlertTriangle, CheckSquare, Download } from 'lucide-react'
 
 export default function ConsentPage({ schedules, scheduleId }) {
   const { profile } = usePortalAuth()
@@ -46,6 +46,18 @@ export default function ConsentPage({ schedules, scheduleId }) {
   const [settings, setSettings] = useState({ sewadar_deployment_open: true })
   const [incharges, setIncharges] = useState({})
   const [locked, setLocked] = useState(false)
+  // v21 Control Panel: the ASO can open deployment for this centre past the
+  // switch / deadline / lock. Finalized rows stay frozen regardless.
+  //   centreWideOverrideOpen — a centre-wide/global override (reopens CONSENT too)
+  //   anyOverrideOpen        — any override incl. department-scoped (reopens DEPLOYMENT)
+  //   openDepartments        — null = all open; else the dept ids a scoped unlock opened
+  const [centreWideOverrideOpen, setCentreWideOverrideOpen] = useState(false)
+  const [anyOverrideOpen, setAnyOverrideOpen] = useState(false)
+  const [openDepartments, setOpenDepartments] = useState(null)
+  // v21 undeployed-only override: opens deployment for the UNDEPLOYED cohort
+  // (consent=No OR yes-not-deployed) to any department within quota. Already-
+  // deployed sewadars (a requested department set) stay locked at the UI too.
+  const [undeployedOverrideOpen, setUndeployedOverrideOpen] = useState(false)
   const [lockBusy, setLockBusy] = useState(false)
   const [lockWarn, setLockWarn] = useState(null)
   const [lockConfirm, setLockConfirm] = useState(false)
@@ -98,7 +110,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
     const prevDirty = dirtyRef.current
     try {
       const [sewRes, consRes, depRes, allocRes, deployRes, prevRes] = await Promise.all([
-        supabase.from('sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, gender').or(notElderlyFilter()).in('centre', subtree).order('sewadar_name'),
+        supabase.from('sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, gender').or(eligibleBadgeStatusFilter()).in('centre', subtree).order('sewadar_name'),
         supabase.from('sewadar_consents').select('*').eq('schedule_id', selectedScheduleId).in('centre', subtree),
         supabase.from('deployment_departments').select('*').eq('is_active', true).order('name'),
         supabase.from('centre_allocations').select('*').eq('schedule_id', selectedScheduleId),
@@ -112,7 +124,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
       const failed = [sewRes, consRes, depRes, allocRes, deployRes, prevRes].find(r => r?.error)
       if (failed) throw failed.error
 
-      const sewadars = sewRes.data || []
+      const sewadars = (sewRes.data || []).filter(sw => !shouldHideFromConsent(sw))
       const existing = consRes.data || []
       const map = {}
       existing.forEach(c => { map[`${c.centre}|${c.badge_number}`] = c })
@@ -271,6 +283,13 @@ export default function ConsentPage({ schedules, scheduleId }) {
           .select('*').eq('schedule_id', selectedScheduleId).eq('centre', myRoot).maybeSingle()
         setLocked(!!lockRow)
       } catch { /* table missing — lock stays off until migrated */ }
+      try {
+        const { data: gates } = await supabase.rpc('get_my_effective_gates', { p_schedule: selectedScheduleId })
+        setCentreWideOverrideOpen(!!gates?.centre_wide_override_open)
+        setAnyOverrideOpen(!!gates?.any_override_open)
+        setOpenDepartments(gates?.open_departments ?? null)
+        setUndeployedOverrideOpen(!!gates?.undeployed_override_open)
+      } catch { /* v21 not migrated — override stays off */ }
     } catch (err) {
       console.error('Failed to load consent data:', err)
       toast.error(err?.message || 'Failed to load data — check your connection')
@@ -303,6 +322,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_overrides', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
       .subscribe()
     return () => { supabase.removeChannel(channel) }
   }, [selectedScheduleId])
@@ -319,6 +339,14 @@ export default function ConsentPage({ schedules, scheduleId }) {
   // the DB round-trip when the page is read-only (deadline passed / done /
   // locked / master switch closed), because the DB rejects those writes anyway
   const editableRef = useRef(false)
+  // Latest "any override open" flag, read inside the persist closure (which is
+  // memoized without this dep) so a department-scoped override can relax the
+  // consent-given requirement when writing deployment rows.
+  const anyOverrideOpenRef = useRef(false)
+  // When an undeployed-only override is active, the DB freezes already-deployed
+  // sewadars — so persist must never write their consent/deployment rows (their
+  // requested_dept is set). We exclude them here to avoid a rejected save.
+  const undeployedOverrideOpenRef = useRef(false)
   const mountedRef = useRef(true)
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false } }, [])
   // failed-save retry — a transient error re-arms one more save (max 3 tries)
@@ -369,23 +397,36 @@ export default function ConsentPage({ schedules, scheduleId }) {
       const changed = changedConsentRows(rows, savedConsentRef.current)
       const deptNameById = {}
       depList.forEach(d => { deptNameById[d.id] = d.name })
+      // Under an undeployed-only override, already-deployed sewadars (a
+      // deployment row that already has a requested department) are frozen at the
+      // DB. Detect that from the persisted deployments, NOT from r.requested_dept
+      // (which reflects the intended NEW state — a sewadar being newly assigned
+      // must NOT be excluded).
+      const undeployedOnly = undeployedOverrideOpenRef.current
+      const alreadyDeployed = (r) => depRows.some(d => `${d.centre}|${d.badge_number}` === `${r.centre}|${r.badge_number}` && d.department_id != null)
       const toUpsert = changed
         // ASO-finalized rows are locked on the centre side — never write them,
         // even from a pre-lock snapshot (debounce / unmount / switch flush)
-        .filter(r => !r.finalized)
+        .filter(r => !r.finalized && !(undeployedOnly && alreadyDeployed(r)))
         .map(r => ({
           schedule_id: scheduleId,
           centre: r.centre,
           badge_number: r.badge_number,
           sewadar_name: r.sewadar_name,
           consent_given: r.consent_given,
-        available_days_count: r.consent_given ? daysForDept(deptNameById[r.requested_dept]) : null,
+        available_days_count: r.consent_given
+          ? daysForDept(deptNameById[r.requested_dept])
+          : (anyOverrideOpenRef.current && r.requested_dept ? daysForDept(deptNameById[r.requested_dept]) : null),
         stay_at_bhati: r.stay_at_bhati,
         chair_pass: r.chair_pass,
       }))
       const activeDeptIds = new Set(depList.map(d => d.id))
+      // Under a Control Panel override the consent-given requirement relaxes
+      // (v21): a sewadar whose consent is No may still be deployed. Otherwise a
+      // deployment row is only written for a consented + department-assigned row.
+      const overrideDeploy = anyOverrideOpenRef.current
       const toDeploy = changed
-        .filter(r => !r.finalized && r.consent_given && r.requested_dept && activeDeptIds.has(r.requested_dept))
+        .filter(r => !r.finalized && !(undeployedOnly && alreadyDeployed(r)) && r.requested_dept && activeDeptIds.has(r.requested_dept) && (r.consent_given || overrideDeploy))
         .map(r => ({
           schedule_id: scheduleId,
           department_id: r.requested_dept,
@@ -395,11 +436,15 @@ export default function ConsentPage({ schedules, scheduleId }) {
           status: 'requested',
         }))
       // toRemove scans ALL rows (not just changed) so rows whose department
-      // was deactivated or whose consent was cleared elsewhere still get cleaned
+      // was deactivated or whose consent was cleared elsewhere still get cleaned.
       // finalized rows (the ASO set the final department) are NEVER removed —
-      // deleting them would destroy the ASO's decision
+      // deleting them would destroy the ASO's decision. While a department-
+      // scoped override is open, a consent=No row that HAS a requested dept is a
+      // deliberate deployment and must be kept (the consent check is relaxed).
+      // Under an undeployed-only override, already-deployed rows are frozen and
+      // likewise never removed.
       const toRemove = Object.values(rows)
-        .filter(r => !r.finalized && (!r.consent_given || !r.requested_dept || !activeDeptIds.has(r.requested_dept)))
+        .filter(r => !r.finalized && !(undeployedOnly && alreadyDeployed(r)) && ((!r.requested_dept || !activeDeptIds.has(r.requested_dept)) || (!r.consent_given && !overrideDeploy)))
         .map(consentRowKey)
         .filter(key => depRows.some(d => `${d.centre}|${d.badge_number}` === key))
 
@@ -560,8 +605,23 @@ export default function ConsentPage({ schedules, scheduleId }) {
   const schedule = schedules.find(s => s.id === selectedScheduleId)
   const deadlinePassed = schedule?.deadline ? new Date(schedule.deadline) < new Date() : false
   const scheduleDone = schedule?.status === 'done'
-  const canEdit = isEditableRole && !!schedule && schedule.status === 'open' && !deadlinePassed && !scheduleDone && !locked && settings.sewadar_deployment_open !== false
-  editableRef.current = canEdit
+  // v21: a Control Panel override reopens editing past the switch, deadline
+  // and centre lock — never past a done schedule. CONSENT rows reopen only via
+  // a centre-wide override; DEPLOYMENT reopens via any override (incl. a
+  // department-scoped one, where the consent-given requirement also relaxes).
+  const { consentEditable, deploymentEditable } = computeEditGates({
+    isEditableRole,
+    schedule,
+    scheduleDone,
+    deadlinePassed,
+    locked,
+    masterOpen: settings.sewadar_deployment_open,
+    centreWideOverrideOpen,
+    anyOverrideOpen,
+  })
+  editableRef.current = consentEditable || deploymentEditable
+  anyOverrideOpenRef.current = anyOverrideOpen
+  undeployedOverrideOpenRef.current = undeployedOverrideOpen
 
   // Derived data is memoized — the table re-renders on every search keystroke
   // / every autosave, and these are O(rows) / O(rows × depts) scans.
@@ -614,6 +674,13 @@ export default function ConsentPage({ schedules, scheduleId }) {
     depts.forEach(d => { m[d.id] = d.name })
     return m
   }, [depts])
+
+  // Human-readable names of the departments a department-scoped override opened
+  // (used by the per-row tooltip and the "opened for your centre" banner).
+  const openDeptNames = useMemo(
+    () => (openDepartments || []).map(id => deptNameById[id]).filter(Boolean).join(', '),
+    [openDepartments, deptNameById]
+  )
 
   // returns a list of human-readable reasons a sewadar is not eligible for a dept
   const rowEligibilityReasons = useCallback((key, deptId) => {
@@ -710,16 +777,23 @@ export default function ConsentPage({ schedules, scheduleId }) {
 
   // ASO-finalized rows are locked — the final department belongs to the ASO
   const isFinalizedRow = (row) => !!row?.finalized
+  // Under an undeployed-only override, a sewadar who ALREADY has a requested
+  // department is frozen at the UI too (the DB enforces the same).
+  const isRowLocked = (row) => isFinalizedRow(row) || (undeployedOverrideOpen && !!row?.requested_dept)
+  // Per-row editability under an undeployed-only override: the undeployed cohort
+  // (consent=No OR yes-not-deployed) may be edited; everyone else stays locked.
+  const rowConsentEditable = (r) => consentEditable || (undeployedOverrideOpen && isUndeployedCohort(r))
+  const rowDeployEditable = (r) => deploymentEditable || (undeployedOverrideOpen && isUndeployedCohort(r))
   const setConsent = (key, value) => {
     dirtyRef.current = true
     editVersionRef.current++
     setConsentRows(prev => {
-      if (isFinalizedRow(prev[key])) return prev
+      if (isRowLocked(prev[key])) return prev
       return {
         ...prev,
         [key]: value
           ? { ...prev[key], consent_given: true }
-          : { ...prev[key], consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: DEFAULT_AVAILABLE_DAYS, requested_dept: '' },
+          : { ...prev[key], consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: null, requested_dept: '' },
       }
     })
   }
@@ -727,7 +801,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
     dirtyRef.current = true
     editVersionRef.current++
     setConsentRows(prev => {
-      if (isFinalizedRow(prev[key])) return prev
+      if (isRowLocked(prev[key])) return prev
       return { ...prev, [key]: { ...prev[key], stay_at_bhati: !prev[key].stay_at_bhati } }
     })
   }
@@ -735,7 +809,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
     dirtyRef.current = true
     editVersionRef.current++
     setConsentRows(prev => {
-      if (isFinalizedRow(prev[key])) return prev
+      if (isRowLocked(prev[key])) return prev
       return { ...prev, [key]: { ...prev[key], chair_pass: !prev[key].chair_pass } }
     })
   }
@@ -743,7 +817,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
     dirtyRef.current = true
     editVersionRef.current++
     setConsentRows(prev => {
-      if (isFinalizedRow(prev[key])) return prev
+      if (isRowLocked(prev[key])) return prev
       const next = { ...prev[key], requested_dept: deptId }
       // days are auto-set by the chosen department: 5 by default, 3 for OE ESCORTS
       next.available_days_count = daysForDept(deptNameOf(deptId))
@@ -841,8 +915,8 @@ export default function ConsentPage({ schedules, scheduleId }) {
       <select
         value={r.consent_given ? 'yes' : 'no'}
         onChange={e => setConsent(`${r.centre}|${r.badge_number}`, e.target.value === 'yes')}
-        disabled={!canEdit || r.finalized}
-        title={r.finalized ? 'Finalized by the ASO — locked' : undefined}
+        disabled={!rowConsentEditable(r) || r.finalized}
+        title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined)}
         className="select"
         style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
       >
@@ -857,9 +931,9 @@ export default function ConsentPage({ schedules, scheduleId }) {
         role="switch"
         aria-checked={r.stay_at_bhati}
         onClick={() => toggleBhati(`${r.centre}|${r.badge_number}`)}
-        disabled={!canEdit || !r.consent_given || r.finalized}
+        disabled={!rowConsentEditable(r) || !r.consent_given || r.finalized}
         className="toggle"
-        title={r.finalized ? 'Finalized by the ASO — locked' : 'Stay at bhati'}
+        title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : 'Stay at bhati')}
       >
         <span className="toggle-knob" />
       </button>
@@ -871,9 +945,9 @@ export default function ConsentPage({ schedules, scheduleId }) {
         role="switch"
         aria-checked={r.chair_pass}
         onClick={() => toggleChairPass(`${r.centre}|${r.badge_number}`)}
-        disabled={!canEdit || !r.consent_given || r.finalized}
+        disabled={!rowConsentEditable(r) || !r.consent_given || r.finalized}
         className="toggle"
-        title={r.finalized ? 'Finalized by the ASO — locked' : 'Chair pass'}
+        title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : 'Chair pass')}
       >
         <span className="toggle-knob" />
       </button>
@@ -913,6 +987,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
     }
     // Only departments the superadmin allocated a quota > 0 for are offered —
     // zero-quota / unallocated departments are hidden entirely.
+    const isCentreAdmin = profile?.role === 'centre_admin'
     const items = allocatedQuota.map(a => {
       const deptName = deptNameById[a.department_id]
       if (!deptName) return null
@@ -921,6 +996,17 @@ export default function ConsentPage({ schedules, scheduleId }) {
       const isCurrent = r.requested_dept === a.department_id
       const full = q && !isCurrent && q.rem < 1
       if (full) reasons.push(`Allocated quota reached (${q ? q.effective : 0}/${q ? q.max : a.max_count})`)
+      // ASO department restriction: centre_admin cannot deploy AREA SECRETARY OFFICE sewadars
+      if (isCentreAdmin && isAssoDepartment(r.department) && !isCurrent) {
+        reasons.push('Reserved for Super Admin')
+      }
+      // v21: a department-scoped override opens only the listed departments —
+      // everything else stays locked for this centre.
+      if (!isDeptSelectable(a.department_id, { isCurrent, anyOverrideOpen, openDepartments })) {
+        reasons.push(openDeptNames
+          ? `Department override not open for your centre — the ASO opened only: ${openDeptNames}`
+          : 'Department override not open for your centre')
+      }
       return { deptId: a.department_id, name: deptName, q, reasons, isCurrent, full }
     }).filter(Boolean)
     return (
@@ -931,7 +1017,8 @@ export default function ConsentPage({ schedules, scheduleId }) {
             depts={depts}
             items={items}
             open={open}
-            disabled={!canEdit || !r.consent_given || r.finalized}
+            disabled={!rowDeployEditable(r) || (!r.consent_given && !anyOverrideOpen) || r.finalized}
+            title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined)}
             onToggle={close => {
               if (close === false) { setOpenDeptDropdown(null); return }
               setOpenIncharge(null)
@@ -967,8 +1054,9 @@ export default function ConsentPage({ schedules, scheduleId }) {
 
   const applyBulk = () => {
     if (!pendingBulk) return
-    // finalized rows are locked by the ASO — never apply a bulk action to them
-    const locked = selectedRows.filter(r => r.finalized && !(pendingBulk.keys && pendingBulk.keys.has(`${r.centre}|${r.badge_number}`)))
+    // finalized rows are locked by the ASO; under an undeployed-only override,
+    // already-deployed sewadars are also locked — never apply a bulk action to them
+    const locked = selectedRows.filter(r => (r.finalized || (undeployedOverrideOpen && r.requested_dept)) && !(pendingBulk.keys && pendingBulk.keys.has(`${r.centre}|${r.badge_number}`)))
     dirtyRef.current = true
     editVersionRef.current++
     setConsentRows(prev => {
@@ -976,13 +1064,13 @@ export default function ConsentPage({ schedules, scheduleId }) {
       selectedRows.forEach(r => {
         const key = `${r.centre}|${r.badge_number}`
         if (pendingBulk.keys && !pendingBulk.keys.has(key)) return
-        if (r.finalized) return
+        if (r.finalized || (undeployedOverrideOpen && r.requested_dept)) return
         next[key] = pendingBulk.updater(next[key])
       })
       return next
     })
     setPendingBulk(null)
-    if (locked.length > 0) toast.info(`${locked.length} finalized sewadar${locked.length > 1 ? 's' : ''} skipped — locked by the ASO`)
+    if (locked.length > 0) toast.info(`${locked.length} deployed sewadar${locked.length > 1 ? 's' : ''} skipped — locked under this override`)
   }
 
   const bulkConsent = (value) => {
@@ -991,7 +1079,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
       `Set consent to ${value ? 'Yes' : 'No'} for ${selectedRows.length} selected sewadar${selectedRows.length > 1 ? 's' : ''}?`,
       row => value
         ? { ...row, consent_given: true }
-        : { ...row, consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: DEFAULT_AVAILABLE_DAYS, requested_dept: '' },
+        : { ...row, consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: null, requested_dept: '' },
     )
   }
 
@@ -1018,12 +1106,16 @@ export default function ConsentPage({ schedules, scheduleId }) {
     const skipped = []
     const q = deptQuota[deptId]
     let remaining = q ? q.rem : Infinity
-    selectedRows.forEach(r => {
-      const key = `${r.centre}|${r.badge_number}`
-      if (r.finalized) {
-        skipped.push({ name: r.sewadar_name, badge: r.badge_number, reasons: ['Finalized by the ASO — locked'] })
-        return
-      }
+      selectedRows.forEach(r => {
+        const key = `${r.centre}|${r.badge_number}`
+        if (r.finalized) {
+          skipped.push({ name: r.sewadar_name, badge: r.badge_number, reasons: ['Finalized by the ASO — locked'] })
+          return
+        }
+        if (undeployedOverrideOpen && r.requested_dept) {
+          skipped.push({ name: r.sewadar_name, badge: r.badge_number, reasons: ['Already deployed — locked under this override'] })
+          return
+        }
       const already = r.requested_dept === deptId
       let reasons
       if (!already && remaining < 1) {
@@ -1098,7 +1190,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
             ) : savedAt ? (
               <span className="pill pill-green"><CheckCircle2 size={12} /> Saved {savedAt.toLocaleTimeString()}</span>
             ) : null}
-            {canEdit && (
+            {(consentEditable || deploymentEditable) && (
               <button onClick={saveDraft} className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
                 <Save size={13} /> Save Draft
               </button>
@@ -1107,12 +1199,12 @@ export default function ConsentPage({ schedules, scheduleId }) {
               <span className="pill pill-red" style={{ fontSize: '0.75rem', fontWeight: 700 }} title="Only the ASO can reopen this deployment">
                 <Lock size={12} style={{ verticalAlign: '-1px', marginRight: '0.25rem' }} /> Deployment Locked
               </span>
-            ) : canEdit && myCentre === myRoot && (
+            ) : deploymentEditable && myCentre === myRoot && (
               <button onClick={startLock} disabled={lockBusy} className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem', color: '#b91c1c', borderColor: '#fecaca', background: '#fef2f2' }}>
                 <Lock size={13} /> {lockBusy ? 'Locking…' : 'Lock Deployment'}
               </button>
             )}
-            {!locked && canEdit && myCentre !== myRoot && (
+            {!locked && deploymentEditable && myCentre !== myRoot && (
               <span className="pill" style={{ fontSize: '0.72rem', fontWeight: 600, color: '#64748b', background: '#f1f5f9', border: '1px solid #e2e8f0' }} title="Only the CENTRE account locks the deployment — this covers your SC_SP too">
                 <Lock size={11} style={{ verticalAlign: '-1px', marginRight: '0.25rem' }} /> Locked at CENTRE level
               </span>
@@ -1193,7 +1285,10 @@ export default function ConsentPage({ schedules, scheduleId }) {
                       setOpenDeptDropdown(null)
                       setOpenIncharge(openIncharge === a.department_id ? null : a.department_id)
                     }}
-                    disabled={!canEdit}
+                    disabled={!deploymentEditable || !isDeptSelectable(a.department_id, { isCurrent: false, anyOverrideOpen, openDepartments })}
+                    title={anyOverrideOpen && openDepartments && !openDepartments.includes(a.department_id)
+                      ? `Only the opened department(s) (${openDeptNames}) incharge can be changed under this override`
+                      : undefined}
                   />
                 </div>
               </div>
@@ -1222,48 +1317,58 @@ export default function ConsentPage({ schedules, scheduleId }) {
           </div>
         </div>
 
-        {(scheduleDone || deadlinePassed) && (
+        {scheduleDone && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
-            <Lock size={16} /> {scheduleDone ? 'This schedule is done.' : 'The deadline has passed.'} Editing is disabled.
+            <Lock size={16} /> This schedule is done. Editing is disabled.
           </div>
         )}
-        {settings.sewadar_deployment_open === false && (
+        {!deploymentEditable && (deadlinePassed || locked || settings.sewadar_deployment_open === false) && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
-            <Lock size={16} /> Deployment is closed by the ASO. Editing is disabled.
+            <Lock size={16} />
+            {locked
+              ? <>Deployment is locked by your centre — consent, deployment and incharges are read-only. Only the ASO can reopen it.</>
+              : deadlinePassed
+                ? <>The deadline has passed. Editing is disabled.</>
+                : <>Deployment is closed by the ASO. Editing is disabled.</>}
           </div>
         )}
-        {locked && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
-            <Lock size={16} /> Deployment is locked by your centre — consent, deployment and incharges are read-only. Only the ASO can reopen it.
+        {anyOverrideOpen && !scheduleDone && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#047857', marginBottom: '1rem' }}>
+            <Unlock size={16} />
+            {centreWideOverrideOpen
+              ? <>Deployment has been <strong>specially opened for your centre</strong> by the ASO — edit freely. Sewadars already finalized by the ASO stay locked.</>
+              : undeployedOverrideOpen
+                ? <>Deployment has been <strong>opened for undeployed sewadars only</strong> by the ASO — you may deploy sewadars who have not yet been assigned a department (consent Yes or No), to any department within quota. Sewadars already deployed stay locked. Sewadars already finalized by the ASO stay locked.</>
+                : <>Deployment has been <strong>specially opened for specific departments</strong> by the ASO{openDepartments && openDepartments.length ? ` (${openDeptNames})` : ''}. You can deploy sewadars there and update their consent; other departments stay locked. Sewadars already finalized by the ASO stay locked.</>}
           </div>
         )}
-        {canEdit && <DeadlineWarning deadline={schedule?.deadline} />}
+        {(consentEditable || deploymentEditable) && <DeadlineWarning deadline={schedule?.deadline} />}
 
-        {canEdit && selectedRows.length > 0 && (
+        {(consentEditable || deploymentEditable) && selectedRows.length > 0 && (
           <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.6rem', background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: 10, padding: '0.6rem 0.75rem', marginBottom: '1rem', fontSize: '0.82rem' }}>
             <span style={{ fontWeight: 700, color: '#3730a3' }}><CheckSquare size={13} style={{ verticalAlign: '-2px', marginRight: '0.25rem' }} />{selectedRows.length} selected</span>
             <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Consent:</span>
-            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" aria-label="Set consent" onChange={e => { if (e.target.value !== '') { bulkConsent(e.target.value === 'yes'); e.target.value = '' } }}>
+            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} disabled={!consentEditable} defaultValue="" aria-label="Set consent" onChange={e => { if (e.target.value !== '') { bulkConsent(e.target.value === 'yes'); e.target.value = '' } }}>
               <option value="" disabled>Set…</option>
               <option value="yes">Yes</option>
               <option value="no">No</option>
             </select>
             <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Stay:</span>
-            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" aria-label="Set stay at bhati" onChange={e => { if (e.target.value !== '') { bulkSetBhati(e.target.value === 'yes'); e.target.value = '' } }}>
+            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} disabled={!consentEditable} defaultValue="" aria-label="Set stay at bhati" onChange={e => { if (e.target.value !== '') { bulkSetBhati(e.target.value === 'yes'); e.target.value = '' } }}>
               <option value="" disabled>Set…</option>
               <option value="yes">Yes</option>
               <option value="no">No</option>
             </select>
             <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Chair pass:</span>
-            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" aria-label="Set chair pass" onChange={e => { if (e.target.value !== '') { bulkSetChairPass(e.target.value === 'yes'); e.target.value = '' } }}>
+            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} disabled={!consentEditable} defaultValue="" aria-label="Set chair pass" onChange={e => { if (e.target.value !== '') { bulkSetChairPass(e.target.value === 'yes'); e.target.value = '' } }}>
               <option value="" disabled>Set…</option>
               <option value="yes">Yes</option>
               <option value="no">No</option>
             </select>
             <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Dept:</span>
-            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} defaultValue="" aria-label="Assign to department" onChange={e => { if (e.target.value) { bulkAssignDept(e.target.value); e.target.value = '' } }}>
+            <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} disabled={!deploymentEditable} defaultValue="" aria-label="Assign to department" onChange={e => { if (e.target.value) { bulkAssignDept(e.target.value); e.target.value = '' } }}>
               <option value="" disabled>Assign…</option>
-              {allocatedQuota.map(a => {
+              {allocatedQuota.filter(a => isDeptSelectable(a.department_id, { isCurrent: false, anyOverrideOpen, openDepartments })).map(a => {
                 const deptName = deptNameById[a.department_id]
                 if (!deptName) return null
                 return <option key={a.department_id} value={a.department_id}>{deptName} ({deptQuota[a.department_id]?.effective || 0}/{deptQuota[a.department_id]?.max || a.max_count})</option>
@@ -1416,7 +1521,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
                             <tr>
                               <th style={{ width: 40, textAlign: 'center' }}>S.No.</th>
                               <th style={{ width: 30, textAlign: 'center' }}>
-                                <input type="checkbox" checked={rows.length > 0 && rows.every(r => selected[`${r.centre}|${r.badge_number}`])} ref={el => { if (el) el.indeterminate = rows.some(r => selected[`${r.centre}|${r.badge_number}`]) && !rows.every(r => selected[`${r.centre}|${r.badge_number}`]) }} onChange={() => selectAllCentre(rows)} disabled={!canEdit} style={{ cursor: canEdit ? 'pointer' : 'not-allowed' }} title="Select all in this centre" aria-label={`Select all in ${centre}`} />
+                                <input type="checkbox" checked={rows.length > 0 && rows.every(r => selected[`${r.centre}|${r.badge_number}`])} ref={el => { if (el) el.indeterminate = rows.some(r => selected[`${r.centre}|${r.badge_number}`]) && !rows.every(r => selected[`${r.centre}|${r.badge_number}`]) }} onChange={() => selectAllCentre(rows)} disabled={!(consentEditable || deploymentEditable) || (undeployedOverrideOpen && rows.some(r => r.requested_dept))} style={{ cursor: (consentEditable || deploymentEditable) ? 'pointer' : 'not-allowed' }} title="Select all in this centre" aria-label={`Select all in ${centre}`} />
                               </th>
                               <th>Badge</th>
                               <th>Name</th>
@@ -1436,7 +1541,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
                               <tr key={`${r.centre}|${r.badge_number}`} style={{ background: selected[`${r.centre}|${r.badge_number}`] ? '#f5f3ff' : undefined }}>
                                 <td style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }} data-label="S.No.">{i + 1}</td>
                                 <td style={{ textAlign: 'center' }} data-label="Select">
-                                  <input type="checkbox" checked={!!selected[`${r.centre}|${r.badge_number}`]} onChange={() => toggleSelect(`${r.centre}|${r.badge_number}`)} disabled={!canEdit || r.finalized} style={{ cursor: canEdit && !r.finalized ? 'pointer' : 'not-allowed' }} title={r.finalized ? 'Finalized by the ASO — locked' : undefined} />
+                                  <input type="checkbox" checked={!!selected[`${r.centre}|${r.badge_number}`]} onChange={() => toggleSelect(`${r.centre}|${r.badge_number}`)} disabled={!(consentEditable || deploymentEditable) || isRowLocked(r)} style={{ cursor: (consentEditable || deploymentEditable) && !isRowLocked(r) ? 'pointer' : 'not-allowed' }} title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined)} />
                                 </td>
                                 <td style={{ fontFamily: 'monospace', fontSize: '0.8rem' }} data-label="Badge">
                                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react'
 import { supabase } from '../lib/supabase'
-import { notElderlyFilter, isVssBadge, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, getRootCentre, changedConsentRows, buildConsentSnapshot } from '../lib/logic'
+import { eligibleBadgeStatusFilter, isVssBadge, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, getRootCentre, changedConsentRows, buildConsentSnapshot, shouldHideFromConsent } from '../lib/logic'
+import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import {
   Save, CheckCircle2, Search, ClipboardCheck, Users,
@@ -93,6 +94,10 @@ const DeployRow = memo(function DeployRow({ row, depts, deptNames, handlers, ser
 
 export default function DeploymentAllocationPage({ schedules, scheduleId }) {
   const toast = useToast()
+  const { profile } = usePortalAuth()
+  // phase-2 hardening: aso is read-only everywhere — only super_admin
+  // may tick "Enable editing" and save (DB: v20 dropped the aso write arms).
+  const isSuperAdmin = profile?.role === 'super_admin'
   const selectedScheduleId = scheduleId
 
   const [depts, setDepts] = useState([])
@@ -159,8 +164,8 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
     const prevDirty = dirtyRef.current
     try {
       const [sewRes, vssRes, consRes, deptRes, deployRes, centreRes, allocRes] = await Promise.all([
-        supabase.from('sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, badge_status').or(notElderlyFilter()).order('sewadar_name'),
-        supabase.from('vss_sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, is_active, badge_status').or(notElderlyFilter()).order('sewadar_name'),
+        supabase.from('sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, badge_status').or(eligibleBadgeStatusFilter()).order('sewadar_name'),
+        supabase.from('vss_sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, is_active, badge_status').or(eligibleBadgeStatusFilter()).order('sewadar_name'),
         supabase.from('sewadar_consents').select('*').eq('schedule_id', selectedScheduleId),
         supabase.from('deployment_departments').select('*').order('name'),
         supabase.from('deployments').select('*').eq('schedule_id', selectedScheduleId),
@@ -173,7 +178,7 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
       const failed = [sewRes, vssRes, consRes, deptRes, deployRes, centreRes, allocRes].find(r => r?.error)
       if (failed) throw failed.error
 
-      const sewadars = [...(sewRes.data || []), ...(vssRes.data || [])]
+      const sewadars = [...(sewRes.data || []), ...(vssRes.data || [])].filter(sw => !shouldHideFromConsent(sw))
       const consentMap = {}
       ;(consRes.data || []).forEach(c => { consentMap[`${c.centre}|${c.badge_number}`] = c })
       const deployMap = {}
@@ -326,7 +331,7 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
       markDirty()
       setRows(prev => ({ ...prev, [key]: value
         ? { ...prev[key], consent_given: true }
-        : { ...prev[key], consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: DEFAULT_AVAILABLE_DAYS, deployed_dept_id: null },
+        : { ...prev[key], consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: null, deployed_dept_id: null },
       }))
     },
     toggleBhati: (key) => {
@@ -742,14 +747,22 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
           <div className="page-sub">Set the Finalized Deployment · ASO · defaults to each sewadar's request</div>
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
             {saving ? <span className="pill pill-amber"><Save size={12} /> Saving...</span> : savedAt ? <span className="pill pill-green"><CheckCircle2 size={12} /> Saved {savedAt.toLocaleTimeString()}</span> : null}
-            <label style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer', padding: '0.3rem 0.6rem', borderRadius: 8, background: editMode ? '#eef2ff' : '#f1f5f9', border: `1px solid ${editMode ? '#c7d2fe' : '#e2e8f0'}` }}>
-              <input type="checkbox" checked={editMode} onChange={e => setEditMode(e.target.checked)} style={{ accentColor: '#6366f1' }} />
-              {editMode ? <Pencil size={13} style={{ color: '#4f46e5' }} /> : <Lock size={13} style={{ color: '#94a3b8' }} />}
-              Enable editing
-            </label>
-            <button onClick={saveDraft} className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-              <Save size={13} /> Save Draft
-            </button>
+            {isSuperAdmin ? (
+              <>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer', padding: '0.3rem 0.6rem', borderRadius: 8, background: editMode ? '#eef2ff' : '#f1f5f9', border: `1px solid ${editMode ? '#c7d2fe' : '#e2e8f0'}` }}>
+                  <input type="checkbox" checked={editMode} onChange={e => setEditMode(e.target.checked)} style={{ accentColor: '#6366f1' }} />
+                  {editMode ? <Pencil size={13} style={{ color: '#4f46e5' }} /> : <Lock size={13} style={{ color: '#94a3b8' }} />}
+                  Enable editing
+                </label>
+                <button onClick={saveDraft} className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+                  <Save size={13} /> Save Draft
+                </button>
+              </>
+            ) : (
+              <span className="pill" title="View-only access — downloads are available, changes are not (v20)" style={{ background: '#f1f5f9', color: '#64748b', fontWeight: 600 }}>
+                <Lock size={12} /> View-only
+              </span>
+            )}
             <button onClick={exportExcel} disabled={exporting} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               <Download size={13} /> {exporting ? 'Exporting…' : 'Export Excel'}
             </button>
@@ -854,7 +867,7 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
         ) : (
           /* fieldset lets editMode disable every control in one attribute —
              rows never have to re-render on toggle */
-          <fieldset disabled={!editMode} style={{ border: 'none', padding: 0, margin: 0 }}>
+          <fieldset disabled={!editMode || !isSuperAdmin} style={{ border: 'none', padding: 0, margin: 0 }}>
             <div
               ref={tableWrapRef}
               className="table-wrap table-wrap-sticky"

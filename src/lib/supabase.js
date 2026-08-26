@@ -4,6 +4,11 @@ import {
   getRootCentre,
   getSubtreeCentres,
   notElderlyFilter,
+  eligibleBadgeStatusFilter,
+  badgeStatusEligible,
+  isAssoDepartment,
+  canCentreDeploy,
+  shouldHideFromConsent,
 } from './logic'
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -74,6 +79,85 @@ export async function fetchSubtreeCentres(centreName) {
   return { centres, subtree: getSubtreeCentres(centres, centreName) }
 }
 
+// ── Control Panel overrides (v21) ────────────────────────────
+// Presence of a centre_overrides row OPENS deployment writing for its
+// scope (centre '*' = all; department_id null = all departments).
+export async function fetchCentreOverrides(scheduleId) {
+  if (!scheduleId) return []
+  const { data, error } = await supabase
+    .from('centre_overrides')
+    .select('id, schedule_id, centre, department_id, undeployed_only, note, created_by, created_at')
+    .eq('schedule_id', scheduleId)
+  if (error) throw error
+  return data || []
+}
+
+// Upsert-by-hand: Postgres treats NULL department_id values as distinct in
+// UNIQUE indexes, so ON CONFLICT can't infer "all departments" rows —
+// we remove the existing override for this EXACT scope (centre + department +
+// undeployed_only flag) before inserting, so a centre can hold BOTH a normal
+// and an undeployed-only override at once.
+export async function setCentreOverride({ scheduleId, centre, departmentId = null, undeployedOnly = false, createdBy = null }) {
+  await removeCentreOverride({ scheduleId, centre, departmentId, undeployedOnly })
+  const { error } = await supabase
+    .from('centre_overrides')
+    .insert({
+      schedule_id: scheduleId,
+      centre,
+      department_id: departmentId,
+      undeployed_only: undeployedOnly,
+      ...(createdBy ? { created_by: createdBy } : {}),
+    })
+  if (error) throw error
+}
+
+// Remove the override row matching the exact scope (centre + department +
+// undeployed_only flag). Used to close a single override without disturbing
+// any other scope that may coexist for the same centre.
+export async function removeCentreOverride({ scheduleId, centre, departmentId = null, undeployedOnly = false }) {
+  let q = supabase
+    .from('centre_overrides')
+    .delete()
+    .eq('schedule_id', scheduleId)
+    .eq('centre', centre)
+  // PostgREST requires .is() for null comparisons — .eq('col', null) sends
+  // "col=eq.null" which is a literal string match, not SQL IS NULL.
+  q = departmentId == null ? q.is('department_id', null) : q.eq('department_id', departmentId)
+  q = q.eq('undeployed_only', undeployedOnly)
+  const { error } = await q
+  if (error) throw error
+}
+
+// Remove every override row for the given schedule + centre (both
+// department-scoped and centre-wide / wildcard rows, including undeployed-only).
+// This is safe to call even when no row exists.
+export async function removeAllCentreOverrides({ scheduleId, centre }) {
+  const { error } = await supabase
+    .from('centre_overrides')
+    .delete()
+    .eq('schedule_id', scheduleId)
+    .eq('centre', centre)
+  if (error) throw error
+}
+
+// Tri-state VSS knobs per centre ('*' = all): creation_open / deployment_open,
+// null = inherit the global switch.
+export async function fetchVssOverrides() {
+  const { data, error } = await supabase.from('centre_vss_overrides').select('*').order('centre')
+  if (error) throw error
+  return data || []
+}
+
+export async function setVssOverride(centre, patch, updatedBy = null) {
+  const { error } = await supabase
+    .from('centre_vss_overrides')
+    .upsert(
+      { centre, ...patch, updated_at: new Date().toISOString(), ...(updatedBy ? { updated_by: updatedBy } : {}) },
+      { onConflict: 'centre' }
+    )
+  if (error) throw error
+}
+
 // ── vss-photos (PRIVATE bucket — v16) ───────────────────────
 // The bucket used to be public; photos stored then are full public URLs,
 // new writes store the bare path (reg/...). This resolves either form to a
@@ -92,4 +176,4 @@ export async function vssPhotoUrl(photoUrlOrPath) {
   return data.signedUrl
 }
 
-export { getParentCentres, getRootCentre, getSubtreeCentres, notElderlyFilter }
+export { getParentCentres, getRootCentre, getSubtreeCentres, notElderlyFilter, eligibleBadgeStatusFilter, badgeStatusEligible, isAssoDepartment, canCentreDeploy, shouldHideFromConsent }
