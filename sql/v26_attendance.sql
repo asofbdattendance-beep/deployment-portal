@@ -4,6 +4,22 @@
 -- ============================================================
 
 -- 1. table
+-- Guard: a pre-existing attendance_sessions from an earlier DRAFT schema that
+-- lacks the schedule_id column would make CREATE INDEX / POLICY fail with
+-- 'column schedule_id does not exist'. Drop only if incompatible (missing
+-- schedule_id), so any real data in a correct-shape table is preserved.
+DO $$
+BEGIN
+  IF to_regclass('public.attendance_sessions') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM information_schema.columns
+       WHERE table_schema='public' AND table_name='attendance_sessions' AND column_name='schedule_id'
+     ) THEN
+    DROP TABLE public.attendance_sessions CASCADE;
+    RAISE NOTICE 'Dropped stale attendance_sessions (missing schedule_id)';
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS public.attendance_sessions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   schedule_id uuid NOT NULL REFERENCES public.deployment_schedules(id) ON DELETE CASCADE,
