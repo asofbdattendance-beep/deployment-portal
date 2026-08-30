@@ -37,14 +37,14 @@ WHERE name ILIKE 'OE ESCORTS%'
 -- Disable every consent-write trigger that could reject the backfill (the SQL
 -- editor has no portal role). Guarded so the script also re-runs cleanly on a
 -- DB that already has the v16 triggers (e.g. trg_block_finalized_consent).
-DO $ BEGIN
+DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_block_after_deadline' AND tgrelid = 'public.sewadar_consents'::regclass) THEN
     ALTER TABLE public.sewadar_consents DISABLE TRIGGER trg_block_after_deadline;
   END IF;
   IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_block_finalized_consent' AND tgrelid = 'public.sewadar_consents'::regclass) THEN
     ALTER TABLE public.sewadar_consents DISABLE TRIGGER trg_block_finalized_consent;
   END IF;
-END $;
+END $$;
 
 UPDATE public.sewadar_consents sc
 SET available_days_count = 3
@@ -59,14 +59,14 @@ WHERE sc.available_days_count IS DISTINCT FROM 3
       AND (req.name ILIKE 'OE ESCORTS%' OR fin.name ILIKE 'OE ESCORTS%')
   );
 
-DO $ BEGIN
+DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_block_after_deadline' AND tgrelid = 'public.sewadar_consents'::regclass) THEN
     ALTER TABLE public.sewadar_consents ENABLE TRIGGER trg_block_after_deadline;
   END IF;
   IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_block_finalized_consent' AND tgrelid = 'public.sewadar_consents'::regclass) THEN
     ALTER TABLE public.sewadar_consents ENABLE TRIGGER trg_block_finalized_consent;
   END IF;
-END $;
+END $$;
 
 -- ------------------------------------------------------------
 -- 3. Department guard: any department named OE ESCORTS (created now

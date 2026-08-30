@@ -147,7 +147,7 @@ BEGIN
       EXECUTE format(
         'ALTER TABLE public.%I ADD CONSTRAINT %I FOREIGN KEY (%I) REFERENCES public.%I(id) ON DELETE %s',
         r.child, r.child || '_' || r.col || '_fkey', r.col, r.parent, v_action);
-      RAISE NOTICE 'v11: added FK % on % (ON DELETE %)', r.child || '_' || r.col || '_fkey', r.child, v_action);
+      RAISE NOTICE 'v11: added FK % on % (ON DELETE %)', r.child || '_' || r.col || '_fkey', r.child, v_action;
     ELSIF v_deltype <> r.action THEN
       EXECUTE format('ALTER TABLE public.%I DROP CONSTRAINT %I', r.child, v_conname);
       EXECUTE format(
@@ -155,7 +155,7 @@ BEGIN
         r.child, r.child || '_' || r.col || '_fkey', r.col, r.parent, v_action);
       RAISE NOTICE 'v11: rebuilt FK % on % (was %, now %)', r.child || '_' || r.col || '_fkey', r.child,
         CASE v_deltype WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'a' THEN 'NO ACTION' ELSE v_deltype END,
-        v_action);
+        v_action;
     END IF;
   END LOOP;
 END $$;
