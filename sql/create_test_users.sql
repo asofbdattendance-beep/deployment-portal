@@ -45,11 +45,11 @@ BEGIN
     );
     INSERT INTO auth.identities (
       id, user_id, provider_id, provider, identity_data,
-      last_sign_in_at, created_at, updated_at, email
+      last_sign_in_at, created_at, updated_at
     )
     SELECT u.id, u.id, u.id::text, 'email',
            jsonb_build_object('sub', u.id::text, 'email', u.email, 'email_verified', false, 'phone_verified', false),
-           now(), now(), now(), u.email
+           now(), now(), now()
     FROM auth.users u WHERE u.email = 'scanner.test@gmail.com';
   END IF;
 
@@ -74,11 +74,11 @@ BEGIN
     );
     INSERT INTO auth.identities (
       id, user_id, provider_id, provider, identity_data,
-      last_sign_in_at, created_at, updated_at, email
+      last_sign_in_at, created_at, updated_at
     )
     SELECT u.id, u.id, u.id::text, 'email',
            jsonb_build_object('sub', u.id::text, 'email', u.email, 'email_verified', false, 'phone_verified', false),
-           now(), now(), now(), u.email
+           now(), now(), now()
     FROM auth.users u WHERE u.email = 'dept.incharge@gmail.com';
   END IF;
 
