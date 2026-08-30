@@ -1,11 +1,22 @@
 -- ============================================================
--- CREATE TEST USERS for Scanner (v3 — SHORT EMAIL)
+-- CREATE TEST USERS for Scanner (v3 — SHORT EMAIL) — FIXED via Admin API
 -- ------------------------------------------------------------
 -- v3: delete old test users (scanner.test@gmail.com / dept.incharge@gmail.com)
 --     and create a single short scanner login: sc@test.com / 123456
 -- Short email is easier to type on the handheld BigPickle scanner.
--- Run in Supabase SQL Editor as postgres AFTER v25/v26/v27.
--- Safe to re-run (idempotent).
+--
+-- ⚠️  DO NOT INSERT DIRECTLY INTO auth.users WITH SQL — GoTrue will 500
+--     ("Database error querying schema") due to missing internal fields.
+--     The block below is kept for DELETE-only cleanup; creation is done
+--     via Supabase Admin API (service_role) — which correctly populates
+--     encrypted_password (cost 10), identities, and metadata.
+--     See the JS snippet at the bottom for the safe creation method.
+--     If you must use SQL, run ONLY the DELETEs, then use Dashboard
+--     → Authentication → Add User, or the Node snippet.
+--
+-- Run the DELETEs in Supabase SQL Editor as postgres AFTER v25/v26/v27.
+-- Safe to re-run (idempotent) — ONLY deletes the 3 test emails, never
+-- real users (ybhadana, qualityestate_123, asofbd.attendance, etc.).
 -- ============================================================
 
 -- role check (idempotent — also covers "run before v25")
@@ -79,3 +90,21 @@ WHERE u.email IN ('sc@test.com') ORDER BY u.email;
 -- OPTIONAL: confirm old test users are gone (should return 0 rows)
 -- SELECT email FROM auth.users WHERE email IN ('scanner.test@gmail.com','dept.incharge@gmail.com');
 -- SELECT email FROM public.portal_users WHERE email IN ('scanner.test@gmail.com','dept.incharge@gmail.com');
+
+-- ============================================================
+-- SAFE CREATION (run with service_role — NOT via SQL Editor auth.users INSERT)
+-- ------------------------------------------------------------
+-- Node.js (requires SERVICE_ROLE_KEY):
+-- import { createClient } from '@supabase/supabase-js';
+-- const supabase = createClient(url, service_role_key);
+-- await supabase.auth.admin.createUser({
+--   email: 'sc@test.com',
+--   password: '123456',
+--   email_confirm: true,
+--   user_metadata: { name: 'Test Scanner', badge_number: 'FB5971GA', centre: 'SECTOR-15-A', role: 'scanner' }
+-- });
+-- await supabase.from('portal_users').insert({
+--   auth_id: newUser.id, name: 'Test Scanner', email: 'sc@test.com',
+--   badge_number: 'FB5971GA', centre: 'SECTOR-15-A', role: 'scanner', is_active: true
+-- });
+-- ============================================================
