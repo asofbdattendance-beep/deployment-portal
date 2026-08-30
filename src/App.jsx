@@ -5,7 +5,7 @@ import { useToast } from './components/Toast'
 import LoginPage from './pages/LoginPage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
 import { ROLE_LABELS, ROLE_COLORS } from './lib/supabase'
-import { Calendar, Users, ClipboardCheck, ShieldCheck, Star, Tags, SlidersHorizontal, RefreshCw, AlertTriangle, Building2 } from 'lucide-react'
+import { Calendar, Users, ClipboardCheck, ShieldCheck, Star, Tags, SlidersHorizontal, RefreshCw, AlertTriangle, Building2, ScanLine, ShieldCheck as ShieldCheck2 } from 'lucide-react'
 
 // Code-split each page so the initial bundle stays small (xlsx etc. only
 // loads when the page that uses it is actually opened).
@@ -15,6 +15,8 @@ const ConsentPage = lazy(() => import('./pages/ConsentPage'))
 const VssPage = lazy(() => import('./pages/VssPage'))
 const DeploymentAllocationPage = lazy(() => import('./pages/DeploymentAllocationPage'))
 const CentreListsPage = lazy(() => import('./pages/CentreListsPage'))
+const DeptInchargePage = lazy(() => import('./pages/DeptInchargePage'))
+const ScannerPage = lazy(() => import('./pages/ScannerPage'))
 const ControlPanelPage = lazy(() => import('./pages/ControlPanelPage'))
 
 const PAGES = {
@@ -24,6 +26,8 @@ const PAGES = {
   alloc: { label: 'Finalize Deployment', icon: Tags, roles: ['aso', 'super_admin'] },
   deployment: { label: 'Overview', icon: Users, roles: ['aso', 'super_admin'] },
   centreLists: { label: 'Centre Lists', icon: Building2, roles: ['aso', 'super_admin'] },
+  deptIncharge: { label: 'Dept Incharge', icon: ShieldCheck2, roles: ['dept_incharge'] },
+  scanner: { label: 'Scanner', icon: ScanLine, roles: ['scanner'] },
   // phase-2 hardening: per-centre permission overrides — super_admin only
   control: { label: 'Control Panel', icon: SlidersHorizontal, roles: ['super_admin'] },
 }
@@ -116,6 +120,8 @@ function Dashboard() {
           {currentPage === 'deployment' && <DeploymentPage schedules={schedules} scheduleId={scheduleId} />}
           {currentPage === 'alloc' && <DeploymentAllocationPage schedules={schedules} scheduleId={scheduleId} />}
           {currentPage === 'centreLists' && <CentreListsPage schedules={schedules} scheduleId={scheduleId} />}
+          {currentPage === 'deptIncharge' && <DeptInchargePage schedules={schedules} scheduleId={scheduleId} />}
+          {currentPage === 'scanner' && <ScannerPage schedules={schedules} scheduleId={scheduleId} />}
           {currentPage === 'control' && <ControlPanelPage schedules={schedules} scheduleId={scheduleId} refreshSchedules={loadSchedules} />}
         </Suspense>
       </main>
@@ -185,7 +191,7 @@ export default function App() {
     return <AccessDenied signOut={signOut} />
   }
 
-  const allowedRoles = ['centre_user', 'centre_admin', 'aso', 'super_admin']
+  const allowedRoles = ['centre_user', 'centre_admin', 'aso', 'super_admin', 'dept_incharge', 'scanner']
   if (!allowedRoles.includes(profile.role)) return <AccessDenied signOut={signOut} />
 
   return <Dashboard />

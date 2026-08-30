@@ -1,13 +1,16 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { getRootCentre, isVssBadge } from '../lib/logic'
+import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
-import { Building2, Users, Search, Download, Filter, X, Star, CheckCircle2, ShieldCheck, Lock, Unlock } from 'lucide-react'
+import { Building2, Users, Search, Download, Filter, X, Star, CheckCircle2, ShieldCheck, Lock, Unlock, Crown } from 'lucide-react'
 
 const ROW_H = 44
 
 export default function CentreListsPage({ schedules, scheduleId }) {
   const toast = useToast()
+  const { profile } = usePortalAuth()
+  const isASO = profile?.role === 'aso' || profile?.role === 'super_admin'
   const selectedScheduleId = scheduleId
 
   const [depts, setDepts] = useState([])
@@ -18,9 +21,15 @@ export default function CentreListsPage({ schedules, scheduleId }) {
   const [vssSewadars, setVssSewadars] = useState([])
   const [inchargesRaw, setInchargesRaw] = useState([])
   const [locksRaw, setLocksRaw] = useState([])
+  const [selectionsRaw, setSelectionsRaw] = useState([])
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(false)
   const exportingRef = useRef(false)
+  const [selCentre, setSelCentre] = useState('')
+  const [selDept, setSelDept] = useState('')
+  const [sel1, setSel1] = useState('')
+  const [sel2, setSel2] = useState('')
+  const [savingSel, setSavingSel] = useState(false)
 
   // tabs: sewadars | vss | incharges
   const [activeTab, setActiveTab] = useState('sewadars')
@@ -74,19 +83,23 @@ export default function CentreListsPage({ schedules, scheduleId }) {
       setRegularSewadars(sewRes.data || [])
       setVssSewadars(vssRes.data || [])
 
-      // incharges + locks — non-fatal: tables may not exist until v12/v13 migrated
+      // incharges + locks + selections — non-fatal
       try {
-        const [incRes, lockRes] = await Promise.all([
+        const [incRes, lockRes, selRes] = await Promise.all([
           supabase.from('department_incharges').select('*').eq('schedule_id', selectedScheduleId),
           supabase.from('centre_locks').select('*').eq('schedule_id', selectedScheduleId),
+          supabase.from('department_incharge_selections').select('*').eq('schedule_id', selectedScheduleId),
         ])
         if (!incRes.error) setInchargesRaw(incRes.data || [])
         else setInchargesRaw([])
         if (!lockRes.error) setLocksRaw(lockRes.data || [])
         else setLocksRaw([])
+        if (!selRes.error) setSelectionsRaw(selRes.data || [])
+        else setSelectionsRaw([])
       } catch {
         setInchargesRaw([])
         setLocksRaw([])
+        setSelectionsRaw([])
       }
     } catch (err) {
       console.error('Failed to load centre lists:', err)
@@ -98,7 +111,7 @@ export default function CentreListsPage({ schedules, scheduleId }) {
 
   useEffect(() => { loadData() }, [loadData])
 
-  // realtime: refresh on deployments / consents / department_incharges / locks
+  // realtime: refresh on deployments / consents / department_incharges / locks / selections
   useEffect(() => {
     if (!selectedScheduleId) return
     let mounted = true
@@ -115,6 +128,7 @@ export default function CentreListsPage({ schedules, scheduleId }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'deployment_departments' }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'department_incharges', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'department_incharge_selections', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
       .subscribe()
     return () => { mounted = false; if (timer) clearTimeout(timer); supabase.removeChannel(channel) }
   }, [selectedScheduleId, loadData])
@@ -882,6 +896,94 @@ export default function CentreListsPage({ schedules, scheduleId }) {
           </div>
         )}
       </div>
+
+      {/* ASO — select 2 dept incharges per Centre×Dept */}
+      {isASO && activeTab === 'incharges' && (
+        <div className="card" style={{ padding: '1rem', marginTop: '1rem' }}>
+          <div style={{ fontWeight: 800, fontSize: '0.92rem', display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}><Crown size={16} style={{ color: '#8b5cf6' }} /> Select 2 Dept Incharges (ASO) — from pool, fallback any deployed sewadar</div>
+          <div style={{ fontSize:'0.78rem', color:'#64748b', marginBottom:10 }}>Pick a CENTRE & department, then choose Rank 1 & 2. Pool members (already centre’s incharge) show as <span className="pill pill-green" style={{fontSize:'0.65rem'}}>Pool</span>; others as <span className="pill pill-amber" style={{fontSize:'0.65rem'}}>Fallback</span>.</div>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:8, alignItems:'center' }}>
+            <select value={selCentre} onChange={e=>{ setSelCentre(e.target.value); setSelDept(''); setSel1(''); setSel2('') }} className="select" style={{ minWidth:160 }}>
+              <option value="">Select Centre</option>
+              {[...new Set(inchargesRows.map(r=>r.centre).concat([...new Set(deploymentsRaw.map(d=> getRootCentre(centres,d.centre)||d.centre))]))].filter(Boolean).sort((a,b)=>centreOrder(a,b)).map(c=> <option key={c} value={c}>{c} {locksRaw.some(l=>l.centre===c)?'🔒':''}</option>)}
+            </select>
+            <select value={selDept} onChange={e=>{ setSelDept(e.target.value); setSel1(''); setSel2('') }} className="select" style={{ minWidth:190 }} disabled={!selCentre}>
+              <option value="">Select Department</option>
+              {[...new Set(deploymentsRaw.filter(d=> (getRootCentre(centres,d.centre)||d.centre)===selCentre).map(d=> d.deployed_department_id||d.department_id).filter(Boolean))]
+                .map(id=>deptMap.get(id)).filter(Boolean).sort((a,b)=>a.name.localeCompare(b.name)).map(d=> <option key={d.id} value={d.id}>{d.name}</option>)}
+            </select>
+            {(() => {
+              const eligible = deploymentsRaw.filter(d=> (getRootCentre(centres,d.centre)||d.centre)===selCentre && (d.deployed_department_id||d.department_id)===selDept).map(d=>d.badge_number)
+              const uniq = [...new Set(eligible)]
+              const opts = uniq.map(badge=>{
+                const inc = inchargesRaw.find(i=>i.centre===selCentre && i.department_id===selDept && i.badge_number===badge)
+                const sw = [...regularSewadars, ...vssSewadars].find(s=>s.badge_number===badge)
+                const name = sw?.sewadar_name || deploymentsRaw.find(d=>d.badge_number===badge)?.sewadar_name || badge
+                return { badge, name, isPool: !!inc, is_vss: badge.startsWith('VS') }
+              }).sort((a,b)=> a.name.localeCompare(b.name))
+              const current = selectionsRaw.filter(s=>s.centre===selCentre && s.department_id===selDept).sort((a,b)=>a.rank-b.rank)
+              const cur1 = current.find(s=>s.rank===1)?.badge_number || ''
+              const cur2 = current.find(s=>s.rank===2)?.badge_number || ''
+              if (!selDept) return null
+              return (
+                <>
+                  <select value={sel1 || cur1} onChange={e=>setSel1(e.target.value)} className="select" style={{ minWidth:180 }}>
+                    <option value="">Rank 1 — Select</option>
+                    {opts.map(o=> <option key={o.badge} value={o.badge}>{o.name} ({o.badge}) {o.isPool?'[Pool]':'[Fallback]'} {o.is_vss?' VSS':''}</option>)}
+                  </select>
+                  <select value={sel2 || cur2} onChange={e=>setSel2(e.target.value)} className="select" style={{ minWidth:180 }}>
+                    <option value="">Rank 2 — Select</option>
+                    {opts.map(o=> <option key={o.badge} value={o.badge}>{o.name} ({o.badge}) {o.isPool?'[Pool]':'[Fallback]'} {o.is_vss?' VSS':''}</option>)}
+                  </select>
+                  <button
+                    disabled={savingSel || (!sel1 && !cur1 && !sel2 && !cur2) || (sel1 && sel2 && sel1===sel2)}
+                    onClick={async()=>{
+                      if(sel1 && sel2 && sel1===sel2){ toast.error('Rank 1 and 2 cannot be same badge'); return }
+                      setSavingSel(true)
+                      try{
+                        const toSave = []
+                        if (sel1 || cur1) {
+                          const badge = sel1 || cur1
+                          const sw = [...regularSewadars, ...vssSewadars].find(s=>s.badge_number===badge)
+                          toSave.push({ schedule_id: selectedScheduleId, centre: selCentre, department_id: selDept, badge_number: badge, sewadar_name: sw?.sewadar_name || badge, rank: 1 })
+                        }
+                        if (sel2 || cur2) {
+                          const badge = sel2 || cur2
+                          const sw = [...regularSewadars, ...vssSewadars].find(s=>s.badge_number===badge)
+                          toSave.push({ schedule_id: selectedScheduleId, centre: selCentre, department_id: selDept, badge_number: badge, sewadar_name: sw?.sewadar_name || badge, rank: 2 })
+                        }
+                        for(const row of toSave){
+                          const { error } = await supabase.from('department_incharge_selections').upsert(row, { onConflict: 'schedule_id,centre,department_id,rank' })
+                          if(error) throw error
+                        }
+                        // remove rank that was cleared
+                        if (!sel1 && cur1 && !toSave.some(r=>r.rank===1)) await supabase.from('department_incharge_selections').delete().eq('schedule_id',selectedScheduleId).eq('centre',selCentre).eq('department_id',selDept).eq('rank',1)
+                        if (!sel2 && cur2 && !toSave.some(r=>r.rank===2)) await supabase.from('department_incharge_selections').delete().eq('schedule_id',selectedScheduleId).eq('centre',selCentre).eq('department_id',selDept).eq('rank',2)
+                        toast.success('Incharge selection saved'); setSel1(''); setSel2('')
+                        const { data } = await supabase.from('department_incharge_selections').select('*').eq('schedule_id',selectedScheduleId)
+                        setSelectionsRaw(data||[])
+                      }catch(e){ toast.error(e.message) } finally{ setSavingSel(false) }
+                    }}
+                    className="btn btn-primary"
+                  >
+                    {savingSel?'Saving…':'Save 2 Incharges'}
+                  </button>
+                  {current.length>0 && <span style={{fontSize:'0.75rem', color:'#64748b'}}>Current: {current.map(c=> `${c.rank}:${c.badge_number} ${c.is_from_pool?'Pool':'Fallback'}`).join(' · ')}</span>}
+                </>
+              )
+            })()}
+          </div>
+          {selectionsRaw.length>0 && (
+            <div style={{marginTop:10, fontSize:'0.78rem'}}>
+              <div style={{fontWeight:700, marginBottom:4}}>All selections for this schedule:</div>
+              <div style={{display:'flex', flexWrap:'wrap', gap:6}}>
+                {selectionsRaw.slice(0,30).map(s=> <span key={s.id||`${s.centre}-${s.department_id}-${s.rank}`} className={`pill ${s.is_from_pool===false?'pill-amber':'pill-indigo'}`} style={{fontSize:'0.68rem'}}>{s.centre} · {deptMap.get(s.department_id)?.name||s.department_id} · Rank {s.rank}: {s.badge_number} {s.is_from_pool===false?'(Fallback)':'(Pool)'}</span>)}
+                {selectionsRaw.length>30 && <span style={{fontSize:'0.72rem', color:'#94a3b8'}}>+{selectionsRaw.length-30} more</span>}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

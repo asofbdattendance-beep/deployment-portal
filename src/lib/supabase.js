@@ -28,6 +28,8 @@ export const ROLES = {
   CENTRE_ADMIN: 'centre_admin',
   ASO: 'aso',
   SUPER_ADMIN: 'super_admin',
+  DEPT_INCHARGE: 'dept_incharge',
+  SCANNER: 'scanner',
 }
 
 export const ROLE_LABELS = {
@@ -35,6 +37,8 @@ export const ROLE_LABELS = {
   centre_admin: 'Centre Admin',
   aso: 'ASO',
   super_admin: 'ASO',
+  dept_incharge: 'Dept Incharge',
+  scanner: 'Scanner',
 }
 
 export const ROLE_COLORS = {
@@ -42,6 +46,14 @@ export const ROLE_COLORS = {
   centre_admin: '#8b5cf6',
   aso: '#f59e0b',
   super_admin: '#ef4444',
+  dept_incharge: '#0ea5e9',
+  scanner: '#10b981',
+}
+
+export async function getMyDeptIds(scheduleId) {
+  if (!scheduleId) return []
+  const { data } = await supabase.rpc('get_my_dept_ids', { p_schedule: scheduleId })
+  return data || []
 }
 
 export async function fetchCentres() {
