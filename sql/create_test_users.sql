@@ -5,6 +5,11 @@
 -- and portal_users rows. Safe to re-run.
 -- ============================================================
 
+-- Ensure role check allows new roles even if v25 not yet run
+ALTER TABLE public.portal_users DROP CONSTRAINT IF EXISTS portal_users_role_check;
+ALTER TABLE public.portal_users ADD CONSTRAINT portal_users_role_check
+  CHECK (role IN ('centre_user','centre_admin','aso','super_admin','dept_incharge','scanner'));
+
 -- Helper: get instance_id (single row in auth.users)
 DO $$
 DECLARE v_instance uuid;
@@ -31,22 +36,24 @@ BEGIN
   ) ON CONFLICT (auth_id) DO UPDATE SET role='scanner', centre='SECTOR-15-A', is_active=true, updated_at=now();
 
   -- 2) Fresh deterministic scanner (scanner.test@gmail.com)
-  INSERT INTO auth.users (
-    instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, confirmation_sent_at, recovery_sent_at,
-    raw_app_meta_data, raw_user_meta_data, created_at, updated_at, is_super_admin, is_sso_user
-  )
-  VALUES (
-    v_instance,
-    gen_random_uuid(),
-    'authenticated', 'authenticated',
-    'scanner.test@gmail.com',
-    crypt('Scanner@123', gen_salt('bf')),
-    now(), now(), null,
-    '{"provider":"email","providers":["email"]}'::jsonb,
-    '{"name":"Test Scanner"}'::jsonb,
-    now(), now(),
-    false, false
-  ) ON CONFLICT (email) DO NOTHING;
+  IF NOT EXISTS (SELECT 1 FROM auth.users WHERE email='scanner.test@gmail.com') THEN
+    INSERT INTO auth.users (
+      instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, confirmation_sent_at, recovery_sent_at,
+      raw_app_meta_data, raw_user_meta_data, created_at, updated_at, is_super_admin, is_sso_user
+    )
+    VALUES (
+      v_instance,
+      gen_random_uuid(),
+      'authenticated', 'authenticated',
+      'scanner.test@gmail.com',
+      crypt('Scanner@123', gen_salt('bf')),
+      now(), now(), null,
+      '{"provider":"email","providers":["email"]}'::jsonb,
+      '{"name":"Test Scanner"}'::jsonb,
+      now(), now(),
+      false, false
+    );
+  END IF;
 
   -- confirm it (in case it was rate-limited but now inserted)
   UPDATE auth.users SET email_confirmed_at = now() WHERE email = 'scanner.test@gmail.com';
@@ -57,22 +64,24 @@ BEGIN
   ON CONFLICT (auth_id) DO UPDATE SET role='scanner', centre='SECTOR-15-A', is_active=true, updated_at=now();
 
   -- 3) Dept Incharge test user (dept.incharge@gmail.com)
-  INSERT INTO auth.users (
-    instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, confirmation_sent_at, recovery_sent_at,
-    raw_app_meta_data, raw_user_meta_data, created_at, updated_at, is_super_admin, is_sso_user
-  )
-  VALUES (
-    v_instance,
-    gen_random_uuid(),
-    'authenticated', 'authenticated',
-    'dept.incharge@gmail.com',
-    crypt('Incharge@123', gen_salt('bf')),
-    now(), now(), null,
-    '{"provider":"email","providers":["email"]}'::jsonb,
-    '{"name":"Test Dept Incharge"}'::jsonb,
-    now(), now(),
-    false, false
-  ) ON CONFLICT (email) DO NOTHING;
+  IF NOT EXISTS (SELECT 1 FROM auth.users WHERE email='dept.incharge@gmail.com') THEN
+    INSERT INTO auth.users (
+      instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, confirmation_sent_at, recovery_sent_at,
+      raw_app_meta_data, raw_user_meta_data, created_at, updated_at, is_super_admin, is_sso_user
+    )
+    VALUES (
+      v_instance,
+      gen_random_uuid(),
+      'authenticated', 'authenticated',
+      'dept.incharge@gmail.com',
+      crypt('Incharge@123', gen_salt('bf')),
+      now(), now(), null,
+      '{"provider":"email","providers":["email"]}'::jsonb,
+      '{"name":"Test Dept Incharge"}'::jsonb,
+      now(), now(),
+      false, false
+    );
+  END IF;
 
   UPDATE auth.users SET email_confirmed_at = now() WHERE email='dept.incharge@gmail.com';
 
