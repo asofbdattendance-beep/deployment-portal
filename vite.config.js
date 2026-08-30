@@ -1,9 +1,23 @@
 import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const here = path.dirname(fileURLToPath(import.meta.url))
+const certDir = path.join(here, 'certs')
+const useHttps = fs.existsSync(path.join(certDir, 'local-cert.pem'))
 
 export default defineConfig({
   plugins: [react()],
-  server: { port: 5174 },
+  server: {
+    host: true,
+    port: 5174,
+    https: useHttps ? {
+      key: fs.readFileSync(path.join(certDir, 'local-key.pem')),
+      cert: fs.readFileSync(path.join(certDir, 'local-cert.pem')),
+    } : undefined,
+  },
   test: {
     environment: 'node',
     coverage: {
