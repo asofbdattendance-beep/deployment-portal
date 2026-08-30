@@ -294,10 +294,8 @@ export default function CentreListsPage({ schedules, scheduleId }) {
         'Days': r.available_days_count ?? '—',
         'Stay at Bhati': r.stay_at_bhati ? 'Yes' : 'No',
         'Chair Pass': r.chair_pass ? 'Yes' : 'No',
-        'Requested Deployment': r.requested_name || '—',
-        'Finalized Deployment': r.deployed_name || (r.requested_name ? `${r.requested_name} (auto)` : '—'),
-        'Effective Deployment': r.effective_name || '—',
-        'Status': r.is_overridden ? 'Overridden' : r.is_finalized ? 'Finalized' : 'Deployed (awaiting finalize)',
+        'Deployed Department': r.effective_name || '—',
+        'Status': r.is_overridden ? 'Overridden' : r.is_finalized ? 'Finalized' : 'Deployed',
       }))
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Centre Lists')
 
@@ -515,14 +513,13 @@ export default function CentreListsPage({ schedules, scheduleId }) {
                   <th style={{ textAlign: 'center' }}>Consent</th>
                   <th style={{ textAlign: 'center' }}>Days</th>
                   <th style={{ textAlign: 'center' }}>Stay</th>
-                  <th style={{ textAlign: 'center' }}>Requested</th>
-                  <th style={{ textAlign: 'center', background: '#eef2ff', color: '#4f46e5', fontWeight: 800 }}>Finalized</th>
+                  <th style={{ textAlign: 'center', background: '#eef2ff', color: '#4f46e5', fontWeight: 800 }}>Deployed Department</th>
                 </tr>
               </thead>
               <tbody>
                 {startIdx > 0 && (
                   <tr aria-hidden="true" style={{ height: startIdx * ROW_H }}>
-                    <td colSpan={10} style={{ padding: 0, border: 'none', height: startIdx * ROW_H }} />
+                    <td colSpan={9} style={{ padding: 0, border: 'none', height: startIdx * ROW_H }} />
                   </tr>
                 )}
                 {visibleSlice.map((r, i) => {
@@ -560,17 +557,18 @@ export default function CentreListsPage({ schedules, scheduleId }) {
                       <td style={{ textAlign: 'center' }} data-label="Stay">
                         <span className={`pill ${r.stay_at_bhati ? 'pill-green' : 'pill-gray'}`} style={{ fontSize: '0.68rem' }}>{r.stay_at_bhati ? 'Yes' : '—'}</span>
                       </td>
-                      <td style={{ textAlign: 'center' }} data-label="Requested">
-                        {r.requested_name ? <span className="pill pill-blue" style={{ fontSize: '0.72rem', whiteSpace: 'nowrap' }}>{r.requested_name}</span> : <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>—</span>}
-                      </td>
-                      <td style={{ textAlign: 'center', background: '#f8faff' }} data-label="Finalized">
-                        {r.deployed_name ? (
+                      <td style={{ textAlign: 'center', background: '#f8faff' }} data-label="Deployed Department">
+                        {r.effective_name && r.effective_name !== '—' ? (
                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap', justifyContent: 'center' }}>
-                            <span className="pill pill-green" style={{ fontSize: '0.72rem', whiteSpace: 'nowrap', fontWeight: 700 }}>{r.deployed_name}</span>
-                            {overridden && <span className="pill pill-amber" style={{ fontSize: '0.6rem' }}>CHANGED</span>}
+                            <span
+                              className={`pill ${overridden ? 'pill-amber' : r.is_finalized ? 'pill-green' : 'pill-blue'}`}
+                              style={{ fontSize: '0.72rem', whiteSpace: 'nowrap', fontWeight: 700 }}
+                              title={overridden ? `Finalized as ${r.deployed_name} (requested was ${r.requested_name})` : r.is_finalized ? 'Finalized deployment' : 'Requested deployment (defaults to this until finalized)'}
+                            >
+                              {r.effective_name}
+                            </span>
+                            {overridden && <span className="pill pill-amber" style={{ fontSize: '0.6rem' }} title={`Changed from ${r.requested_name}`}>CHANGED</span>}
                           </span>
-                        ) : r.requested_name ? (
-                          <span className="pill pill-gray" style={{ fontSize: '0.68rem' }} title="Awaiting finalize — defaults to requested">Pending</span>
                         ) : (
                           <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>—</span>
                         )}
@@ -580,7 +578,7 @@ export default function CentreListsPage({ schedules, scheduleId }) {
                 })}
                 {endIdx < totalRows && (
                   <tr aria-hidden="true" style={{ height: (totalRows - endIdx) * ROW_H }}>
-                    <td colSpan={10} style={{ padding: 0, border: 'none', height: (totalRows - endIdx) * ROW_H }} />
+                    <td colSpan={9} style={{ padding: 0, border: 'none', height: (totalRows - endIdx) * ROW_H }} />
                   </tr>
                 )}
               </tbody>
