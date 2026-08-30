@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react'
 import { supabase } from '../lib/supabase'
-import { eligibleBadgeStatusFilter, isVssBadge, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, getRootCentre, changedConsentRows, buildConsentSnapshot, shouldHideFromConsent } from '../lib/logic'
+import { eligibleBadgeStatusFilter, notElderlyFilter, isVssBadge, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, getRootCentre, changedConsentRows, buildConsentSnapshot, shouldHideFromConsent } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import {
@@ -163,15 +163,31 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
     const prevRows = liveRef.current.rows
     const prevDirty = dirtyRef.current
     try {
-      const [sewRes, vssRes, consRes, deptRes, deployRes, centreRes, allocRes] = await Promise.all([
-        supabase.from('sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, badge_status').or(eligibleBadgeStatusFilter()).order('sewadar_name'),
-        supabase.from('vss_sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, is_active, badge_status').or(eligibleBadgeStatusFilter()).order('sewadar_name'),
+      // Supabase caps single-query rows at 1000 — paginate sewadars/vss to get the full roster (3597 + 320)
+      const fetchAllSewadars = async (table, columns, filter) => {
+        const pageSize = 1000
+        let from = 0
+        let all = []
+        while (true) {
+          const { data, error } = await supabase.from(table).select(columns).or(filter).order('sewadar_name').range(from, from + pageSize - 1)
+          if (error) throw error
+          all.push(...(data || []))
+          if (!data || data.length < pageSize) break
+          from += pageSize
+        }
+        return all
+      }
+      const [sewAll, vssAll, consRes, deptRes, deployRes, centreRes, allocRes] = await Promise.all([
+        fetchAllSewadars('sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, badge_status', eligibleBadgeStatusFilter()),
+        fetchAllSewadars('vss_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, is_active, badge_status', notElderlyFilter()),
         supabase.from('sewadar_consents').select('*').eq('schedule_id', selectedScheduleId),
         supabase.from('deployment_departments').select('*').order('name'),
         supabase.from('deployments').select('*').eq('schedule_id', selectedScheduleId),
         supabase.from('centres').select('name, parent_centre').order('name'),
         supabase.from('centre_allocations').select('department_id, centre, max_count').eq('schedule_id', selectedScheduleId),
       ])
+      const sewRes = { data: sewAll, error: null }
+      const vssRes = { data: vssAll, error: null }
 
       // Abort if any query failed — empty rows here would reset the save
       // baseline and could let a later save clobber real consent data.
