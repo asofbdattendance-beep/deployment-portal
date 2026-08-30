@@ -14,6 +14,8 @@ ALTER TABLE public.portal_users ADD CONSTRAINT portal_users_role_check
   CHECK (role IN ('centre_user','centre_admin','aso','super_admin','dept_incharge','scanner'));
 
 -- 1) delete OLD test users + any prior sc@test.com (idempotent, for re-runs)
+-- Identities must be deleted first if FK is not CASCADE (prevents 500 "Database error querying schema")
+DELETE FROM auth.identities WHERE user_id IN (SELECT id FROM auth.users WHERE email IN ('scanner.test@gmail.com','dept.incharge@gmail.com','sc@test.com'));
 DELETE FROM auth.users WHERE email IN ('scanner.test@gmail.com','dept.incharge@gmail.com','sc@test.com');
 DELETE FROM public.portal_users WHERE email IN ('scanner.test@gmail.com','dept.incharge@gmail.com','sc@test.com');
 
@@ -46,6 +48,18 @@ BEGIN
            now(), now(), now()
     FROM auth.users u WHERE u.email = 'sc@test.com';
   END IF;
+
+  -- Repair broken case: user exists but identities missing (500 "Database error querying schema")
+  INSERT INTO auth.identities (
+    id, user_id, provider_id, provider, identity_data,
+    last_sign_in_at, created_at, updated_at
+  )
+  SELECT u.id, u.id, u.id::text, 'email',
+         jsonb_build_object('sub', u.id::text, 'email', u.email, 'email_verified', false, 'phone_verified', false),
+         now(), now(), now()
+  FROM auth.users u
+  WHERE u.email='sc@test.com'
+  AND NOT EXISTS (SELECT 1 FROM auth.identities i WHERE i.user_id = u.id);
 
   INSERT INTO public.portal_users (auth_id, name, email, badge_number, centre, role, is_active)
   SELECT id, 'Test Scanner', 'sc@test.com', 'FB5971GA', 'SECTOR-15-A', 'scanner', true
