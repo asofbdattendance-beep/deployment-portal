@@ -193,7 +193,7 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
       {tab==='scan' && (
         <div style={{display:'grid', gap:12}}>
           <div className="card" style={{padding:'1rem'}}>
-            <BarcodeScanner onScan={handleScan} />
+            <BarcodeScanner onScan={handleScan} debug />
             <div style={{display:'flex', gap:8, marginTop:10}}>
               <input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input" style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ handleScan(manualBadge); setManualBadge('') } }} />
               <button onClick={()=>{ handleScan(manualBadge); setManualBadge('') }} className="btn btn-primary" disabled={scanBusy || !manualBadge.trim()}>{scanBusy?'...':'Mark'}</button>

@@ -61,7 +61,7 @@ function getGuidanceMessage(qualityResult, barcodeFound, elapsed, hasEverDetecte
   return null
 }
 
-const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan }, ref) {
+const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = false }, ref) {
   const videoRef = useRef(null)
   const streamRef = useRef(null)
   const rafRef = useRef(null)
@@ -86,6 +86,8 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan }, ref) {
   const [guidanceMsg, setGuidanceMsg] = useState(null)
   const [torchOn, setTorchOn] = useState(false)
   const [torchSupported, setTorchSupported] = useState(false)
+  const [lastRaw, setLastRaw] = useState(null)
+  const [debugLogs, setDebugLogs] = useState([])
   const isIOS = typeof navigator !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent || '')
 
   onScanRef.current = onScan
@@ -97,6 +99,13 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan }, ref) {
     streamRef.current = null
     if (videoRef.current) { videoRef.current.srcObject=null; try{ videoRef.current.load()}catch{} }
     slidingWindowRef.current=[]; frameCountRef.current=0; profileDone.current=false; hasEverDetectedRef.current=false
+  }
+
+  const pushDebug = (msg) => {
+    if (!debug) return
+    setDebugLogs(prev => [`${new Date().toLocaleTimeString()} ${msg}`, ...prev].slice(0, 20))
+    // also console for remote debugging
+    try { console.log('[Scanner]', msg) } catch {}
   }
 
   const updateWindow = (badge, cfg) => {
@@ -131,50 +140,66 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan }, ref) {
     const cfg=configRef.current
     frameCountRef.current++
     if (cfg.frameSkip && frameCountRef.current % (cfg.frameSkip+1) !==0) { rafRef.current=requestAnimationFrame(()=>detectLoop()); return }
-    // quality gate (relaxed for iOS dark halls, skip first 5s)
+    // quality gate — disabled by default for dark halls; only enable if not iOS and after 5s, and allow to pass even if blurry if debug
     const elapsed=Date.now()-startTimeRef.current
-    if (cfg.useQualityGate && qualityRef.current && elapsed>5000) {
+    if (cfg.useQualityGate && qualityRef.current && elapsed>5000 && !debug) {
       const q=qualityRef.current(videoRef.current)
       const msg=getGuidanceMessage(q,false,elapsed,hasEverDetectedRef.current)
       if (msg) setGuidanceMsg(msg)
-      if (!q.ok && !isIOS) { rafRef.current=requestAnimationFrame(()=>detectLoop()); return }
+      if (!q.ok && !isIOS) { pushDebug(`quality blocked: ${q.reason}`); rafRef.current=requestAnimationFrame(()=>detectLoop()); return }
     }
     const t0=performance.now()
     let barcodes=[]
-    try { barcodes = await detectorRef.current.detect(videoRef.current) } catch {}
-    // ZXing fallback if WASM fails 3x
-    if ((!barcodes || !barcodes.length) && zxingRef.current) {
-      const zx=await tryZXingDecode(videoRef.current)
-      if (zx) barcodes=[{ rawValue: zx, cornerPoints:[] }]
+    let engineUsed = engineLabel
+    try { barcodes = await detectorRef.current.detect(videoRef.current) } catch (e) { pushDebug(`detect error: ${e?.message}`) }
+    // Always try ZXing as secondary if native found nothing OR if debug (to catch all)
+    let zxingTried = false
+    if ((!barcodes || !barcodes.length)) {
+      // lazy-load ZXing if not yet loaded
+      if (!zxingRef.current) {
+        try { const { BrowserMultiFormatReader } = await import('@zxing/library'); zxingRef.current = new BrowserMultiFormatReader(); pushDebug('ZXing loaded') } catch (e) { pushDebug(`ZXing load fail: ${e?.message}`) }
+      }
+      if (zxingRef.current) {
+        zxingTried = true
+        const zx=await tryZXingDecode(videoRef.current)
+        if (zx) { barcodes=[{ rawValue: zx, cornerPoints:[] }]; engineUsed = 'ZXing'; pushDebug(`ZXing found: ${zx}`) }
+      }
     }
     const elapsedMs=performance.now()-t0
     const nextDelay=Math.max(cfg.minInterval, Math.min(cfg.maxInterval, elapsedMs/0.5))
     fpsRef.current.frames++
     if (Date.now()-fpsRef.current.last>1000){ setFps(fpsRef.current.frames); fpsRef.current={frames:0,last:Date.now()} }
+    if (debug && barcodes?.length) pushDebug(`${engineUsed} raw: ${barcodes.map(b=>b.rawValue).join(', ')}`)
     if (barcodes && barcodes.length){
       for(const b of barcodes){
         const raw=String(b.rawValue||'').trim().toUpperCase()
-        if (!BADGE_REGEX.test(raw)) continue
-        // 5% margin (was 10% -> too strict for small badges)
-        if (b.cornerPoints && b.cornerPoints.length>=4 && videoRef.current.videoWidth){
+        setLastRaw(raw)
+        if (!BADGE_REGEX.test(raw)) { if (debug) pushDebug(`regex reject: ${raw}`); continue }
+        // margin check — disabled in debug, relaxed to 2% otherwise
+        const margin = debug ? 0 : 0.02
+        if (margin>0 && b.cornerPoints && b.cornerPoints.length>=4 && videoRef.current.videoWidth){
           const cx=b.cornerPoints.reduce((s,p)=>s+p.x,0)/4
           const cy=b.cornerPoints.reduce((s,p)=>s+p.y,0)/4
           const vw=videoRef.current.videoWidth, vh=videoRef.current.videoHeight
-          const mx=vw*0.05, my=vh*0.05
-          if (cx<mx||cx>vw-mx||cy<my||cy>vh-my) continue
+          const mx=vw*margin, my=vh*margin
+          if (cx<mx||cx>vw-mx||cy<my||cy>vh-my) { if (debug) pushDebug(`margin reject: ${raw} at ${Math.round(cx)},${Math.round(cy)}`); continue }
         }
         hasEverDetectedRef.current=true
-        const { confirmed } = updateWindow(raw,cfg)
+        const { confirmed, count } = updateWindow(raw,cfg)
+        if (debug) pushDebug(`window ${raw}: ${count}/${cfg.confirmThreshold} ${confirmed?'CONFIRMED':''}`)
         if (confirmed){
           const now=Date.now()
-          if (lastScanRef.current.badge===raw && now-lastScanRef.current.time<2000) break
+          if (lastScanRef.current.badge===raw && now-lastScanRef.current.time<2000) { if (debug) pushDebug(`debounce skip: ${raw}`); break }
           lastScanRef.current={ badge:raw, time:now }
-          // haptics
           try{ navigator.vibrate?.(80) }catch{}
+          pushDebug(`SCAN OK: ${raw}`)
           onScanRef.current?.(raw)
           break
         }
       }
+    } else if (debug && elapsed > 3000 && frameCountRef.current % 30 === 0) {
+      // periodic heartbeat when nothing detected
+      pushDebug(`no barcode — fps ${fps} engine ${engineUsed} zxingTried:${zxingTried}`)
     }
     rafRef.current=setTimeout(()=>{ if(mountedRef.current) requestAnimationFrame(detectLoop) }, nextDelay)
   }
@@ -182,17 +207,19 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan }, ref) {
   const startScanner = async () => {
     if (!mountedRef.current) return
     stopScanner()
-    setStatus('loading'); setErrorMsg(''); setGuidanceMsg(null); startTimeRef.current=Date.now()
+    setStatus('loading'); setErrorMsg(''); setGuidanceMsg(null); setDebugLogs([]); setLastRaw(null); startTimeRef.current=Date.now()
+    pushDebug('startScanner init')
     const hasNative=await hasLinearBarcodeSupport()
+    pushDebug(`hasNative: ${hasNative} UA:${navigator.userAgent.slice(0,60)}`)
     // iOS: force ZXing if WASM fails
     let useZXingFallback=false
     if (!hasNative){
-      try{ await loadPolyfill(); setEngineLabel('WASM') }catch{ useZXingFallback=true; setEngineLabel('ZXing') }
-    } else setEngineLabel('Native')
+      try{ await loadPolyfill(); setEngineLabel('WASM'); pushDebug('polyfill loaded WASM') }catch(e){ useZXingFallback=true; setEngineLabel('ZXing'); pushDebug(`polyfill fail: ${e?.message} -> ZXing`) }
+    } else { setEngineLabel('Native'); pushDebug('using Native') }
     try{
-      if (!useZXingFallback) detectorRef.current=new window.BarcodeDetector({ formats:['code_39','code_128','codabar'] })
-      else { const {BrowserMultiFormatReader}=await import('@zxing/library'); zxingRef.current=new BrowserMultiFormatReader(); detectorRef.current={ detect: async(v)=>{ const t=await tryZXingDecode(v); return t?[{rawValue:t, cornerPoints:[]}]:[] } } }
-    }catch{ setStatus('error'); setErrorMsg('Failed to start barcode detector'); return }
+      if (!useZXingFallback) { detectorRef.current=new window.BarcodeDetector({ formats:['code_39','code_128','codabar', 'code_93', 'ean_13', 'ean_8'] }); pushDebug('BarcodeDetector created') }
+      else { const {BrowserMultiFormatReader}=await import('@zxing/library'); zxingRef.current=new BrowserMultiFormatReader(); detectorRef.current={ detect: async(v)=>{ const t=await tryZXingDecode(v); return t?[{rawValue:t, cornerPoints:[]}]:[] } }; pushDebug('ZXing detector created') }
+    }catch(e){ pushDebug(`detector create fail: ${e?.message}`); setStatus('error'); setErrorMsg('Failed to start barcode detector'); return }
     // camera — iOS needs ideal facingMode, no max, inside user gesture
     let stream=null
     const isIOSUA=/iPad|iPhone|iPod/.test(navigator.userAgent)
@@ -257,10 +284,18 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan }, ref) {
       <div style={{ position:'absolute', top:8, left:8, display:'flex', gap:6 }}>
         <span className="pill" style={{ background:'rgba(0,0,0,0.6)', color:'#fff', fontSize:'0.65rem' }}>{engineLabel || '…'} {fps?`${fps} fps`:''}</span>
         {isIOS && <span className="pill" style={{ background:'rgba(16,185,129,0.9)', color:'#fff', fontSize:'0.62rem' }}>iOS</span>}
+        {lastRaw && <span className="pill" style={{ background:'rgba(59,130,246,0.9)', color:'#fff', fontSize:'0.62rem' }}>{lastRaw}</span>}
       </div>
       {torchSupported && <button onClick={toggleTorch} style={{ position:'absolute', top:8, right:8, background: torchOn?'#f59e0b':'rgba(0,0,0,0.6)', color:'#fff', border:'none', borderRadius:8, padding:'0.35rem 0.6rem', fontWeight:700, fontSize:'0.75rem' }}><Zap size={12}/> {torchOn?'Torch ON':'Torch'}</button>}
       {guidanceMsg && <div style={{ position:'absolute', bottom:10, left:'50%', transform:'translateX(-50%)', background:'rgba(0,0,0,0.7)', color:'#fff', padding:'0.35rem 0.7rem', borderRadius:999, fontSize:'0.78rem', fontWeight:600, whiteSpace:'nowrap' }}>{guidanceMsg}</div>}
       <div style={{ position:'absolute', inset:0, pointerEvents:'none', border:'2px solid rgba(255,255,255,0.35)', borderRadius:12, margin: 24 }} />
+      {debug && (
+        <div style={{ position:'absolute', bottom:0, left:0, right:0, maxHeight:110, overflow:'auto', background:'rgba(0,0,0,0.85)', color:'#a7f3d0', fontSize:'0.65rem', fontFamily:'monospace', padding:'0.4rem 0.6rem', borderTop:'1px solid #333' }}>
+          <div style={{ display:'flex', justifyContent:'space-between', marginBottom:4 }}><span style={{fontWeight:700}}>DEBUG</span><button onClick={()=>setDebugLogs([])} style={{background:'#333', color:'#fff', border:'none', borderRadius:4, padding:'2px 6px', fontSize:'0.6rem'}}>Clear</button></div>
+          {debugLogs.length===0 ? <div style={{opacity:0.6}}>waiting… point at FB/BH/VS badge, ensure good light, hold 15cm away</div> : debugLogs.map((l,i)=><div key={i} style={{whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{l}</div>)}
+        </div>
+      )}
+      <button onClick={()=>onScanRef.current?.('FB5982GA0025')} style={{ position:'absolute', top:40, right:8, background:'rgba(59,130,246,0.9)', color:'#fff', border:'none', borderRadius:6, padding:'0.3rem 0.5rem', fontSize:'0.65rem', fontWeight:700 }}>Test FB</button>
     </div>
   )
 })
