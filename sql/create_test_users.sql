@@ -93,32 +93,45 @@ BEGIN
   RAISE NOTICE 'Test users ready';
 END $$;
 
--- After running, also select 2 incharges for this centre×dept so Dept Incharge can login and see his dept
--- Pick a real deployed dept for SECTOR-15-A (first allocation)
+-- After running, also make the Dept Incharge a REAL deployed sewadar so it
+-- can actually resolve its department (My Dept / Scanning / Absentees).
+-- A fake badge can't be deployed (check_deployment rejects non-sewadars).
+-- So: pick an existing sewadar in SECTOR-15-A that is already consented +
+-- deployed to some department, reuse that badge as the dept_incharge user's
+-- badge, and create the selection for it. Requires an open schedule + allocation.
 DO $$
-DECLARE v_sched uuid; v_dept uuid;
+DECLARE v_sched uuid; v_dept uuid; v_badge text; v_name text;
 BEGIN
   SELECT id INTO v_sched FROM public.deployment_schedules WHERE status='open' ORDER BY created_at DESC LIMIT 1;
   IF v_sched IS NULL THEN RAISE NOTICE 'No open schedule — create one first'; RETURN; END IF;
-  SELECT department_id INTO v_dept FROM public.centre_allocations WHERE schedule_id=v_sched AND centre='SECTOR-15-A' LIMIT 1;
-  IF v_dept IS NULL THEN RAISE NOTICE 'No allocation for SECTOR-15-A — allocate a dept first'; RETURN; END IF;
-  -- ensure test incharge is deployed to that dept (or fallback)
-  IF NOT EXISTS (SELECT 1 FROM public.deployments WHERE schedule_id=v_sched AND badge_number='FB5971GA0002' AND COALESCE(deployed_department_id,department_id)=v_dept) THEN
-    INSERT INTO public.sewadar_consents(schedule_id, centre, badge_number, sewadar_name, consent_given, available_days_count, stay_at_bhati)
-    VALUES (v_sched,'SECTOR-15-A','FB5971GA0002','Test Dept Incharge', true, 5, true)
-    ON CONFLICT (schedule_id,centre,badge_number) DO UPDATE SET consent_given=true, available_days_count=5;
-    INSERT INTO public.deployments(schedule_id, department_id, centre, badge_number, sewadar_name) VALUES (v_sched, v_dept, 'SECTOR-15-A','FB5971GA0002','Test Dept Incharge')
-    ON CONFLICT (schedule_id,centre,badge_number) DO UPDATE SET department_id=v_dept;
+
+  -- a real sewadar already deployed (effective dept) in SECTOR-15-A subtree
+  SELECT d.badge_number, COALESCE(d.deployed_department_id, d.department_id), COALESCE(d.sewadar_name,'')
+  INTO v_badge, v_dept, v_name
+  FROM public.deployments d
+  WHERE d.schedule_id = v_sched
+    AND public.get_root_centre(d.centre) = 'SECTOR-15-A'
+    AND COALESCE(d.deployed_department_id, d.department_id) IS NOT NULL
+  LIMIT 1;
+  IF v_badge IS NULL THEN
+    RAISE NOTICE 'No deployed sewadar in SECTOR-15-A for schedule — deploy one via Consent & Deploy first';
+    RETURN;
   END IF;
-  INSERT INTO public.department_incharges(schedule_id, centre, department_id, badge_number, sewadar_name)
-  VALUES (v_sched,'SECTOR-15-A',v_dept,'FB5971GA0002','Test Dept Incharge')
-  ON CONFLICT (schedule_id,centre,department_id) DO UPDATE SET badge_number='FB5971GA0002', sewadar_name='Test Dept Incharge';
-  INSERT INTO public.department_incharge_selections(schedule_id, centre, department_id, badge_number, sewadar_name, rank)
-  VALUES (v_sched,'SECTOR-15-A',v_dept,'FB5971GA0002','Test Dept Incharge',1)
-  ON CONFLICT (schedule_id,centre,department_id,rank) DO UPDATE SET badge_number='FB5971GA0002', sewadar_name='Test Dept Incharge';
-  RAISE NOTICE 'Dept Incharge wired to % dept %', v_sched, v_dept;
+
+  -- point the dept_incharge test user at that real badge
+  UPDATE public.portal_users SET badge_number = v_badge, centre = 'SECTOR-15-A', is_active = true, updated_at = now()
+  WHERE email = 'dept.incharge@gmail.com';
+
+  -- make that sewadar a selected incharge (rank 1) for the dept
+  INSERT INTO public.department_incharge_selections(schedule_id, centre, department_id, badge_number, sewadar_name, rank, is_from_pool)
+  VALUES (v_sched, 'SECTOR-15-A', v_dept, v_badge, NULLIF(v_name,''), 1, true)
+  ON CONFLICT (schedule_id, centre, department_id, rank) DO UPDATE
+  SET badge_number = EXCLUDED.badge_number, sewadar_name = EXCLUDED.sewadar_name;
+
+  RAISE NOTICE 'Dept Incharge wired: badge % dept % sched %', v_badge, v_dept, v_sched;
 END $$;
 
 -- VERIFY
 SELECT email, role, centre, is_active, badge_number FROM public.portal_users WHERE email IN ('scanner.test@gmail.com','dept.incharge@gmail.com','scanner.test.1788070468500@gmail.com') ORDER BY email;
 SELECT * FROM auth.users WHERE email IN ('scanner.test@gmail.com','dept.incharge@gmail.com') ORDER BY email;
+SELECT * FROM public.department_incharge_selections ORDER BY created_at DESC;
