@@ -1,17 +1,27 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
-import { isVssBadge } from '../lib/logic'
+import { isVssBadge, BADGE_REGEX } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import BarcodeScanner from '../components/scanner/BarcodeScanner'
+import ScanResultPopup from '../components/scanner/ScanResultPopup'
 import { enqueueScan, getQueuedScans, installDrainListeners, preloadDeployed } from '../lib/offlineQueue'
-import { ScanLine, Users, UserX, Search, Clock, AlertTriangle, X, Download } from 'lucide-react'
+import { ScanLine, Users, UserX, Search, Clock, AlertTriangle, Download } from 'lucide-react'
 
 function todayStrIST() {
   const d = new Date()
-  // Asia/Kolkata offset +5:30
   const ist = new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }))
   return ist.toISOString().slice(0,10)
+}
+
+function friendly(msg) {
+  const m = String(msg || '')
+  if (m.includes('Invalid badge')) return 'Invalid badge format'
+  if (m.includes('Badge not found')) return 'Badge not found in sewadars/VSS'
+  if (m.includes('No open session')) return 'No open session to close'
+  if (m.includes('Not authorized')) return 'Not authorized to scan'
+  if (m.includes('Already IN')) return 'Already checked IN — please OUT first'
+  return m || 'Scan failed — try again'
 }
 
 export default function DeptInchargePage({ schedules, scheduleId }) {
@@ -33,8 +43,7 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
   const [loading, setLoading] = useState(true)
   const [manualBadge, setManualBadge] = useState('')
   const [scanBusy, setScanBusy] = useState(false)
-  const [lastScan, setLastScan] = useState(null)
-  const [showOutPrompt, setShowOutPrompt] = useState(null) // { badge, openId, in_time }
+  const [popup, setPopup] = useState(null) // { status, badge, name, centre, deptName, time, message, flag, openSince, outTime }
   const [outTime, setOutTime] = useState('')
   const [search, setSearch] = useState('')
 
@@ -61,7 +70,6 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
       setSewadars(sewRes.data||[])
       setConsents(consRes.data||[])
       setSessions(sessRes.data||[])
-      // preload cache for offline
       const deployed = (depRes.data||[]).map(d=>({ badge_number:d.badge_number, deptId: d.deployed_department_id||d.department_id, is_vss: d.badge_number?.startsWith('VS') }))
       preloadDeployed(selectedScheduleId, deployed)
       const q = await getQueuedScans()
@@ -95,72 +103,124 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
       .sort((a,b)=> a.sewadar_name.localeCompare(b.sewadar_name))
   },[myDeployedEnriched,absentees,tab,search])
 
+  const getSewadarMeta = useCallback((badge) => {
+    const sw = swMap[badge] || {}
+    const dep = deployments.find(d=> d.badge_number===badge)
+    return {
+      name: dep?.sewadar_name || sw.sewadar_name || '',
+      centre: dep?.centre || sw.centre || '',
+      deptName: myDeptName,
+    }
+  }, [swMap, deployments, myDeptName])
+
+  const closePopup = useCallback(()=> setPopup(null), [])
+  const showPopup = useCallback((data) => {
+    setPopup(data)
+    // auto-dismiss success/queued after 2.5s, keep error/forgot
+    if (['in','out','flagged','queued','offline'].includes(data.status)) {
+      setTimeout(()=> setPopup(null), 2500)
+    }
+  }, [])
+
   const handleScan = async (badge) => {
+    if (scanBusy) return
     const b=String(badge).trim().toUpperCase()
     if(!b) return
-    // FB/BH or VS validation
-    if(!/^(FB(597[1-9]|59[89]\d|600\d|601[01])(GA|LA)\d{4}|BH\d{4}[A-Z]{1,2}\d{4}|VS[A-Z0-9]+)$/i.test(b)){
-      toast.error('Invalid badge format'); setLastScan({ badge:b, ok:false, msg:'Invalid badge format' }); return
+    if(!BADGE_REGEX.test(b)){
+      const meta = getSewadarMeta(b)
+      showPopup({ status:'error', badge:b, name: meta.name, centre: meta.centre, deptName: myDeptName, message:'Invalid badge format — check FB/BH/VS', time: new Date().toLocaleTimeString() })
+      return
     }
-    // VSS allowed
-    // check open session
     setScanBusy(true)
+    let ts
     try{
       const open = await supabase.rpc('get_open_session', { p_badge:b, p_schedule:selectedScheduleId }).then(r=>r.data).catch(()=>null)
       if(open){
-        // if >12h ask out time
-        const inTs=new Date(`${open.in_date}T${open.in_time}`)
-        const hrs=(Date.now()-inTs.getTime())/3600000
+        const inTs=new Date(`${open.in_date}T${open.in_time}+05:30`).getTime()
+        const hrs=(Date.now()-inTs)/3600000
         if(hrs>12){
-          setShowOutPrompt({ badge:b, openId: open.id, in_time: `${open.in_date} ${open.in_time}` })
+          const meta = getSewadarMeta(b)
+          setPopup({ status:'forgot', badge:b, name: meta.name || open.sewadar_name, centre: meta.centre || open.centre, deptName: myDeptName, openSince:`${open.in_date} ${open.in_time}`, openId: open.id, in_date: open.in_date })
           setOutTime(new Date().toISOString().slice(11,16))
-          setScanBusy(false)
           return
         }
-        // close OUT
-        const ts=new Date().toISOString()
+        ts=new Date().toISOString()
         try{
-          const { error } = await supabase.rpc('scan_out', { p_badge:b, p_schedule:selectedScheduleId, p_ts: ts })
+          const { error } = await supabase.rpc('scan_out', { p_badge:b, p_schedule:selectedScheduleId, p_ts: ts, p_open_id: open.id })
           if(error) throw error
+          const meta = getSewadarMeta(b)
+          showPopup({ status:'out', badge:b, name: meta.name || open.sewadar_name, centre: meta.centre || open.centre, deptName: myDeptName, time: new Date().toLocaleTimeString(), message:`OUT marked` })
           toast.success(`OUT marked for ${b}`)
-          setLastScan({ badge:b, ok:true, action:'OUT', time: new Date().toLocaleTimeString() })
         }catch(e){
-          if(!navigator.onLine) throw e
-          // offline queue OUT
-          await enqueueScan({ badge:b, schedule_id:selectedScheduleId, action:'OUT', ts, open_id: open.id, centre: profile?.centre })
-          setQueued(await getQueuedScans()); toast.success(`OUT queued (offline) for ${b}`); setLastScan({ badge:b, ok:true, action:'OUT (queued)' })
+          const msg=String(e.message||'')
+          if(!navigator.onLine || msg.includes('Failed to fetch')){
+            await enqueueScan({ badge:b, schedule_id:selectedScheduleId, action:'OUT', ts, open_id: open.id, centre: profile?.centre })
+            const meta = getSewadarMeta(b)
+            showPopup({ status:'queued', badge:b, name: meta.name, centre: meta.centre, deptName: myDeptName, time: new Date().toLocaleTimeString(), message:'Queued offline — will sync when online' })
+            toast.success(`OUT queued (offline) for ${b}`)
+          } else {
+            const meta = getSewadarMeta(b)
+            showPopup({ status:'error', badge:b, name: meta.name, centre: meta.centre, message: friendly(msg), time: new Date().toLocaleTimeString() })
+            toast.error(friendly(msg))
+          }
         }
       } else {
-        // IN — check if badge belongs to my dept (flag undeployed) — for audit
-        void myDeployed.some(d=>d.badge_number===b)
-        const ts=new Date().toISOString()
+        ts=new Date().toISOString()
         try{
           const { error, data } = await supabase.rpc('scan_in', { p_badge:b, p_schedule:selectedScheduleId, p_ts: ts, p_centre: profile?.centre })
           if(error) throw error
           const undeployed = data?.undeployed
-          if(undeployed) toast.warning(`Marked IN but not deployed to ${myDeptName} — flagged`)
-          else toast.success(`IN marked for ${b}`)
-          setLastScan({ badge:b, ok:true, action:'IN', time: new Date().toLocaleTimeString(), flag: undeployed? 'Not in my dept':null })
+          const meta = getSewadarMeta(b)
+          if(undeployed){
+            showPopup({ status:'flagged', badge:b, name: meta.name, centre: meta.centre, deptName: myDeptName, time: new Date().toLocaleTimeString(), flag:'Not deployed to your dept — flagged', message:`IN marked but not deployed to ${myDeptName}` })
+            toast.warning(`Marked IN but not deployed to ${myDeptName} — flagged`)
+          } else {
+            showPopup({ status:'in', badge:b, name: meta.name, centre: meta.centre, deptName: myDeptName, time: new Date().toLocaleTimeString(), message:'IN marked' })
+            toast.success(`IN marked for ${b}`)
+          }
         }catch(e){
           const msg=String(e.message||'')
           if(msg.includes('Already IN')){
-            toast.error('Already IN — OUT first'); setLastScan({badge:b, ok:false, msg:'Already IN'})
+            const fresh = await supabase.rpc('get_open_session',{p_badge:b,p_schedule:selectedScheduleId}).then(r=>r.data).catch(()=>null)
+            if(fresh){
+              const meta = getSewadarMeta(b)
+              setPopup({ status:'forgot', badge:b, name: meta.name || fresh.sewadar_name, centre: meta.centre || fresh.centre, deptName: myDeptName, openSince:`${fresh.in_date} ${fresh.in_time}`, openId: fresh.id, in_date: fresh.in_date })
+              setOutTime(new Date().toISOString().slice(11,16))
+              return
+            }
+            const meta = getSewadarMeta(b)
+            showPopup({ status:'error', badge:b, name: meta.name, centre: meta.centre, message:'Already checked IN — please OUT first', time: new Date().toLocaleTimeString() })
+            toast.error('Already IN — OUT first')
           } else if(!navigator.onLine || msg.includes('Failed to fetch')){
             await enqueueScan({ badge:b, schedule_id:selectedScheduleId, action:'IN', ts, centre: profile?.centre, dept: myDept })
-            setQueued(await getQueuedScans()); toast.success(`IN queued (offline) for ${b}`); setLastScan({ badge:b, ok:true, action:'IN (queued)' })
-          } else { toast.error(msg); setLastScan({badge:b, ok:false, msg}) }
+            const meta = getSewadarMeta(b)
+            showPopup({ status:'queued', badge:b, name: meta.name, centre: meta.centre, deptName: myDeptName, time: new Date().toLocaleTimeString(), message:'Queued offline — will sync when online' })
+            toast.success(`IN queued (offline) for ${b}`)
+          } else {
+            const meta = getSewadarMeta(b)
+            showPopup({ status:'error', badge:b, name: meta.name, centre: meta.centre, message: friendly(msg), time: new Date().toLocaleTimeString() })
+            toast.error(friendly(msg))
+          }
         }
       }
-      // refresh sessions
       const sess=await supabase.from('attendance_sessions').select('*').eq('schedule_id',selectedScheduleId).eq('in_date',todayStrIST()).order('created_at',{ascending:false}).limit(200).then(r=>r.data||[])
       setSessions(sess)
     } finally{ setScanBusy(false); setQueued(await getQueuedScans()) }
   }
 
   const confirmForgotOut = async () => {
-    if(!showOutPrompt) return
-    const ts=new Date(`${todayStrIST()}T${outTime}:00+05:30`).toISOString()
-    try{ await supabase.rpc('scan_out', { p_badge:showOutPrompt.badge, p_schedule:selectedScheduleId, p_ts: ts, p_open_id: showOutPrompt.openId }); toast.success('OUT closed, now you can IN'); setShowOutPrompt(null); handleScan(showOutPrompt.badge) }catch(e){ toast.error(e.message) }
+    if(!popup || popup.status!=='forgot') return
+    if(!outTime.match(/^\d{2}:\d{2}$/)){ toast.error('Pick a valid OUT time'); return }
+    const ts=new Date(`${popup.in_date}T${outTime}:00+05:30`).toISOString()
+    const badgeToIn = popup.badge
+    try{
+      await supabase.rpc('scan_out', { p_badge: badgeToIn, p_schedule:selectedScheduleId, p_ts: ts, p_open_id: popup.openId })
+      toast.success('OUT closed, now you can IN')
+      setPopup(null)
+      setOutTime('')
+      // directly IN (don't re-show forgot)
+      setTimeout(()=> handleScan(badgeToIn), 200)
+    }catch(e){ toast.error(friendly(e.message)) }
   }
 
   const exportList = async () => {
@@ -198,11 +258,6 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
               <input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input" style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ handleScan(manualBadge); setManualBadge('') } }} />
               <button onClick={()=>{ handleScan(manualBadge); setManualBadge('') }} className="btn btn-primary" disabled={scanBusy || !manualBadge.trim()}>{scanBusy?'...':'Mark'}</button>
             </div>
-            {lastScan && <div style={{marginTop:8, padding:'0.6rem 0.8rem', borderRadius:8, background: lastScan.ok?'#ecfdf5':'#fef2f2', border:`1px solid ${lastScan.ok?'#a7f3d0':'#fecaca'}`, fontSize:'0.85rem'}}>{lastScan.badge} — {lastScan.action||lastScan.msg} {lastScan.time?`· ${lastScan.time}`:''} {lastScan.flag?<span className="pill pill-amber" style={{marginLeft:6}}>{lastScan.flag}</span>:null}</div>}
-            {showOutPrompt && <div style={{marginTop:10, background:'#fffbeb', border:'1px solid #fde68a', borderRadius:10, padding:'0.9rem'}}>
-              <div style={{fontWeight:700, marginBottom:6}}>Forgot OUT — open since {showOutPrompt.in_time}</div>
-              <div style={{display:'flex', gap:8, alignItems:'center'}}><input type="time" value={outTime} onChange={e=>setOutTime(e.target.value)} className="input" /><button onClick={confirmForgotOut} className="btn btn-primary">Close OUT then IN</button><button onClick={()=>setShowOutPrompt(null)} className="btn"><X size={14}/> Cancel</button></div>
-            </div>}
           </div>
           <div className="card" style={{padding:'1rem'}}>
             <div className="section-title" style={{display:'flex', alignItems:'center', gap:6}}><Clock size={14}/> Recent scans (today) {queued.length? <span className="pill pill-amber">{queued.length} queued</span>:null}</div>
@@ -236,6 +291,23 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
           </div>
         </div>
       )}
+
+      <ScanResultPopup
+        open={!!popup}
+        status={popup?.status}
+        badge={popup?.badge}
+        name={popup?.name}
+        centre={popup?.centre}
+        deptName={popup?.deptName}
+        time={popup?.time}
+        message={popup?.message}
+        flag={popup?.flag}
+        openSince={popup?.openSince}
+        outTime={outTime}
+        onOutTimeChange={setOutTime}
+        onClose={closePopup}
+        onConfirm={popup?.status==='forgot' ? confirmForgotOut : closePopup}
+      />
     </div>
   )
 }
