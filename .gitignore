@@ -4,3 +4,9 @@ coverage
 .env
 *.local
 .DS_Store
+.vercel
+
+# Local HTTPS dev certs (mkcert) — never commit private keys
+certs/
+public/mkcert-ca.pem
+.env*

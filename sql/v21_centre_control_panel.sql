@@ -838,8 +838,13 @@ BEGIN
 
   -- UNDEPLOYED-ONLY override: already-deployed deployment rows stay frozen even
   -- against a delete (the cohort that may be cleaned up is only the undeployed).
-  IF v_undeployed AND NOT v_override AND TG_RELID = 'public.deployments'::regclass AND OLD.department_id IS NOT NULL THEN
-    RAISE EXCEPTION 'Already deployed — locked under this override';
+  -- Nest the check: PG doesn't short-circuit AND, so OLD.department_id must only
+  -- be evaluated when TG_RELID confirms we're on the deployments table (sewadar_consents
+  -- and department_incharges have no department_id column).
+  IF v_undeployed AND NOT v_override AND TG_RELID = 'public.deployments'::regclass THEN
+    IF OLD.department_id IS NOT NULL THEN
+      RAISE EXCEPTION 'Already deployed — locked under this override';
+    END IF;
   END IF;
   RETURN OLD;
 END;
