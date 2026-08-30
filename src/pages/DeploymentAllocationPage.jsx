@@ -21,7 +21,7 @@ import {
 const ROW_H = 44
 
 /* ─── Memoized row: re-renders only when its own data/props change ─── */
-const DeployRow = memo(function DeployRow({ row, depts, deptNames, handlers, serial }) {
+const DeployRow = memo(function DeployRow({ row, depts, deptNames, handlers, serial, isSuperAdmin }) {
   const key = `${row.centre}|${row.badge_number}`
   const reqName = deptNames.get(row.requested_dept_id)?.name || null
   const noRequest = !row.requested_dept_id
@@ -78,10 +78,10 @@ const DeployRow = memo(function DeployRow({ row, depts, deptNames, handlers, ser
         <select
           value={row.deployed_dept_id || ''}
           onChange={e => handlers.setDeployedDept(key, e.target.value)}
-          disabled={!row.consent_given}
+          disabled={!row.consent_given && !isSuperAdmin}
           className={row.deployed_dept_id ? 'select assigned' : 'select'}
           style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem', minWidth: 160, ...(overridden ? { background: '#fffbeb', borderColor: '#fcd34d', fontWeight: 700, color: '#b45309' } : row.deployed_dept_id ? { background: '#ecfdf5', borderColor: '#a7f3d0', fontWeight: 700, color: '#047857' } : {}) }}
-          title={!row.consent_given ? 'Consent not given — cannot assign' : noRequest ? 'No department was requested — assign one directly' : overridden ? 'Finalized deployment differs from the deployment request' : 'Defaults to the deployment request — change only if needed'}
+          title={!row.consent_given ? (isSuperAdmin ? 'Consent will be auto-created as Yes' : 'Consent not given — cannot assign') : noRequest ? 'No department was requested — assign one directly' : overridden ? 'Finalized deployment differs from the deployment request' : 'Defaults to the deployment request — change only if needed'}
         >
           <option value="">{!row.consent_given ? 'Not requested' : '— Not assigned —'}</option>
           {depts.map(d => <option key={d.id} value={d.id}>{d.name}{d.is_active ? '' : ' (inactive)'}</option>)}
@@ -194,7 +194,7 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
       const failed = [sewRes, vssRes, consRes, deptRes, deployRes, centreRes, allocRes].find(r => r?.error)
       if (failed) throw failed.error
 
-      const sewadars = [...(sewRes.data || []), ...(vssRes.data || [])].filter(sw => !shouldHideFromConsent(sw))
+      const sewadars = [...(sewRes.data || []), ...(vssRes.data || [])].filter(sw => !shouldHideFromConsent(sw, profile?.role))
       const consentMap = {}
       ;(consRes.data || []).forEach(c => { consentMap[`${c.centre}|${c.badge_number}`] = c })
       const deployMap = {}
@@ -277,7 +277,7 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
       toast.error(err?.message || 'Failed to load data — check your connection')
       if (!prevDirty) dirtyRef.current = false
     } finally { setLoading(false) }
-  }, [selectedScheduleId, toast])
+  }, [selectedScheduleId, toast, profile?.role])
 
   useEffect(() => { loadData() }, [loadData])
 
@@ -364,10 +364,15 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
       if (!editModeRef.current) return
       markDirty()
       setRows(prev => {
-        const next = { ...prev[key], deployed_dept_id: deptId || null }
+        const cur = prev[key]
+        const next = { ...cur, deployed_dept_id: deptId || null }
+        // super_admin deploying auto-creates consent (Yes) so check_deployment never fails on "No consent recorded"
+        if (deptId && !cur.consent_given) {
+          next.consent_given = true
+        }
         // days follow the FINAL department (5 by default, 3 for OE ESCORTS);
         // when the final dept is cleared, fall back to the requested one
-        next.available_days_count = daysForDept(deptId ? deptNameRef.current(deptId) : deptNameRef.current(prev[key]?.requested_dept_id))
+        next.available_days_count = daysForDept(deptId ? deptNameRef.current(deptId) : deptNameRef.current(cur?.requested_dept_id))
         return { ...prev, [key]: next }
       })
     },
@@ -918,6 +923,7 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
                       depts={depts}
                       deptNames={deptNames}
                       handlers={handlers}
+                      isSuperAdmin={isSuperAdmin}
                     />
                   ))}
                   {endIdx < totalRows && (

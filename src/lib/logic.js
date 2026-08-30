@@ -37,10 +37,11 @@ export function canCentreDeploy(consentRow, userRole) {
 
 /* ─── Consent-page visibility gating ─── */
 
-export function shouldHideFromConsent(sewadar) {
+export function shouldHideFromConsent(sewadar, role) {
   if (!sewadar) return true
   if (isElderly(sewadar.badge_status)) return true
-  return isAssoDepartment(sewadar.department)
+  if (isAssoDepartment(sewadar.department) && !['aso', 'super_admin'].includes(role)) return true
+  return false
 }
 
 

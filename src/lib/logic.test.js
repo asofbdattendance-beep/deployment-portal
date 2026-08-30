@@ -110,10 +110,16 @@ describe('shouldHideFromConsent', () => {
   it('returns true for elderly sewadars', () => {
     expect(shouldHideFromConsent({ badge_status: 'ELDERLY', department: 'LANGAR' })).toBe(true)
     expect(shouldHideFromConsent({ badge_status: 'elderly', department: 'LANGAR' })).toBe(true)
+    expect(shouldHideFromConsent({ badge_status: 'ELDERLY', department: 'LANGAR' }, 'super_admin')).toBe(true)
   })
   it('returns true for AREA SECRETARY OFFICE department sewadars', () => {
     expect(shouldHideFromConsent({ badge_status: 'OPEN', department: 'AREA SECRETARY OFFICE' })).toBe(true)
     expect(shouldHideFromConsent({ badge_status: 'PERMANENT', department: 'area secretary office' })).toBe(true)
+    expect(shouldHideFromConsent({ badge_status: 'OPEN', department: 'AREA SECRETARY OFFICE' }, 'centre_admin')).toBe(true)
+  })
+  it('returns true for AREA SECRETARY OFFICE but visible to aso/super_admin', () => {
+    expect(shouldHideFromConsent({ badge_status: 'OPEN', department: 'AREA SECRETARY OFFICE' }, 'aso')).toBe(false)
+    expect(shouldHideFromConsent({ badge_status: 'PERMANENT', department: 'AREA SECRETARY OFFICE' }, 'super_admin')).toBe(false)
   })
   it('returns false for normal sewadars', () => {
     expect(shouldHideFromConsent({ badge_status: 'OPEN', department: 'LANGAR' })).toBe(false)

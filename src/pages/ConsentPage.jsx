@@ -124,7 +124,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
       const failed = [sewRes, consRes, depRes, allocRes, deployRes, prevRes].find(r => r?.error)
       if (failed) throw failed.error
 
-      const sewadars = (sewRes.data || []).filter(sw => !shouldHideFromConsent(sw))
+      const sewadars = (sewRes.data || []).filter(sw => !shouldHideFromConsent(sw, profile?.role))
       const existing = consRes.data || []
       const map = {}
       existing.forEach(c => { map[`${c.centre}|${c.badge_number}`] = c })
@@ -296,7 +296,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
       // a failed refresh must not pretend in-flight edits were saved
       if (!prevDirty) dirtyRef.current = false
     } finally { setLoading(false) }
-  }, [selectedScheduleId, subtree, myRoot, toast])
+  }, [selectedScheduleId, subtree, myRoot, toast, profile?.role])
 
   useEffect(() => { loadData() }, [loadData])
 
