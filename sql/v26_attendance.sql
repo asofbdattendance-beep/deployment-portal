@@ -65,6 +65,9 @@ RETURNS boolean LANGUAGE sql IMMUTABLE SET search_path = '' AS $$
   SELECT p_badge ILIKE 'VS%';
 $$;
 
+-- Draft runs may have left these with a different return type, which blocks
+-- CREATE OR REPLACE (42P13). Drop first so a re-run always succeeds.
+DROP FUNCTION IF EXISTS public.get_sewadar_by_badge(text);
 CREATE OR REPLACE FUNCTION public.get_sewadar_by_badge(p_badge text)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE v_s jsonb; v_v jsonb;
@@ -77,6 +80,7 @@ BEGIN
   RETURN v_v;
 END; $$;
 
+DROP FUNCTION IF EXISTS public.get_open_session(text, uuid);
 CREATE OR REPLACE FUNCTION public.get_open_session(p_badge text, p_schedule uuid)
 RETURNS public.attendance_sessions LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE v_row public.attendance_sessions;
@@ -86,6 +90,7 @@ BEGIN
 END; $$;
 
 -- idempotent scan IN
+DROP FUNCTION IF EXISTS public.scan_in(text, uuid, timestamptz, text, text, boolean);
 CREATE OR REPLACE FUNCTION public.scan_in(
   p_badge text, p_schedule uuid, p_ts timestamptz, p_nonce text DEFAULT NULL, p_centre text DEFAULT NULL,
   p_is_manual boolean DEFAULT false
@@ -128,6 +133,7 @@ BEGIN
 END; $$;
 
 -- scan OUT (or forgot OUT first)
+DROP FUNCTION IF EXISTS public.scan_out(text, uuid, timestamptz, uuid);
 CREATE OR REPLACE FUNCTION public.scan_out(
   p_badge text, p_schedule uuid, p_ts timestamptz, p_open_id uuid DEFAULT NULL
 ) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
@@ -152,6 +158,7 @@ BEGIN
 END; $$;
 
 -- absentees per dept per day
+DROP FUNCTION IF EXISTS public.absentees_in_my_dept(uuid, date);
 CREATE OR REPLACE FUNCTION public.absentees_in_my_dept(p_schedule uuid, p_date date DEFAULT (now() AT TIME ZONE 'Asia/Kolkata')::date)
 RETURNS TABLE(badge_number text, sewadar_name text, centre text) LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $$
   WITH my_depts AS (
