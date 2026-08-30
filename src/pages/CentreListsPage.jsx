@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { getRootCentre, isVssBadge } from '../lib/logic'
 import { useToast } from '../components/Toast'
-import { Building2, Users, Search, Download, Filter, X, Star, CheckCircle2 } from 'lucide-react'
+import { Building2, Users, Search, Download, Filter, X, Star, CheckCircle2, ShieldCheck, Lock, Unlock } from 'lucide-react'
 
 const ROW_H = 44
 
@@ -16,16 +16,21 @@ export default function CentreListsPage({ schedules, scheduleId }) {
   const [consentsRaw, setConsentsRaw] = useState([])
   const [regularSewadars, setRegularSewadars] = useState([])
   const [vssSewadars, setVssSewadars] = useState([])
+  const [inchargesRaw, setInchargesRaw] = useState([])
+  const [locksRaw, setLocksRaw] = useState([])
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(false)
   const exportingRef = useRef(false)
 
-  // filters
+  // tabs: sewadars | vss | incharges
+  const [activeTab, setActiveTab] = useState('sewadars')
+
+  // shared filters
   const [search, setSearch] = useState('')
   const [filterCentre, setFilterCentre] = useState('all')
   const [filterDept, setFilterDept] = useState('all')
   const [filterFinal, setFilterFinal] = useState('all') // all | finalized | not_finalized | overridden
-  const [filterType, setFilterType] = useState('all') // all | regular | vss
+  const [filterLock, setFilterLock] = useState('all') // for incharges tab: all | locked | unlocked
   const [sortBy, setSortBy] = useState('centre') // centre | name | badge
 
   // mobile virtualization toggle
@@ -40,6 +45,9 @@ export default function CentreListsPage({ schedules, scheduleId }) {
   const tableWrapRef = useRef(null)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewH, setViewH] = useState(600)
+  const inchargesWrapRef = useRef(null)
+  const [inchargeScrollTop, setInchargeScrollTop] = useState(0)
+  const [inchargeViewH, setInchargeViewH] = useState(600)
 
   const schedule = schedules.find(s => s.id === selectedScheduleId)
 
@@ -65,6 +73,21 @@ export default function CentreListsPage({ schedules, scheduleId }) {
       setConsentsRaw(consentRes.data || [])
       setRegularSewadars(sewRes.data || [])
       setVssSewadars(vssRes.data || [])
+
+      // incharges + locks — non-fatal: tables may not exist until v12/v13 migrated
+      try {
+        const [incRes, lockRes] = await Promise.all([
+          supabase.from('department_incharges').select('*').eq('schedule_id', selectedScheduleId),
+          supabase.from('centre_locks').select('*').eq('schedule_id', selectedScheduleId),
+        ])
+        if (!incRes.error) setInchargesRaw(incRes.data || [])
+        else setInchargesRaw([])
+        if (!lockRes.error) setLocksRaw(lockRes.data || [])
+        else setLocksRaw([])
+      } catch {
+        setInchargesRaw([])
+        setLocksRaw([])
+      }
     } catch (err) {
       console.error('Failed to load centre lists:', err)
       toast.error(err?.message || 'Failed to load deployed lists')
@@ -75,7 +98,7 @@ export default function CentreListsPage({ schedules, scheduleId }) {
 
   useEffect(() => { loadData() }, [loadData])
 
-  // realtime: refresh on deployments / consents / department changes
+  // realtime: refresh on deployments / consents / department_incharges / locks
   useEffect(() => {
     if (!selectedScheduleId) return
     let mounted = true
@@ -90,6 +113,8 @@ export default function CentreListsPage({ schedules, scheduleId }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'deployment_departments' }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'department_incharges', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
       .subscribe()
     return () => { mounted = false; if (timer) clearTimeout(timer); supabase.removeChannel(channel) }
   }, [selectedScheduleId, loadData])
@@ -102,11 +127,19 @@ export default function CentreListsPage({ schedules, scheduleId }) {
       setFilterCentre('all')
       setFilterDept('all')
       setFilterFinal('all')
-      setFilterType('all')
+      setFilterLock('all')
       setSearch('')
       setSortBy('centre')
     }
   }, [selectedScheduleId])
+
+  // reset scroll when tab changes
+  useEffect(() => {
+    setScrollTop(0)
+    setInchargeScrollTop(0)
+    if (tableWrapRef.current) tableWrapRef.current.scrollTop = 0
+    if (inchargesWrapRef.current) inchargesWrapRef.current.scrollTop = 0
+  }, [activeTab])
 
   const deptMap = useMemo(() => {
     const m = new Map()
@@ -141,6 +174,13 @@ export default function CentreListsPage({ schedules, scheduleId }) {
     return m
   }, [consentsRaw])
 
+  const locksSet = useMemo(() => new Set((locksRaw || []).map(l => l.centre)), [locksRaw])
+  const lockByCentre = useMemo(() => {
+    const m = {}
+    ;(locksRaw || []).forEach(l => { m[l.centre] = l })
+    return m
+  }, [locksRaw])
+
   // build deployed rows from deploymentsRaw
   const deployedRows = useMemo(() => {
     return (deploymentsRaw || []).map(d => {
@@ -157,7 +197,6 @@ export default function CentreListsPage({ schedules, scheduleId }) {
         centre: d.centre,
         badge_number: d.badge_number,
         sewadar_name: d.sewadar_name || sw.sewadar_name || '—',
-        home_department: sw.department || d.sewadar_name ? '' : '',
         is_initiated: !!sw.is_initiated,
         gender: sw.gender || '',
         is_vss: isVss,
@@ -173,52 +212,110 @@ export default function CentreListsPage({ schedules, scheduleId }) {
         effective_name: effectiveId ? (deptMap.get(effectiveId)?.name || '') : '—',
         is_finalized: !!finalId,
         is_overridden: overridden,
-        // for sorting
         _root: getRootCentre(centres, d.centre) || d.centre,
       }
     })
   }, [deploymentsRaw, swMap, consentMap, deptMap, centres])
 
-  // stats
-  const stats = useMemo(() => {
-    const total = deployedRows.length
-    const finalized = deployedRows.filter(r => r.is_finalized).length
-    const overridden = deployedRows.filter(r => r.is_overridden).length
-    const vss = deployedRows.filter(r => r.is_vss).length
-    const regular = total - vss
-    const centresCount = new Set(deployedRows.map(r => r.centre)).size
-    const initiated = deployedRows.filter(r => r.is_initiated).length
-    return { total, finalized, overridden, vss, regular, centresCount, initiated, notFinalized: total - finalized }
-  }, [deployedRows])
+  // split by type
+  const sewadarRows = useMemo(() => deployedRows.filter(r => !r.is_vss), [deployedRows])
+  const vssRows = useMemo(() => deployedRows.filter(r => r.is_vss), [deployedRows])
 
-  // filter + search + sort
+  // incharges enriched
+  const inchargesRows = useMemo(() => {
+    return (inchargesRaw || []).map(inc => {
+      const deptName = deptMap.get(inc.department_id)?.name || '—'
+      const sw = swMap[inc.badge_number] || {}
+      const isLocked = locksSet.has(inc.centre)
+      const lock = lockByCentre[inc.centre] || null
+      return {
+        _key: `${inc.centre}|${inc.department_id}`,
+        centre: inc.centre,
+        department_id: inc.department_id,
+        dept_name: deptName,
+        badge_number: inc.badge_number,
+        sewadar_name: inc.sewadar_name || sw.sewadar_name || '—',
+        is_initiated: !!sw.is_initiated,
+        gender: sw.gender || '',
+        is_vss: isVssBadge(inc.badge_number) || !!sw.is_vss,
+        is_locked: isLocked,
+        locked_at: lock?.locked_at || null,
+        locked_by: lock?.locked_by || null,
+        _root: getRootCentre(centres, inc.centre) || inc.centre,
+      }
+    })
+  }, [inchargesRaw, deptMap, swMap, locksSet, lockByCentre, centres])
+
+  // stats
+  const sewadarStats = useMemo(() => {
+    const total = sewadarRows.length
+    const finalized = sewadarRows.filter(r => r.is_finalized).length
+    const overridden = sewadarRows.filter(r => r.is_overridden).length
+    const centresCount = new Set(sewadarRows.map(r => r.centre)).size
+    return { total, finalized, overridden, centresCount, notFinalized: total - finalized }
+  }, [sewadarRows])
+  const vssStats = useMemo(() => {
+    const total = vssRows.length
+    const finalized = vssRows.filter(r => r.is_finalized).length
+    const overridden = vssRows.filter(r => r.is_overridden).length
+    const centresCount = new Set(vssRows.map(r => r.centre)).size
+    return { total, finalized, overridden, centresCount, notFinalized: total - finalized }
+  }, [vssRows])
+  const inchargesStats = useMemo(() => {
+    const total = inchargesRows.length
+    const locked = inchargesRows.filter(r => r.is_locked).length
+    const centresWithIncharge = new Set(inchargesRows.map(r => r.centre)).size
+    const lockedCentres = new Set(inchargesRows.filter(r => r.is_locked).map(r => r.centre)).size
+    const totalLocks = locksRaw.length
+    return { total, locked, unlocked: total - locked, centresWithIncharge, lockedCentres, totalLocks }
+  }, [inchargesRows, locksRaw])
+
+  // active base rows for Sewadars/VSS tabs (before status filter)
+  const activeBaseRows = useMemo(() => (activeTab === 'sewadars' ? sewadarRows : activeTab === 'vss' ? vssRows : []), [activeTab, sewadarRows, vssRows])
+
+  // filter + search + sort for Sewadars/VSS
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
-    return deployedRows.filter(r => {
+    return activeBaseRows.filter(r => {
       if (filterCentre !== 'all' && r.centre !== filterCentre) return false
       if (filterDept !== 'all' && r.effective_dept_id !== filterDept) return false
       if (filterFinal === 'finalized' && !r.is_finalized) return false
       if (filterFinal === 'not_finalized' && r.is_finalized) return false
       if (filterFinal === 'overridden' && !r.is_overridden) return false
-      if (filterType === 'regular' && r.is_vss) return false
-      if (filterType === 'vss' && !r.is_vss) return false
       if (q && !(`${r.sewadar_name} ${r.badge_number} ${r.centre}`).toLowerCase().includes(q)) return false
       return true
     }).sort((a, b) => {
       if (sortBy === 'badge') return a.badge_number.localeCompare(b.badge_number, undefined, { numeric: true })
       if (sortBy === 'name') return (a.sewadar_name || '').localeCompare(b.sewadar_name || '', undefined, { sensitivity: 'base' })
-      // centre — grouped hierarchy
       const c = centreOrder(a.centre, b.centre)
       if (c !== 0) return c
       return (a.sewadar_name || '').localeCompare(b.sewadar_name || '', undefined, { sensitivity: 'base' })
     })
-  }, [deployedRows, filterCentre, filterDept, filterFinal, filterType, search, sortBy, centreOrder])
+  }, [activeBaseRows, filterCentre, filterDept, filterFinal, search, sortBy, centreOrder])
 
-  // quick filter counts (based on deployedRows filtered by department/centre/search but before final/type — similar to statusChips)
-  const quickCounts = useMemo(() => {
-    // base set after centre/dept/search — quick filters refine from there
+  // filtered incharges
+  const filteredIncharges = useMemo(() => {
     const q = search.trim().toLowerCase()
-    const base = deployedRows.filter(r => {
+    return inchargesRows.filter(r => {
+      if (filterCentre !== 'all' && r.centre !== filterCentre) return false
+      if (filterDept !== 'all' && r.department_id !== filterDept) return false
+      if (filterLock === 'locked' && !r.is_locked) return false
+      if (filterLock === 'unlocked' && r.is_locked) return false
+      if (q && !(`${r.sewadar_name} ${r.badge_number} ${r.centre} ${r.dept_name}`).toLowerCase().includes(q)) return false
+      return true
+    }).sort((a, b) => {
+      if (sortBy === 'badge') return a.badge_number.localeCompare(b.badge_number, undefined, { numeric: true })
+      if (sortBy === 'name') return (a.sewadar_name || '').localeCompare(b.sewadar_name || '', undefined, { sensitivity: 'base' })
+      const c = centreOrder(a.centre, b.centre)
+      if (c !== 0) return c
+      return (a.dept_name || '').localeCompare(b.dept_name || '', undefined, { sensitivity: 'base' })
+    })
+  }, [inchargesRows, filterCentre, filterDept, filterLock, search, sortBy, centreOrder])
+
+  // quick filter counts (for Sewadars/VSS tabs)
+  const quickCounts = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    const base = activeBaseRows.filter(r => {
       if (filterCentre !== 'all' && r.centre !== filterCentre) return false
       if (filterDept !== 'all' && r.effective_dept_id !== filterDept) return false
       if (q && !(`${r.sewadar_name} ${r.badge_number} ${r.centre}`).toLowerCase().includes(q)) return false
@@ -229,22 +326,37 @@ export default function CentreListsPage({ schedules, scheduleId }) {
       finalized: base.filter(r => r.is_finalized).length,
       not_finalized: base.filter(r => !r.is_finalized).length,
       overridden: base.filter(r => r.is_overridden).length,
-      regular: base.filter(r => !r.is_vss).length,
-      vss: base.filter(r => r.is_vss).length,
     }
-  }, [deployedRows, filterCentre, filterDept, search])
+  }, [activeBaseRows, filterCentre, filterDept, search])
 
-  const hasActiveFilters = filterCentre !== 'all' || filterDept !== 'all' || filterFinal !== 'all' || filterType !== 'all' || !!search.trim()
+  const inchargeQuickCounts = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    const base = inchargesRows.filter(r => {
+      if (filterCentre !== 'all' && r.centre !== filterCentre) return false
+      if (filterDept !== 'all' && r.department_id !== filterDept) return false
+      if (q && !(`${r.sewadar_name} ${r.badge_number} ${r.centre} ${r.dept_name}`).toLowerCase().includes(q)) return false
+      return true
+    })
+    return {
+      all: base.length,
+      locked: base.filter(r => r.is_locked).length,
+      unlocked: base.filter(r => !r.is_locked).length,
+    }
+  }, [inchargesRows, filterCentre, filterDept, search])
+
+  const hasActiveFiltersSewadar = filterCentre !== 'all' || filterDept !== 'all' || filterFinal !== 'all' || !!search.trim()
+  const hasActiveFiltersIncharge = filterCentre !== 'all' || filterDept !== 'all' || filterLock !== 'all' || !!search.trim()
+  const hasActiveFilters = activeTab === 'incharges' ? hasActiveFiltersIncharge : hasActiveFiltersSewadar
 
   const clearAllFilters = () => {
     setFilterCentre('all')
     setFilterDept('all')
     setFilterFinal('all')
-    setFilterType('all')
+    setFilterLock('all')
     setSearch('')
   }
 
-  // virtualization
+  // virtualization for Sewadars/VSS
   const OVERSCAN = 14
   const vh = viewH || 600
   const totalRows = filtered.length
@@ -253,98 +365,147 @@ export default function CentreListsPage({ schedules, scheduleId }) {
   const endIdx = isMobile ? totalRows : Math.min(totalRows, Math.ceil((scrollTop + vh) / ROW_H) + OVERSCAN)
   const visibleSlice = isMobile ? filtered : filtered.slice(startIdx, endIdx)
 
+  // virtualization for incharges
+  const totalInchargeRows = filteredIncharges.length
+  const maxStartInc = Math.max(0, totalInchargeRows - 1)
+  const startIdxInc = isMobile ? 0 : Math.min(Math.max(0, Math.floor(inchargeScrollTop / ROW_H) - OVERSCAN), maxStartInc)
+  const endIdxInc = isMobile ? totalInchargeRows : Math.min(totalInchargeRows, Math.ceil((inchargeViewH + inchargeScrollTop) / ROW_H) + OVERSCAN)
+  const visibleInchargeSlice = isMobile ? filteredIncharges : filteredIncharges.slice(startIdxInc, endIdxInc)
+
   useEffect(() => {
     setScrollTop(0)
     if (tableWrapRef.current) tableWrapRef.current.scrollTop = 0
-  }, [filterCentre, filterDept, filterFinal, filterType, search, sortBy, selectedScheduleId])
+  }, [filterCentre, filterDept, filterFinal, search, sortBy, selectedScheduleId, activeTab])
+
+  useEffect(() => {
+    setInchargeScrollTop(0)
+    if (inchargesWrapRef.current) inchargesWrapRef.current.scrollTop = 0
+  }, [filterCentre, filterDept, filterLock, search, sortBy, selectedScheduleId, activeTab])
 
   useEffect(() => {
     if (loading || !tableWrapRef.current) return
     setViewH(tableWrapRef.current.clientHeight || 600)
-  }, [loading, filtered.length])
+  }, [loading, filtered.length, activeTab])
+
+  useEffect(() => {
+    if (loading || !inchargesWrapRef.current) return
+    setInchargeViewH(inchargesWrapRef.current.clientHeight || 600)
+  }, [loading, filteredIncharges.length, activeTab])
 
   const centreOptions = useMemo(() => {
-    const names = [...new Set(deployedRows.map(r => r.centre))].sort((a, b) => centreOrder(a, b))
+    const source = activeTab === 'incharges' ? inchargesRows : activeBaseRows
+    const names = [...new Set(source.map(r => r.centre))].sort((a, b) => centreOrder(a, b))
     return names
-  }, [deployedRows, centreOrder])
+  }, [activeTab, inchargesRows, activeBaseRows, centreOrder])
 
   const deptOptions = useMemo(() => {
-    // only depts that actually have deployments
-    const ids = new Set(deployedRows.map(r => r.effective_dept_id).filter(Boolean))
+    if (activeTab === 'incharges') {
+      const ids = new Set(inchargesRows.map(r => r.department_id).filter(Boolean))
+      return [...ids].map(id => deptMap.get(id)).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name))
+    }
+    const ids = new Set(activeBaseRows.map(r => r.effective_dept_id).filter(Boolean))
     return [...ids].map(id => deptMap.get(id)).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name))
-  }, [deployedRows, deptMap])
+  }, [activeTab, inchargesRows, activeBaseRows, deptMap])
 
   const exportExcel = useCallback(async () => {
     if (exportingRef.current) return
-    if (!filtered.length) { toast.info('Nothing to export'); return }
+    const isIncharge = activeTab === 'incharges'
+    const exportRows = isIncharge ? filteredIncharges : filtered
+    if (!exportRows.length) { toast.info('Nothing to export'); return }
     exportingRef.current = true
     setExporting(true)
     try {
       const XLSX = await import('xlsx')
       const wb = XLSX.utils.book_new()
-      const rows = filtered.map((r, idx) => ({
-        'S.No.': idx + 1,
-        'Centre': r.centre,
-        'Badge': r.badge_number,
-        'Name': r.sewadar_name,
-        'Type': r.is_vss ? 'VSS' : 'Regular',
-        'Gender': r.gender || '—',
-        'Initiated': r.is_initiated ? 'Yes' : 'No',
-        'Consent': r.consent_given == null ? '—' : (r.consent_given ? 'Yes' : 'No'),
-        'Days': r.available_days_count ?? '—',
-        'Stay at Bhati': r.stay_at_bhati ? 'Yes' : 'No',
-        'Chair Pass': r.chair_pass ? 'Yes' : 'No',
-        'Deployed Department': r.effective_name || '—',
-        'Status': r.is_overridden ? 'Overridden' : r.is_finalized ? 'Finalized' : 'Deployed',
-      }))
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Centre Lists')
-
-      // per-centre summary
-      const byCentre = {}
-      filtered.forEach(r => {
-        if (!byCentre[r.centre]) byCentre[r.centre] = { total: 0, finalized: 0, vss: 0 }
-        byCentre[r.centre].total++
-        if (r.is_finalized) byCentre[r.centre].finalized++
-        if (r.is_vss) byCentre[r.centre].vss++
-      })
-      const summary = Object.entries(byCentre)
-        .sort((a, b) => centreOrder(a[0], b[0]))
-        .map(([centre, v]) => ({
-          'Centre': centre,
-          'Deployed': v.total,
-          'Finalized': v.finalized,
-          'Pending': v.total - v.finalized,
-          'VSS': v.vss,
-          'Regular': v.total - v.vss,
+      if (isIncharge) {
+        const rows = exportRows.map((r, idx) => ({
+          'S.No.': idx + 1,
+          'Centre': r.centre,
+          'Department': r.dept_name || '—',
+          'Incharge Badge': r.badge_number,
+          'Incharge Name': r.sewadar_name,
+          'Initiated': r.is_initiated ? 'Yes' : 'No',
+          'Gender': r.gender || '—',
+          'Lock Status': r.is_locked ? 'Locked' : 'Not Locked',
+          'Locked By': r.locked_by || '—',
+          'Locked At': r.locked_at ? new Date(r.locked_at).toLocaleString() : '—',
         }))
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summary), 'Centre Summary')
-
-      // per-department summary
-      const byDept = {}
-      filtered.forEach(r => {
-        const name = r.effective_name || '—'
-        if (!byDept[name]) byDept[name] = { total: 0, finalized: 0 }
-        byDept[name].total++
-        if (r.is_finalized) byDept[name].finalized++
-      })
-      const deptSummary = Object.entries(byDept)
-        .sort((a, b) => a[0].localeCompare(b[0]))
-        .map(([dept, v]) => ({
-          'Department': dept,
-          'Deployed': v.total,
-          'Finalized': v.finalized,
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Centre Incharges')
+        // per-centre summary
+        const byCentre = {}
+        exportRows.forEach(r => {
+          if (!byCentre[r.centre]) byCentre[r.centre] = { total: 0, locked: 0 }
+          byCentre[r.centre].total++
+          if (r.is_locked) byCentre[r.centre].locked++
+        })
+        const summary = Object.entries(byCentre)
+          .sort((a, b) => centreOrder(a[0], b[0]))
+          .map(([centre, v]) => ({
+            'Centre': centre,
+            'Incharges': v.total,
+            'Locked': v.locked,
+            'Unlocked': v.total - v.locked,
+          }))
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summary), 'Centre Summary')
+      } else {
+        const rows = exportRows.map((r, idx) => ({
+          'S.No.': idx + 1,
+          'Centre': r.centre,
+          'Badge': r.badge_number,
+          'Name': r.sewadar_name,
+          'Type': r.is_vss ? 'VSS' : 'Regular',
+          'Gender': r.gender || '—',
+          'Initiated': r.is_initiated ? 'Yes' : 'No',
+          'Consent': r.consent_given == null ? '—' : (r.consent_given ? 'Yes' : 'No'),
+          'Days': r.available_days_count ?? '—',
+          'Stay at Bhati': r.stay_at_bhati ? 'Yes' : 'No',
+          'Chair Pass': r.chair_pass ? 'Yes' : 'No',
+          'Deployed Department': r.effective_name || '—',
+          'Status': r.is_overridden ? 'Overridden' : r.is_finalized ? 'Finalized' : 'Deployed',
         }))
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(deptSummary), 'Department Summary')
-
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), activeTab === 'vss' ? 'VSS Lists' : 'Sewadar Lists')
+        const byCentre = {}
+        exportRows.forEach(r => {
+          if (!byCentre[r.centre]) byCentre[r.centre] = { total: 0, finalized: 0, vss: 0 }
+          byCentre[r.centre].total++
+          if (r.is_finalized) byCentre[r.centre].finalized++
+          if (r.is_vss) byCentre[r.centre].vss++
+        })
+        const summary = Object.entries(byCentre)
+          .sort((a, b) => centreOrder(a[0], b[0]))
+          .map(([centre, v]) => ({
+            'Centre': centre,
+            'Deployed': v.total,
+            'Finalized': v.finalized,
+            'Pending': v.total - v.finalized,
+          }))
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summary), 'Centre Summary')
+        const byDept = {}
+        exportRows.forEach(r => {
+          const name = r.effective_name || '—'
+          if (!byDept[name]) byDept[name] = { total: 0, finalized: 0 }
+          byDept[name].total++
+          if (r.is_finalized) byDept[name].finalized++
+        })
+        const deptSummary = Object.entries(byDept)
+          .sort((a, b) => a[0].localeCompare(b[0]))
+          .map(([dept, v]) => ({
+            'Department': dept,
+            'Deployed': v.total,
+            'Finalized': v.finalized,
+          }))
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(deptSummary), 'Department Summary')
+      }
       const name = (schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')
-      XLSX.writeFile(wb, `${name}_centre_lists.xlsx`)
+      const suffix = activeTab === 'incharges' ? 'centre_incharges' : activeTab === 'vss' ? 'vss_lists' : 'centre_lists'
+      XLSX.writeFile(wb, `${name}_${suffix}.xlsx`)
     } catch (err) {
       toast.error(err?.message || 'Export failed')
     } finally {
       exportingRef.current = false
       setExporting(false)
     }
-  }, [filtered, schedule, toast, centreOrder])
+  }, [filtered, filteredIncharges, activeTab, schedule, toast, centreOrder])
 
   if (!schedules.length) {
     return (
@@ -355,6 +516,9 @@ export default function CentreListsPage({ schedules, scheduleId }) {
       </div>
     )
   }
+
+  const tabStats = activeTab === 'sewadars' ? sewadarStats : activeTab === 'vss' ? vssStats : inchargesStats
+  const isSewadarLike = activeTab === 'sewadars' || activeTab === 'vss'
 
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
@@ -376,40 +540,83 @@ export default function CentreListsPage({ schedules, scheduleId }) {
         </div>
       </div>
 
-      <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-        <div className="stat">
-          <div className="stat-label">Deployed</div>
-          <div className="stat-value">{stats.total}</div>
-          <div className="stat-sub">across {stats.centresCount} centres</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Finalized</div>
-          <div className="stat-value" style={{ color: stats.finalized ? '#10b981' : '#64748b' }}>{stats.finalized}</div>
-          <div className="stat-sub">{stats.notFinalized} awaiting finalize</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Overridden</div>
-          <div className="stat-value" style={{ color: stats.overridden ? '#b45309' : '#64748b' }}>{stats.overridden}</div>
-          <div className="stat-sub">final dept ≠ requested</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">VSS</div>
-          <div className="stat-value" style={{ color: '#8b5cf6' }}>{stats.vss}</div>
-          <div className="stat-sub">{stats.regular} regular</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Showing</div>
-          <div className="stat-value" style={{ color: '#4f46e5' }}>{filtered.length}</div>
-          <div className="stat-sub">after filters</div>
-        </div>
+      {/* tabs */}
+      <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
+        <button className={`seg-btn ${activeTab === 'sewadars' ? 'seg-active' : ''}`} onClick={() => setActiveTab('sewadars')}>
+          <Users size={14} /> Sewadars
+          <span className="pill pill-gray" style={{ marginLeft: '0.3rem', fontSize: '0.68rem', background: activeTab === 'sewadars' ? 'rgba(255,255,255,0.22)' : undefined, color: activeTab === 'sewadars' ? '#fff' : undefined }}>{sewadarStats.total}</span>
+        </button>
+        <button className={`seg-btn ${activeTab === 'vss' ? 'seg-active' : ''}`} onClick={() => setActiveTab('vss')}>
+          <Star size={14} /> VSS
+          <span className="pill pill-gray" style={{ marginLeft: '0.3rem', fontSize: '0.68rem', background: activeTab === 'vss' ? 'rgba(255,255,255,0.22)' : undefined, color: activeTab === 'vss' ? '#fff' : undefined }}>{vssStats.total}</span>
+        </button>
+        <button className={`seg-btn ${activeTab === 'incharges' ? 'seg-active' : ''}`} onClick={() => setActiveTab('incharges')}>
+          <ShieldCheck size={14} /> Centre Incharges
+          <span className="pill pill-gray" style={{ marginLeft: '0.3rem', fontSize: '0.68rem', background: activeTab === 'incharges' ? 'rgba(255,255,255,0.22)' : undefined, color: activeTab === 'incharges' ? '#fff' : undefined }}>{inchargesStats.total}</span>
+        </button>
       </div>
 
+      {/* stats strip — tab-specific */}
+      {isSewadarLike ? (
+        <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
+          <div className="stat">
+            <div className="stat-label">{activeTab === 'vss' ? 'VSS Deployed' : 'Deployed'}</div>
+            <div className="stat-value">{tabStats.total}</div>
+            <div className="stat-sub">across {tabStats.centresCount} centres</div>
+          </div>
+          <div className="stat">
+            <div className="stat-label">Finalized</div>
+            <div className="stat-value" style={{ color: tabStats.finalized ? '#10b981' : '#64748b' }}>{tabStats.finalized}</div>
+            <div className="stat-sub">{tabStats.notFinalized} awaiting finalize</div>
+          </div>
+          <div className="stat">
+            <div className="stat-label">Overridden</div>
+            <div className="stat-value" style={{ color: tabStats.overridden ? '#b45309' : '#64748b' }}>{tabStats.overridden}</div>
+            <div className="stat-sub">final dept ≠ requested</div>
+          </div>
+          <div className="stat">
+            <div className="stat-label">Showing</div>
+            <div className="stat-value" style={{ color: '#4f46e5' }}>{filtered.length}</div>
+            <div className="stat-sub">after filters</div>
+          </div>
+        </div>
+      ) : (
+        <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
+          <div className="stat">
+            <div className="stat-label">Incharges</div>
+            <div className="stat-value">{inchargesStats.total}</div>
+            <div className="stat-sub">across {inchargesStats.centresWithIncharge} centres</div>
+          </div>
+          <div className="stat">
+            <div className="stat-label">Locked</div>
+            <div className="stat-value" style={{ color: inchargesStats.locked ? '#10b981' : '#64748b' }}>{inchargesStats.locked}</div>
+            <div className="stat-sub">{inchargesStats.totalLocks} centres locked · {inchargesStats.lockedCentres} with incharges</div>
+          </div>
+          <div className="stat">
+            <div className="stat-label">Unlocked</div>
+            <div className="stat-value" style={{ color: inchargesStats.unlocked ? '#f59e0b' : '#64748b' }}>{inchargesStats.unlocked}</div>
+            <div className="stat-sub">awaiting lock or without lock</div>
+          </div>
+          <div className="stat">
+            <div className="stat-label">Showing</div>
+            <div className="stat-value" style={{ color: '#4f46e5' }}>{filteredIncharges.length}</div>
+            <div className="stat-sub">after filters</div>
+          </div>
+        </div>
+      )}
+
       <div className="card" style={{ padding: '1.25rem' }}>
-        {/* filters */}
+        {/* filters — shared */}
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.6rem', alignItems: 'center', marginBottom: '0.9rem' }}>
           <div style={{ position: 'relative', minWidth: 220, flex: '1 1 220px' }}>
             <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
-            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name / badge / centre..." className="input" style={{ width: '100%', paddingLeft: 30 }} />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder={activeTab === 'incharges' ? 'Search incharge / badge / centre / dept...' : 'Search name / badge / centre...'}
+              className="input"
+              style={{ width: '100%', paddingLeft: 30 }}
+            />
           </div>
           <select value={filterCentre} onChange={e => setFilterCentre(e.target.value)} className="select" style={{ minWidth: 160 }}>
             <option value="all">All Centres ({centreOptions.length})</option>
@@ -424,12 +631,12 @@ export default function CentreListsPage({ schedules, scheduleId }) {
             <option value="name">Sort: Name</option>
             <option value="badge">Sort: Badge</option>
           </select>
-          {hasActiveFilters && <span style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 600 }}>{filtered.length} result{filtered.length !== 1 ? 's' : ''}</span>}
+          {hasActiveFilters && <span style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 600 }}>{activeTab === 'incharges' ? filteredIncharges.length : filtered.length} result{(activeTab === 'incharges' ? filteredIncharges.length : filtered.length) !== 1 ? 's' : ''}</span>}
         </div>
 
-        {/* quick filters */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1rem' }}>
-          <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+        {/* quick filters — tab-specific */}
+        {isSewadarLike ? (
+          <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '1rem' }}>
             <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em', marginRight: '0.2rem' }}>Status:</span>
             {[
               { key: 'all', label: 'All', count: quickCounts.all },
@@ -450,28 +657,6 @@ export default function CentreListsPage({ schedules, scheduleId }) {
                 </button>
               )
             })}
-          </div>
-          <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
-            <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em', marginRight: '0.2rem' }}>Type:</span>
-            {[
-              { key: 'all', label: 'All Types', count: quickCounts.all },
-              { key: 'regular', label: 'Regular', count: quickCounts.regular },
-              { key: 'vss', label: 'VSS', count: quickCounts.vss },
-            ].map(c => {
-              const active = filterType === c.key
-              return (
-                <button
-                  key={c.key}
-                  onClick={() => setFilterType(c.key)}
-                  className={`pill ${active ? 'pill-indigo' : 'pill-gray'}`}
-                  style={{ cursor: 'pointer', border: '1px solid transparent', fontWeight: active ? 700 : 600, ...(active ? { boxShadow: '0 1px 4px rgba(99,102,241,0.3)' } : {}) }}
-                >
-                  {c.label === 'VSS' ? <Star size={11} style={{ marginRight: '0.15rem' }} /> : null}
-                  {c.label}
-                  <span style={{ opacity: 0.75, marginLeft: '0.3rem', fontWeight: 700 }}>{c.count}</span>
-                </button>
-              )
-            })}
             <span style={{ marginLeft: 'auto', display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
               <span style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 600 }}>{filtered.length} shown</span>
               {hasActiveFilters && (
@@ -481,104 +666,215 @@ export default function CentreListsPage({ schedules, scheduleId }) {
               )}
             </span>
           </div>
-        </div>
+        ) : (
+          <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '1rem' }}>
+            <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em', marginRight: '0.2rem' }}>Lock:</span>
+            {[
+              { key: 'all', label: 'All', count: inchargeQuickCounts.all },
+              { key: 'locked', label: 'Locked', count: inchargeQuickCounts.locked },
+              { key: 'unlocked', label: 'Unlocked', count: inchargeQuickCounts.unlocked },
+            ].map(c => {
+              const active = filterLock === c.key
+              return (
+                <button
+                  key={c.key}
+                  onClick={() => setFilterLock(c.key)}
+                  className={`pill ${active ? 'pill-indigo' : 'pill-gray'}`}
+                  style={{ cursor: 'pointer', border: '1px solid transparent', fontWeight: active ? 700 : 600, ...(active ? { boxShadow: '0 1px 4px rgba(99,102,241,0.3)' } : {}) }}
+                >
+                  {c.key === 'locked' ? <Lock size={11} style={{ marginRight: '0.15rem' }} /> : c.key === 'unlocked' ? <Unlock size={11} style={{ marginRight: '0.15rem' }} /> : null}
+                  {c.label}
+                  <span style={{ opacity: 0.75, marginLeft: '0.3rem', fontWeight: 700 }}>{c.count}</span>
+                </button>
+              )
+            })}
+            <span style={{ marginLeft: 'auto', display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+              <span style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 600 }}>{filteredIncharges.length} shown</span>
+              {hasActiveFilters && (
+                <button onClick={clearAllFilters} className="pill pill-gray" style={{ cursor: 'pointer', border: '1px solid #e2e8f0' }}>
+                  <X size={11} /> Reset
+                </button>
+              )}
+            </span>
+          </div>
+        )}
 
         {loading ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
             {[...Array(6)].map((_, i) => <div key={i} className="skeleton" style={{ height: 44, borderRadius: 10 }} />)}
           </div>
-        ) : filtered.length === 0 ? (
+        ) : isSewadarLike ? (
+          filtered.length === 0 ? (
+            <div className="card" style={{ border: 'none', boxShadow: 'none', background: '#f8fafc' }}>
+              <div className="empty">
+                <div className="empty-icon"><Users size={22} /></div>
+                <div className="empty-title">{activeBaseRows.length === 0 ? (activeTab === 'vss' ? 'No VSS deployments yet' : 'No deployments yet') : 'No matches'}</div>
+                <div className="empty-text">{activeBaseRows.length === 0 ? 'No sewadars have been deployed for this schedule yet.' : 'Try clearing filters or searching differently.'}</div>
+                {hasActiveFilters && <button onClick={clearAllFilters} className="btn btn-primary" style={{ marginTop: '0.85rem' }}><X size={14} /> Clear filters</button>}
+              </div>
+            </div>
+          ) : (
+            <div
+              ref={tableWrapRef}
+              className="table-wrap table-wrap-sticky"
+              onScroll={e => { setScrollTop(e.currentTarget.scrollTop); if (e.currentTarget.clientHeight) setViewH(e.currentTarget.clientHeight) }}
+            >
+              <table className="table table-sticky">
+                <thead>
+                  <tr>
+                    <th style={{ width: 44, textAlign: 'center' }}>S.No.</th>
+                    <th>Centre</th>
+                    <th>Badge</th>
+                    <th>Name</th>
+                    <th style={{ textAlign: 'center' }}>Type</th>
+                    <th style={{ textAlign: 'center' }}>Consent</th>
+                    <th style={{ textAlign: 'center' }}>Days</th>
+                    <th style={{ textAlign: 'center' }}>Stay</th>
+                    <th style={{ textAlign: 'center', background: '#eef2ff', color: '#4f46e5', fontWeight: 800 }}>Deployed Department</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {startIdx > 0 && (
+                    <tr aria-hidden="true" style={{ height: startIdx * ROW_H }}>
+                      <td colSpan={9} style={{ padding: 0, border: 'none', height: startIdx * ROW_H }} />
+                    </tr>
+                  )}
+                  {visibleSlice.map((r, i) => {
+                    const idx = startIdx + i + 1
+                    const overridden = r.is_overridden
+                    const rowBg = overridden ? '#fff7ed' : undefined
+                    return (
+                      <tr key={r._key} style={{ height: ROW_H, background: rowBg }}>
+                        <td style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }} data-label="S.No.">{idx}</td>
+                        <td style={{ fontWeight: 600, fontSize: '0.82rem', whiteSpace: 'nowrap' }} data-label="Centre">{r.centre}</td>
+                        <td style={{ fontFamily: 'monospace', fontSize: '0.8rem' }} data-label="Badge">
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                            {r.badge_number}
+                            {r.is_vss && <span className="pill pill-amber" style={{ fontSize: '0.6rem' }}>VSS</span>}
+                          </span>
+                        </td>
+                        <td style={{ fontWeight: 500, maxWidth: 220 }} data-label="Name">
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', overflow: 'hidden' }}>
+                            <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.sewadar_name}</span>
+                            {r.is_initiated && <span className="pill pill-green" style={{ flexShrink: 0, fontSize: '0.6rem' }}>INIT</span>}
+                          </span>
+                        </td>
+                        <td style={{ textAlign: 'center' }} data-label="Type">
+                          <span className={`pill ${r.is_vss ? 'pill-amber' : 'pill-gray'}`} style={{ fontSize: '0.68rem' }}>
+                            {r.is_vss ? <Star size={10} style={{ marginRight: '0.2rem' }} /> : null}
+                            {r.is_vss ? 'VSS' : 'Regular'}
+                          </span>
+                        </td>
+                        <td style={{ textAlign: 'center' }} data-label="Consent">
+                          {r.consent_given == null ? <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>—</span> : r.consent_given ? <span className="pill pill-green" style={{ fontSize: '0.68rem' }}><CheckCircle2 size={10} /> Yes</span> : <span className="pill pill-red" style={{ fontSize: '0.68rem' }}>No</span>}
+                        </td>
+                        <td style={{ textAlign: 'center' }} data-label="Days">
+                          {r.available_days_count == null ? <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>—</span> : <span className="pill pill-blue" style={{ fontSize: '0.68rem' }}>{r.available_days_count}d</span>}
+                        </td>
+                        <td style={{ textAlign: 'center' }} data-label="Stay">
+                          <span className={`pill ${r.stay_at_bhati ? 'pill-green' : 'pill-gray'}`} style={{ fontSize: '0.68rem' }}>{r.stay_at_bhati ? 'Yes' : '—'}</span>
+                        </td>
+                        <td style={{ textAlign: 'center', background: '#f8faff' }} data-label="Deployed Department">
+                          {r.effective_name && r.effective_name !== '—' ? (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap', justifyContent: 'center' }}>
+                              <span
+                                className={`pill ${overridden ? 'pill-amber' : r.is_finalized ? 'pill-green' : 'pill-blue'}`}
+                                style={{ fontSize: '0.72rem', whiteSpace: 'nowrap', fontWeight: 700 }}
+                                title={overridden ? `Finalized as ${r.deployed_name} (requested was ${r.requested_name})` : r.is_finalized ? 'Finalized deployment' : 'Requested deployment (defaults to this until finalized)'}
+                              >
+                                {r.effective_name}
+                              </span>
+                              {overridden && <span className="pill pill-amber" style={{ fontSize: '0.6rem' }} title={`Changed from ${r.requested_name}`}>CHANGED</span>}
+                            </span>
+                          ) : (
+                            <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>—</span>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                  {endIdx < totalRows && (
+                    <tr aria-hidden="true" style={{ height: (totalRows - endIdx) * ROW_H }}>
+                      <td colSpan={9} style={{ padding: 0, border: 'none', height: (totalRows - endIdx) * ROW_H }} />
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )
+        ) : filteredIncharges.length === 0 ? (
           <div className="card" style={{ border: 'none', boxShadow: 'none', background: '#f8fafc' }}>
             <div className="empty">
-              <div className="empty-icon"><Users size={22} /></div>
-              <div className="empty-title">{deployedRows.length === 0 ? 'No deployments yet' : 'No matches'}</div>
-              <div className="empty-text">{deployedRows.length === 0 ? 'No sewadars have been deployed for this schedule yet.' : 'Try clearing filters or searching differently.'}</div>
+              <div className="empty-icon"><ShieldCheck size={22} /></div>
+              <div className="empty-title">{inchargesRows.length === 0 ? 'No incharges yet' : 'No matches'}</div>
+              <div className="empty-text">{inchargesRows.length === 0 ? 'Centres have not locked deployments or set incharges for this schedule yet. Each CENTRE sets one incharge per allocated department before locking.' : 'Try clearing filters or searching differently.'}</div>
               {hasActiveFilters && <button onClick={clearAllFilters} className="btn btn-primary" style={{ marginTop: '0.85rem' }}><X size={14} /> Clear filters</button>}
             </div>
           </div>
         ) : (
           <div
-            ref={tableWrapRef}
+            ref={inchargesWrapRef}
             className="table-wrap table-wrap-sticky"
-            onScroll={e => { setScrollTop(e.currentTarget.scrollTop); if (e.currentTarget.clientHeight) setViewH(e.currentTarget.clientHeight) }}
+            onScroll={e => { setInchargeScrollTop(e.currentTarget.scrollTop); if (e.currentTarget.clientHeight) setInchargeViewH(e.currentTarget.clientHeight) }}
           >
             <table className="table table-sticky">
               <thead>
                 <tr>
                   <th style={{ width: 44, textAlign: 'center' }}>S.No.</th>
                   <th>Centre</th>
+                  <th>Department</th>
                   <th>Badge</th>
-                  <th>Name</th>
-                  <th style={{ textAlign: 'center' }}>Type</th>
-                  <th style={{ textAlign: 'center' }}>Consent</th>
-                  <th style={{ textAlign: 'center' }}>Days</th>
-                  <th style={{ textAlign: 'center' }}>Stay</th>
-                  <th style={{ textAlign: 'center', background: '#eef2ff', color: '#4f46e5', fontWeight: 800 }}>Deployed Department</th>
+                  <th>Incharge Name</th>
+                  <th style={{ textAlign: 'center' }}>Initiated</th>
+                  <th style={{ textAlign: 'center' }}>Status</th>
+                  <th style={{ textAlign: 'center' }}>Locked By / At</th>
                 </tr>
               </thead>
               <tbody>
-                {startIdx > 0 && (
-                  <tr aria-hidden="true" style={{ height: startIdx * ROW_H }}>
-                    <td colSpan={9} style={{ padding: 0, border: 'none', height: startIdx * ROW_H }} />
+                {startIdxInc > 0 && (
+                  <tr aria-hidden="true" style={{ height: startIdxInc * ROW_H }}>
+                    <td colSpan={8} style={{ padding: 0, border: 'none', height: startIdxInc * ROW_H }} />
                   </tr>
                 )}
-                {visibleSlice.map((r, i) => {
-                  const idx = startIdx + i + 1
-                  const overridden = r.is_overridden
-                  const rowBg = overridden ? '#fff7ed' : undefined
+                {visibleInchargeSlice.map((r, i) => {
+                  const idx = startIdxInc + i + 1
                   return (
-                    <tr key={r._key} style={{ height: ROW_H, background: rowBg }}>
+                    <tr key={r._key} style={{ height: ROW_H, background: r.is_locked ? '#ecfdf5' : undefined }}>
                       <td style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }} data-label="S.No.">{idx}</td>
                       <td style={{ fontWeight: 600, fontSize: '0.82rem', whiteSpace: 'nowrap' }} data-label="Centre">{r.centre}</td>
+                      <td style={{ fontWeight: 600, fontSize: '0.82rem' }} data-label="Department"><span className="pill pill-indigo" style={{ fontSize: '0.72rem', whiteSpace: 'nowrap' }}>{r.dept_name}</span></td>
                       <td style={{ fontFamily: 'monospace', fontSize: '0.8rem' }} data-label="Badge">
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
                           {r.badge_number}
                           {r.is_vss && <span className="pill pill-amber" style={{ fontSize: '0.6rem' }}>VSS</span>}
                         </span>
                       </td>
-                      <td style={{ fontWeight: 500, maxWidth: 220 }} data-label="Name">
+                      <td style={{ fontWeight: 500, maxWidth: 220 }} data-label="Incharge Name">
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', overflow: 'hidden' }}>
                           <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.sewadar_name}</span>
                           {r.is_initiated && <span className="pill pill-green" style={{ flexShrink: 0, fontSize: '0.6rem' }}>INIT</span>}
                         </span>
                       </td>
-                      <td style={{ textAlign: 'center' }} data-label="Type">
-                        <span className={`pill ${r.is_vss ? 'pill-amber' : 'pill-gray'}`} style={{ fontSize: '0.68rem' }}>
-                          {r.is_vss ? <Star size={10} style={{ marginRight: '0.2rem' }} /> : null}
-                          {r.is_vss ? 'VSS' : 'Regular'}
-                        </span>
+                      <td style={{ textAlign: 'center' }} data-label="Initiated">
+                        <span className={`pill ${r.is_initiated ? 'pill-green' : 'pill-gray'}`} style={{ fontSize: '0.68rem' }}>{r.is_initiated ? 'Yes' : 'No'}</span>
                       </td>
-                      <td style={{ textAlign: 'center' }} data-label="Consent">
-                        {r.consent_given == null ? <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>—</span> : r.consent_given ? <span className="pill pill-green" style={{ fontSize: '0.68rem' }}><CheckCircle2 size={10} /> Yes</span> : <span className="pill pill-red" style={{ fontSize: '0.68rem' }}>No</span>}
+                      <td style={{ textAlign: 'center' }} data-label="Status">
+                        {r.is_locked ? <span className="pill pill-green" style={{ fontSize: '0.68rem' }}><Lock size={10} /> Locked</span> : <span className="pill pill-amber" style={{ fontSize: '0.68rem' }}><Unlock size={10} /> Unlocked</span>}
                       </td>
-                      <td style={{ textAlign: 'center' }} data-label="Days">
-                        {r.available_days_count == null ? <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>—</span> : <span className="pill pill-blue" style={{ fontSize: '0.68rem' }}>{r.available_days_count}d</span>}
-                      </td>
-                      <td style={{ textAlign: 'center' }} data-label="Stay">
-                        <span className={`pill ${r.stay_at_bhati ? 'pill-green' : 'pill-gray'}`} style={{ fontSize: '0.68rem' }}>{r.stay_at_bhati ? 'Yes' : '—'}</span>
-                      </td>
-                      <td style={{ textAlign: 'center', background: '#f8faff' }} data-label="Deployed Department">
-                        {r.effective_name && r.effective_name !== '—' ? (
-                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap', justifyContent: 'center' }}>
-                            <span
-                              className={`pill ${overridden ? 'pill-amber' : r.is_finalized ? 'pill-green' : 'pill-blue'}`}
-                              style={{ fontSize: '0.72rem', whiteSpace: 'nowrap', fontWeight: 700 }}
-                              title={overridden ? `Finalized as ${r.deployed_name} (requested was ${r.requested_name})` : r.is_finalized ? 'Finalized deployment' : 'Requested deployment (defaults to this until finalized)'}
-                            >
-                              {r.effective_name}
-                            </span>
-                            {overridden && <span className="pill pill-amber" style={{ fontSize: '0.6rem' }} title={`Changed from ${r.requested_name}`}>CHANGED</span>}
+                      <td style={{ textAlign: 'center', fontSize: '0.75rem', color: '#64748b' }} data-label="Locked By / At">
+                        {r.is_locked ? (
+                          <span style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', lineHeight: 1.2 }}>
+                            <span style={{ fontWeight: 600, color: '#334155', fontSize: '0.78rem' }}>{r.locked_by || '—'}</span>
+                            <span style={{ fontSize: '0.68rem' }}>{r.locked_at ? new Date(r.locked_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}</span>
                           </span>
-                        ) : (
-                          <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>—</span>
-                        )}
+                        ) : <span style={{ color: '#94a3b8' }}>—</span>}
                       </td>
                     </tr>
                   )
                 })}
-                {endIdx < totalRows && (
-                  <tr aria-hidden="true" style={{ height: (totalRows - endIdx) * ROW_H }}>
-                    <td colSpan={9} style={{ padding: 0, border: 'none', height: (totalRows - endIdx) * ROW_H }} />
+                {endIdxInc < totalInchargeRows && (
+                  <tr aria-hidden="true" style={{ height: (totalInchargeRows - endIdxInc) * ROW_H }}>
+                    <td colSpan={8} style={{ padding: 0, border: 'none', height: (totalInchargeRows - endIdxInc) * ROW_H }} />
                   </tr>
                 )}
               </tbody>
