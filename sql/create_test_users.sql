@@ -15,7 +15,7 @@ BEGIN
   -- 1) Scanner test user (existing pending user + fresh)
   -- Confirm the pending signUp we created via anon key (c7bf81be-...)
   UPDATE auth.users
-  SET email_confirmed_at = now(), confirmed_at = now(), is_sso_user = false
+  SET email_confirmed_at = now(), is_sso_user = false
   WHERE id = 'c7bf81be-1978-4f5a-b925-5adaadda2463';
 
   -- Ensure portal_users for that pending scanner
@@ -49,7 +49,7 @@ BEGIN
   ) ON CONFLICT (email) DO NOTHING;
 
   -- confirm it (in case it was rate-limited but now inserted)
-  UPDATE auth.users SET email_confirmed_at = now(), confirmed_at = now() WHERE email = 'scanner.test@gmail.com';
+  UPDATE auth.users SET email_confirmed_at = now() WHERE email = 'scanner.test@gmail.com';
 
   INSERT INTO public.portal_users (auth_id, name, email, badge_number, centre, role, is_active)
   SELECT id, 'Test Scanner', 'scanner.test@gmail.com', 'FB5971GA0001', 'SECTOR-15-A', 'scanner', true
@@ -74,7 +74,7 @@ BEGIN
     false, false
   ) ON CONFLICT (email) DO NOTHING;
 
-  UPDATE auth.users SET email_confirmed_at = now(), confirmed_at = now() WHERE email='dept.incharge@gmail.com';
+  UPDATE auth.users SET email_confirmed_at = now() WHERE email='dept.incharge@gmail.com';
 
   INSERT INTO public.portal_users (auth_id, name, email, badge_number, centre, role, is_active)
   SELECT id, 'Test Dept Incharge', 'dept.incharge@gmail.com', 'FB5971GA0002', 'SECTOR-15-A', 'dept_incharge', true
