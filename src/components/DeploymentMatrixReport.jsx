@@ -6,7 +6,9 @@ import { Users } from 'lucide-react'
    Rendered as a section inside the Overview tab. One block per department,
    one column per CENTRE (counts rolled up to the root CENTRE incl. SC_SPs).
    Sections: COMPLETE REPORT (Scheduled = allocated quota, Deployed =
-   finalized, Difference), RATIO (Male/Female/Total + M:F), per-department
+   effective — finalized if super_admin has set it, otherwise the centre's
+   current request, no lock gating — reflects what is happening now,
+   Difference), RATIO (Male/Female/Total + M:F), per-department
    blocks (Scheduled / Deployed / Difference / Male / Female, plus a VSS
    line for TRAFFIC OUTSIDE BHATI only). Zeros render blank. No
    open-vs-permanent distinction anywhere. */
@@ -50,7 +52,8 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     setDeptNameById(deptNameById)
     const rowsData = (dRes.data || []).map(r => ({
       ...r,
-      final_dept_name: deptNameById[r.deployed_department_id] || '—',
+      // effective department — what is happening now: finalized if exists, otherwise the centre's request
+      final_dept_name: deptNameById[r.deployed_department_id || r.department_id] || '—',
     }))
     setRows(rowsData)
     setAllocations(aRes.data || [])
@@ -78,7 +81,8 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     return () => { mounted = false }
   }, [scheduleId, load])
 
-  // realtime: refresh live while centres edit. Coalesced (400ms).
+  // realtime: refresh live while centres edit or allocations change. Coalesced (400ms).
+  // Deployed (effective) reflects deployments table; Scheduled reflects centre_allocations — both change in real time, no lock gating.
   useEffect(() => {
     if (!scheduleId) return
     let mounted = true
@@ -91,6 +95,7 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     const channel = supabase
       .channel(`deploy-overview-${scheduleId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${scheduleId}` }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_allocations', filter: `schedule_id=eq.${scheduleId}` }, scheduleReload)
       .subscribe()
     return () => { mounted = false; if (reloadTimer) clearTimeout(reloadTimer); supabase.removeChannel(channel) }
   }, [scheduleId, load])
@@ -361,10 +366,10 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
 
   return (
     <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-<div className="deploy-matrix-legend">
+  <div className="deploy-matrix-legend">
             <span className="legend-group">
               <span className="legend-item"><i className="legend-dot legend-sched" /> Scheduled (allocated quota)</span>
-              <span className="legend-item"><i className="legend-dot legend-deploy" /> Deployed (finalized)</span>
+              <span className="legend-item"><i className="legend-dot legend-deploy" /> Deployed (effective — live, no lock)</span>
             </span>
             <span className="legend-group">
               <span className="legend-item"><i className="legend-dot legend-male" /> Male</span>
