@@ -36,7 +36,7 @@ export default function ScannerPage({ schedules, scheduleId }){
   const handleScan=async(badge)=>{
     const b=String(badge).trim().toUpperCase()
     if(!b) return
-    if(!/^(FB(597[1-9]|59[89]\d|600\d|601[01])(GA|LA)|BH\d{4}[A-Z]{1,2}\d{4}|VS[A-Z0-9]+)$/i.test(b)){ toast.error('Invalid badge format'); setLast({badge:b, ok:false, msg:'Invalid format'}); return }
+    if(!/^(FB(597[1-9]|59[89]\d|600\d|601[01])(GA|LA)\d{4}|BH\d{4}[A-Z]{1,2}\d{4}|VS[A-Z0-9]+)$/i.test(b)){ toast.error('Invalid badge format'); setLast({badge:b, ok:false, msg:'Invalid format'}); return }
     setBusy(true)
     try{
       const open=await supabase.rpc('get_open_session',{p_badge:b, p_schedule:scheduleId}).then(r=>r.data).catch(()=>null)

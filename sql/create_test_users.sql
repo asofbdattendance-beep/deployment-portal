@@ -73,9 +73,9 @@ BEGIN
   AND NOT EXISTS (SELECT 1 FROM auth.identities i WHERE i.user_id = u.id);
 
   INSERT INTO public.portal_users (auth_id, name, email, badge_number, centre, role, is_active)
-  SELECT id, 'Test Scanner', 'sc@test.com', 'FB5971GA', 'SECTOR-15-A', 'scanner', true
+  SELECT id, 'Test Scanner', 'sc@test.com', 'FB5971GA0001', 'SECTOR-15-A', 'scanner', true
   FROM auth.users WHERE email='sc@test.com'
-  ON CONFLICT (auth_id) DO UPDATE SET role='scanner', centre='SECTOR-15-A', is_active=true, updated_at=now();
+  ON CONFLICT (auth_id) DO UPDATE SET badge_number='FB5971GA0001', role='scanner', centre='SECTOR-15-A', is_active=true, updated_at=now();
 
   RAISE NOTICE 'Test scanner ready: sc@test.com / 123456';
 END $$;
@@ -101,10 +101,10 @@ WHERE u.email IN ('sc@test.com') ORDER BY u.email;
 --   email: 'sc@test.com',
 --   password: '123456',
 --   email_confirm: true,
---   user_metadata: { name: 'Test Scanner', badge_number: 'FB5971GA', centre: 'SECTOR-15-A', role: 'scanner' }
+--   user_metadata: { name: 'Test Scanner', badge_number: 'FB5971GA0001', centre: 'SECTOR-15-A', role: 'scanner' }
 -- });
 -- await supabase.from('portal_users').insert({
 --   auth_id: newUser.id, name: 'Test Scanner', email: 'sc@test.com',
---   badge_number: 'FB5971GA', centre: 'SECTOR-15-A', role: 'scanner', is_active: true
+--   badge_number: 'FB5971GA0001', centre: 'SECTOR-15-A', role: 'scanner', is_active: true
 -- });
 -- ============================================================

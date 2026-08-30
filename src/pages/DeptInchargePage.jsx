@@ -99,7 +99,7 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
     const b=String(badge).trim().toUpperCase()
     if(!b) return
     // FB/BH or VS validation
-    if(!/^(FB(597[1-9]|59[89]\d|600\d|601[01])(GA|LA)|BH\d{4}[A-Z]{1,2}\d{4}|VS[A-Z0-9]+)$/i.test(b)){
+    if(!/^(FB(597[1-9]|59[89]\d|600\d|601[01])(GA|LA)\d{4}|BH\d{4}[A-Z]{1,2}\d{4}|VS[A-Z0-9]+)$/i.test(b)){
       toast.error('Invalid badge format'); setLastScan({ badge:b, ok:false, msg:'Invalid badge format' }); return
     }
     // VSS allowed
