@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { supabase, fetchSubtreeCentres, fetchAllRows, getRootCentre, fetchPortalSettings } from '../lib/supabase'
-import { computeDeptQuota, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment } from '../lib/logic'
+import { supabase, fetchSubtreeCentres, fetchAllRows, getRootCentre, fetchPortalSettings, fetchCentres, fetchVssOverrides } from '../lib/supabase'
+import { computeDeptQuota, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment, resolveVssOverride, effectiveVssCreation } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import DeptDropdown from '../components/DeptDropdown'
@@ -22,24 +22,65 @@ export default function VssPage({ schedules, scheduleId }) {
   // window, UNLESS a Control Panel tri-state override forces it for this
   // centre. Re-checked every time the Add VSS tab opens.
   const [creationOpen, setCreationOpen] = useState(false)
+  const [creationOverride, setCreationOverride] = useState(null)
   const schedule = schedules.find(s => s.id === scheduleId)
   // NULL deadline never blocks (deadline optional); done schedules close the window
   const windowOpen = !!schedule && schedule.status !== 'done' && (!schedule.deadline || new Date(schedule.deadline) > new Date())
   useEffect(() => {
     if (tab !== 'add') return
     const admin = isAso
-    fetchPortalSettings().then(async s => {
-      const globalOpen = !!s.vss_creation_open
-      let effective = globalOpen && windowOpen
-      if (!admin && profile?.centre && scheduleId) {
-        try {
-          const { data: gates } = await supabase.rpc('get_my_effective_gates', { p_schedule: scheduleId })
-          // v21 tri-state: force-open / force-closed wins over switch ∧ window
-          effective = gates?.vss_creation_open != null ? !!gates.vss_creation_open : effective
-        } catch { /* v21 not migrated — fall back to global rules */ }
+    if (admin) {
+      setCreationOpen(true)
+      setCreationOverride(null)
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const settings = await fetchPortalSettings()
+        const globalOpen = !!settings.vss_creation_open
+        let rawOverride = null
+        if (profile?.centre) {
+          // Primary: security-definer RPC returns raw tri-state directly (bypasses RLS)
+          try {
+            const { data, error } = await supabase.rpc('centre_vss_creation_override', { p_centre: profile.centre })
+            if (!error && (data === true || data === false)) rawOverride = data
+            else if (!error && data == null) rawOverride = null
+          } catch (_e) { void _e }
+          // Fallback for DBs without the RPC (pre-v21) or if RPC not yet deployed:
+          // fetch via table + resolveVssOverride (may be blocked by RLS for centre_user)
+          if (rawOverride == null) {
+            try {
+              const overrides = await fetchVssOverrides()
+              const centres = await fetchCentres()
+              const root = getRootCentre(centres, profile.centre) || profile.centre
+              const v = resolveVssOverride(overrides, { rootCentre: root, key: 'creation_open' })
+              if (v != null) rawOverride = v
+            } catch (_e) { void _e }
+          }
+        }
+        // Effective creation gate: override ?? (global && window) — mirrors DB guard
+        let effective = effectiveVssCreation({ overrideValue: rawOverride, globalOpen, windowOpen })
+        // Cross-check with get_my_effective_gates for schedule-specific window recomputation
+        if (profile?.centre && scheduleId) {
+          try {
+            const { data: gates } = await supabase.rpc('get_my_effective_gates', { p_schedule: scheduleId })
+            if (gates?.vss_creation_open != null) effective = !!gates.vss_creation_open
+          } catch (_e) { void _e /* v21 not migrated — keep computed effective */ }
+        }
+        if (!cancelled) {
+          setCreationOverride(rawOverride)
+          setCreationOpen(effective || admin)
+        }
+      } catch (_e) {
+        void _e
+        if (!cancelled) {
+          setCreationOverride(null)
+          setCreationOpen(admin)
+        }
       }
-      setCreationOpen(effective || admin)
-    }).catch(() => {})
+    })()
+    return () => { cancelled = true }
   }, [tab, windowOpen, scheduleId, isAso, profile?.centre])
 
   return (
@@ -58,7 +99,7 @@ export default function VssPage({ schedules, scheduleId }) {
         )}
       </div>
       {tab === 'add'
-        ? <AddVssForm creationOpen={creationOpen} windowOpen={windowOpen} />
+        ? <AddVssForm creationOpen={creationOpen} windowOpen={windowOpen} creationOverride={creationOverride} />
         : tab === 'roster' ? <VssRoster /> : isAso ? <VssDashboard schedules={schedules} scheduleId={scheduleId} /> : <VssDeployTable schedules={schedules} scheduleId={scheduleId} />}
     </div>
   )
@@ -118,17 +159,33 @@ function VssDeployTable({ schedules, scheduleId }) {
     }).catch(() => setSubtreeError(true))
   }, [myCentre, subtreeRetry])
 
-  // v21 Control Panel: any_override_open = an override (centre-wide or
-  // department-scoped) reopens deployment past lock/switch/deadline;
-  // vss_deployment_open = the EFFECTIVE VSS switch
-  // (global switch with any per-centre tri-state applied). This is the ONLY
-  // writer of the vss_deployment_open key — every global-settings refresh
-  // re-runs it right after, or a raw global value would clobber the override.
+  // v21 Control Panel — VSS FIX: any_override_open (generic centre_overrides)
+  // reopens REGULAR deployment past lock/switch/deadline, but it must NOT
+  // reopen VSS when the global VSS switch is closed. VSS respects ONLY the
+  // VSS-specific effective switch (portal_settings.vss_deployment_open with
+  // the per-centre tri-state centre_vss_overrides applied via
+  // vss_deploy_open_for_centre). A stale generic wildcard that keeps regular
+  // deployment open would otherwise keep VSS editable via canEditDeployment's
+  // overrideOpen bypass — "My vss is globally closed but centres are able to
+  // mark for vss". This loader is the ONLY writer of the vss_deployment_open
+  // key — every global-settings refresh re-runs it right after, so a raw
+  // global value never clobbers the effective override.
   const loadGates = useCallback(async () => {
     if (!selectedScheduleId || !myRoot) return
     try {
       const { data: gates } = await supabase.rpc('get_my_effective_gates', { p_schedule: selectedScheduleId })
-      setOverrideOpen(!!gates?.any_override_open)
+      // VSS FIX: Do NOT derive VSS editability from generic centre_overrides.
+      // any_override_open (centre_overrides) is for regular sewadars — a stale
+      // wildcard or department-scoped row would otherwise make VSS editable
+      // even though portal_settings.vss_deployment_open is globally closed.
+      // Keep the generic flag at false so VSS canEdit + persist never treat a
+      // regular override as a VSS opening. VSS openness comes solely from the
+      // effective value gates.vss_deployment_open (global ∧ tri-state).
+      setOverrideOpen(false)
+      // undeployed_only is also a generic centre_overrides signal, but it
+      // controls the DB/UI freeze of already-deployed VSS rows under that
+      // mode — keep it so the freeze stays in sync with the DB. It does NOT
+      // affect VSS canEdit (which is gated solely by the effective VSS switch).
       setUndeployedOverrideOpen(!!gates?.undeployed_override_open)
       setSettings(s => ({ ...s, vss_deployment_open: !!gates?.vss_deployment_open }))
     } catch { /* v21 not migrated — override stays off */ }
@@ -575,6 +632,21 @@ function VssDeployTable({ schedules, scheduleId }) {
   const schedule = schedules.find(s => s.id === selectedScheduleId)
   const deadlinePassed = schedule?.deadline ? new Date(schedule.deadline) < new Date() : false
   const scheduleDone = schedule?.status === 'done'
+  // VSS FIX: masterOpen is the EFFECTIVE VSS switch (global
+  // portal_settings.vss_deployment_open with the per-centre tri-state
+  // centre_vss_overrides applied via vss_deploy_open_for_centre). It already
+  // encodes whether a VSS-specific override force-opens deployment for this
+  // centre. Generic centre_overrides (any_override_open) must NOT reopen VSS:
+  // a stale wildcard that keeps REGULAR deployment open would otherwise make
+  // VSS editable via canEditDeployment's overrideOpen bypass even though the
+  // ASO left VSS globally closed. So VSS is gated solely on the VSS-specific
+  // effective switch; deadline/locked still block normally (the DB's VSS
+  // tri-state does NOT bypass deadline/lock — only a generic override does
+  // at the DB, but we intentionally do not surface that for VSS so globally
+  // closed truly blocks unless a VSS-specific override set the effective true).
+  // overrideOpen is kept at false for VSS (see loadGates) — we pass it
+  // through to canEditDeployment so the variable stays used and the intent is
+  // explicit in one place.
   const masterOpen = settings.vss_deployment_open === true
   const canEdit = canEditDeployment({
     editableRole: isEditableRole,
@@ -583,9 +655,14 @@ function VssDeployTable({ schedules, scheduleId }) {
     done: scheduleDone,
     masterOpen,
     locked,
-    overrideOpen,
+    overrideOpen, // VSS: always false — ignores generic centre_overrides; only VSS tri-state via masterOpen matters
   })
   editableRef.current = canEdit
+  // For VSS, the consent-given relaxation must also not be driven by a
+  // generic regular override — keep it false so persist does not deploy
+  // consent=No VSS rows just because regular deployment was specially opened.
+  // The DB still relaxes consent via generic v_open, but the UI now stays
+  // stricter for VSS (persist will not create those rows).
   overrideOpenRef.current = overrideOpen
   undeployedOverrideOpenRef.current = undeployedOverrideOpen
 
@@ -1057,7 +1134,7 @@ function VssDeployTable({ schedules, scheduleId }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
             <Lock size={16} /> This schedule is done. Editing is disabled.
           </div>
-        ) : overrideOpen ? (
+        ) : overrideOpen ? ( // VSS FIX: overrideOpen is intentionally always false for VSS (see loadGates) — generic centre_overrides must NOT show a "specially opened" banner for VSS. VSS respects ONLY the VSS-specific effective switch (masterOpen). A stale generic wildcard that keeps regular deployment open would otherwise show this green banner on the VSS page even though VSS is globally closed. This branch is kept structurally so the closed/locked/deadline banners below correctly reflect VSS state; it will never render for VSS.
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#047857', marginBottom: '1rem' }}>
             <Unlock size={16} />
             {undeployedOverrideOpen

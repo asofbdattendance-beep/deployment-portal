@@ -233,6 +233,32 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
       await setPortalSetting(key, next, profile?.name || null)
       setSettings(s => ({ ...s, [key]: next }))
       toast.success(`${label} is now ${next ? 'OPEN' : 'CLOSED'}`)
+      if (next === false) {
+        if (key === 'vss_deployment_open') {
+          const toClear = vssOverrides.filter(o => o.deployment_open === true)
+          if (toClear.length && window.confirm(`Global VSS Deployment is now CLOSED but ${toClear.length} centre(s) are still forced OPEN via overrides — centres can still mark.\n\nClear those VSS deployment overrides now (reset to Auto)?`)) {
+            await Promise.all(toClear.map(o => setVssOverride(o.centre, { creation_open: o.creation_open ?? null, deployment_open: null }, profile?.name || null)))
+            setVssOverrides(await fetchVssOverrides())
+            audit('vss_override_clear_deployment', { centres: toClear.map(o => o.centre) })
+            toast.success(`Cleared ${toClear.length} VSS deployment override(s) — now Auto (closed)`)
+          }
+        } else if (key === 'vss_creation_open') {
+          const toClear = vssOverrides.filter(o => o.creation_open === true)
+          if (toClear.length && window.confirm(`Global Add VSS is now CLOSED but ${toClear.length} centre(s) are still forced OPEN via overrides — centres can still add VSS.\n\nClear those VSS creation overrides now (reset to Auto)?`)) {
+            await Promise.all(toClear.map(o => setVssOverride(o.centre, { creation_open: null, deployment_open: o.deployment_open ?? null }, profile?.name || null)))
+            setVssOverrides(await fetchVssOverrides())
+            audit('vss_override_clear_creation', { centres: toClear.map(o => o.centre) })
+            toast.success(`Cleared ${toClear.length} VSS creation override(s) — now Auto (closed)`)
+          }
+        } else if (key === 'sewadar_deployment_open') {
+          if (overrides.length && window.confirm(`Global Sewadar Deployment is now CLOSED but ${overrides.length} centre override(s) are still OPEN — centres can still edit.\n\nClear all deployment overrides for this schedule now?`)) {
+            await Promise.all(overrides.map(o => removeCentreOverride({ scheduleId: selectedScheduleId, centre: o.centre, departmentId: o.department_id, undeployedOnly: !!o.undeployed_only })))
+            setOverrides(await fetchCentreOverrides(selectedScheduleId))
+            audit('override_clear_all_on_global_close', { count: overrides.length })
+            toast.success(`Cleared ${overrides.length} deployment override(s)`)
+          }
+        }
+      }
     } catch (err) {
       toast.error(err.message || 'Could not update setting')
     } finally { setBusy(false) }
@@ -356,6 +382,50 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
     } finally { setBusy(false) }
   }
 
+  const clearStaleVssDeploy = async () => {
+    const toClear = vssOverrides.filter(o => o.deployment_open === true)
+    if (!toClear.length) return
+    if (!window.confirm(`Clear ${toClear.length} VSS deployment override(s) that force OPEN? They will be reset to Auto (follow the global CLOSED).`)) return
+    setBusy(true)
+    try {
+      await Promise.all(toClear.map(o => setVssOverride(o.centre, { creation_open: o.creation_open ?? null, deployment_open: null }, profile?.name || null)))
+      setVssOverrides(await fetchVssOverrides())
+      audit('vss_override_clear_deployment', { centres: toClear.map(o => o.centre) })
+      toast.success(`Cleared ${toClear.length} VSS deployment override(s)`)
+    } catch (err) {
+      toast.error(err.message || 'Could not clear overrides')
+    } finally { setBusy(false) }
+  }
+
+  const clearStaleVssCreation = async () => {
+    const toClear = vssOverrides.filter(o => o.creation_open === true)
+    if (!toClear.length) return
+    if (!window.confirm(`Clear ${toClear.length} VSS creation override(s) that force OPEN? They will be reset to Auto (follow the global CLOSED).`)) return
+    setBusy(true)
+    try {
+      await Promise.all(toClear.map(o => setVssOverride(o.centre, { creation_open: null, deployment_open: o.deployment_open ?? null }, profile?.name || null)))
+      setVssOverrides(await fetchVssOverrides())
+      audit('vss_override_clear_creation', { centres: toClear.map(o => o.centre) })
+      toast.success(`Cleared ${toClear.length} VSS creation override(s)`)
+    } catch (err) {
+      toast.error(err.message || 'Could not clear overrides')
+    } finally { setBusy(false) }
+  }
+
+  const clearStaleRegular = async () => {
+    if (!overrides.length) return
+    if (!window.confirm(`Clear all ${overrides.length} deployment override(s) for this schedule? Centres will then follow the global CLOSED switch.`)) return
+    setBusy(true)
+    try {
+      await Promise.all(overrides.map(o => removeCentreOverride({ scheduleId: selectedScheduleId, centre: o.centre, departmentId: o.department_id, undeployedOnly: !!o.undeployed_only })))
+      setOverrides(await fetchCentreOverrides(selectedScheduleId))
+      audit('override_clear_all_stale', { count: overrides.length })
+      toast.success(`Cleared ${overrides.length} deployment override(s)`)
+    } catch (err) {
+      toast.error(err.message || 'Could not clear overrides')
+    } finally { setBusy(false) }
+  }
+
   // ── tree helpers ─────────────────────────────────────────────────────
   const visibleRoots = roots.filter(r => r.name.toLowerCase().includes(treeSearch.toLowerCase()))
   const toggleExpand = name => setExpanded(e => ({ ...e, [name]: !e[name] }))
@@ -461,6 +531,33 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
             {selected === 'all' && (
               <>
                 <PanelCard icon={Globe} title="Global switches" sub="Master controls — these apply everywhere unless a centre below carries its own override">
+                  {settings.sewadar_deployment_open === false && overrides.length > 0 && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, padding: '0.6rem 0.75rem', fontSize: '0.82rem', color: '#92400e', marginBottom: '0.85rem' }}>
+                      <AlertTriangle size={14} style={{ flexShrink: 0, color: '#d97706' }} />
+                      <span><strong>Sewadar Deployment is globally CLOSED</strong> but <strong>{overrides.length} override(s)</strong> are still OPEN — centres can still edit deployment.</span>
+                      <button className="btn" disabled={busy} onClick={clearStaleRegular} style={{ marginLeft: 'auto', padding: '0.25rem 0.55rem', fontSize: '0.72rem', borderColor: '#f59e0b', color: '#92400e' }}>Clear all deployment overrides</button>
+                    </div>
+                  )}
+                  {settings.vss_deployment_open === false && vssOverrides.some(o => o.deployment_open === true) && (() => {
+                    const n = vssOverrides.filter(o => o.deployment_open === true).length
+                    return (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, padding: '0.6rem 0.75rem', fontSize: '0.82rem', color: '#92400e', marginBottom: '0.85rem' }}>
+                        <AlertTriangle size={14} style={{ flexShrink: 0, color: '#d97706' }} />
+                        <span><strong>VSS Deployment is globally CLOSED</strong> but <strong>{n} centre(s)</strong> are still forced OPEN via overrides below — centres can still mark.</span>
+                        <button className="btn" disabled={busy} onClick={clearStaleVssDeploy} style={{ marginLeft: 'auto', padding: '0.25rem 0.55rem', fontSize: '0.72rem', borderColor: '#f59e0b', color: '#92400e' }}>Clear all VSS deployment overrides</button>
+                      </div>
+                    )
+                  })()}
+                  {settings.vss_creation_open === false && vssOverrides.some(o => o.creation_open === true) && (() => {
+                    const n = vssOverrides.filter(o => o.creation_open === true).length
+                    return (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, padding: '0.6rem 0.75rem', fontSize: '0.82rem', color: '#92400e', marginBottom: '0.85rem' }}>
+                        <AlertTriangle size={14} style={{ flexShrink: 0, color: '#d97706' }} />
+                        <span><strong>Add VSS is globally CLOSED</strong> but <strong>{n} centre(s)</strong> are still forced OPEN via overrides below — centres can still add VSS.</span>
+                        <button className="btn" disabled={busy} onClick={clearStaleVssCreation} style={{ marginLeft: 'auto', padding: '0.25rem 0.55rem', fontSize: '0.72rem', borderColor: '#f59e0b', color: '#92400e' }}>Clear all VSS creation overrides</button>
+                      </div>
+                    )
+                  })()}
                   <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
                     <MasterSwitch label="Sewadar Deployment" open={settings.sewadar_deployment_open !== false} onToggle={toggleSetting('sewadar_deployment_open', 'Sewadar deployment')} busy={busy} />
                     <MasterSwitch label="VSS Deployment" open={settings.vss_deployment_open === true} onToggle={toggleSetting('vss_deployment_open', 'VSS deployment')} busy={busy} />
@@ -750,6 +847,26 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
                   title="VSS special controls"
                   sub="Tri-state knobs per centre: Auto = follow the global switches & deadline window · Open/Closed = force for that centre (centre wins over All-centres)"
                 >
+                  {settings.vss_deployment_open === false && vssOverrides.some(o => o.deployment_open === true) && (() => {
+                    const n = vssOverrides.filter(o => o.deployment_open === true).length
+                    return (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, padding: '0.6rem 0.75rem', fontSize: '0.82rem', color: '#92400e', marginBottom: '0.85rem' }}>
+                        <AlertTriangle size={14} style={{ flexShrink: 0, color: '#d97706' }} />
+                        <span><strong>VSS Deployment is globally CLOSED</strong> but <strong>{n} centre(s)</strong> are still forced OPEN via overrides — centres can still mark.</span>
+                        <button className="btn" disabled={busy} onClick={clearStaleVssDeploy} style={{ marginLeft: 'auto', padding: '0.25rem 0.55rem', fontSize: '0.72rem', borderColor: '#f59e0b', color: '#92400e' }}>Clear all VSS deployment overrides</button>
+                      </div>
+                    )
+                  })()}
+                  {settings.vss_creation_open === false && vssOverrides.some(o => o.creation_open === true) && (() => {
+                    const n = vssOverrides.filter(o => o.creation_open === true).length
+                    return (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, padding: '0.6rem 0.75rem', fontSize: '0.82rem', color: '#92400e', marginBottom: '0.85rem' }}>
+                        <AlertTriangle size={14} style={{ flexShrink: 0, color: '#d97706' }} />
+                        <span><strong>Add VSS is globally CLOSED</strong> but <strong>{n} centre(s)</strong> are still forced OPEN via overrides — centres can still add VSS.</span>
+                        <button className="btn" disabled={busy} onClick={clearStaleVssCreation} style={{ marginLeft: 'auto', padding: '0.25rem 0.55rem', fontSize: '0.72rem', borderColor: '#f59e0b', color: '#92400e' }}>Clear all VSS creation overrides</button>
+                      </div>
+                    )
+                  })()}
                   <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
                     <MasterSwitch label="VSS Deployment" open={settings.vss_deployment_open === true} onToggle={toggleSetting('vss_deployment_open', 'VSS deployment')} busy={busy} />
                     <MasterSwitch label="Add VSS" open={settings.vss_creation_open === true} onToggle={toggleSetting('vss_creation_open', 'Add VSS')} busy={busy} />

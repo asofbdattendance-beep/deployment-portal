@@ -42,7 +42,7 @@ const EMPTY_FORM = {
    Creation is gated (v19): centre roles need BOTH the ASO's "Add VSS"
    master switch open AND an open deadline window. Once a registration
    is assigned its VSFB number it freezes for centres (DB-enforced). */
-export default function AddVssForm({ creationOpen = false, windowOpen = false }) {
+export default function AddVssForm({ creationOpen = false, windowOpen = false, creationOverride = null }) {
   const { profile } = usePortalAuth()
   const toast = useToast()
   // phase-2 hardening (v20): aso accounts are read-only everywhere —
@@ -53,9 +53,13 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false })
   const isAllCentres = isAso || isSuperAdmin
   const canAssign = isSuperAdmin
   // centres are gated by switch + deadline; super_admin bypasses both;
-  // aso never gets the form (view-only)
-  const centreGated = readOnlyAdmin || (!isAllCentres && (!creationOpen || !windowOpen))
-  const editGated = readOnlyAdmin || (!isAllCentres && !windowOpen)
+  // aso never gets the form (view-only). creationOpen already equals
+  // override ?? (global && window), so the double `|| !windowOpen` would
+  // defeat a per-centre force-open after deadline (override=true should
+  // allow creation even when window=false). Edit gating mirrors the DB
+  // guard: COALESCE(override, window) for UPDATE/DELETE.
+  const centreGated = readOnlyAdmin || (!isAllCentres && !creationOpen)
+  const editGated = readOnlyAdmin || (!isAllCentres && !(creationOverride != null ? creationOverride : windowOpen))
 
   const [centres, setCentres] = useState([])
   const [form, setForm] = useState(EMPTY_FORM)
@@ -141,9 +145,15 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false })
     e.preventDefault()
     // belt-and-braces: the DB guard (v19) is authoritative, this keeps the UX clean
     if (centreGated) {
-      toast.error(readOnlyAdmin
-        ? 'View-only access — ASO accounts cannot create VSS records'
-        : !creationOpen ? 'Adding VSS is currently closed by the ASO' : 'The deadline has passed — adding VSS is disabled')
+      if (readOnlyAdmin) {
+        toast.error('View-only access — ASO accounts cannot create VSS records')
+      } else if (creationOverride === false) {
+        toast.error('Adding VSS is currently closed for your centre by the ASO')
+      } else if (!windowOpen) {
+        toast.error('The deadline has passed — adding VSS is disabled')
+      } else {
+        toast.error('Adding VSS is currently closed by the ASO')
+      }
       return
     }
     const e2 = vssRegistrationErrors(form, { hasPhoto: !!photo, photoSize: photo?.size || 0 })
@@ -217,7 +227,12 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false })
   }
   const saveEdit = async () => {
     if (!editReg || editReg.status === 'assigned') return
-    if (editGated && !isSuperAdmin) { toast.error(readOnlyAdmin ? 'View-only access — ASO accounts cannot edit VSS records' : 'The deadline has passed — VSS records can no longer be edited'); return }
+    if (editGated && !isSuperAdmin) {
+      if (readOnlyAdmin) toast.error('View-only access — ASO accounts cannot edit VSS records')
+      else if (creationOverride === false) toast.error('Editing VSS is currently closed for your centre by the ASO')
+      else toast.error('The deadline has passed — VSS records can no longer be edited')
+      return
+    }
     const e2 = vssRegistrationErrors(editForm, { hasPhoto: true, photoSize: editPhoto ? editPhoto.size : 0 })
     setEditErrors(e2)
     if (Object.keys(e2).some(k => e2[k])) { toast.error('Please fix the highlighted fields'); return }
@@ -257,7 +272,12 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false })
   /* ─── delete ─── */
   const doDelete = async () => {
     if (!deleteReg) return
-    if (editGated && !isSuperAdmin) { toast.error(readOnlyAdmin ? 'View-only access — ASO accounts cannot delete VSS records' : 'The deadline has passed — VSS records can no longer be deleted'); return }
+    if (editGated && !isSuperAdmin) {
+      if (readOnlyAdmin) toast.error('View-only access — ASO accounts cannot delete VSS records')
+      else if (creationOverride === false) toast.error('Deleting VSS is currently closed for your centre by the ASO')
+      else toast.error('The deadline has passed — VSS records can no longer be deleted')
+      return
+    }
     setDeleting(true)
     try {
       if (deleteReg.photo_url) {
@@ -427,9 +447,11 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false })
           <Lock size={16} />
           {readOnlyAdmin
             ? <>View-only access — ASO accounts cannot create, edit or assign VSS records.</>
-            : !creationOpen
-              ? <>Adding VSS is currently <strong>CLOSED by the ASO</strong> — you cannot create VSS records until it is opened.</>
-              : <>The deadline has passed — adding and editing VSS is disabled.</>}
+            : creationOverride === false
+              ? <>Adding VSS is currently <strong>CLOSED for your centre by the ASO</strong> — you cannot create VSS records until it is opened.</>
+            : !windowOpen
+              ? <>The deadline has passed — adding and editing VSS is disabled.</>
+              : <>Adding VSS is currently <strong>CLOSED by the ASO</strong> — you cannot create VSS records until it is opened.</>}
         </div>
       )}
 
