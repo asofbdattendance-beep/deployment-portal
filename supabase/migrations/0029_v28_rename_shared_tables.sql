@@ -86,17 +86,17 @@ BEGIN
   -- (e.g. previous run left views but did not rename), drop the view
   -- so the rename has a free name slot. Views are cheap to recreate.
   IF to_regclass('public.centres') IS NOT NULL
-     AND (SELECT relkind FROM pg_class WHERE oid = 'public.centres'::regclass) = 'v' THEN
+     AND (SELECT relkind FROM pg_class WHERE oid = to_regclass('public.centres')) = 'v' THEN
     DROP VIEW public.centres;
     RAISE NOTICE 'Dropped stale view public.centres';
   END IF;
   IF to_regclass('public.sewadars') IS NOT NULL
-     AND (SELECT relkind FROM pg_class WHERE oid = 'public.sewadars'::regclass) = 'v' THEN
+     AND (SELECT relkind FROM pg_class WHERE oid = to_regclass('public.sewadars')) = 'v' THEN
     DROP VIEW public.sewadars;
     RAISE NOTICE 'Dropped stale view public.sewadars';
   END IF;
   IF to_regclass('public.attendance_sessions') IS NOT NULL
-     AND (SELECT relkind FROM pg_class WHERE oid = 'public.attendance_sessions'::regclass) = 'v' THEN
+     AND (SELECT relkind FROM pg_class WHERE oid = to_regclass('public.attendance_sessions')) = 'v' THEN
     DROP VIEW public.attendance_sessions;
     RAISE NOTICE 'Dropped stale view public.attendance_sessions';
   END IF;
@@ -213,13 +213,13 @@ CREATE POLICY att_update ON public.dp_attendance_sessions FOR UPDATE TO authenti
 -- (no-op if old rel does not exist — guarded)
 DO $$
 BEGIN
-  IF to_regclass('public.centres') IS NOT NULL AND (SELECT relkind FROM pg_class WHERE oid='public.centres'::regclass)='r' THEN
+  IF to_regclass('public.centres') IS NOT NULL AND (SELECT relkind FROM pg_class WHERE oid=to_regclass('public.centres'))='r' THEN
     DROP POLICY IF EXISTS centres_read ON public.centres;
   END IF;
-  IF to_regclass('public.sewadars') IS NOT NULL AND (SELECT relkind FROM pg_class WHERE oid='public.sewadars'::regclass)='r' THEN
+  IF to_regclass('public.sewadars') IS NOT NULL AND (SELECT relkind FROM pg_class WHERE oid=to_regclass('public.sewadars'))='r' THEN
     DROP POLICY IF EXISTS sewadars_portal_read ON public.sewadars;
   END IF;
-  IF to_regclass('public.attendance_sessions') IS NOT NULL AND (SELECT relkind FROM pg_class WHERE oid='public.attendance_sessions'::regclass)='r' THEN
+  IF to_regclass('public.attendance_sessions') IS NOT NULL AND (SELECT relkind FROM pg_class WHERE oid=to_regclass('public.attendance_sessions'))='r' THEN
     DROP POLICY IF EXISTS att_read ON public.attendance_sessions;
     DROP POLICY IF EXISTS att_insert ON public.attendance_sessions;
     DROP POLICY IF EXISTS att_update ON public.attendance_sessions;
@@ -1097,7 +1097,7 @@ CREATE TRIGGER trg_portal_users_touch
 DO $$
 BEGIN
   IF to_regclass('public.attendance_sessions') IS NOT NULL
-     AND (SELECT relkind FROM pg_class WHERE oid='public.attendance_sessions'::regclass)='r' THEN
+     AND (SELECT relkind FROM pg_class WHERE oid=to_regclass('public.attendance_sessions'))='r' THEN
     DROP TRIGGER IF EXISTS trg_touch_att ON public.attendance_sessions;
   END IF;
 END $$;
