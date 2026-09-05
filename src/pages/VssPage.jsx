@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { supabase, fetchSubtreeCentres, getRootCentre, fetchPortalSettings } from '../lib/supabase'
+import { supabase, fetchSubtreeCentres, fetchAllRows, getRootCentre, fetchPortalSettings } from '../lib/supabase'
 import { computeDeptQuota, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
@@ -155,31 +155,26 @@ function VssDeployTable({ schedules, scheduleId }) {
     const prevRows = liveRef.current.rows
     const prevDirty = dirtyRef.current
     try {
-      const [vssRes, consRes, depRes, allocRes, deployRes] = await Promise.all([
-        supabase.from('vss_sewadars').select('badge_number, sewadar_name, gender, is_initiated, is_active, remarks, centre').in('centre', subtree).order('sewadar_name'),
-        supabase.from('sewadar_consents').select('*').eq('schedule_id', selectedScheduleId).in('centre', subtree),
-        supabase.from('deployment_departments').select('*').eq('is_active', true).order('name'),
-        supabase.from('centre_allocations').select('*').eq('schedule_id', selectedScheduleId),
-        supabase.from('deployments').select('*').eq('schedule_id', selectedScheduleId).in('centre', subtree),
+      // Supabase max-rows=1000 — paginate every table that can exceed it
+      const [vssAll, consAll, deptAll, allocAll, deployAll] = await Promise.all([
+        fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, gender, is_initiated, is_active, remarks, centre', (q) => q.in('centre', subtree).order('sewadar_name')),
+        fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree)),
+        fetchAllRows('deployment_departments', '*', (q) => q.eq('is_active', true).order('name')),
+        fetchAllRows('centre_allocations', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
+        fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree)),
       ])
 
-      // Abort the load if any query failed — rendering empty/default rows here
-      // would make the next auto-save treat every VSS sewadar as "new" and
-      // could overwrite real consent data.
-      const failed = [vssRes, consRes, depRes, allocRes, deployRes].find(r => r?.error)
-      if (failed) throw failed.error
-
-      const vss = vssRes.data || []
-      const existing = consRes.data || []
+      const vss = vssAll || []
+      const existing = consAll || []
       const map = {}
       existing.forEach(c => { map[`${c.centre}|${c.badge_number}`] = c })
       const deployMap = {}
       // keep the whole deployment row so the page knows which sewadars the ASO
       // has FINALIZED — those rows are locked on the centre side
-      ;(deployRes.data || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d })
+      ;(deployAll || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d })
       const rows = {}
       const deptNameById = {}
-      ;(depRes.data || []).forEach(d => { deptNameById[d.id] = d.name })
+      ;(deptAll || []).forEach(d => { deptNameById[d.id] = d.name })
       // days as stored in the DB — the save baseline must use these so legacy
       // values that differ from the auto-set rule get corrected on first save
       const storedDays = {}
@@ -235,9 +230,9 @@ function VssDeployTable({ schedules, scheduleId }) {
             rows[key] = autoSetDays(rows[key])
           })
           setConsentRows(rows)
-          setDepts(depRes.data || [])
-          setAllocations(allocRes.data || [])
-          setDeployments(deployRes.data || [])
+          setDepts(deptAll || [])
+          setAllocations(allocAll || [])
+          setDeployments(deployAll || [])
           loadedRef.current = true
           scheduleIdRef.current = selectedScheduleId
           const ex = {}
@@ -285,9 +280,9 @@ function VssDeployTable({ schedules, scheduleId }) {
       }
 
       setConsentRows(rows)
-      setDepts(depRes.data || [])
-      setAllocations(allocRes.data || [])
-      setDeployments(deployRes.data || [])
+      setDepts(deptAll || [])
+      setAllocations(allocAll || [])
+      setDeployments(deployAll || [])
       // Baseline the snapshot on the DB-stored days: rows whose days were
       // auto-corrected on load (legacy values ≠ the 5/3 rule) are flagged as
       // changed so the first save fixes them, keeping UI + DB in sync.
@@ -499,8 +494,10 @@ function VssDeployTable({ schedules, scheduleId }) {
         setSavedAt(new Date())
       }
       if (mountedRef.current && scheduleIdRef.current === scheduleId) {
-        const { data: fresh } = await supabase.from('deployments').select('*').eq('schedule_id', scheduleId).in('centre', sub)
-        if (fresh && mountedRef.current) setDeployments(fresh)
+        try {
+          const fresh = await fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', scheduleId).in('centre', sub))
+          if (fresh && mountedRef.current) setDeployments(fresh)
+        } catch { /* keep previous deployments on transient error */ }
       }
     } catch (err) { toast.error(err.message); dirtyRef.current = true; scheduleRetry() } finally {
       savingRef.current = false

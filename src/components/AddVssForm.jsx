@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { supabase, fetchCentres, vssPhotoUrl } from '../lib/supabase'
+import { supabase, fetchCentres, fetchAllRows, vssPhotoUrl } from '../lib/supabase'
 import { getSubtreeCentres, computeAge, isVssAgeBlocked, vssRegistrationErrors } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from './Toast'
@@ -278,18 +278,18 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false })
   const findDuplicates = async (reg) => {
     const name = reg.sewadar_name.trim().toLowerCase()
     const aadhar = reg.aadhar_number ? reg.aadhar_number.replace(/\s/g, '') : ''
-    const [rosterRes, regRes] = await Promise.all([
-      supabase.from('vss_sewadars').select('badge_number, sewadar_name, aadhar_number'),
-      supabase.from('vss_registrations').select('id, temp_vss_id, sewadar_name, aadhar_number, status').neq('id', reg.id),
+    const [rosterAll, regAll] = await Promise.all([
+      fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, aadhar_number', null),
+      fetchAllRows('vss_registrations', 'id, temp_vss_id, sewadar_name, aadhar_number, status', (q) => q.neq('id', reg.id)),
     ])
     const dups = []
-    ;(rosterRes.data || []).forEach(r => {
+    ;(rosterAll || []).forEach(r => {
       const reasons = []
       if (r.sewadar_name && r.sewadar_name.toLowerCase() === name) reasons.push('same name')
       if (aadhar && r.aadhar_number && r.aadhar_number.replace(/\s/g, '') === aadhar) reasons.push('same Aadhar')
       if (reasons.length) dups.push({ where: 'roster', ref: r.badge_number, reasons })
     })
-    ;(regRes.data || []).forEach(r => {
+    ;(regAll || []).forEach(r => {
       const reasons = []
       if (r.sewadar_name && r.sewadar_name.toLowerCase() === name) reasons.push('same name')
       if (aadhar && r.aadhar_number && r.aadhar_number.replace(/\s/g, '') === aadhar) reasons.push('same Aadhar')

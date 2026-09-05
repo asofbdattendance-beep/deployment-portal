@@ -56,10 +56,77 @@ export async function getMyDeptIds(scheduleId) {
   return data || []
 }
 
-export async function fetchCentres() {
-  const { data, error } = await supabase.from('centres').select('id, name, parent_centre').order('name')
+// ── Pagination helper (v22) ────────────────────────────────
+// Supabase / PostgREST caps single-query rows at 1000 (max-rows). Any table
+// that can exceed 1000 (3597+ sewadars live) must be fetched via ranged
+// pagination, otherwise rows beyond 1000 are silently dropped.
+// `applyFilters` receives the query builder and may chain .eq/.in/.or/.order
+// — the helper appends .range() and loops until a short page is returned.
+// Keep `fetchAll` / `fetchAllFrom` as aliases for ergonomics at call sites.
+export async function fetchAllRows(table, selectColumns = '*', applyFilters = null) {
+  const pageSize = 1000
+  let from = 0
+  let all = []
+  while (true) {
+    let q = supabase.from(table).select(selectColumns)
+    if (typeof applyFilters === 'function') {
+      const maybe = applyFilters(q)
+      if (maybe) q = maybe
+    }
+    q = q.range(from, from + pageSize - 1)
+    const { data, error } = await q
+    if (error) throw error
+    all.push(...(data || []))
+    if (!data || data.length < pageSize) break
+    from += pageSize
+  }
+  return all
+}
+export const fetchAll = fetchAllRows
+export const fetchAllFrom = fetchAllRows
+export const fetchPaginated = fetchAllRows
+
+// ── DB-side count helper (v22.1) ───────────────────────────────────
+// Returns exact count via PostgREST head:true — NO rows are downloaded.
+// Use for pure-count stats (headers, badges, quota totals) where the rows
+// themselves are NOT needed for display. For table/matrix rows that ARE
+// displayed, keep fetchAllRows + client counting (no extra download beyond
+// the table). Example:
+//   const total = await getCount('deployments', q => q.eq('schedule_id', sid))
+export async function getCount(table, applyFilters = null) {
+  let q = supabase.from(table).select('*', { count: 'exact', head: true })
+  if (typeof applyFilters === 'function') {
+    const maybe = applyFilters(q)
+    if (maybe) q = maybe
+  }
+  const { count, error } = await q
   if (error) throw error
-  return data || []
+  return count ?? 0
+}
+
+// ── Grouped-count helper (v22.1) ──────────────────────────────────
+// Grouped counts (per-centre / per-department tallies) are best served by
+// a DB RPC (e.g. get_deployment_matrix_counts) that aggregates server-side.
+// This helper is a placeholder that documents the intent: for now it returns
+// null so callers fall back to client aggregation; once the RPC migration
+// ships, callers can prefer RPC with fallback (see DeploymentMatrixReport).
+// Signature: getGroupedCounts(table, groupColumns, selectExtra, applyFilters)
+export async function getGroupedCounts(
+  _table,
+  _groupColumns,
+  _selectExtra = null,
+  _applyFilters = null,
+) {
+  // Intentionally not implemented client-side — grouped counts without an
+  // RPC would still download all rows. Callers should attempt
+  // supabase.rpc('get_deployment_matrix_counts', ...) first and fall back
+  // to fetchAllRows + JS grouping only if the RPC is missing.
+  return null
+}
+
+export async function fetchCentres() {
+  // 40 rows today — still paginated via fetchAllRows so a future import never hits the 1000 cap silently
+  return fetchAllRows('dp_centres', 'id, name, parent_centre', (q) => q.order('name'))
 }
 
 export async function fetchPortalSettings() {
@@ -96,12 +163,11 @@ export async function fetchSubtreeCentres(centreName) {
 // scope (centre '*' = all; department_id null = all departments).
 export async function fetchCentreOverrides(scheduleId) {
   if (!scheduleId) return []
-  const { data, error } = await supabase
-    .from('centre_overrides')
-    .select('id, schedule_id, centre, department_id, undeployed_only, note, created_by, created_at')
-    .eq('schedule_id', scheduleId)
-  if (error) throw error
-  return data || []
+  return fetchAllRows(
+    'centre_overrides',
+    'id, schedule_id, centre, department_id, undeployed_only, note, created_by, created_at',
+    (q) => q.eq('schedule_id', scheduleId),
+  )
 }
 
 // Upsert-by-hand: Postgres treats NULL department_id values as distinct in
@@ -155,9 +221,7 @@ export async function removeAllCentreOverrides({ scheduleId, centre }) {
 // Tri-state VSS knobs per centre ('*' = all): creation_open / deployment_open,
 // null = inherit the global switch.
 export async function fetchVssOverrides() {
-  const { data, error } = await supabase.from('centre_vss_overrides').select('*').order('centre')
-  if (error) throw error
-  return data || []
+  return fetchAllRows('centre_vss_overrides', '*', (q) => q.order('centre'))
 }
 
 export async function setVssOverride(centre, patch, updatedBy = null) {

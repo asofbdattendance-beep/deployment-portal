@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { supabase, fetchCentres, fetchPortalSettings, setPortalSetting } from '../lib/supabase'
+import { supabase, fetchCentres, fetchAllRows, fetchPortalSettings, setPortalSetting, getCount } from '../lib/supabase'
 import { isVssBadge } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from './Toast'
@@ -24,32 +24,41 @@ export default function VssDashboard({ schedules, scheduleId }) {
     fetchPortalSettings().then(setSettings).catch(() => {})
   }, [toast])
 
+  // DB-side pure counts (head:true) for header stats where rows not needed elsewhere
+  const [dbCounts, setDbCounts] = useState({ vss: null, deployments: null })
+  useEffect(() => {
+    if (!selectedScheduleId) return
+    Promise.all([
+      getCount('vss_sewadars', null).catch(() => null),
+      getCount('deployments', (q) => q.eq('schedule_id', selectedScheduleId)).catch(() => null),
+    ]).then(([vssCount, depCount]) => setDbCounts({ vss: vssCount, deployments: depCount })).catch(() => {})
+  }, [selectedScheduleId])
+
   const load = async (scheduleId) => {
-    const [centres, vss, consents, deps, depts] = await Promise.all([
+    const [centres, vssAll, consAll, depAll, deptAll] = await Promise.all([
       fetchCentres(),
-      supabase.from('vss_sewadars').select('*'),
-      supabase.from('sewadar_consents').select('*').eq('schedule_id', scheduleId),
-      supabase.from('deployments').select('centre, badge_number, department_id, deployed_department_id').eq('schedule_id', scheduleId),
-      supabase.from('deployment_departments').select('id, name, include_vss').eq('is_active', true),
+      fetchAllRows('vss_sewadars', '*', null),
+      fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', scheduleId)),
+      fetchAllRows('deployments', 'centre, badge_number, department_id, deployed_department_id', (q) => q.eq('schedule_id', scheduleId)),
+      fetchAllRows('deployment_departments', 'id, name, include_vss', (q) => q.eq('is_active', true)),
     ])
     const consentMap = {}
-    ;(consents.data || []).forEach(c => { consentMap[`${c.centre}|${c.badge_number}`] = c })
+    ;(consAll || []).forEach(c => { consentMap[`${c.centre}|${c.badge_number}`] = c })
     const deployMap = {}
     // show the ASO's FINAL department when set (same semantics as the centre
     // pages + the DB quota count) — a finalized override must not look stale
-    ;(deps.data || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d.deployed_department_id || d.department_id })
+    ;(depAll || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d.deployed_department_id || d.department_id })
     const deptNameMap = {}
-    ;(depts.data || []).forEach(d => { deptNameMap[d.id] = d.name })
+    ;(deptAll || []).forEach(d => { deptNameMap[d.id] = d.name })
     // centre deployment locks (v13) — non-fatal: the strip stays empty if the
-    // migration hasn't been run yet
+    // migration hasn't been run yet (paginated)
     let locks = []
     try {
-      const { data: lockData } = await supabase.from('centre_locks').select('*').eq('schedule_id', scheduleId)
-      locks = lockData || []
+      locks = await fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', scheduleId)) || []
     } catch { /* v13 not migrated yet */ }
     return {
       centres: centres || [],
-      vss: (vss.data || []).filter(v => isVssBadge(v.badge_number)),
+      vss: (vssAll || []).filter(v => isVssBadge(v.badge_number)),
       consentMap,
       deployMap,
       deptNameMap,
@@ -126,7 +135,9 @@ export default function VssDashboard({ schedules, scheduleId }) {
   const allCentreNames = (data?.centres || []).map(c => c.name)
   const consentedList = (data?.vss || []).filter(sw => data?.consentMap[`${sw.centre}|${sw.badge_number}`]?.consent_given)
 
-  const total = data?.vss.length || 0
+  // Prefer DB-side count (head:true) for the header badge when available;
+  // falls back to JS count from already-fetched rows for display tables.
+  const total = dbCounts.vss ?? data?.vss.length ?? 0
   const active = (data?.vss || []).filter(v => v.is_active).length
   const inactive = total - active
   const consented = consentedList.length

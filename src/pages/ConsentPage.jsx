@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { supabase, fetchSubtreeCentres, getRootCentre, eligibleBadgeStatusFilter, isAssoDepartment, fetchPortalSettings, shouldHideFromConsent } from '../lib/supabase'
+import { supabase, fetchSubtreeCentres, fetchAllRows, getRootCentre, eligibleBadgeStatusFilter, isAssoDepartment, fetchPortalSettings, shouldHideFromConsent } from '../lib/supabase'
 import { computeEditGates, isDeptSelectable, isUndeployedCohort, computeDeptQuota, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
@@ -109,34 +109,28 @@ export default function ConsentPage({ schedules, scheduleId }) {
     const prevRows = liveRef.current.rows
     const prevDirty = dirtyRef.current
     try {
-      const [sewRes, consRes, depRes, allocRes, deployRes, prevRes] = await Promise.all([
-        supabase.from('sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, gender').or(eligibleBadgeStatusFilter()).in('centre', subtree).order('sewadar_name'),
-        supabase.from('sewadar_consents').select('*').eq('schedule_id', selectedScheduleId).in('centre', subtree),
-        supabase.from('deployment_departments').select('*').eq('is_active', true).order('name'),
-        supabase.from('centre_allocations').select('*').eq('schedule_id', selectedScheduleId),
-        supabase.from('deployments').select('*').eq('schedule_id', selectedScheduleId).in('centre', subtree),
-        supabase.from('prev_year_deployments').select('badge_number, prev_department, attendance_reported'),
+      // Supabase max-rows=1000 — paginate every table that can exceed 1000
+      const [sewAll, consAll, deptAll, allocAll, deployAll, prevAll] = await Promise.all([
+        fetchAllRows('dp_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, gender', (q) => q.or(eligibleBadgeStatusFilter()).in('centre', subtree).order('sewadar_name')),
+        fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree)),
+        fetchAllRows('deployment_departments', '*', (q) => q.eq('is_active', true).order('name')),
+        fetchAllRows('centre_allocations', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
+        fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree)),
+        fetchAllRows('prev_year_deployments', 'badge_number, prev_department, attendance_reported', null),
       ])
-
-      // If any query failed, abort the load INSTEAD of rendering empty/default
-      // rows — otherwise the next auto-save would treat every sewadar as "new"
-      // (no consent, default days) and could overwrite real consent data.
-      const failed = [sewRes, consRes, depRes, allocRes, deployRes, prevRes].find(r => r?.error)
-      if (failed) throw failed.error
-
-      const sewadars = (sewRes.data || []).filter(sw => !shouldHideFromConsent(sw, profile?.role))
-      const existing = consRes.data || []
+      const sewadars = (sewAll || []).filter(sw => !shouldHideFromConsent(sw, profile?.role))
+      const existing = consAll || []
       const map = {}
       existing.forEach(c => { map[`${c.centre}|${c.badge_number}`] = c })
       const deployMap = {}
       // keep the whole deployment row so the page knows which sewadars the ASO
       // has FINALIZED — those rows are locked on the centre side
-      ;(deployRes.data || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d })
+      ;(deployAll || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d })
       const prevMap = {}
-      ;(prevRes.data || []).forEach(p => { prevMap[p.badge_number] = p })
+      ;(prevAll || []).forEach(p => { prevMap[p.badge_number] = p })
       const rows = {}
       const deptNameById = {}
-      ;(depRes.data || []).forEach(d => { deptNameById[d.id] = d.name })
+      ;(deptAll || []).forEach(d => { deptNameById[d.id] = d.name })
       // days as stored in the DB — the save baseline must use these so legacy
       // values that differ from the auto-set rule get corrected on first save
       const storedDays = {}
@@ -194,9 +188,9 @@ export default function ConsentPage({ schedules, scheduleId }) {
             rows[key] = autoSetDays(rows[key])
           })
           setConsentRows(rows)
-          setDepts(depRes.data || [])
-          setAllocations(allocRes.data || [])
-          setDeployments(deployRes.data || [])
+          setDepts(deptAll || [])
+          setAllocations(allocAll || [])
+          setDeployments(deployAll || [])
           loadedRef.current = true
           scheduleIdRef.current = selectedScheduleId
           const ex = {}
@@ -245,9 +239,9 @@ export default function ConsentPage({ schedules, scheduleId }) {
       }
 
       setConsentRows(rows)
-      setDepts(depRes.data || [])
-      setAllocations(allocRes.data || [])
-      setDeployments(deployRes.data || [])
+      setDepts(deptAll || [])
+      setAllocations(allocAll || [])
+      setDeployments(deployAll || [])
       // Baseline the snapshot on the DB-stored days: rows whose days were
       // auto-corrected on load (legacy values ≠ the 5/3 rule) are flagged as
       // changed so the first save fixes them, keeping UI + DB in sync.
@@ -524,8 +518,11 @@ export default function ConsentPage({ schedules, scheduleId }) {
         setSavedAt(new Date())
       }
       if (mountedRef.current && scheduleIdRef.current === scheduleId) {
-        const { data: fresh } = await supabase.from('deployments').select('*').eq('schedule_id', scheduleId).in('centre', sub)
-        if (fresh && mountedRef.current) setDeployments(fresh)
+        // paginated refresh — subtree can hold 1000+ deployments
+        try {
+          const fresh = await fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', scheduleId).in('centre', sub))
+          if (fresh && mountedRef.current) setDeployments(fresh)
+        } catch { /* keep previous deployments on transient error */ }
       }
     } catch (err) { toast.error(err.message); dirtyRef.current = true; scheduleRetry() } finally {
       savingRef.current = false

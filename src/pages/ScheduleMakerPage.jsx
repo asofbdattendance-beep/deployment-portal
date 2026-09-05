@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { supabase, fetchCentres, getParentCentres } from '../lib/supabase'
+import { supabase, fetchCentres, fetchAllRows, getParentCentres, getCount } from '../lib/supabase'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import { Plus, Trash2, Edit3, Calendar, Lock, Unlock, ChevronRight, X } from 'lucide-react'
@@ -334,9 +334,10 @@ function DepartmentsPanel({ isSuper, toast }) {
   })
 
   const loadDepts = useCallback(async () => {
-    const { data, error } = await supabase.from('deployment_departments').select('*').order('name')
-    if (error) { toast.error(`Could not load departments: ${error.message}`); return }
-    setDepts(data || [])
+    try {
+      const data = await fetchAllRows('deployment_departments', '*', (q) => q.order('name'))
+      setDepts(data || [])
+    } catch (err) { toast.error(`Could not load departments: ${err.message}`) }
   }, [toast])
 
   useEffect(() => { loadDepts() }, [loadDepts])
@@ -578,14 +579,13 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
   const [stagedNewCentre, setStagedNewCentre] = useState(null)
 
   const load = useCallback(async () => {
-    const [aRes, dRes] = await Promise.all([
-      supabase.from('centre_allocations').select('*, deployment_departments(name)').eq('schedule_id', schedule.id).order('created_at'),
-      supabase.from('deployment_departments').select('*').order('name'),
+    // centre_allocations per schedule is small (<100) but still paginated via helper to never silently cap
+    const [aAll, dAll] = await Promise.all([
+      fetchAllRows('centre_allocations', '*, deployment_departments(name)', (q) => q.eq('schedule_id', schedule.id).order('created_at')),
+      fetchAllRows('deployment_departments', '*', (q) => q.order('name')),
     ])
-    const failed = [aRes, dRes].find(r => r?.error)
-    if (failed) { toast.error(failed.error.message); return }
-    setAllocations(aRes.data || [])
-    setDepts(dRes.data || [])
+    setAllocations(aAll || [])
+    setDepts(dAll || [])
     // fetchCentres() resolves straight to the row array and THROWS on error
     // (unlike the raw supabase calls above) — surface the failure instead of
     // silently rendering an editor with no centres to edit or add
@@ -706,8 +706,8 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
   }
 
   const removeDeptAll = async (deptId) => {
-    // capture rows BEFORE the delete so the audit payload records what was removed
-    const existing = await supabase.from('centre_allocations').select('*').eq('schedule_id', schedule.id).eq('department_id', deptId)
+    // capture rows BEFORE the delete so the audit payload records what was removed (paginated, though at most ~40 rows)
+    const existing = { data: await fetchAllRows('centre_allocations', '*', (q) => q.eq('schedule_id', schedule.id).eq('department_id', deptId)), error: null }
     const { error } = await supabase.from('centre_allocations').delete().eq('schedule_id', schedule.id).eq('department_id', deptId)
     if (error) { toast.error(error.message); return }
     // audit AFTER a successful delete — a failed delete must not leave a phantom log
@@ -985,6 +985,7 @@ function ReadOnlySummary({ schedule }) {
   const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(null)
+  const [totalDeployCount, setTotalDeployCount] = useState(null)
 
   useEffect(() => {
     let mounted = true
@@ -994,22 +995,24 @@ function ReadOnlySummary({ schedule }) {
       try {
         // fetch department names separately instead of relying on a hard-coded
         // FK constraint name in the select hint (that name can differ between DBs)
-        const [dRes, depRes] = await Promise.all([
-          supabase.from('deployments').select('centre, department_id, deployed_department_id').eq('schedule_id', schedule.id),
-          supabase.from('deployment_departments').select('id, name'),
+        const [deployAll, deptAll, dbTotal] = await Promise.all([
+          fetchAllRows('deployments', 'centre, department_id, deployed_department_id', (q) => q.eq('schedule_id', schedule.id)),
+          fetchAllRows('deployment_departments', 'id, name', null),
+          // DB-side pure count (head:true) — no rows downloaded, useful for the
+          // "Total deployed" header. Falls back to rows.length if RPC fails.
+          getCount('deployments', (q) => q.eq('schedule_id', schedule.id)).catch(() => null),
         ])
-        const failed = [dRes, depRes].find(r => r?.error)
-        if (failed) throw failed.error
         if (mounted) {
           const deptNameById = {}
-          ;(depRes.data || []).forEach(d => { deptNameById[d.id] = d.name })
+          ;(deptAll || []).forEach(d => { deptNameById[d.id] = d.name })
           // count by the EFFECTIVE department (ASO's final when set, else
           // requested) — same semantics as every dashboard and the DB quota math
-          setRows((dRes.data || []).map(r => ({
+          setRows((deployAll || []).map(r => ({
             ...r,
             dept_name: deptNameById[r.deployed_department_id || r.department_id] || '—',
             overridden: !!r.deployed_department_id && r.deployed_department_id !== r.department_id,
           })))
+          if (dbTotal != null) setTotalDeployCount(dbTotal)
         }
       } catch (err) {
         console.warn('summary load failed:', err?.message)
@@ -1039,10 +1042,13 @@ function ReadOnlySummary({ schedule }) {
     )
   }
 
+  // Header total prefers DB-side count (head:true) without downloading rows twice;
+  // fallback to client rows.length when DB count unavailable (e.g. pre-migration).
+  const headerTotal = totalDeployCount ?? rows.length
   return (
     <section className="card" style={{ padding: '1.25rem' }}>
       <div className="section-header">
-        <div className="section-title">Deployment Summary — {schedule.name}</div>
+        <div className="section-title">Deployment Summary — {schedule.name} <span style={{ fontWeight: 600, color: '#64748b', fontSize: '0.82rem' }}>({headerTotal} total)</span></div>
       </div>
       {centres.length === 0 ? (
         <p style={{ color: '#9ca3af', fontSize: '0.85rem', textAlign: 'center', padding: '1rem' }}>No deployments yet.</p>

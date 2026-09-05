@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, fetchAllRows } from '../lib/supabase'
 import { isVssBadge, BADGE_REGEX } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
@@ -54,23 +54,24 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
       const deptIds = await supabase.rpc('get_my_dept_ids', { p_schedule: selectedScheduleId }).then(r=>r.data||[]).catch(()=>[])
       setMyDeptIds(deptIds)
       if (deptIds.length && !activeDept) setActiveDept(deptIds[0])
-      const [deptRes, centreRes, depRes, vssRes, sewRes, consRes, sessRes] = await Promise.all([
-        supabase.from('deployment_departments').select('*').order('name'),
-        supabase.from('centres').select('name, parent_centre').order('name'),
-        supabase.from('deployments').select('*').eq('schedule_id', selectedScheduleId),
-        supabase.from('vss_sewadars').select('badge_number, sewadar_name, centre, is_initiated, gender, is_active'),
-        supabase.from('sewadars').select('badge_number, sewadar_name, centre, is_initiated, gender'),
-        supabase.from('sewadar_consents').select('*').eq('schedule_id', selectedScheduleId),
-        supabase.from('attendance_sessions').select('*').eq('schedule_id', selectedScheduleId).eq('in_date', todayStrIST()).order('created_at', { ascending:false }).limit(200),
+      // Supabase max-rows=1000 — paginate every table that can exceed it (attendance_sessions intentionally stays capped at 200)
+      const [deptAll, centreAll, depAll, vssAll, sewAll, consAll, sessRes] = await Promise.all([
+        fetchAllRows('deployment_departments', '*', (q) => q.order('name')),
+        fetchAllRows('dp_centres', 'name, parent_centre', (q) => q.order('name')),
+        fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
+        fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, centre, is_initiated, gender, is_active', null),
+        fetchAllRows('dp_sewadars', 'badge_number, sewadar_name, centre, is_initiated, gender', null),
+        fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
+        supabase.from('dp_attendance_sessions').select('*').eq('schedule_id', selectedScheduleId).eq('in_date', todayStrIST()).order('created_at', { ascending:false }).limit(200),
       ])
-      setDepts(deptRes.data||[])
-      setCentres(centreRes.data||[])
-      setDeployments(depRes.data||[])
-      setVss(vssRes.data||[])
-      setSewadars(sewRes.data||[])
-      setConsents(consRes.data||[])
+      setDepts(deptAll||[])
+      setCentres(centreAll||[])
+      setDeployments(depAll||[])
+      setVss(vssAll||[])
+      setSewadars(sewAll||[])
+      setConsents(consAll||[])
       setSessions(sessRes.data||[])
-      const deployed = (depRes.data||[]).map(d=>({ badge_number:d.badge_number, deptId: d.deployed_department_id||d.department_id, is_vss: d.badge_number?.startsWith('VS') }))
+      const deployed = (depAll||[]).map(d=>({ badge_number:d.badge_number, deptId: d.deployed_department_id||d.department_id, is_vss: d.badge_number?.startsWith('VS') }))
       preloadDeployed(selectedScheduleId, deployed)
       const q = await getQueuedScans()
       setQueued(q||[])
@@ -203,7 +204,7 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
           }
         }
       }
-      const sess=await supabase.from('attendance_sessions').select('*').eq('schedule_id',selectedScheduleId).eq('in_date',todayStrIST()).order('created_at',{ascending:false}).limit(200).then(r=>r.data||[])
+      const sess=await supabase.from('dp_attendance_sessions').select('*').eq('schedule_id',selectedScheduleId).eq('in_date',todayStrIST()).order('created_at',{ascending:false}).limit(200).then(r=>r.data||[])
       setSessions(sess)
     } finally{ setScanBusy(false); setQueued(await getQueuedScans()) }
   }

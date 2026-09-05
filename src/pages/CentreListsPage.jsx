@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, fetchAllRows } from '../lib/supabase'
 import { getRootCentre, isVssBadge } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
@@ -64,38 +64,33 @@ export default function CentreListsPage({ schedules, scheduleId }) {
     if (!selectedScheduleId) return
     setLoading(true)
     try {
-      const [deptRes, centreRes, deployRes, consentRes, sewRes, vssRes] = await Promise.all([
-        supabase.from('deployment_departments').select('*').order('name'),
-        supabase.from('centres').select('name, parent_centre').order('name'),
-        supabase.from('deployments').select('*').eq('schedule_id', selectedScheduleId).order('centre'),
-        supabase.from('sewadar_consents').select('*').eq('schedule_id', selectedScheduleId),
-        supabase.from('sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, gender, badge_status'),
-        supabase.from('vss_sewadars').select('badge_number, sewadar_name, department, centre, is_initiated, gender, is_active').order('sewadar_name'),
+      // Supabase max-rows=1000 — paginate every table that can exceed it
+      const [deptAll, centreAll, deployAll, consentAll, sewAll, vssAll] = await Promise.all([
+        fetchAllRows('deployment_departments', '*', (q) => q.order('name')),
+        fetchAllRows('dp_centres', 'name, parent_centre', (q) => q.order('name')),
+        fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId).order('centre')),
+        fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
+        fetchAllRows('dp_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, gender, badge_status', null),
+        fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, gender, is_active', (q) => q.order('sewadar_name')),
       ])
 
-      const failed = [deptRes, centreRes, deployRes, consentRes, sewRes, vssRes].find(r => r?.error)
-      if (failed) throw failed.error
+      setDepts(deptAll || [])
+      setCentres(centreAll || [])
+      setDeploymentsRaw(deployAll || [])
+      setConsentsRaw(consentAll || [])
+      setRegularSewadars(sewAll || [])
+      setVssSewadars(vssAll || [])
 
-      setDepts(deptRes.data || [])
-      setCentres(centreRes.data || [])
-      setDeploymentsRaw(deployRes.data || [])
-      setConsentsRaw(consentRes.data || [])
-      setRegularSewadars(sewRes.data || [])
-      setVssSewadars(vssRes.data || [])
-
-      // incharges + locks + selections — non-fatal
+      // incharges + locks + selections — non-fatal (small tables but still paginated for consistency)
       try {
-        const [incRes, lockRes, selRes] = await Promise.all([
-          supabase.from('department_incharges').select('*').eq('schedule_id', selectedScheduleId),
-          supabase.from('centre_locks').select('*').eq('schedule_id', selectedScheduleId),
-          supabase.from('department_incharge_selections').select('*').eq('schedule_id', selectedScheduleId),
+        const [incAll, lockAll, selAll] = await Promise.all([
+          fetchAllRows('department_incharges', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
+          fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
+          fetchAllRows('department_incharge_selections', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
         ])
-        if (!incRes.error) setInchargesRaw(incRes.data || [])
-        else setInchargesRaw([])
-        if (!lockRes.error) setLocksRaw(lockRes.data || [])
-        else setLocksRaw([])
-        if (!selRes.error) setSelectionsRaw(selRes.data || [])
-        else setSelectionsRaw([])
+        setInchargesRaw(incAll || [])
+        setLocksRaw(lockAll || [])
+        setSelectionsRaw(selAll || [])
       } catch {
         setInchargesRaw([])
         setLocksRaw([])
@@ -260,7 +255,12 @@ export default function CentreListsPage({ schedules, scheduleId }) {
     })
   }, [inchargesRaw, deptMap, swMap, locksSet, lockByCentre, centres])
 
-  // stats
+  // stats — rows are already fetched for table display, so JS counting here
+  // adds no extra download. For pure DB counts without rows, use:
+  //   await getCount('deployments', q => q.eq('schedule_id', sid))
+  //   await getCount('department_incharges', q => q.eq('schedule_id', sid))
+  // Grouped counts should prefer an RPC (e.g. get_deployment_matrix_counts)
+  // with client fallback — see DeploymentMatrixReport.
   const sewadarStats = useMemo(() => {
     const total = sewadarRows.length
     const finalized = sewadarRows.filter(r => r.is_finalized).length
@@ -960,8 +960,8 @@ export default function CentreListsPage({ schedules, scheduleId }) {
                         if (!sel1 && cur1 && !toSave.some(r=>r.rank===1)) await supabase.from('department_incharge_selections').delete().eq('schedule_id',selectedScheduleId).eq('centre',selCentre).eq('department_id',selDept).eq('rank',1)
                         if (!sel2 && cur2 && !toSave.some(r=>r.rank===2)) await supabase.from('department_incharge_selections').delete().eq('schedule_id',selectedScheduleId).eq('centre',selCentre).eq('department_id',selDept).eq('rank',2)
                         toast.success('Incharge selection saved'); setSel1(''); setSel2('')
-                        const { data } = await supabase.from('department_incharge_selections').select('*').eq('schedule_id',selectedScheduleId)
-                        setSelectionsRaw(data||[])
+                        const freshSel = await fetchAllRows('department_incharge_selections', '*', (q) => q.eq('schedule_id',selectedScheduleId))
+                        setSelectionsRaw(freshSel||[])
                       }catch(e){ toast.error(e.message) } finally{ setSavingSel(false) }
                     }}
                     className="btn btn-primary"

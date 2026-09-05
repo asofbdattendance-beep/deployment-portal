@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, fetchAllRows } from '../lib/supabase'
 import { BADGE_REGEX } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
@@ -24,11 +24,11 @@ export default function ScannerPage({ schedules, scheduleId }){
 
   const refresh=useCallback(async()=>{
     if(!scheduleId) return
-    const sess=await supabase.from('attendance_sessions').select('*').eq('schedule_id',scheduleId).eq('in_date',todayStrIST()).order('created_at',{ascending:false}).limit(30).then(r=>r.data||[])
+    const sess=await supabase.from('dp_attendance_sessions').select('*').eq('schedule_id',scheduleId).eq('in_date',todayStrIST()).order('created_at',{ascending:false}).limit(30).then(r=>r.data||[])
     setSessions(sess)
     setQueued(await getQueuedScans())
-    const dep=await supabase.from('deployments').select('badge_number, department_id, deployed_department_id').eq('schedule_id',scheduleId).then(r=>r.data||[])
-    preloadDeployed(scheduleId, dep.map(d=>({badge_number:d.badge_number, deptId:d.deployed_department_id||d.department_id, is_vss: d.badge_number?.startsWith('VS')})))
+    const dep=await fetchAllRows('deployments', 'badge_number, department_id, deployed_department_id', (q) => q.eq('schedule_id',scheduleId))
+    preloadDeployed(scheduleId, (dep||[]).map(d=>({badge_number:d.badge_number, deptId:d.deployed_department_id||d.department_id, is_vss: d.badge_number?.startsWith('VS')})))
   },[scheduleId])
 
   useEffect(()=>{ refresh() },[refresh])
