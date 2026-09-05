@@ -5,7 +5,27 @@ import { useToast } from './components/Toast'
 import LoginPage from './pages/LoginPage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
 import { ROLE_LABELS, ROLE_COLORS } from './lib/supabase'
-import { Calendar, Users, ClipboardCheck, ShieldCheck, Star, Tags, SlidersHorizontal, RefreshCw, AlertTriangle } from 'lucide-react'
+import { Calendar, Users, ClipboardCheck, ShieldCheck, Star, Tags, SlidersHorizontal, RefreshCw, AlertTriangle, Wrench } from 'lucide-react'
+
+// ── Maintenance mode — flip to false to restore portal ──
+const MAINTENANCE_MODE = true
+const MAINTENANCE_MESSAGE = 'Under Maintenance - Will be up and running by 10:45'
+
+function MaintenanceScreen() {
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f6f7fb', padding: '1.5rem' }}>
+      <div style={{ background: '#fff', borderRadius: 16, padding: '2.5rem 2rem', boxShadow: '0 8px 30px rgba(15,23,42,0.08)', border: '1px solid #e2e8f0', maxWidth: 560, width: '100%', textAlign: 'center' }}>
+        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1rem' }}>
+          <div style={{ width: 56, height: 56, borderRadius: 999, background: '#fffbeb', border: '1px solid #fde68a', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#b45309' }}>
+            <Wrench size={26} />
+          </div>
+        </div>
+        <h1 style={{ fontSize: '1.35rem', fontWeight: 800, letterSpacing: '-0.02em', color: '#0f172a', marginBottom: '0.5rem' }}>{MAINTENANCE_MESSAGE}</h1>
+        <p style={{ color: '#64748b', fontSize: '0.9rem', lineHeight: 1.5, margin: 0 }}>The portal is temporarily under maintenance. Please check back after 10:45. Your data is safe and no progress will be lost.</p>
+      </div>
+    </div>
+  )
+}
 
 // Code-split each page so the initial bundle stays small (xlsx etc. only
 // loads when the page that uses it is actually opened).
@@ -158,6 +178,8 @@ function ProfileError({ message, onRetry, onSignOut }) {
 
 export default function App() {
   const { isAuthenticated, loading, profile, profileError, signOut, refreshProfile, isRecovery } = usePortalAuth()
+
+  if (MAINTENANCE_MODE) return <MaintenanceScreen />
 
   if (loading) {
     return (
