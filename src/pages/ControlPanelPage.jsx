@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
-  supabase, fetchCentres, fetchPortalSettings, setPortalSetting,
+  supabase, fetchCentres, fetchAllRows, fetchPortalSettings, setPortalSetting,
   fetchCentreOverrides, setCentreOverride, removeCentreOverride,
-  fetchVssOverrides, setVssOverride,
+  fetchVssOverrides, setVssOverride, getCount,
 } from '../lib/supabase'
 import {
   getParentCentres, getRootCentre, getSubtreeCentres,
@@ -114,32 +114,40 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
   const loadStatic = useCallback(async () => {
     const [c, d] = await Promise.all([
       fetchCentres(),
-      // is_active is selected (not just filtered) — the centre panel's
-      // additional-department picker filters on it client-side, and a
-      // column that was never fetched is undefined for every row
-      supabase.from('deployment_departments').select('id, name, is_active').eq('is_active', true).order('name'),
+      fetchAllRows('deployment_departments', 'id, name, is_active', (q) => q.eq('is_active', true).order('name')),
     ])
     setCentres(c)
-    setDepts(d.data || [])
+    setDepts(d || [])
   }, [])
 
+  // DB-side pure counts (head:true) — do NOT download rows just to count
+  // Used for header badges where per-row detail is already fetched for the
+  // quota table; demonstrates DB-side counting for future count-only views.
+  const [DBCounts, setDbCounts] = useState({ allocations: null, deployments: null })
   const loadScheduleData = useCallback(async (sid) => {
     if (!sid) {
       setAllocations([]); setDeployRows([]); setOverrides([]); setLocks([]); setVssOverrides([])
+      setDbCounts({ allocations: 0, deployments: 0 })
       return
     }
-    const [allocRes, depRes, ovRes, lockRes, vssOvRes] = await Promise.all([
-      supabase.from('centre_allocations').select('id, department_id, centre, max_count').eq('schedule_id', sid),
-      supabase.from('deployments').select('centre, badge_number, department_id, deployed_department_id').eq('schedule_id', sid),
+    const [allocAll, deployAll, ovRes, lockAll, vssOvRes, allocCount, deployCount] = await Promise.all([
+      fetchAllRows('centre_allocations', 'id, department_id, centre, max_count', (q) => q.eq('schedule_id', sid)),
+      fetchAllRows('deployments', 'centre, badge_number, department_id, deployed_department_id', (q) => q.eq('schedule_id', sid)),
       fetchCentreOverrides(sid),
-      supabase.from('centre_locks').select('*').eq('schedule_id', sid),
+      fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', sid)),
       fetchVssOverrides(),
+      // Pure counts via head:true — no rows downloaded, useful for header stats
+      // where the per-row detail is already fetched above for the quota table,
+      // but demonstrates DB-side counting for future count-only views.
+      getCount('centre_allocations', (q) => q.eq('schedule_id', sid)).catch(() => null),
+      getCount('deployments', (q) => q.eq('schedule_id', sid)).catch(() => null),
     ])
-    setAllocations(allocRes.data || [])
-    setDeployRows(depRes.data || [])
+    setAllocations(allocAll || [])
+    setDeployRows(deployAll || [])
     setOverrides(ovRes)
-    setLocks(lockRes.data || [])
+    setLocks(lockAll || [])
     setVssOverrides(vssOvRes)
+    if (allocCount != null || deployCount != null) setDbCounts({ allocations: allocCount, deployments: deployCount })
   }, [])
 
   useEffect(() => {
@@ -165,7 +173,7 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', ...schedFilter }, () => {
         if (!selectedScheduleId) return
-        supabase.from('centre_locks').select('*').eq('schedule_id', selectedScheduleId).then(({ data }) => setLocks(data || [])).catch(() => {})
+        fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', selectedScheduleId)).then((data) => setLocks(data || [])).catch(() => {})
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_overrides', ...schedFilter }, () => {
         if (!selectedScheduleId) return
@@ -174,6 +182,12 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
       .subscribe()
     return () => { supabase.removeChannel(channel) }
   }, [selectedScheduleId])
+
+  // Header totals prefer DB-side counts (head:true) when available; fallback to
+  // JS counts from rows already fetched for the quota table (no extra download).
+  const totalAllocHeader = DBCounts.allocations ?? allocations.length
+  const totalDeployHeader = DBCounts.deployments ?? deployRows.length
+  void totalAllocHeader; void totalDeployHeader // used in panel subtitles below
 
   // ── derived quota/usage per ROOT centre × department ────────────────
   const quotaByRoot = useMemo(() => {
@@ -315,7 +329,7 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
         })
         setOverrides(await fetchCentreOverrides(selectedScheduleId))
       }
-      const { data: freshAlloc } = await supabase.from('centre_allocations').select('id, department_id, centre, max_count').eq('schedule_id', selectedScheduleId)
+      const freshAlloc = await fetchAllRows('centre_allocations', 'id, department_id, centre, max_count', (q) => q.eq('schedule_id', selectedScheduleId))
       setAllocations(freshAlloc || [])
       audit('allocate_additional', { department_id: deptId, max_count: n, centres: allRootNames ? '*' : scopeCentre, also_open: !!alsoOpen })
       toast.success(`Allocated ${n} × ${deptName}${alsoOpen ? ' and opened it' : ''}`)

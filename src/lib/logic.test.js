@@ -40,6 +40,10 @@ import {
   computeEditGates,
   isDeptSelectable,
   isUndeployedCohort,
+  BADGE_REGEX,
+  isValidBadgeFormat,
+  isFaridabadBadge,
+  isUndeployedScan,
 } from '../lib/logic'
 
 const CENTRES = [
@@ -132,6 +136,45 @@ describe('shouldHideFromConsent', () => {
   })
 })
 
+
+describe('badge format helpers (v25-v27)', () => {
+  it('BADGE_REGEX matches FB / BH / VS patterns (as implemented)', () => {
+    // FB pattern requires trailing 4 digits after GA/LA (real badges: FB5982GA0025)
+    expect(BADGE_REGEX.test('FB5971GA0001')).toBe(true)
+    expect(BADGE_REGEX.test('FB6000LA0002')).toBe(true)
+    expect(BADGE_REGEX.test('BH1234AB0001')).toBe(true)
+    expect(BADGE_REGEX.test('VSABC123')).toBe(true)
+    expect(BADGE_REGEX.test('VS123')).toBe(true)
+    expect(BADGE_REGEX.test('INVALID')).toBe(false)
+    expect(BADGE_REGEX.test('')).toBe(false)
+    // FB without trailing 4 digits is rejected (must be GA/LA + 4 digits)
+    expect(BADGE_REGEX.test('FB5971GA')).toBe(false)
+  })
+  it('isValidBadgeFormat validates FB/BH/VS and is null-safe', () => {
+    expect(isValidBadgeFormat('FB5971GA0001')).toBe(true)
+    expect(isValidBadgeFormat(' VS123 ')).toBe(true)
+    expect(isValidBadgeFormat('BH1234AB0001')).toBe(true)
+    expect(isValidBadgeFormat('bad')).toBe(false)
+    expect(isValidBadgeFormat(null)).toBe(false)
+    expect(isValidBadgeFormat(undefined)).toBe(false)
+    expect(isValidBadgeFormat('')).toBe(false)
+  })
+  it('isFaridabadBadge mirrors isValidBadgeFormat (currently)', () => {
+    expect(isFaridabadBadge('FB5971GA0001')).toBe(true)
+    expect(isFaridabadBadge('VS123')).toBe(true)
+    expect(isFaridabadBadge('BH1234AB0001')).toBe(true)
+    expect(isFaridabadBadge('bad')).toBe(false)
+    expect(isFaridabadBadge(null)).toBe(false)
+  })
+  it('isUndeployedScan checks deployedSet', () => {
+    const set = new Set(['FB5971GA0001', 'VS123'])
+    expect(isUndeployedScan('FB5971GA0001', set)).toBe(false)
+    expect(isUndeployedScan('fb5971ga0001', set)).toBe(false) // case-insensitive
+    expect(isUndeployedScan('BH0001AB0001', set)).toBe(true)
+    expect(isUndeployedScan(null, set)).toBe(true)
+    expect(isUndeployedScan('FB5971GA0001', null)).toBe(true)
+  })
+})
 
 describe('centre hierarchy', () => {
   it('getParentCentres returns only root centres', () => {

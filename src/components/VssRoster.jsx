@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, Fragment } from 'react'
-import { supabase, fetchCentres } from '../lib/supabase'
+import { supabase, fetchCentres, fetchAllRows } from '../lib/supabase'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from './Toast'
 import { Users, Search, Pencil, X, Save, Lock } from 'lucide-react'
@@ -25,9 +25,10 @@ export default function VssRoster() {
   const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
-    const { data, error } = await supabase.from('vss_sewadars').select('*').order('sewadar_name')
-    if (error) { toast.error(error.message); setLoading(false); return }
-    setRows(data || [])
+    try {
+      const data = await fetchAllRows('vss_sewadars', '*', (q) => q.order('sewadar_name'))
+      setRows(data || [])
+    } catch (err) { toast.error(err.message) }
     setLoading(false)
   }, [toast])
 

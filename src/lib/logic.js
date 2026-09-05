@@ -118,6 +118,18 @@ export function isVssBadge(badge) {
   return typeof badge === 'string' && /^VS/i.test(badge)
 }
 
+export const BADGE_REGEX = /^(FB(597[1-9]|59[89]\d|600\d|601[01])(GA|LA)\d{4}|BH\d{4}[A-Z]{1,2}\d{4}|VS[A-Z0-9]+)$/i
+export function isValidBadgeFormat(badge) {
+  return typeof badge === 'string' && BADGE_REGEX.test(badge.trim())
+}
+export function isFaridabadBadge(badge) {
+  return isValidBadgeFormat(badge)
+}
+export function isUndeployedScan(badge, deployedSet) {
+  if (!badge || !deployedSet) return true
+  return !deployedSet.has(String(badge).toUpperCase())
+}
+
 /* ─── Eligibility ─── */
 
 export function isEligible(consentRow, dept) {

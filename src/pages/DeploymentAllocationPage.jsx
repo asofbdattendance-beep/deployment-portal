@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, fetchAllRows } from '../lib/supabase'
 import { eligibleBadgeStatusFilter, notElderlyFilter, isVssBadge, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, getRootCentre, changedConsentRows, buildConsentSnapshot, shouldHideFromConsent } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
@@ -163,42 +163,22 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
     const prevRows = liveRef.current.rows
     const prevDirty = dirtyRef.current
     try {
-      // Supabase caps single-query rows at 1000 — paginate sewadars/vss to get the full roster (3597 + 320)
-      const fetchAllSewadars = async (table, columns, filter) => {
-        const pageSize = 1000
-        let from = 0
-        let all = []
-        while (true) {
-          const { data, error } = await supabase.from(table).select(columns).or(filter).order('sewadar_name').range(from, from + pageSize - 1)
-          if (error) throw error
-          all.push(...(data || []))
-          if (!data || data.length < pageSize) break
-          from += pageSize
-        }
-        return all
-      }
-      const [sewAll, vssAll, consRes, deptRes, deployRes, centreRes, allocRes] = await Promise.all([
-        fetchAllSewadars('sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, badge_status', eligibleBadgeStatusFilter()),
-        fetchAllSewadars('vss_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, is_active, badge_status', notElderlyFilter()),
-        supabase.from('sewadar_consents').select('*').eq('schedule_id', selectedScheduleId),
-        supabase.from('deployment_departments').select('*').order('name'),
-        supabase.from('deployments').select('*').eq('schedule_id', selectedScheduleId),
-        supabase.from('centres').select('name, parent_centre').order('name'),
-        supabase.from('centre_allocations').select('department_id, centre, max_count').eq('schedule_id', selectedScheduleId),
+      // Supabase max-rows=1000 — paginate EVERY table that can exceed 1000 via the shared helper
+      const [sewAll, vssAll, consAll, deptAll, deployAll, centreAll, allocAll] = await Promise.all([
+        fetchAllRows('dp_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, badge_status', (q) => q.or(eligibleBadgeStatusFilter()).order('sewadar_name')),
+        fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, is_active, badge_status', (q) => q.or(notElderlyFilter()).order('sewadar_name')),
+        fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
+        fetchAllRows('deployment_departments', '*', (q) => q.order('name')),
+        fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
+        fetchAllRows('dp_centres', 'name, parent_centre', (q) => q.order('name')),
+        fetchAllRows('centre_allocations', 'department_id, centre, max_count', (q) => q.eq('schedule_id', selectedScheduleId)),
       ])
-      const sewRes = { data: sewAll, error: null }
-      const vssRes = { data: vssAll, error: null }
 
-      // Abort if any query failed — empty rows here would reset the save
-      // baseline and could let a later save clobber real consent data.
-      const failed = [sewRes, vssRes, consRes, deptRes, deployRes, centreRes, allocRes].find(r => r?.error)
-      if (failed) throw failed.error
-
-      const sewadars = [...(sewRes.data || []), ...(vssRes.data || [])].filter(sw => !shouldHideFromConsent(sw, profile?.role))
+      const sewadars = [...(sewAll || []), ...(vssAll || [])].filter(sw => !shouldHideFromConsent(sw, profile?.role))
       const consentMap = {}
-      ;(consRes.data || []).forEach(c => { consentMap[`${c.centre}|${c.badge_number}`] = c })
+      ;(consAll || []).forEach(c => { consentMap[`${c.centre}|${c.badge_number}`] = c })
       const deployMap = {}
-      ;(deployRes.data || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d })
+      ;(deployAll || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d })
 
       // Schedule switch: a save triggered by the switch flush may still be in
       // flight (or queued). Let it settle while scheduleIdRef still points at
@@ -222,7 +202,7 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
       }
 
       const deptNameById = {}
-      ;(deptRes.data || []).forEach(d => { deptNameById[d.id] = d.name })
+      ;(deptAll || []).forEach(d => { deptNameById[d.id] = d.name })
       const map = {}
       sewadars.forEach(sw => {
         const key = `${sw.centre}|${sw.badge_number}`
@@ -254,9 +234,9 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
       // to upsert every consented row on every save — thousands of writes).
       savedConsentRef.current = buildConsentSnapshot(map)
       setRows(map)
-      setDepts(deptRes.data || [])
-      setCentres(centreRes.data || [])
-      setAllocations(allocRes.data || [])
+      setDepts(deptAll || [])
+      setCentres(centreAll || [])
+      setAllocations(allocAll || [])
       dirtyRef.current = false
       editVersionRef.current = 0
       loadedRef.current = true
@@ -597,6 +577,10 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
   }, [rows, selectedScheduleId, saveAll])
 
   // ── derived stats & visible rows (memoized) ──
+  // NOTE: these counts are derived from `all` which is ALREADY fetched for
+  // table display — no extra download beyond the table. For pure counts where
+  // rows are NOT needed, use getCount(table, filter) with head:true instead
+  // of fetchAllRows + .length (see src/lib/supabase.js).
   const all = useMemo(() => Object.values(rows), [rows])
   const requestedAll = useMemo(() => all.filter(r => r.requested_dept_id).length, [all])
   const deployedAll = useMemo(() => all.filter(r => r.deployed_dept_id).length, [all])

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { supabase, fetchCentres, fetchPortalSettings, setPortalSetting } from '../lib/supabase'
+import { supabase, fetchCentres, fetchAllRows, fetchPortalSettings, setPortalSetting } from '../lib/supabase'
 import { getSubtreeCentres, getRootCentre } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from './Toast'
@@ -35,26 +35,26 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
     fetchPortalSettings().then(setSettings).catch(() => {})
     Promise.all([
       fetchCentres(),
-      supabase.from('deployment_departments').select('id, name').eq('is_active', true),
+      fetchAllRows('deployment_departments', 'id, name', (q) => q.eq('is_active', true)),
     ]).then(([c, d]) => {
       setCentres(c)
-      setDepts(d.data || [])
+      setDepts(d || [])
     }).catch(() => {})
   }, [toast])
 
   const loadMatrices = useCallback(async (scheduleId) => {
     if (!scheduleId) return
-    const [consentRes, allocRes] = await Promise.all([
+    const [consentRes, allocAll] = await Promise.all([
       supabase.rpc('get_parent_consent_matrix', { p_schedule: scheduleId }),
-      supabase.from('centre_allocations').select('department_id, centre, max_count').eq('schedule_id', scheduleId),
+      fetchAllRows('centre_allocations', 'department_id, centre, max_count', (q) => q.eq('schedule_id', scheduleId)),
     ])
     setConsentMatrix(consentRes.data || [])
-    setAllocations(allocRes.data || [])
+    setAllocations(allocAll || [])
     // centre deployment locks (v13) — non-fatal: strip just stays empty if the
-    // migration hasn't been run yet
+    // migration hasn't been run yet (paginated, though locks are < 50 rows)
     try {
-      const { data: lockData } = await supabase.from('centre_locks').select('*').eq('schedule_id', scheduleId)
-      setLocks(lockData || [])
+      const lockAll = await fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', scheduleId))
+      setLocks(lockAll || [])
     } catch { setLocks([]) }
     // recent major actions (v17 sewadar_audit_log) — non-fatal: card stays
     // hidden until the migration is run and events start flowing
