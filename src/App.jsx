@@ -8,7 +8,7 @@ import { ROLE_LABELS, ROLE_COLORS } from './lib/supabase'
 import { Calendar, Users, ClipboardCheck, ShieldCheck, Star, Tags, SlidersHorizontal, RefreshCw, AlertTriangle, Building2, ScanLine, ShieldCheck as ShieldCheck2, Wrench } from 'lucide-react'
 
 // ── Maintenance mode — flip to false to restore portal ──
-const MAINTENANCE_MODE = true
+const MAINTENANCE_MODE = false
 const MAINTENANCE_MESSAGE = 'Under Maintenance - Will be up and running by 10:45'
 
 function MaintenanceScreen() {
