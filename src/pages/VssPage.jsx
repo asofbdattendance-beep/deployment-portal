@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, fetchAllRows, getRootCentre, fetchPortalSettings, fetchCentres, fetchVssOverrides } from '../lib/supabase'
-import { computeDeptQuota, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment, resolveVssOverride, effectiveVssCreation } from '../lib/logic'
+import { computeDeptQuota, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment, resolveVssOverride, effectiveVssCreation, effectiveVssDeployment } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import DeptDropdown from '../components/DeptDropdown'
@@ -159,36 +159,46 @@ function VssDeployTable({ schedules, scheduleId }) {
     }).catch(() => setSubtreeError(true))
   }, [myCentre, subtreeRetry])
 
-  // v21 Control Panel — VSS FIX: any_override_open (generic centre_overrides)
-  // reopens REGULAR deployment past lock/switch/deadline, but it must NOT
-  // reopen VSS when the global VSS switch is closed. VSS respects ONLY the
-  // VSS-specific effective switch (portal_settings.vss_deployment_open with
-  // the per-centre tri-state centre_vss_overrides applied via
-  // vss_deploy_open_for_centre). A stale generic wildcard that keeps regular
-  // deployment open would otherwise keep VSS editable via canEditDeployment's
-  // overrideOpen bypass — "My vss is globally closed but centres are able to
-  // mark for vss". This loader is the ONLY writer of the vss_deployment_open
-  // key — every global-settings refresh re-runs it right after, so a raw
-  // global value never clobbers the effective override.
+  // v31 HARD VSS CLOSE: global is the master.
+  // Before v31 a per-centre `true` (`centre_vss_overrides.deployment_open=true`)
+  // could reopen VSS even after the super_admin globally closed
+  // `portal_settings.vss_deployment_open`. User wants "disable everything in
+  // VSS until its open" — hard gate: `effective = global && (override ?? true)`.
+  // This loader computes the HARD effective locally (raw global + raw override)
+  // so the UI is hard-closed even before the DB migration v31 is applied.
+  // Generic `centre_overrides` (any_override_open) must NOT reopen VSS.
   const loadGates = useCallback(async () => {
     if (!selectedScheduleId || !myRoot) return
     try {
+      // 1) Try the authoritative RPC first (now hard in v31)
       const { data: gates } = await supabase.rpc('get_my_effective_gates', { p_schedule: selectedScheduleId })
-      // VSS FIX: Do NOT derive VSS editability from generic centre_overrides.
-      // any_override_open (centre_overrides) is for regular sewadars — a stale
-      // wildcard or department-scoped row would otherwise make VSS editable
-      // even though portal_settings.vss_deployment_open is globally closed.
-      // Keep the generic flag at false so VSS canEdit + persist never treat a
-      // regular override as a VSS opening. VSS openness comes solely from the
-      // effective value gates.vss_deployment_open (global ∧ tri-state).
+      // Keep generic flag at false — regular overrides never reopen VSS
       setOverrideOpen(false)
-      // undeployed_only is also a generic centre_overrides signal, but it
-      // controls the DB/UI freeze of already-deployed VSS rows under that
-      // mode — keep it so the freeze stays in sync with the DB. It does NOT
-      // affect VSS canEdit (which is gated solely by the effective VSS switch).
       setUndeployedOverrideOpen(!!gates?.undeployed_override_open)
-      setSettings(s => ({ ...s, vss_deployment_open: !!gates?.vss_deployment_open }))
-    } catch { /* v21 not migrated — override stays off */ }
+      if (gates && typeof gates.vss_deployment_open === 'boolean') {
+        // RPC already hard — use it directly
+        setSettings(s => ({ ...s, vss_deployment_open: !!gates.vss_deployment_open }))
+        return
+      }
+    } catch { /* RPC missing — fall back to local hard compute */ }
+    // 2) Fallback hard compute: global && (override ?? true)
+    try {
+      const rawSettings = await fetchPortalSettings()
+      const globalOpen = !!rawSettings.vss_deployment_open
+      let rawOverride = null
+      try {
+        const overrides = await fetchVssOverrides()
+        rawOverride = resolveVssOverride(overrides, { rootCentre: myRoot, key: 'deployment_open' })
+      } catch { /* RLS or missing — keep null */ }
+      const hardEffective = effectiveVssDeployment({ overrideValue: rawOverride, globalOpen })
+      setSettings(s => ({ ...s, vss_deployment_open: hardEffective }))
+    } catch {
+      // Last resort: raw global only
+      try {
+        const raw = await fetchPortalSettings()
+        setSettings(s => ({ ...s, vss_deployment_open: !!raw.vss_deployment_open }))
+      } catch { /* keep previous */ }
+    }
   }, [selectedScheduleId, myRoot])
 
   useEffect(() => {

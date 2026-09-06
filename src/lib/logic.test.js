@@ -430,8 +430,10 @@ describe('Control Panel overrides (v21 helpers)', () => {
     expect(resolveVssOverride(rows, { rootCentre: null, key: 'creation_open' })).toBeNull()
   })
 
-  it('effectiveVssCreation composes override > (switch ∧ window)', () => {
-    expect(effectiveVssCreation({ overrideValue: true, globalOpen: false, windowOpen: false })).toBe(true)
+  it('effectiveVssCreation hard global — global must be true, override can only force closed or bypass window', () => {
+    // hard: global && (override ?? window)
+    expect(effectiveVssCreation({ overrideValue: true, globalOpen: false, windowOpen: false })).toBe(false) // global false => false even if override true
+    expect(effectiveVssCreation({ overrideValue: true, globalOpen: true, windowOpen: false })).toBe(true) // override true bypasses window when global true
     expect(effectiveVssCreation({ overrideValue: false, globalOpen: true, windowOpen: true })).toBe(false)
     expect(effectiveVssCreation({ overrideValue: null, globalOpen: true, windowOpen: true })).toBe(true)
     expect(effectiveVssCreation({ overrideValue: null, globalOpen: true, windowOpen: false })).toBe(false)

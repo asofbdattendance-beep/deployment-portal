@@ -299,11 +299,27 @@ export function resolveVssOverride(vssOverrides, { rootCentre, key }) {
   return row ? (row[key] ?? null) : null
 }
 
-// Effective VSS CREATION gate: per-centre override wins, else the global
-// switch AND the open-schedule window (same composition as the DB guard).
+// Effective VSS CREATION gate — HARD global close.
+// Before v31 this was `override ?? (global && window)` which let a per-centre
+// `true` reopen creation even after the super_admin globally closed it.
+// User requirement: "disable everything in VSS until its open" — global
+// must be the master. Hard gate: global must be true AND (override ?? window).
+// i.e. a per-centre `true` can only keep it open when global is already open
+// (and can bypass the deadline window), but can never reopen after global closed.
 export function effectiveVssCreation({ overrideValue, globalOpen, windowOpen }) {
-  if (overrideValue != null) return overrideValue
-  return !!globalOpen && !!windowOpen
+  if (!globalOpen) return false
+  if (overrideValue != null) return !!overrideValue
+  return !!windowOpen
+}
+
+// Effective VSS DEPLOYMENT gate — HARD global close.
+// Same principle: per-centre `true` cannot reopen after global closed.
+// Hard gate: global && (override ?? true) — override `false` forces closed
+// even when global open, `true` keeps global's value, `null` inherits.
+export function effectiveVssDeployment({ overrideValue, globalOpen }) {
+  if (!globalOpen) return false
+  if (overrideValue != null) return !!overrideValue
+  return true
 }
 
 /* ─── VSS registration (new creation) ─── */
