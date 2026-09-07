@@ -524,7 +524,16 @@ export default function ConsentPage({ schedules, scheduleId }) {
         for (let i = 0; i < toInsert.length; i += 100) {
           const { error } = await supabase.from('sewadar_consents')
             .upsert(toInsert.slice(i, i + 100), { onConflict: 'schedule_id,centre,badge_number' })
-          if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
+          if (error) {
+            const m = error.message || ''
+            // deployed freeze (v32) is permanent — don't retry, just refresh
+            if (m.includes('already deployed') || m.includes('consent is frozen') || m.includes('No consent recorded')) {
+              toast.error(m)
+              loadDataRef.current(true)
+              return
+            }
+            toast.error(m); dirtyRef.current = true; scheduleRetry(); return
+          }
         }
       }
       // per-field PATCH — only fields that actually differ from the saved state,
@@ -539,7 +548,15 @@ export default function ConsentPage({ schedules, scheduleId }) {
             .update(patch.fields)
             .eq('schedule_id', scheduleId)
             .or(orFilter)
-          if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
+          if (error) {
+            const m = error.message || ''
+            if (m.includes('already deployed') || m.includes('consent is frozen') || m.includes('No consent recorded')) {
+              toast.error(m)
+              loadDataRef.current(true)
+              return
+            }
+            toast.error(m); dirtyRef.current = true; scheduleRetry(); return
+          }
         }
       }
       // The DB unconditionally requires a consent ROW before any deployment —
@@ -557,14 +574,30 @@ export default function ConsentPage({ schedules, scheduleId }) {
         for (let i = 0; i < ensureConsentRows.length; i += 100) {
           const { error } = await supabase.from('sewadar_consents')
             .upsert(ensureConsentRows.slice(i, i + 100), { onConflict: 'schedule_id,centre,badge_number', ignoreDuplicates: true })
-          if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
+          if (error) {
+            const m = error.message || ''
+            if (m.includes('already deployed') || m.includes('consent is frozen') || m.includes('No consent recorded')) {
+              toast.error(m)
+              loadDataRef.current(true)
+              return
+            }
+            toast.error(m); dirtyRef.current = true; scheduleRetry(); return
+          }
         }
         // rows are now guaranteed to exist — skip re-ensuring on the next save
         ensureConsentRows.forEach(p => consentExistsRef.current.add(`${p.centre}|${p.badge_number}`))
       }
       if (toDeploy.length > 0) {
         const { error } = await supabase.from('deployments').upsert(toDeploy, { onConflict: 'schedule_id,centre,badge_number' })
-        if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
+        if (error) {
+          const m = error.message || ''
+          if (m.includes('already deployed') || m.includes('consent is frozen') || m.includes('No consent recorded') || m.includes('Consent not given') || m.includes('Deadline has passed') || m.includes('Deployment is locked')) {
+            toast.error(m)
+            loadDataRef.current(true)
+            return
+          }
+          toast.error(m); dirtyRef.current = true; scheduleRetry(); return
+        }
       }
       if (toRemove.length > 0) {
         const byCentre = {}
