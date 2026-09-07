@@ -122,6 +122,9 @@ export default function ConsentPage({ schedules, scheduleId }) {
       const existing = consAll || []
       const map = {}
       existing.forEach(c => { map[`${c.centre}|${c.badge_number}`] = c })
+      // which sewadars really have a consent row persisted — the deploy
+      // guarantee below needs this, and it must survive every load path
+      consentExistsRef.current = new Set(existing.map(c => `${c.centre}|${c.badge_number}`))
       const deployMap = {}
       // keep the whole deployment row so the page knows which sewadars the ASO
       // has FINALIZED — those rows are locked on the centre side
@@ -380,6 +383,11 @@ export default function ConsentPage({ schedules, scheduleId }) {
   // sewadars — so persist must never write their consent/deployment rows (their
   // requested_dept is set). We exclude them here to avoid a rejected save.
   const undeployedOverrideOpenRef = useRef(false)
+  // Keys of sewadars that actually have a persisted consent row (loaded from
+  // sewadar_consents). persist must guarantee one exists for every sewadar it
+  // deploys — the DB raises "No consent recorded" for a missing row even under
+  // an override (only the consent=No check relaxes there).
+  const consentExistsRef = useRef(new Set())
   const mountedRef = useRef(true)
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false } }, [])
   // failed-save retry — a transient error re-arms one more save (max 3 tries)
@@ -449,6 +457,20 @@ export default function ConsentPage({ schedules, scheduleId }) {
       //     grouped by identical field-set, matched per-row via an or-filter
       const toInsert = []
       const patchByFields = new Map()
+      // one source of truth for the consent-row payload — shared by the
+      // new-row inserts and the deploy-existence guarantee below
+      const consentPayload = (r) => ({
+        schedule_id: scheduleId,
+        centre: r.centre,
+        badge_number: r.badge_number,
+        sewadar_name: r.sewadar_name,
+        consent_given: r.consent_given,
+        available_days_count: r.consent_given
+          ? daysForDept(deptNameById[r.requested_dept])
+          : (anyOverrideOpenRef.current && r.requested_dept ? daysForDept(deptNameById[r.requested_dept]) : null),
+        stay_at_bhati: r.stay_at_bhati,
+        chair_pass: r.chair_pass,
+      })
       Object.values(rows).forEach(r => {
         const key = `${r.centre}|${r.badge_number}`
         if (r.finalized || r.deployed || deployedKeys.has(key) || (undeployedOnly && alreadyDeployed(r))) return
@@ -467,18 +489,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
           patch.rows.push({ centre: r.centre, badge_number: r.badge_number })
           patchByFields.set(groupKey, patch)
         } else {
-          toInsert.push({
-            schedule_id: scheduleId,
-            centre: r.centre,
-            badge_number: r.badge_number,
-            sewadar_name: r.sewadar_name,
-            consent_given: r.consent_given,
-            available_days_count: r.consent_given
-              ? daysForDept(deptNameById[r.requested_dept])
-              : (anyOverrideOpenRef.current && r.requested_dept ? daysForDept(deptNameById[r.requested_dept]) : null),
-            stay_at_bhati: r.stay_at_bhati,
-            chair_pass: r.chair_pass,
-          })
+          toInsert.push(consentPayload(r))
         }
       })
       const activeDeptIds = new Set(depList.map(d => d.id))
@@ -530,6 +541,26 @@ export default function ConsentPage({ schedules, scheduleId }) {
             .or(orFilter)
           if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
         }
+      }
+      // The DB unconditionally requires a consent ROW before any deployment —
+      // an override relaxes only the consent=No check, not a missing row. A
+      // sewadar whose consent row was never persisted (consent=No, untouched)
+      // cannot be deployed until its row exists. Guarantee it here: INSERT with
+      // ignoreDuplicates so a row a parallel session created moments ago is
+      // never overwritten.
+      const ensureConsentRows = [...new Set(toDeploy.map(d => `${d.centre}|${d.badge_number}`))]
+        .filter(key => !consentExistsRef.current.has(key))
+        .map(key => rows[key])
+        .filter(Boolean)
+        .map(consentPayload)
+      if (ensureConsentRows.length > 0) {
+        for (let i = 0; i < ensureConsentRows.length; i += 100) {
+          const { error } = await supabase.from('sewadar_consents')
+            .upsert(ensureConsentRows.slice(i, i + 100), { onConflict: 'schedule_id,centre,badge_number', ignoreDuplicates: true })
+          if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
+        }
+        // rows are now guaranteed to exist — skip re-ensuring on the next save
+        ensureConsentRows.forEach(p => consentExistsRef.current.add(`${p.centre}|${p.badge_number}`))
       }
       if (toDeploy.length > 0) {
         const { error } = await supabase.from('deployments').upsert(toDeploy, { onConflict: 'schedule_id,centre,badge_number' })

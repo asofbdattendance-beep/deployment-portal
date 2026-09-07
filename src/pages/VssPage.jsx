@@ -235,6 +235,9 @@ function VssDeployTable({ schedules, scheduleId }) {
       const existing = consAll || []
       const map = {}
       existing.forEach(c => { map[`${c.centre}|${c.badge_number}`] = c })
+      // which VSS sewadars really have a consent row persisted — the deploy
+      // guarantee below needs this, and it must survive every load path
+      consentExistsRef.current = new Set(existing.map(c => `${c.centre}|${c.badge_number}`))
       const deployMap = {}
       // keep the whole deployment row so the page knows which sewadars the ASO
       // has FINALIZED — those rows are locked on the centre side
@@ -463,6 +466,10 @@ function VssDeployTable({ schedules, scheduleId }) {
   // When an undeployed-only override is active, the DB freezes already-deployed
   // VSS sewadars — so persist must never write their consent/deployment rows.
   const undeployedOverrideOpenRef = useRef(false)
+  // Keys of VSS sewadars that actually have a persisted consent row. The DB
+  // requires the consent ROW to exist before ANY deployment (an override only
+  // relaxes the consent=No check) — persist guarantees one before deploying.
+  const consentExistsRef = useRef(new Set())
   const mountedRef = useRef(true)
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false } }, [])
   // failed-save retry — a transient error re-arms one more save (max 3 tries)
@@ -518,24 +525,27 @@ function VssDeployTable({ schedules, scheduleId }) {
       const alreadyDeployed = (r) => depRows.some(d => `${d.centre}|${d.badge_number}` === `${r.centre}|${r.badge_number}` && d.department_id != null)
       const toInsert = []
       const patchByFields = new Map() // fieldsKey -> { fields, keys: [] }
+      // one source of truth for the consent-row payload — shared by the
+      // new-row inserts and the deploy-existence guarantee below
+      const consentPayload = (r) => ({
+        schedule_id: scheduleId,
+        centre: r.centre,
+        badge_number: r.badge_number,
+        sewadar_name: r.sewadar_name,
+        consent_given: r.consent_given,
+        available_days_count: r.consent_given
+          ? daysForDept(deptNameById[r.requested_dept])
+          : (overrideOpenRef.current && r.requested_dept ? daysForDept(deptNameById[r.requested_dept]) : null),
+        stay_at_bhati: r.stay_at_bhati,
+        chair_pass: r.chair_pass,
+      })
       changed.forEach(r => {
         // ASO-finalized rows are locked on the centre side — never write them,
         // even from a pre-lock snapshot (debounce / unmount / switch flush).
         // Under an undeployed-only override, already-deployed VSS are frozen too.
         if (r.finalized || (undeployedOnly && alreadyDeployed(r))) return
         const key = consentRowKey(r)
-        const candidate = {
-          schedule_id: scheduleId,
-          centre: r.centre,
-          badge_number: r.badge_number,
-          sewadar_name: r.sewadar_name,
-          consent_given: r.consent_given,
-        available_days_count: r.consent_given
-          ? daysForDept(deptNameById[r.requested_dept])
-          : (overrideOpenRef.current && r.requested_dept ? daysForDept(deptNameById[r.requested_dept]) : null),
-        stay_at_bhati: r.stay_at_bhati,
-        chair_pass: r.chair_pass,
-      }
+        const candidate = consentPayload(r)
         const saved = savedConsentRef.current[key]
         if (!saved) { toInsert.push(candidate); return }
         const fields = changedConsentFields(candidate, saved)
@@ -589,6 +599,25 @@ function VssDeployTable({ schedules, scheduleId }) {
             .or(orFilter)
           if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
         }
+      }
+      // The DB unconditionally requires a consent ROW before any deployment —
+      // an override relaxes only the consent=No check. A VSS sewadar whose
+      // consent row was never persisted cannot be deployed until its row
+      // exists. Guarantee it here: INSERT with ignoreDuplicates so a row a
+      // parallel session created moments ago is never overwritten.
+      const ensureConsentRows = [...new Set(toDeploy.map(d => `${d.centre}|${d.badge_number}`))]
+        .filter(key => !consentExistsRef.current.has(key))
+        .map(key => rows[key])
+        .filter(Boolean)
+        .map(consentPayload)
+      if (ensureConsentRows.length > 0) {
+        for (let i = 0; i < ensureConsentRows.length; i += 100) {
+          const { error } = await supabase.from('sewadar_consents')
+            .upsert(ensureConsentRows.slice(i, i + 100), { onConflict: 'schedule_id,centre,badge_number', ignoreDuplicates: true })
+          if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
+        }
+        // rows are now guaranteed to exist — skip re-ensuring on the next save
+        ensureConsentRows.forEach(p => consentExistsRef.current.add(`${p.centre}|${p.badge_number}`))
       }
       if (toDeploy.length > 0) {
         const { error } = await supabase.from('deployments').upsert(toDeploy, { onConflict: 'schedule_id,centre,badge_number' })
