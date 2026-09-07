@@ -23,6 +23,7 @@ import {
   consentRowSignature,
   consentRowKey,
   changedConsentRows,
+  changedConsentFields,
   buildConsentSnapshot,
   EDITABLE_CONSENT_FIELDS,
   DEFAULT_AVAILABLE_DAYS,
@@ -33,6 +34,7 @@ import {
   resolveOverride,
   resolveVssOverride,
   effectiveVssCreation,
+  effectiveVssDeployment,
   ASO_DEPARTMENT,
   isAssoDepartment,
   canCentreDeploy,
@@ -439,6 +441,14 @@ describe('Control Panel overrides (v21 helpers)', () => {
     expect(effectiveVssCreation({ overrideValue: null, globalOpen: true, windowOpen: false })).toBe(false)
     expect(effectiveVssCreation({ overrideValue: null, globalOpen: false, windowOpen: true })).toBe(false)
   })
+
+  it('effectiveVssDeployment hard global — global must be true, override can only force closed', () => {
+    // hard: global && (override ?? true)
+    expect(effectiveVssDeployment({ overrideValue: true, globalOpen: false })).toBe(false) // global false => false even if override true
+    expect(effectiveVssDeployment({ overrideValue: false, globalOpen: true })).toBe(false)
+    expect(effectiveVssDeployment({ overrideValue: true, globalOpen: true })).toBe(true)
+    expect(effectiveVssDeployment({ overrideValue: null, globalOpen: true })).toBe(true) // null inherits global's open state
+  })
 })
 
 describe('VSS registration age + validation', () => {
@@ -586,6 +596,56 @@ describe('consent row signatures / dirty detection', () => {
   it('new rows (missing from snapshot) are always dirty', () => {
     const rows = { 'GURGAON|B9': { ...row, badge_number: 'B9' } }
     expect(changedConsentRows(rows, {})).toHaveLength(1)
+  })
+  it('buildConsentSnapshot stores value objects (not signature strings)', () => {
+    const snap = buildConsentSnapshot({ 'GURGAON|B1': { ...row } })
+    expect(snap['GURGAON|B1']).toEqual({
+      consent_given: true,
+      available_days_count: 3,
+      stay_at_bhati: true,
+      chair_pass: false,
+      requested_dept: 'd1',
+      is_active: true,
+    })
+    // consent_given=false coerces days to null (mirrors the signature)
+    const snap2 = buildConsentSnapshot({ 'GURGAON|B1': { ...row, consent_given: false, available_days_count: 5 } })
+    expect(snap2['GURGAON|B1'].available_days_count).toBeNull()
+    // a row with no department stores an empty requested_dept (no undefined leak)
+    const snap3 = buildConsentSnapshot({ 'GURGAON|B1': { ...row, requested_dept: undefined } })
+    expect(snap3['GURGAON|B1'].requested_dept).toBe('')
+  })
+  it('changedConsentRows accepts value-object snapshots (round-trip + drift)', () => {
+    const rows = { 'GURGAON|B1': { ...row } }
+    expect(changedConsentRows(rows, buildConsentSnapshot(rows))).toEqual([])
+    const drifted = buildConsentSnapshot({ 'GURGAON|B1': { ...row, stay_at_bhati: false } })
+    expect(changedConsentRows(rows, drifted)).toHaveLength(1)
+    // the legacy string-snapshot format still works (older call sites/tests)
+    const legacy = { 'GURGAON|B1': consentRowSignature({ ...row, stay_at_bhati: false }) }
+    expect(changedConsentRows(rows, legacy)).toHaveLength(1)
+  })
+  it('changedConsentFields returns ONLY the fields that differ', () => {
+    const saved = { consent_given: true, available_days_count: 3, stay_at_bhati: true, chair_pass: false }
+    expect(changedConsentFields({ ...row, stay_at_bhati: false }, saved)).toEqual({ stay_at_bhati: false })
+    expect(changedConsentFields({ ...row, stay_at_bhati: false, chair_pass: true }, saved))
+      .toEqual({ stay_at_bhati: false, chair_pass: true })
+    expect(changedConsentFields(row, saved)).toBeNull()
+  })
+  it('changedConsentFields treats a missing snapshot as a full insert', () => {
+    expect(changedConsentFields(row, null)).toEqual({
+      consent_given: true,
+      available_days_count: 3,
+      stay_at_bhati: true,
+      chair_pass: false,
+    })
+    expect(changedConsentFields({ ...row, consent_given: false, available_days_count: null }, undefined))
+      .toEqual({ consent_given: false, available_days_count: null, stay_at_bhati: true, chair_pass: false })
+  })
+  it('changedConsentFields ignores fields that are not consent-persisted (requested_dept, is_active)', () => {
+    const saved = { consent_given: true, available_days_count: 3, stay_at_bhati: true, chair_pass: false }
+    expect(changedConsentFields({ ...row, requested_dept: 'd9', is_active: false }, saved)).toBeNull()
+  })
+  it('changedConsentFields handles a null row', () => {
+    expect(changedConsentFields(null, {})).toBeNull()
   })
 })
 

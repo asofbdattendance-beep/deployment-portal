@@ -447,15 +447,33 @@ export function consentRowKey(row) {
 // gender, remarks, prev_* attendance) must always come fresh from the server.
 export const EDITABLE_CONSENT_FIELDS = ['consent_given', 'available_days_count', 'stay_at_bhati', 'chair_pass', 'requested_dept']
 
-// Rows that differ from the last-saved snapshot. `snapshot` is
-// { [centre|badge]: signature } built after every successful save.
+// Rows that differ from the last-saved snapshot. `snapshot` is a map built by
+// buildConsentSnapshot() ({ key → value object }), but older call sites/tests
+// may still pass signature STRINGS — both forms compare exactly, so either is
+// safe.
 export function changedConsentRows(rows, snapshot) {
   if (!rows) return []
   const snap = snapshot || {}
   return Object.values(rows).filter(row => {
     const key = consentRowKey(row)
-    return consentRowSignature(row) !== snap[key]
+    const saved = snap[key]
+    const savedSig = typeof saved === 'string' ? saved : (saved ? consentRowSignature(saved) : '')
+    return consentRowSignature(row) !== savedSig
   })
+}
+
+// Snapshot entry for one row: the persisted editable fields as raw VALUES
+// (mirrors consentRowSignature field-for-field) so callers can diff per-field
+// instead of only knowing "the row changed".
+function consentSnapshotValue(row) {
+  return {
+    consent_given: !!row.consent_given,
+    available_days_count: row.consent_given ? row.available_days_count : null,
+    stay_at_bhati: !!row.stay_at_bhati,
+    chair_pass: !!row.chair_pass,
+    requested_dept: row.requested_dept || '',
+    is_active: row.is_active !== false, // VSS-only; regular rows keep it true
+  }
 }
 
 // Build the snapshot map from the current rows (call after load/save).
@@ -463,7 +481,28 @@ export function buildConsentSnapshot(rows) {
   const snap = {}
   if (!rows) return snap
   Object.values(rows).forEach(row => {
-    snap[consentRowKey(row)] = consentRowSignature(row)
+    snap[consentRowKey(row)] = consentSnapshotValue(row)
   })
   return snap
+}
+
+// Fields written to a consent row on a partial (UPDATE) save. Per-field
+// diffing means a parallel session's edits to OTHER fields of the same row
+// survive this save — whole-row upserts used to clobber them (the "my work
+// disappeared" bug with two open tabs).
+export const CONSENT_PERSIST_FIELDS = ['consent_given', 'available_days_count', 'stay_at_bhati', 'chair_pass']
+
+// Per-field consent diff of a row against its last-saved snapshot entry.
+// Returns an object with ONLY the fields that differ, or null when nothing
+// does. `saved` missing/null means the row has never been saved — every
+// persisted field is then returned so callers can do a full insert.
+// Non-consent fields (requested_dept, is_active) are intentionally ignored:
+// department changes travel through the deployments table, not the consent row.
+export function changedConsentFields(row, saved) {
+  if (!row) return null
+  const diff = {}
+  CONSENT_PERSIST_FIELDS.forEach(f => {
+    if (!saved || row[f] !== saved[f]) diff[f] = row[f]
+  })
+  return Object.keys(diff).length > 0 ? diff : null
 }

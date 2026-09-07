@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, fetchAllRows, getRootCentre, eligibleBadgeStatusFilter, isAssoDepartment, fetchPortalSettings, shouldHideFromConsent } from '../lib/supabase'
-import { computeEditGates, isDeptSelectable, isUndeployedCohort, computeDeptQuota, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
+import { computeEditGates, isDeptSelectable, isUndeployedCohort, computeDeptQuota, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, changedConsentFields, consentRowKey, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import ConsentDashboard from '../components/ConsentDashboard'
@@ -160,6 +160,10 @@ export default function ConsentPage({ schedules, scheduleId }) {
           requested_dept: deployMap[key]?.department_id || '',
           finalized: !!deployMap[key]?.deployed_department_id,
           final_dept: deployMap[key]?.deployed_department_id || '',
+          // a deployments row exists ⇒ this sewadar is DEPLOYED (v32) — frozen
+          // for centre editing even before any centre lock. The flag is
+          // recomputed from fresh deployments on every merge/load.
+          deployed: !!deployMap[key]?.department_id,
           prev_department: prev?.prev_department || null,
           prev_attendance: prev?.attendance_reported != null ? prev.attendance_reported : null,
         })
@@ -176,6 +180,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
           // overlay ONLY user-editable fields — fresh rows keep server-side
           // values for read-only data (is_active, is_initiated, prev_*, etc.)
           const dropped = []
+          const deployDropped = []
           Object.keys(rows).forEach(key => {
             const edit = editsByKey[key]
             if (!edit) return
@@ -183,6 +188,9 @@ export default function ConsentPage({ schedules, scheduleId }) {
             // row is locked centre-side) and persist would silently filter it
             // while the UI kept showing it as saved; drop it loudly instead
             if (rows[key].finalized) { dropped.push(key); return }
+            // a peer session deployed this row mid-refresh — deployed sewadars
+            // are frozen (v32): the edit can never be saved, so drop it too
+            if (rows[key].deployed) { deployDropped.push(key); return }
             EDITABLE_CONSENT_FIELDS.forEach(f => { if (f in edit) rows[key][f] = edit[f] })
             // even after the overlay, days stay auto-set (5 / 3 for OE ESCORTS)
             rows[key] = autoSetDays(rows[key])
@@ -196,15 +204,33 @@ export default function ConsentPage({ schedules, scheduleId }) {
           const ex = {}
           subtree.forEach(c => { ex[c] = true })
           setExpanded(ex)
-          if (dropped.length > 0) {
-            // baseline the dropped rows at their fresh (finalized) state so
-            // they no longer count as pending changes
-            const nextBaseline = { ...savedConsentRef.current }
-            dropped.forEach(k => { nextBaseline[k] = consentRowSignature(rows[k]) })
-            savedConsentRef.current = nextBaseline
-            dirtyRef.current = changedConsentRows(rows, savedConsentRef.current).length > 0
-            toast.info(`${dropped.length} sewadar${dropped.length > 1 ? 's' : ''} finalized by the ASO — pending edits discarded`)
+          const dropAll = [...dropped, ...deployDropped]
+          // Baseline-sync untouched rows: every row this session did NOT edit
+          // is now at its fresh server state, so peer changes stop counting as
+          // OUR pending edits (previously the whole baseline stayed stale and
+          // the next save re-wrote peer edits as if they were ours — the
+          // "another tab overwrote my work" bug). Edited rows keep their old
+          // baseline so they stay dirty and get per-field saved next.
+          const pendingKeys = new Set(Object.keys(editsByKey))
+          const freshSnap = buildConsentSnapshot(rows)
+          const nextBaseline = { ...savedConsentRef.current }
+          Object.keys(freshSnap).forEach(k => {
+            if (pendingKeys.has(k)) return
+            nextBaseline[k] = freshSnap[k]
+          })
+          if (dropAll.length > 0) {
+            // baseline the dropped rows at their fresh (finalized/deployed)
+            // state so they no longer count as pending changes
+            dropAll.forEach(k => { nextBaseline[k] = freshSnap[k] })
+            if (dropped.length > 0) {
+              toast.info(`${dropped.length} sewadar${dropped.length > 1 ? 's' : ''} finalized by the ASO — pending edits discarded`)
+            }
+            if (deployDropped.length > 0) {
+              toast.info(`${deployDropped.length} sewadar${deployDropped.length > 1 ? 's' : ''} deployed — pending edits discarded (deployed sewadars are locked)`)
+            }
           }
+          savedConsentRef.current = nextBaseline
+          dirtyRef.current = changedConsentRows(rows, savedConsentRef.current).length > 0
           // the remaining (non-dropped) edits stay pending — dirtyRef /
           // savedConsentRef / editVersionRef keep their pre-refresh state so
           // the debounce persists them next.
@@ -300,13 +326,23 @@ export default function ConsentPage({ schedules, scheduleId }) {
   // (subtree/centres settling in) never tears down and re-creates the channel.
   const loadDataRef = useRef(loadData)
   loadDataRef.current = loadData
+  // Realtime merge hygiene: peer-centre writes arrive as postgres_changes
+  // events. Reloads are coalesced (one silent refresh per burst), skipped
+  // briefly after OUR OWN saves (which echo back as events) and queued while
+  // a save is in flight so a merge can never fight the write in progress.
+  const reloadTimerRef = useRef(null)
+  const reloadQueuedRef = useRef(false)
+  const lastWriteAtRef = useRef(0)
   useEffect(() => {
     if (!selectedScheduleId) return
     const reload = () => {
-      // don't clobber unsaved local edits with a stale server snapshot
-      if (dirtyRef.current || savingRef.current) return
-      // silent reload: refresh data in place without flashing the skeleton
-      loadDataRef.current(true)
+      if (Date.now() - lastWriteAtRef.current < 1500) return
+      if (savingRef.current) { reloadQueuedRef.current = true; return }
+      if (reloadTimerRef.current) clearTimeout(reloadTimerRef.current)
+      reloadTimerRef.current = setTimeout(() => {
+        reloadTimerRef.current = null
+        loadDataRef.current(true)
+      }, 600)
     }
     const channel = supabase
       .channel(`consent-settings-${selectedScheduleId}`)
@@ -318,7 +354,10 @@ export default function ConsentPage({ schedules, scheduleId }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_overrides', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
       .subscribe()
-    return () => { supabase.removeChannel(channel) }
+    return () => {
+      supabase.removeChannel(channel)
+      if (reloadTimerRef.current) { clearTimeout(reloadTimerRef.current); reloadTimerRef.current = null }
+    }
   }, [selectedScheduleId])
 
   // Latest committed state, kept in refs so a flush triggered by unmount or
@@ -398,29 +437,57 @@ export default function ConsentPage({ schedules, scheduleId }) {
       // must NOT be excluded).
       const undeployedOnly = undeployedOverrideOpenRef.current
       const alreadyDeployed = (r) => depRows.some(d => `${d.centre}|${d.badge_number}` === `${r.centre}|${r.badge_number}` && d.department_id != null)
-      const toUpsert = changed
-        // ASO-finalized rows are locked on the centre side — never write them,
-        // even from a pre-lock snapshot (debounce / unmount / switch flush)
-        .filter(r => !r.finalized && !(undeployedOnly && alreadyDeployed(r)))
-        .map(r => ({
-          schedule_id: scheduleId,
-          centre: r.centre,
-          badge_number: r.badge_number,
-          sewadar_name: r.sewadar_name,
-          consent_given: r.consent_given,
-        available_days_count: r.consent_given
-          ? daysForDept(deptNameById[r.requested_dept])
-          : (anyOverrideOpenRef.current && r.requested_dept ? daysForDept(deptNameById[r.requested_dept]) : null),
-        stay_at_bhati: r.stay_at_bhati,
-        chair_pass: r.chair_pass,
-      }))
+      // v32: any regular sewadar with a deployments row is FROZEN — the DB rejects
+      // centre writes to their deployments/consents rows. Never include them in an
+      // upsert (an upsert on an existing row becomes an UPDATE → the trigger fires).
+      const deployedKeys = new Set(depRows.filter(d => d.department_id != null).map(d => `${d.centre}|${d.badge_number}`))
+      // Consent writes split into two buckets so parallel-session edits never
+      // clobber each other (a whole-row upsert used to overwrite a peer's other
+      // fields with our stale values):
+      //   rows with no saved baseline  → INSERT only (chunked upsert)
+      //   rows with local field diffs  → PATCH only the fields that differ,
+      //     grouped by identical field-set, matched per-row via an or-filter
+      const toInsert = []
+      const patchByFields = new Map()
+      Object.values(rows).forEach(r => {
+        const key = `${r.centre}|${r.badge_number}`
+        if (r.finalized || r.deployed || deployedKeys.has(key) || (undeployedOnly && alreadyDeployed(r))) return
+        const saved = savedConsentRef.current[key]
+        const fields = changedConsentFields(r, saved)
+        if (!fields) return
+        if (saved) {
+          // force the canonical days value at save time (mirrors the insert path)
+          if ('available_days_count' in fields) {
+            fields.available_days_count = r.consent_given
+              ? daysForDept(deptNameById[r.requested_dept])
+              : (anyOverrideOpenRef.current && r.requested_dept ? daysForDept(deptNameById[r.requested_dept]) : null)
+          }
+          const groupKey = Object.keys(fields).sort().join(',')
+          const patch = patchByFields.get(groupKey) || { fields, rows: [] }
+          patch.rows.push({ centre: r.centre, badge_number: r.badge_number })
+          patchByFields.set(groupKey, patch)
+        } else {
+          toInsert.push({
+            schedule_id: scheduleId,
+            centre: r.centre,
+            badge_number: r.badge_number,
+            sewadar_name: r.sewadar_name,
+            consent_given: r.consent_given,
+            available_days_count: r.consent_given
+              ? daysForDept(deptNameById[r.requested_dept])
+              : (anyOverrideOpenRef.current && r.requested_dept ? daysForDept(deptNameById[r.requested_dept]) : null),
+            stay_at_bhati: r.stay_at_bhati,
+            chair_pass: r.chair_pass,
+          })
+        }
+      })
       const activeDeptIds = new Set(depList.map(d => d.id))
       // Under a Control Panel override the consent-given requirement relaxes
       // (v21): a sewadar whose consent is No may still be deployed. Otherwise a
       // deployment row is only written for a consented + department-assigned row.
       const overrideDeploy = anyOverrideOpenRef.current
       const toDeploy = changed
-        .filter(r => !r.finalized && !(undeployedOnly && alreadyDeployed(r)) && r.requested_dept && activeDeptIds.has(r.requested_dept) && (r.consent_given || overrideDeploy))
+        .filter(r => !r.finalized && !r.deployed && !deployedKeys.has(`${r.centre}|${r.badge_number}`) && !(undeployedOnly && alreadyDeployed(r)) && r.requested_dept && activeDeptIds.has(r.requested_dept) && (r.consent_given || overrideDeploy))
         .map(r => ({
           schedule_id: scheduleId,
           department_id: r.requested_dept,
@@ -438,13 +505,31 @@ export default function ConsentPage({ schedules, scheduleId }) {
       // Under an undeployed-only override, already-deployed rows are frozen and
       // likewise never removed.
       const toRemove = Object.values(rows)
-        .filter(r => !r.finalized && !(undeployedOnly && alreadyDeployed(r)) && ((!r.requested_dept || !activeDeptIds.has(r.requested_dept)) || (!r.consent_given && !overrideDeploy)))
+        .filter(r => !r.finalized && !r.deployed && !deployedKeys.has(`${r.centre}|${r.badge_number}`) && !(undeployedOnly && alreadyDeployed(r)) && ((!r.requested_dept || !activeDeptIds.has(r.requested_dept)) || (!r.consent_given && !overrideDeploy)))
         .map(consentRowKey)
         .filter(key => depRows.some(d => `${d.centre}|${d.badge_number}` === key))
 
-      if (toUpsert.length > 0) {
-        const { error } = await supabase.from('sewadar_consents').upsert(toUpsert, { onConflict: 'schedule_id,centre,badge_number' })
-        if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
+      if (toInsert.length > 0) {
+        for (let i = 0; i < toInsert.length; i += 100) {
+          const { error } = await supabase.from('sewadar_consents')
+            .upsert(toInsert.slice(i, i + 100), { onConflict: 'schedule_id,centre,badge_number' })
+          if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
+        }
+      }
+      // per-field PATCH — only fields that actually differ from the saved state,
+      // grouped by identical field-set so each group needs exactly one update.
+      // Rows match via a PostgREST or-filter; values are double-quoted because
+      // centre names contain spaces/hyphens (e.g. "NIT - 2").
+      for (const patch of patchByFields.values()) {
+        for (let i = 0; i < patch.rows.length; i += 40) {
+          const chunk = patch.rows.slice(i, i + 40)
+          const orFilter = chunk.map(r => `and(centre.eq."${r.centre}",badge_number.eq."${r.badge_number}")`).join(',')
+          const { error } = await supabase.from('sewadar_consents')
+            .update(patch.fields)
+            .eq('schedule_id', scheduleId)
+            .or(orFilter)
+          if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
+        }
       }
       if (toDeploy.length > 0) {
         const { error } = await supabase.from('deployments').upsert(toDeploy, { onConflict: 'schedule_id,centre,badge_number' })
@@ -527,12 +612,20 @@ export default function ConsentPage({ schedules, scheduleId }) {
     } catch (err) { toast.error(err.message); dirtyRef.current = true; scheduleRetry() } finally {
       savingRef.current = false
       setSaving(false)
+      // Self-echo window: a realtime refresh triggered right after our own save
+      // is skipped (reloads are debounced too) — parallel sessions' writes still
+      // show up, but our own writes don't cause a wasted reload round-trip.
+      lastWriteAtRef.current = Date.now()
       // If a newer snapshot was queued while this save was in flight, persist it
       // now — otherwise those edits would be dropped silently.
       if (pendingSaveRef.current) {
         const s = pendingSaveRef.current
         pendingSaveRef.current = null
         persist(s)
+      } else if (reloadQueuedRef.current) {
+        // A realtime refresh arrived while we were saving — run it now.
+        reloadQueuedRef.current = false
+        loadDataRef.current(true)
       }
     }
   }, [toast, scheduleRetry])
@@ -774,13 +867,17 @@ export default function ConsentPage({ schedules, scheduleId }) {
 
   // ASO-finalized rows are locked — the final department belongs to the ASO
   const isFinalizedRow = (row) => !!row?.finalized
+  // Deployed rows (a deployments row exists) are frozen for centre users (v32)
+  // even BEFORE any centre lock — once deployed, a sewadar may not be edited
+  // or moved between departments.
+  const isDeployedRow = (row) => !!row?.deployed
   // Under an undeployed-only override, a sewadar who ALREADY has a requested
   // department is frozen at the UI too (the DB enforces the same).
-  const isRowLocked = (row) => isFinalizedRow(row) || (undeployedOverrideOpen && !!row?.requested_dept)
+  const isRowLocked = (row) => isFinalizedRow(row) || isDeployedRow(row) || (undeployedOverrideOpen && !!row?.requested_dept)
   // Per-row editability under an undeployed-only override: the undeployed cohort
   // (consent=No OR yes-not-deployed) may be edited; everyone else stays locked.
-  const rowConsentEditable = (r) => consentEditable || (undeployedOverrideOpen && isUndeployedCohort(r))
-  const rowDeployEditable = (r) => deploymentEditable || (undeployedOverrideOpen && isUndeployedCohort(r))
+  const rowConsentEditable = (r) => consentEditable || (undeployedOverrideOpen && !isDeployedRow(r) && isUndeployedCohort(r))
+  const rowDeployEditable = (r) => deploymentEditable || (undeployedOverrideOpen && !isDeployedRow(r) && isUndeployedCohort(r))
   const setConsent = (key, value) => {
     dirtyRef.current = true
     editVersionRef.current++
@@ -912,8 +1009,8 @@ export default function ConsentPage({ schedules, scheduleId }) {
       <select
         value={r.consent_given ? 'yes' : 'no'}
         onChange={e => setConsent(`${r.centre}|${r.badge_number}`, e.target.value === 'yes')}
-        disabled={!rowConsentEditable(r) || r.finalized}
-        title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined)}
+        disabled={!rowConsentEditable(r) || r.finalized || r.deployed}
+        title={r.finalized ? 'Finalized by the ASO — locked' : (r.deployed ? 'Deployed — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined))}
         className="select"
         style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
       >
@@ -928,9 +1025,9 @@ export default function ConsentPage({ schedules, scheduleId }) {
         role="switch"
         aria-checked={r.stay_at_bhati}
         onClick={() => toggleBhati(`${r.centre}|${r.badge_number}`)}
-        disabled={!rowConsentEditable(r) || !r.consent_given || r.finalized}
+        disabled={!rowConsentEditable(r) || !r.consent_given || r.finalized || r.deployed}
         className="toggle"
-        title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : 'Stay at bhati')}
+        title={r.finalized ? 'Finalized by the ASO — locked' : (r.deployed ? 'Deployed — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : 'Stay at bhati'))}
       >
         <span className="toggle-knob" />
       </button>
@@ -942,9 +1039,9 @@ export default function ConsentPage({ schedules, scheduleId }) {
         role="switch"
         aria-checked={r.chair_pass}
         onClick={() => toggleChairPass(`${r.centre}|${r.badge_number}`)}
-        disabled={!rowConsentEditable(r) || !r.consent_given || r.finalized}
+        disabled={!rowConsentEditable(r) || !r.consent_given || r.finalized || r.deployed}
         className="toggle"
-        title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : 'Chair pass')}
+        title={r.finalized ? 'Finalized by the ASO — locked' : (r.deployed ? 'Deployed — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : 'Chair pass'))}
       >
         <span className="toggle-knob" />
       </button>
@@ -978,6 +1075,21 @@ export default function ConsentPage({ schedules, scheduleId }) {
               {deptNameOf(r.final_dept) || deptNameOf(r.requested_dept) || '—'}
             </span>
             <span className="pill pill-indigo" style={{ fontSize: '0.6rem', whiteSpace: 'nowrap' }} title="Finalized by the ASO — locked">FINAL</span>
+          </div>
+        </td>
+      )
+    }
+    // Deployed sewadars are frozen (v32): once a regular sewadar has a
+    // deployments row, centre users can no longer change/remove it — the DB
+    // rejects the writes, so show a read-only pill instead of a dropdown.
+    if (r.deployed) {
+      return (
+        <td style={{ textAlign: 'center' }} data-label="Deployment">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', justifyContent: 'center' }}>
+            <span className="pill pill-indigo" title="Deployed — locked" style={{ whiteSpace: 'nowrap' }}>
+              {deptNameOf(r.requested_dept) || '—'}
+            </span>
+            <span className="pill pill-indigo" style={{ fontSize: '0.6rem', whiteSpace: 'nowrap' }} title="Deployed — locked">DEPLOYED</span>
           </div>
         </td>
       )
@@ -1051,9 +1163,10 @@ export default function ConsentPage({ schedules, scheduleId }) {
 
   const applyBulk = () => {
     if (!pendingBulk) return
-    // finalized rows are locked by the ASO; under an undeployed-only override,
-    // already-deployed sewadars are also locked — never apply a bulk action to them
-    const locked = selectedRows.filter(r => (r.finalized || (undeployedOverrideOpen && r.requested_dept)) && !(pendingBulk.keys && pendingBulk.keys.has(`${r.centre}|${r.badge_number}`)))
+    // finalized rows are locked by the ASO; deployed sewadars are frozen (v32);
+    // under an undeployed-only override, already-deployed sewadars are also
+    // locked — never apply a bulk action to them
+    const locked = selectedRows.filter(r => (r.finalized || r.deployed || (undeployedOverrideOpen && r.requested_dept)) && !(pendingBulk.keys && pendingBulk.keys.has(`${r.centre}|${r.badge_number}`)))
     dirtyRef.current = true
     editVersionRef.current++
     setConsentRows(prev => {
@@ -1061,13 +1174,13 @@ export default function ConsentPage({ schedules, scheduleId }) {
       selectedRows.forEach(r => {
         const key = `${r.centre}|${r.badge_number}`
         if (pendingBulk.keys && !pendingBulk.keys.has(key)) return
-        if (r.finalized || (undeployedOverrideOpen && r.requested_dept)) return
+        if (r.finalized || r.deployed || (undeployedOverrideOpen && r.requested_dept)) return
         next[key] = pendingBulk.updater(next[key])
       })
       return next
     })
     setPendingBulk(null)
-    if (locked.length > 0) toast.info(`${locked.length} deployed sewadar${locked.length > 1 ? 's' : ''} skipped — locked under this override`)
+    if (locked.length > 0) toast.info(`${locked.length} finalized/deployed sewadar${locked.length > 1 ? 's' : ''} skipped — locked`)
   }
 
   const bulkConsent = (value) => {
@@ -1105,8 +1218,8 @@ export default function ConsentPage({ schedules, scheduleId }) {
     let remaining = q ? q.rem : Infinity
       selectedRows.forEach(r => {
         const key = `${r.centre}|${r.badge_number}`
-        if (r.finalized) {
-          skipped.push({ name: r.sewadar_name, badge: r.badge_number, reasons: ['Finalized by the ASO — locked'] })
+        if (r.finalized || r.deployed) {
+          skipped.push({ name: r.sewadar_name, badge: r.badge_number, reasons: [r.finalized ? 'Finalized by the ASO — locked' : 'Deployed — locked'] })
           return
         }
         if (undeployedOverrideOpen && r.requested_dept) {

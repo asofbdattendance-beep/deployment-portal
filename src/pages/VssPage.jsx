@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, fetchAllRows, getRootCentre, fetchPortalSettings, fetchCentres, fetchVssOverrides } from '../lib/supabase'
-import { computeDeptQuota, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment, resolveVssOverride, effectiveVssCreation, effectiveVssDeployment } from '../lib/logic'
+import { computeDeptQuota, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, changedConsentFields, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment, resolveVssOverride, effectiveVssCreation, effectiveVssDeployment } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import DeptDropdown from '../components/DeptDropdown'
@@ -314,6 +314,19 @@ function VssDeployTable({ schedules, scheduleId }) {
             dirtyRef.current = changedConsentRows(rows, savedConsentRef.current).length > 0
             toast.info(`${dropped.length} sewadar${dropped.length > 1 ? 's' : ''} finalized by the ASO — pending edits discarded`)
           }
+          // Baseline-sync untouched rows: every row this session did NOT edit
+          // is now at its fresh server state, so peer changes stop counting as
+          // OUR pending edits (previously the whole baseline stayed stale and
+          // the next save re-wrote peer edits as if they were ours).
+          const pendingKeys = new Set(Object.keys(editsByKey))
+          const freshSnap = buildConsentSnapshot(rows)
+          const nextBaseline = { ...savedConsentRef.current }
+          Object.keys(freshSnap).forEach(k => {
+            if (pendingKeys.has(k)) return
+            nextBaseline[k] = freshSnap[k]
+          })
+          savedConsentRef.current = nextBaseline
+          dirtyRef.current = changedConsentRows(rows, savedConsentRef.current).length > 0
           // the remaining (non-dropped) edits stay pending — dirtyRef /
           // savedConsentRef / editVersionRef keep their pre-refresh state so
           // the debounce persists them next.
@@ -384,6 +397,9 @@ function VssDeployTable({ schedules, scheduleId }) {
     } finally { setLoading(false) }
   }, [selectedScheduleId, subtree, myRoot, toast, loadGates])
 
+  const loadDataRef = useRef(loadData)
+  loadDataRef.current = loadData
+
   useEffect(() => { loadData() }, [loadData])
 
   // Escape closes the bulk-confirm modal
@@ -397,12 +413,23 @@ function VssDeployTable({ schedules, scheduleId }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  // realtime: reflect master switch + centre edits live
+  // Realtime merge hygiene: peer VSS-user writes arrive as postgres_changes
+  // events. Reloads are coalesced (one silent refresh per burst), skipped
+  // briefly after OUR OWN saves (which echo back as events) and queued while
+  // a save is in flight so a merge never fights the write in progress.
+  const reloadTimerRef = useRef(null)
+  const reloadQueuedRef = useRef(false)
+  const lastWriteAtRef = useRef(0)
   useEffect(() => {
     if (!selectedScheduleId) return
     const reload = () => {
-      if (dirtyRef.current || savingRef.current) return
-      loadData()
+      if (Date.now() - lastWriteAtRef.current < 1500) return
+      if (savingRef.current) { reloadQueuedRef.current = true; return }
+      if (reloadTimerRef.current) clearTimeout(reloadTimerRef.current)
+      reloadTimerRef.current = setTimeout(() => {
+        reloadTimerRef.current = null
+        loadData()
+      }, 600)
     }
     const channel = supabase
       .channel(`vss-deploy-${selectedScheduleId}`)
@@ -415,7 +442,10 @@ function VssDeployTable({ schedules, scheduleId }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
       .subscribe()
-    return () => { supabase.removeChannel(channel) }
+    return () => {
+      supabase.removeChannel(channel)
+      if (reloadTimerRef.current) { clearTimeout(reloadTimerRef.current); reloadTimerRef.current = null }
+    }
   }, [selectedScheduleId, loadData, loadGates])
 
   const savedConsentRef = useRef({})
@@ -486,12 +516,15 @@ function VssDeployTable({ schedules, scheduleId }) {
       // deployments, NOT from r.requested_dept (which is the intended NEW state —
       // a VSS being newly assigned must NOT be excluded).
       const alreadyDeployed = (r) => depRows.some(d => `${d.centre}|${d.badge_number}` === `${r.centre}|${r.badge_number}` && d.department_id != null)
-      const toUpsert = changed
+      const toInsert = []
+      const patchByFields = new Map() // fieldsKey -> { fields, keys: [] }
+      changed.forEach(r => {
         // ASO-finalized rows are locked on the centre side — never write them,
-        // even from a pre-lock snapshot (debounce / unmount / switch flush)
+        // even from a pre-lock snapshot (debounce / unmount / switch flush).
         // Under an undeployed-only override, already-deployed VSS are frozen too.
-        .filter(r => !r.finalized && !(undeployedOnly && alreadyDeployed(r)))
-        .map(r => ({
+        if (r.finalized || (undeployedOnly && alreadyDeployed(r))) return
+        const key = consentRowKey(r)
+        const candidate = {
           schedule_id: scheduleId,
           centre: r.centre,
           badge_number: r.badge_number,
@@ -502,7 +535,15 @@ function VssDeployTable({ schedules, scheduleId }) {
           : (overrideOpenRef.current && r.requested_dept ? daysForDept(deptNameById[r.requested_dept]) : null),
         stay_at_bhati: r.stay_at_bhati,
         chair_pass: r.chair_pass,
-      }))
+      }
+        const saved = savedConsentRef.current[key]
+        if (!saved) { toInsert.push(candidate); return }
+        const fields = changedConsentFields(candidate, saved)
+        if (!fields) return
+        const fkey = Object.keys(fields).sort().join(',')
+        if (!patchByFields.has(fkey)) patchByFields.set(fkey, { fields, keys: [] })
+        patchByFields.get(fkey).keys.push(key)
+      })
       const activeDeptIds = new Set(depList.map(d => d.id))
       // Under a Control Panel override the consent-given requirement relaxes
       // (v21): a sewadar whose consent is No may still be deployed.
@@ -527,18 +568,46 @@ function VssDeployTable({ schedules, scheduleId }) {
         .map(consentRowKey)
         .filter(key => depRows.some(d => `${d.centre}|${d.badge_number}` === key))
 
-      if (toUpsert.length > 0) {
-        const { error } = await supabase.from('sewadar_consents').upsert(toUpsert, { onConflict: 'schedule_id,centre,badge_number' })
-        if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
+      if (toInsert.length > 0) {
+        // chunked: a big centre's first save can exceed PostgREST's row limit
+        for (let i = 0; i < toInsert.length; i += 100) {
+          const { error } = await supabase.from('sewadar_consents').upsert(toInsert.slice(i, i + 100), { onConflict: 'schedule_id,centre,badge_number' })
+          if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
+        }
+      }
+      // partial per-field UPDATEs — one PATCH per identical field-set, matched
+      // row-by-row via or=(and(...)) so only this centre's rows are touched
+      for (const { fields, keys } of patchByFields.values()) {
+        for (let i = 0; i < keys.length; i += 40) {
+          const orFilter = keys.slice(i, i + 40).map(k => {
+            const [centre, badge_number] = k.split('|')
+            return `and(centre.eq."${centre}",badge_number.eq."${badge_number}")`
+          }).join(',')
+          const { error } = await supabase.from('sewadar_consents')
+            .update(fields)
+            .eq('schedule_id', scheduleId)
+            .or(orFilter)
+          if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
+        }
       }
       if (toDeploy.length > 0) {
         const { error } = await supabase.from('deployments').upsert(toDeploy, { onConflict: 'schedule_id,centre,badge_number' })
         if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
       }
       if (toRemove.length > 0) {
+        const depMap = {}
+        depRows.forEach(d => { depMap[`${d.centre}|${d.badge_number}`] = d })
         const byCentre = {}
         toRemove.forEach(key => {
           const [centre, badge_number] = key.split('|')
+          // Department-match the delete: only remove a row whose persisted
+          // department still matches what THIS session saw. A peer session may
+          // have just reassigned the (VSS) sewadar — this stale delete must not
+          // destroy that newer assignment.
+          const persisted = depMap[key]
+          if (!persisted) return
+          const row = rows[key]
+          if (row && row.requested_dept && persisted.department_id !== row.requested_dept) return
           ;(byCentre[centre] = byCentre[centre] || []).push(badge_number)
         })
         for (const [centre, badges] of Object.entries(byCentre)) {
@@ -569,12 +638,19 @@ function VssDeployTable({ schedules, scheduleId }) {
     } catch (err) { toast.error(err.message); dirtyRef.current = true; scheduleRetry() } finally {
       savingRef.current = false
       setSaving(false)
+      // mark the echo window: our own writes come back as postgres_changes and
+      // must not trigger a merge loop right after this save
+      lastWriteAtRef.current = Date.now()
       // If a newer snapshot was queued while this save was in flight, persist it
       // now — otherwise those edits would be dropped silently.
       if (pendingSaveRef.current) {
         const s = pendingSaveRef.current
         pendingSaveRef.current = null
         persist(s)
+      } else if (reloadQueuedRef.current) {
+        // a realtime event arrived mid-save — run the deferred merge now
+        reloadQueuedRef.current = false
+        loadDataRef.current()
       }
     }
   }, [toast, scheduleRetry])
