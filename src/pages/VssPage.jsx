@@ -246,7 +246,7 @@ function VssDeployTable({ schedules, scheduleId }) {
     try {
       // Supabase max-rows=1000 — paginate every table that can exceed it
       const [vssAll, consAll, deptAll, allocAll, deployAll] = await Promise.all([
-        fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, gender, is_initiated, is_active, remarks, centre', (q) => q.in('centre', subtree).order('sewadar_name')),
+        fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, gender, is_initiated, is_active, remarks, centre, department', (q) => q.in('centre', subtree).order('sewadar_name')),
         fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree)),
         fetchAllRows('deployment_departments', '*', (q) => q.eq('is_active', true).order('name')),
         fetchAllRows('centre_allocations', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
@@ -286,6 +286,7 @@ function VssDeployTable({ schedules, scheduleId }) {
           badge_number: sw.badge_number,
           sewadar_name: sw.sewadar_name,
           gender: sw.gender || '',
+          department: sw.department || '', // sewadar's own department (e.g. AREA SECRETARY OFFICE)
           is_initiated: !!sw.is_initiated,
           is_active: sw.is_active !== false,
           remarks: sw.remarks || '',
@@ -581,7 +582,7 @@ function VssDeployTable({ schedules, scheduleId }) {
       // (v21): a sewadar whose consent is No may still be deployed.
       const overrideDeploy = overrideOpenRef.current
       const toDeploy = changed
-        .filter(r => !r.finalized && !(undeployedOnly && alreadyDeployed(r)) && r.requested_dept && r.is_active && activeDeptIds.has(r.requested_dept) && (r.consent_given || overrideDeploy))
+        .filter(r => !r.finalized && !(undeployedOnly && alreadyDeployed(r)) && r.requested_dept && r.is_active && activeDeptIds.has(r.requested_dept) && (r.consent_given || overrideDeploy) && !isAssoDepartment(r.department))
         .map(r => ({
           schedule_id: scheduleId,
           department_id: r.requested_dept,
@@ -849,11 +850,24 @@ function VssDeployTable({ schedules, scheduleId }) {
   // AND gave a quota — quota bars / dropdowns show only those.
   const vssAllocatedQuota = allocatedQuota.filter(a => depts.find(d => d.id === a.department_id)?.include_vss)
   const savedAllCounts = {}
-  deployments.forEach(d => { savedAllCounts[d.deployed_department_id || d.department_id] = (savedAllCounts[d.deployed_department_id || d.department_id] || 0) + 1 })
+  deployments.forEach(d => {
+    // Exclude AREA SECRETARY OFFICE sewadars from quota — they don't consume centre quota
+    const rowConsent = consentRows[`${d.centre}|${d.badge_number}`]
+    if (rowConsent && isAssoDepartment(rowConsent.department)) return
+    savedAllCounts[d.deployed_department_id || d.department_id] = (savedAllCounts[d.deployed_department_id || d.department_id] || 0) + 1
+  })
   const savedOwnCounts = {}
-  deployments.filter(d => isVssBadge(d.badge_number)).forEach(d => { savedOwnCounts[d.deployed_department_id || d.department_id] = (savedOwnCounts[d.deployed_department_id || d.department_id] || 0) + 1 })
+  deployments.filter(d => isVssBadge(d.badge_number)).forEach(d => {
+    const rowConsent = consentRows[`${d.centre}|${d.badge_number}`]
+    if (rowConsent && isAssoDepartment(rowConsent.department)) return
+    savedOwnCounts[d.deployed_department_id || d.department_id] = (savedOwnCounts[d.deployed_department_id || d.department_id] || 0) + 1
+  })
   const localOwnCounts = {}
-  Object.values(consentRows).forEach(r => { if (r.consent_given && r.requested_dept) localOwnCounts[r.requested_dept] = (localOwnCounts[r.requested_dept] || 0) + 1 })
+  Object.values(consentRows).forEach(r => {
+    if (r.consent_given && r.requested_dept && !isAssoDepartment(r.department)) {
+      localOwnCounts[r.requested_dept] = (localOwnCounts[r.requested_dept] || 0) + 1
+    }
+  })
   const deptQuota = computeDeptQuota(myAlloc, savedAllCounts, localOwnCounts, savedOwnCounts)
 
   const vssSewadarMap = {}
@@ -964,35 +978,47 @@ function VssDeployTable({ schedules, scheduleId }) {
   const requestedAll = Object.values(consentRows).filter(r => r.consent_given && r.requested_dept).length
   const inactiveAll = Object.values(consentRows).filter(r => !r.is_active).length
 
-  const renderConsentCell = (r) => (
-    <td style={{ textAlign: 'center' }} data-label="Consent">
-      <select
-        value={r.consent_given ? 'yes' : 'no'}
-        onChange={e => setConsent(`${r.centre}|${r.badge_number}`, e.target.value === 'yes')}
-        disabled={!canEdit || !r.is_active || isRowLocked(r)}
-        title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined)}
-        className="select"
-        style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
-      >
-        <option value="no">No</option>
-        <option value="yes">Yes</option>
-      </select>
-    </td>
-  )
-  const renderBhatiCell = (r) => (
-    <td style={{ textAlign: 'center' }} data-label="Stay at Bhati">
-      <button
-        role="switch"
-        aria-checked={r.stay_at_bhati}
-        onClick={() => toggleBhati(`${r.centre}|${r.badge_number}`)}
-        disabled={!canEdit || !r.consent_given || !r.is_active || isRowLocked(r)}
-        className="toggle"
-        title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : 'Stay at bhati')}
-      >
-        <span className="toggle-knob" />
-      </button>
-    </td>
-  )
+  const renderConsentCell = (r) => {
+    const locked = isRowLocked(r)
+    return (
+      <td style={{ textAlign: 'center' }} data-label="Consent">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem' }}>
+          <select
+            value={r.consent_given ? 'yes' : 'no'}
+            onChange={e => setConsent(`${r.centre}|${r.badge_number}`, e.target.value === 'yes')}
+            disabled={!canEdit || !r.is_active || locked}
+            title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined)}
+            className="select"
+            style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem', minWidth: 52 }}
+          >
+            <option value="no">No</option>
+            <option value="yes">Yes</option>
+          </select>
+          {locked && <span className="pill pill-red" style={{ fontSize: '0.55rem', padding: '0.1rem 0.3rem' }} title={r.finalized ? 'Finalized by the ASO' : 'Already deployed'}>🔒</span>}
+        </div>
+      </td>
+    )
+  }
+  const renderBhatiCell = (r) => {
+    const locked = isRowLocked(r)
+    return (
+      <td style={{ textAlign: 'center' }} data-label="Stay at Bhati">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem' }}>
+          <button
+            role="switch"
+            aria-checked={r.stay_at_bhati}
+            onClick={() => toggleBhati(`${r.centre}|${r.badge_number}`)}
+            disabled={!canEdit || !r.consent_given || !r.is_active || locked}
+            className="toggle"
+            title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : 'Stay at bhati')}
+          >
+            <span className="toggle-knob" />
+          </button>
+          {locked && <span style={{ fontSize: '0.55rem', color: '#dc2626' }} title={r.finalized ? 'Finalized' : 'Deployed'}>🔒</span>}
+        </div>
+      </td>
+    )
+  }
   const renderDaysCell = (r) => {
     const oeLocked = isOeEscortsDept(deptNameOf(r.requested_dept))
     const days = r.available_days_count

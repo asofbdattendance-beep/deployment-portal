@@ -786,17 +786,30 @@ export default function ConsentPage({ schedules, scheduleId }) {
     const counts = {}
     // quota consumption follows the EFFECTIVE department — the ASO's final
     // deployed dept when set, else the requested one (matches the DB)
-    deployments.forEach(d => { counts[d.deployed_department_id || d.department_id] = (counts[d.deployed_department_id || d.department_id] || 0) + 1 })
+    deployments.forEach(d => {
+      // Exclude AREA SECRETARY OFFICE sewadars from quota — they don't consume centre quota
+      const rowConsent = consentRows[`${d.centre}|${d.badge_number}`]
+      if (rowConsent && isAssoDepartment(rowConsent.department)) return
+      counts[d.deployed_department_id || d.department_id] = (counts[d.deployed_department_id || d.department_id] || 0) + 1
+    })
     return counts
-  }, [deployments])
+  }, [deployments, consentRows])
   const savedOwnCounts = useMemo(() => {
     const counts = {}
-    deployments.filter(d => !isVssBadge(d.badge_number)).forEach(d => { counts[d.deployed_department_id || d.department_id] = (counts[d.deployed_department_id || d.department_id] || 0) + 1 })
+    deployments.filter(d => !isVssBadge(d.badge_number)).forEach(d => {
+      const rowConsent = consentRows[`${d.centre}|${d.badge_number}`]
+      if (rowConsent && isAssoDepartment(rowConsent.department)) return
+      counts[d.deployed_department_id || d.department_id] = (counts[d.deployed_department_id || d.department_id] || 0) + 1
+    })
     return counts
-  }, [deployments])
+  }, [deployments, consentRows])
   const localCounts = useMemo(() => {
     const counts = {}
-    Object.values(consentRows).forEach(r => { if (r.consent_given && r.requested_dept) counts[r.requested_dept] = (counts[r.requested_dept] || 0) + 1 })
+    Object.values(consentRows).forEach(r => {
+      if (r.consent_given && r.requested_dept && !isAssoDepartment(r.department)) {
+        counts[r.requested_dept] = (counts[r.requested_dept] || 0) + 1
+      }
+    })
     return counts
   }, [consentRows])
   const deptQuota = useMemo(() => computeDeptQuota(myAlloc, savedAllCounts, localCounts, savedOwnCounts), [myAlloc, savedAllCounts, localCounts, savedOwnCounts])
