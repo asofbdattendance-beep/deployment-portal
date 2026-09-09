@@ -146,6 +146,12 @@ function VssDeployTable({ schedules, scheduleId }) {
   // v21 undeployed-only override: opens deployment for VSS sewadars who have not
   // yet been assigned a department; already-deployed VSS stay locked.
   const [undeployedOverrideOpen, setUndeployedOverrideOpen] = useState(false)
+  // v34: an EXPLICIT VSS tri-state force-open (centre_vss_overrides.deployment_open=true)
+  // for this centre. The DB reopens VSS deployment past a centre lock + the deadline
+  // ONLY for this signal (global-only "Auto" still binds lock+deadline), so the UI must
+  // distinguish it from merely inheriting the global switch. Exposed by
+  // get_my_effective_gates.vss_deployment_force_open (v34); local fallback for admins.
+  const [vssDeployForceOpen, setVssDeployForceOpen] = useState(false)
   const [exporting, setExporting] = useState(false)
 
   const myRoot = getRootCentre(centres, myCentre)
@@ -175,6 +181,9 @@ function VssDeployTable({ schedules, scheduleId }) {
       // Keep generic flag at false — regular overrides never reopen VSS
       setOverrideOpen(false)
       setUndeployedOverrideOpen(!!gates?.undeployed_override_open)
+      // v34: explicit VSS tri-state force-open (deployment_open=true) — the DB
+      // reopens VSS deployment past lock+deadline ONLY for this signal.
+      setVssDeployForceOpen(!!gates?.vss_deployment_force_open)
       if (gates && typeof gates.vss_deployment_open === 'boolean') {
         // RPC already hard in v31, but cross-check locally for safety:
         // if RPC is stale / not yet migrated or realtime hasn't propagated,
@@ -186,6 +195,7 @@ function VssDeployTable({ schedules, scheduleId }) {
           const rawOverride = resolveVssOverride(overrides, { rootCentre: myRoot, key: 'deployment_open' })
           const localEffective = effectiveVssDeployment({ overrideValue: rawOverride, globalOpen: !!rawSettings.vss_deployment_open })
           setSettings(s => ({ ...s, vss_deployment_open: localEffective }))
+          if (rawOverride != null) setVssDeployForceOpen(rawOverride === true)
         } catch {
           setSettings(s => ({ ...s, vss_deployment_open: !!gates.vss_deployment_open }))
         }
@@ -203,6 +213,7 @@ function VssDeployTable({ schedules, scheduleId }) {
       } catch { /* RLS or missing — keep null */ }
       const hardEffective = effectiveVssDeployment({ overrideValue: rawOverride, globalOpen })
       setSettings(s => ({ ...s, vss_deployment_open: hardEffective }))
+      if (rawOverride != null) setVssDeployForceOpen(rawOverride === true)
     } catch {
       // Last resort: raw global only
       try {
@@ -806,6 +817,10 @@ function VssDeployTable({ schedules, scheduleId }) {
   // through to canEditDeployment so the variable stays used and the intent is
   // explicit in one place.
   const masterOpen = settings.vss_deployment_open === true
+  // v34: only an EXPLICIT VSS tri-state force-open (deployment_open=true) bypasses
+  // a centre lock + the deadline — mirroring the DB (check_deployment v34 + batch).
+  // Global-only "Auto" (vssDeployForceOpen=false) must NOT bypass: lock + deadline
+  // still bind, exactly like the DB, so the UI never offers edits the DB rejects.
   const canEdit = canEditDeployment({
     editableRole: isEditableRole,
     schedule,
@@ -814,7 +829,7 @@ function VssDeployTable({ schedules, scheduleId }) {
     masterOpen,
     locked,
     overrideOpen, // VSS: always false — ignores generic centre_overrides; only VSS tri-state via masterOpen matters
-    vssOpen: masterOpen, // VSS: the DB trigger block_after_deadline (v30) bypasses lock+deadline when vss_deploy_open_for_centre() is true — frontend must match
+    vssOpen: masterOpen && vssDeployForceOpen, // DB reopens lock+deadline ONLY under an explicit force-open
   })
   editableRef.current = canEdit
   // For VSS, the consent-given relaxation must also not be driven by a
@@ -1292,6 +1307,11 @@ function VssDeployTable({ schedules, scheduleId }) {
         {scheduleDone ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
             <Lock size={16} /> This schedule is done. Editing is disabled.
+          </div>
+        ) : masterOpen && vssDeployForceOpen ? ( // v34: explicit VSS tri-state force-open reopens past lock + deadline — show the green opened banner, NOT the locked/deadline red banners
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#047857', marginBottom: '1rem' }}>
+            <Unlock size={16} />
+            <>VSS deployment has been <strong>specially opened for your centre</strong> by the ASO — VSS consent and deployment are editable even though the deadline has passed and your centre locked deployment. Sewadars the ASO already finalized stay locked.</>
           </div>
         ) : overrideOpen ? ( // VSS FIX: overrideOpen is intentionally always false for VSS (see loadGates) — generic centre_overrides must NOT show a "specially opened" banner for VSS. VSS respects ONLY the VSS-specific effective switch (masterOpen). A stale generic wildcard that keeps regular deployment open would otherwise show this green banner on the VSS page even though VSS is globally closed. This branch is kept structurally so the closed/locked/deadline banners below correctly reflect VSS state; it will never render for VSS.
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#047857', marginBottom: '1rem' }}>
