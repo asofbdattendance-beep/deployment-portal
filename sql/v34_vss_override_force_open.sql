@@ -1,37 +1,57 @@
 -- ============================================================
--- V34: VSS TRI-STATE FORCE-OPEN REOPENS DEPLOYMENT PAST LOCK + DEADLINE
+-- V34: VSS IS GATED SOLELY BY ITS EFFECTIVE SWITCH (LOCK + DEADLINE
+-- DO NOT BIND VSS)
 -- ============================================================
--- Problem: v30 made block_after_deadline() VSS-aware (a centre_vss_overrides
--- row with deployment_open = true bypasses the centre lock + deadline for
--- VSS writes), but the OTHER enforcement gates were never patched. For a
--- LOCKED centre with a PASSED deadline, the VSS tri-state "Open" knob still
--- could NOT reopen VSS deployment because:
+-- Product rule (v30's stated intent, never fully implemented):
+--   "VSS deployment is gated SOLELY by the VSS-specific effective switch
+--    vss_deploy_open_for_centre(centre) — global vss_deployment_open with the
+--    per-centre tri-state applied. A generic centre_overrides row must NOT
+--    reopen VSS."
 --
---   1. check_deployment() (v30) — its generic lock/deadline gate
---      (`IF NOT v_open THEN ... locked ... deadline ...`) only honours
---      GENERIC centre_overrides rows; a VSS tri-state row does not set
---      v_open, so it raised "Deployment is locked by this centre" /
---      "Deadline has passed" for every VSS deployment write.
---   2. check_deployment_batch() / check_deployment_batch_upd() (v28) — the
---      AFTER-statement lock/deadline re-checks have the same generic-only gap,
---      so even a single-row VSS deployment UPSERT on a locked centre aborted.
---   3. block_locked_delete() (v22) — deleting a VSS deployment / consent row
---      on a locked centre raised "Deployment is locked" with no VSS escape.
+-- The ASO flips the GLOBAL VSS switches in the Control Panel and expects
+-- centres to be able to mark VSS consent + deployment + add VSS, even after
+-- the deadline and even when a centre has LOCKED deployment. That did not
+-- work because the enforcement gates still made VSS rows subject to the
+-- centre lock and the deadline unless a per-centre tri-state "Open" knob
+-- existed:
 --
--- Fix: VSS tri-state force-open (centre_vss_overrides.deployment_open = true,
--- specific-centre row wins over the '*' wildcard, mirroring v30's
--- v_vss_override lookup) is now treated exactly like a Control Panel override
--- for VSS rows across ALL the closure gates. The global VSS switch stays the
--- master (v31): force-open alone cannot reopen when the switch is off, and
--- status='done' stays terminal. Quotas + restriction rules always bind.
+--   1. block_after_deadline() (v30) — VSS branch bypassed lock + deadline
+--      ONLY under an explicit tri-state row; global-only "Auto" still raised
+--      "Deployment is locked by this centre" / "Deadline has passed".
+--   2. check_deployment() (v30) — generic lock/deadline gate only honoured
+--      GENERIC centre_overrides rows, so EVERY VSS deployment write on a
+--      locked / past-deadline centre died even with a tri-state Open knob.
+--   3. check_deployment_batch() / _upd() (v28) — same generic-only gap in the
+--      AFTER-statement re-checks.
+--   4. block_locked_delete() (v22) — deleting a VSS deployment / consent row
+--      on a locked centre raised "Deployment is locked".
 --
--- Non-destructive; safe to re-run. Run AFTER v30 + v31.
+-- Fix (this file): for VSS rows, ALL of these gates now key off the VSS-
+-- specific EFFECTIVE switch (vss_deploy_open_for_centre = global &&
+-- COALESCE(override, true)):
+--   • switch ON  → VSS consent + deployment fully open for the centre,
+--                  regardless of centre lock or deadline
+--   • switch OFF → "VSS deployment is closed" (v31 hard global: a per-centre
+--                  Open knob cannot reopen it; a per-centre Closed knob can
+--                  force-close)
+--   • status='done' stays terminal; quotas + restriction rules always bind;
+--     ASO-finalized rows stay frozen (v15/v16).
+--
+-- The per-centre tri-state still exists as a FORCE-CLOSE (Auto = follow the
+-- global switch; Closed = force closed). This matches the Control Panel copy
+-- "Auto = follow the global switches & deadline window · Open/Closed = force
+-- for that centre".
+--
+-- Non-destructive; safe to re-run. Run AFTER v30 + v31. Supersedes the
+-- earlier force-open-only draft of this file (re-run to upgrade in place).
 -- ============================================================
 
 -- ------------------------------------------------------------
--- 0. helper — is this centre explicitly force-open for VSS deployment?
---    Mirrors v30's v_vss_override lookup exactly (specific centre row wins
---    over '*', no row => not force-open).
+-- 0. helper — informational: does an explicit VSS tri-state Open knob exist
+--    for this centre? (specific-centre row wins over '*'). Used by
+--    get_my_effective_gates so the UI / SQL console can tell force-open from
+--    Auto-inherit. NOT required for the gates below (they use the effective
+--    switch), but kept for transparency + the frontend banner distinction.
 -- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.vss_deployment_force_open(p_centre text)
 RETURNS boolean
@@ -51,7 +71,129 @@ AS $$
 $$;
 
 -- ------------------------------------------------------------
--- 1. check_deployment — VSS force-open skips the generic lock/deadline gate
+-- 1. block_after_deadline — VSS rows gated ONLY by the effective switch;
+--    lock + deadline do NOT bind VSS.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.block_after_deadline()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_status text;
+  v_deadline timestamptz;
+  v_is_vss boolean;
+  v_override boolean;
+  v_undeployed boolean;
+  v_open boolean;
+  v_dept uuid := NULL;
+  v_old_dept uuid := NULL;
+  v_vss_open boolean;
+BEGIN
+  IF public.get_portal_user_role() IN ('aso', 'super_admin') THEN
+    RETURN NEW;
+  END IF;
+
+  IF TG_RELID = 'public.deployments'::regclass THEN
+    EXECUTE 'SELECT COALESCE(($1).deployed_department_id, ($1).department_id)'
+      USING NEW INTO v_dept;
+    IF TG_OP <> 'INSERT' THEN
+      EXECUTE 'SELECT ($1).department_id' USING OLD INTO v_old_dept;
+    END IF;
+  END IF;
+
+  v_override := CASE
+    WHEN TG_RELID = 'public.deployments'::regclass
+      THEN public.is_centre_override_open(NEW.schedule_id, NEW.centre, v_dept)
+    ELSE public.is_any_centre_override_open(NEW.schedule_id, NEW.centre)
+  END;
+  v_undeployed := public.is_centre_undeployed_override_open(NEW.schedule_id, NEW.centre);
+  v_open := v_override OR v_undeployed;
+
+  -- VSS vs regular: determine which population this row is
+  v_is_vss := NEW.badge_number ILIKE 'VS%'
+              OR EXISTS (SELECT 1 FROM public.vss_sewadars vs WHERE vs.badge_number = NEW.badge_number);
+
+  -- UNDEPLOYED-ONLY already-deployed freeze (kept for both populations)
+  IF v_undeployed THEN
+    IF TG_RELID = 'public.deployments'::regclass THEN
+      IF NOT v_override THEN
+        IF TG_OP = 'INSERT' THEN
+          IF EXISTS (
+            SELECT 1 FROM public.deployments d
+            WHERE d.schedule_id = NEW.schedule_id AND d.centre = NEW.centre
+              AND d.badge_number = NEW.badge_number AND d.department_id IS NOT NULL
+          ) THEN
+            RAISE EXCEPTION 'Already deployed — locked under this override';
+          END IF;
+        ELSIF v_old_dept IS NOT NULL THEN
+          RAISE EXCEPTION 'Already deployed — locked under this override';
+        END IF;
+      END IF;
+    ELSE
+      IF NOT public.is_any_normal_override_open(NEW.schedule_id, NEW.centre) THEN
+        IF EXISTS (
+          SELECT 1 FROM public.deployments d
+          WHERE d.schedule_id = NEW.schedule_id AND d.centre = NEW.centre
+            AND d.badge_number = NEW.badge_number AND d.department_id IS NOT NULL
+        ) THEN
+          RAISE EXCEPTION 'Already deployed — locked under this override';
+        END IF;
+      END IF;
+    END IF;
+  END IF;
+
+  -- VSS: gated SOLELY by the VSS-specific effective switch. When the switch
+  -- is ON, the centre lock and the deadline do NOT bind VSS — the ASO opening
+  -- VSS deployment reopens it for the centre (v30's stated intent). When it
+  -- is OFF, raise closed (v31 hard global: a per-centre Open knob cannot
+  -- reopen it). status='done' stays terminal below.
+  IF v_is_vss THEN
+    v_vss_open := public.vss_deploy_open_for_centre(NEW.centre);
+    IF NOT v_vss_open THEN
+      RAISE EXCEPTION 'VSS deployment is closed';
+    END IF;
+  ELSE
+    -- Regular sewadars: original logic — generic override bypasses lock/switch/deadline
+    IF NOT v_open THEN
+      IF public.is_centre_locked(NEW.schedule_id, NEW.centre) THEN
+        RAISE EXCEPTION 'Deployment is locked by this centre — only ASO / Super Admin can change it';
+      END IF;
+      IF NOT public.get_sewadar_deployment_open() THEN
+        RAISE EXCEPTION 'Sewadar deployment is closed';
+      END IF;
+    END IF;
+  END IF;
+
+  SELECT status, deadline INTO v_status, v_deadline FROM public.deployment_schedules WHERE id = NEW.schedule_id;
+  IF v_status = 'done' THEN
+    RAISE EXCEPTION 'This schedule is done — editing disabled';
+  END IF;
+
+  -- Deadline: binds regular rows (unless a generic override is open); VSS rows
+  -- are already gated by the effective switch above.
+  IF NOT v_is_vss AND NOT v_open AND v_deadline IS NOT NULL AND now() > v_deadline THEN
+    RAISE EXCEPTION 'Deadline has passed — editing disabled';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_block_after_deadline ON public.sewadar_consents;
+CREATE TRIGGER trg_block_after_deadline
+  BEFORE INSERT OR UPDATE ON public.sewadar_consents
+  FOR EACH ROW EXECUTE FUNCTION public.block_after_deadline();
+
+DROP TRIGGER IF EXISTS trg_block_after_deadline_deploy ON public.deployments;
+CREATE TRIGGER trg_block_after_deadline_deploy
+  BEFORE INSERT OR UPDATE ON public.deployments
+  FOR EACH ROW EXECUTE FUNCTION public.block_after_deadline();
+
+-- ------------------------------------------------------------
+-- 2. check_deployment — VSS rows skip the generic lock/deadline gate; the VSS
+--    branch below still raises 'VSS deployment is closed' when the switch is off.
 -- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.check_deployment()
 RETURNS trigger
@@ -73,9 +215,7 @@ DECLARE
   v_override boolean;
   v_undeployed boolean;
   v_open boolean;
-  v_vss_force boolean;
   v_vss_open boolean;
-  v_vss_override boolean;
 BEGIN
   v_role := public.get_portal_user_role();
   v_is_admin := v_role IN ('aso', 'super_admin');
@@ -101,14 +241,6 @@ BEGIN
     v_undeployed := public.is_centre_undeployed_override_open(NEW.schedule_id, NEW.centre);
     v_open := v_override OR v_undeployed;
 
-    -- VSS tri-state force-open (deployment_open = true) reopens VSS deployment
-    -- past a centre lock + the deadline — the same signal block_after_deadline
-    -- (v30) already honours. The global VSS switch stays the master (v31):
-    -- if it is off, the VSS branch below still raises 'VSS deployment is closed'.
-    v_vss_force := (NEW.badge_number ILIKE 'VS%'
-                    OR EXISTS (SELECT 1 FROM public.vss_sewadars vs WHERE vs.badge_number = NEW.badge_number))
-                   AND public.vss_deployment_force_open(NEW.centre);
-
     IF v_undeployed AND NOT v_override THEN
       IF TG_OP = 'INSERT' THEN
         IF EXISTS (
@@ -123,7 +255,14 @@ BEGIN
       END IF;
     END IF;
 
-    IF NOT (v_open OR v_vss_force) THEN
+    -- VSS rows skip the generic lock + deadline gate — they are gated by the
+    -- VSS-specific effective switch in the VSS branch below (which raises
+    -- 'VSS deployment is closed' when the switch is off). status='done'
+    -- stays terminal.
+    v_is_vss := NEW.badge_number ILIKE 'VS%'
+                OR EXISTS (SELECT 1 FROM public.vss_sewadars vs WHERE vs.badge_number = NEW.badge_number);
+
+    IF NOT (v_open OR v_is_vss) THEN
       IF public.is_centre_locked(NEW.schedule_id, NEW.centre) THEN
         RAISE EXCEPTION 'Deployment is locked by this centre — only ASO / Super Admin can change it';
       END IF;
@@ -161,13 +300,6 @@ BEGIN
      ORDER BY CASE WHEN o.centre = '*' THEN 1 ELSE 0 END LIMIT 1),
     public.get_vss_deployment_open()
   ) INTO v_vss_open;
-  -- For consent, we need to know if VSS is open (effective) OR if generic override is open for that vss cohort?
-  -- Keep original: generic v_open relaxes consent for VSS too, but we now make VSS consent respect VSS switch first.
-  -- If VSS switch is open (effective), consent may be No and still deploy under override — handled below.
-  -- Determine if we are in an override-like state for consent:
-  -- For VSS, overrideDeploy = v_vss_open OR (v_open AND v_is_vss) ? No — just v_vss_open true means VSS is open via tri-state.
-  -- But generic override should NOT relax VSS consent either — keep consistent with block_after_deadline.
-  -- So for VSS, use v_vss_open as the "open" that relaxes consent; for regular, use v_open.
   IF v_is_vss THEN
     IF NOT v_consent.consent_given AND NOT (v_vss_open OR v_is_admin) THEN
       RAISE EXCEPTION 'Consent not given for this sewadar';
@@ -182,7 +314,7 @@ BEGIN
               OR EXISTS (SELECT 1 FROM public.vss_sewadars vs WHERE vs.badge_number = NEW.badge_number);
 
   IF v_is_vss THEN
-    -- VSS switch: must be open via VSS tri-state, not generic
+    -- VSS switch: must be open via the VSS-specific effective switch
     SELECT COALESCE(
       (SELECT o.deployment_open FROM public.centre_vss_overrides o
        WHERE o.centre IN (public.get_root_centre(NEW.centre), '*')
@@ -275,9 +407,10 @@ CREATE TRIGGER trg_check_deployment
   FOR EACH ROW EXECUTE FUNCTION public.check_deployment();
 
 -- ------------------------------------------------------------
--- 2. check_deployment_batch / check_deployment_batch_upd — the AFTER-statement
---    lock/deadline re-checks must treat a VSS force-open centre as override-open.
---    (Quota + done checks unchanged.)
+-- 3. check_deployment_batch / _upd — the AFTER-statement lock/deadline
+--    re-checks exempt VSS rows entirely (the switch is enforced row-level in
+--    check_deployment / block_after_deadline before the statement completes).
+--    Quota + done checks unchanged.
 -- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.check_deployment_batch()
 RETURNS trigger
@@ -308,7 +441,7 @@ BEGIN
   LOOP
     IF NOT v_is_admin THEN
       -- a locked centre cannot deploy unless the Control Panel opened it
-      -- (or the VSS tri-state force-open knob reopened VSS for that centre)
+      -- (or the row is a VSS row — VSS is gated solely by its effective switch)
       IF EXISTS (
         SELECT 1 FROM new_rows nr
         WHERE nr.schedule_id = r.schedule_id
@@ -316,10 +449,8 @@ BEGIN
           AND NOT (
             public.is_centre_override_open(r.schedule_id, nr.centre, r.dept_id)
             OR public.is_centre_undeployed_override_open(r.schedule_id, nr.centre)
-            OR (
-              (nr.badge_number ILIKE 'VS%' OR EXISTS (SELECT 1 FROM public.vss_sewadars vs WHERE vs.badge_number = nr.badge_number))
-              AND public.vss_deployment_force_open(nr.centre)
-            )
+            OR nr.badge_number ILIKE 'VS%'
+            OR EXISTS (SELECT 1 FROM public.vss_sewadars vs WHERE vs.badge_number = nr.badge_number)
           )
           AND public.is_centre_locked(r.schedule_id, nr.centre)
       ) THEN
@@ -333,10 +464,8 @@ BEGIN
           AND NOT (
             public.is_centre_override_open(r.schedule_id, nr.centre, r.dept_id)
             OR public.is_centre_undeployed_override_open(r.schedule_id, nr.centre)
-            OR (
-              (nr.badge_number ILIKE 'VS%' OR EXISTS (SELECT 1 FROM public.vss_sewadars vs WHERE vs.badge_number = nr.badge_number))
-              AND public.vss_deployment_force_open(nr.centre)
-            )
+            OR nr.badge_number ILIKE 'VS%'
+            OR EXISTS (SELECT 1 FROM public.vss_sewadars vs WHERE vs.badge_number = nr.badge_number)
           )
       ) THEN
         SELECT status, deadline INTO v_sched_status, v_deadline FROM public.deployment_schedules WHERE id = r.schedule_id;
@@ -410,7 +539,7 @@ BEGIN
   LOOP
     IF NOT v_is_admin THEN
       -- a locked centre cannot deploy unless the Control Panel opened it
-      -- (or the VSS tri-state force-open knob reopened VSS for that centre)
+      -- (or the row is a VSS row — VSS is gated solely by its effective switch)
       IF EXISTS (
         SELECT 1 FROM new_rows nr
         WHERE nr.schedule_id = r.schedule_id
@@ -418,10 +547,8 @@ BEGIN
           AND NOT (
             public.is_centre_override_open(r.schedule_id, nr.centre, r.dept_id)
             OR public.is_centre_undeployed_override_open(r.schedule_id, nr.centre)
-            OR (
-              (nr.badge_number ILIKE 'VS%' OR EXISTS (SELECT 1 FROM public.vss_sewadars vs WHERE vs.badge_number = nr.badge_number))
-              AND public.vss_deployment_force_open(nr.centre)
-            )
+            OR nr.badge_number ILIKE 'VS%'
+            OR EXISTS (SELECT 1 FROM public.vss_sewadars vs WHERE vs.badge_number = nr.badge_number)
           )
           AND public.is_centre_locked(r.schedule_id, nr.centre)
       ) THEN
@@ -435,10 +562,8 @@ BEGIN
           AND NOT (
             public.is_centre_override_open(r.schedule_id, nr.centre, r.dept_id)
             OR public.is_centre_undeployed_override_open(r.schedule_id, nr.centre)
-            OR (
-              (nr.badge_number ILIKE 'VS%' OR EXISTS (SELECT 1 FROM public.vss_sewadars vs WHERE vs.badge_number = nr.badge_number))
-              AND public.vss_deployment_force_open(nr.centre)
-            )
+            OR nr.badge_number ILIKE 'VS%'
+            OR EXISTS (SELECT 1 FROM public.vss_sewadars vs WHERE vs.badge_number = nr.badge_number)
           )
       ) THEN
         SELECT status, deadline INTO v_sched_status, v_deadline FROM public.deployment_schedules WHERE id = r.schedule_id;
@@ -502,8 +627,9 @@ CREATE TRIGGER trg_check_deployment_batch_upd
   FOR EACH STATEMENT EXECUTE FUNCTION public.check_deployment_batch_upd();
 
 -- ------------------------------------------------------------
--- 3. block_locked_delete — VSS force-open allows deleting VSS deployment /
---    consent rows on a locked centre (still blocked for regular rows).
+-- 4. block_locked_delete — VSS rows are exempt from the lock raise when the
+--    VSS-specific effective switch is ON (a centre may clean up its own VSS
+--    deployment / consent rows on a locked centre). Regular rows unchanged.
 -- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.block_locked_delete()
 RETURNS trigger
@@ -515,7 +641,7 @@ DECLARE
   v_override boolean;
   v_undeployed boolean;
   v_old_dept uuid := NULL;
-  v_vss_force boolean := false;
+  v_vss_exempt boolean := false;
 BEGIN
   -- ASO / Super Admin may always clean up
   IF public.get_portal_user_role() IN ('aso', 'super_admin') THEN
@@ -534,18 +660,17 @@ BEGIN
   END IF;
   v_undeployed := public.is_centre_undeployed_override_open(OLD.schedule_id, OLD.centre);
 
-  -- VSS tri-state force-open (deployment_open = true) lets a centre clean up
-  -- its own VSS deployment / consent rows on a locked centre — same signal
-  -- block_after_deadline / check_deployment now honour. department_incharges
+  -- VSS rows are exempt from the lock raise while the VSS effective switch is
+  -- ON — the ASO opening VSS reopens it for the centre. department_incharges
   -- has no badge_number column, so only deployments / sewadar_consents qualify.
   IF TG_RELID IN ('public.deployments'::regclass, 'public.sewadar_consents'::regclass) THEN
     EXECUTE 'SELECT (($1).badge_number ILIKE ''VS%''
                      OR EXISTS (SELECT 1 FROM public.vss_sewadars vs WHERE vs.badge_number = ($1).badge_number))
-                     AND public.vss_deployment_force_open(($1).centre)'
-      USING OLD INTO v_vss_force;
+                     AND public.vss_deploy_open_for_centre(($1).centre)'
+      USING OLD INTO v_vss_exempt;
   END IF;
 
-  IF NOT (v_override OR v_undeployed OR v_vss_force) AND public.is_centre_locked(OLD.schedule_id, OLD.centre) THEN
+  IF NOT (v_override OR v_undeployed OR v_vss_exempt) AND public.is_centre_locked(OLD.schedule_id, OLD.centre) THEN
     RAISE EXCEPTION 'Deployment is locked by this centre — only ASO / Super Admin can change it';
   END IF;
 
@@ -574,9 +699,8 @@ CREATE TRIGGER trg_block_locked_delete_consent
   FOR EACH ROW EXECUTE FUNCTION public.block_locked_delete();
 
 -- ------------------------------------------------------------
--- 4. get_my_effective_gates — expose the VSS force-open flag so the frontend
---    can show the correct "specially opened" banner / edit gate (global-only
---    "Auto" must NOT bypass lock+deadline; an explicit Open knob must).
+-- 5. get_my_effective_gates — expose the effective VSS switch AND the
+--    informational force-open knob so the frontend can show the right banner.
 -- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.get_my_effective_gates(p_schedule uuid)
 RETURNS jsonb
@@ -622,13 +746,12 @@ $$;
 -- ------------------------------------------------------------
 -- VERIFY (run after executing the above)
 -- ------------------------------------------------------------
--- 1. Force-open helper (specific-centre row wins over '*'):
---    SELECT public.vss_deployment_force_open('SECTOR-15-A');
--- 2. Effective + force-open gates for a centre:
+-- 1. Global switch + effective + force-open for a centre:
 --    SELECT public.vss_deploy_open_for_centre('SECTOR-15-A'),
 --           public.vss_deployment_force_open('SECTOR-15-A');
--- 3. Client gates RPC now includes vss_deployment_force_open:
+-- 2. Client gates RPC (now includes vss_deployment_open / vss_deployment_force_open):
 --    SELECT public.get_my_effective_gates('<schedule uuid>');
--- 4. Scenario proof (locked centre + past deadline + tri-state deployment_open=true
---    + global vss_deployment_open=true): a centre-role VSS deployment INSERT should
---    now succeed (previously 'Deployment is locked by this centre').
+-- 3. Scenario proof (LOCKED centre + PASSED deadline + global vss_deployment_open=true):
+--    a centre-role VSS deployment INSERT / consent UPDATE should now succeed —
+--    previously it raised 'Deployment is locked by this centre' /
+--    'Deadline has passed for this schedule'.

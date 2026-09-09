@@ -817,10 +817,12 @@ function VssDeployTable({ schedules, scheduleId }) {
   // through to canEditDeployment so the variable stays used and the intent is
   // explicit in one place.
   const masterOpen = settings.vss_deployment_open === true
-  // v34: only an EXPLICIT VSS tri-state force-open (deployment_open=true) bypasses
-  // a centre lock + the deadline — mirroring the DB (check_deployment v34 + batch).
-  // Global-only "Auto" (vssDeployForceOpen=false) must NOT bypass: lock + deadline
-  // still bind, exactly like the DB, so the UI never offers edits the DB rejects.
+  // v34: VSS rows are gated SOLELY by the VSS-specific effective switch — when
+  // it is ON, VSS consent + deployment are fully open for the centre regardless
+  // of a centre lock or the deadline (DB: block_after_deadline / check_deployment
+  // / batch / block_locked_delete all key off vss_deploy_open_for_centre). So the
+  // UI bypasses lock + deadline whenever masterOpen (effective switch) is true —
+  // never off a generic override (overrideOpen stays false for VSS).
   const canEdit = canEditDeployment({
     editableRole: isEditableRole,
     schedule,
@@ -828,8 +830,8 @@ function VssDeployTable({ schedules, scheduleId }) {
     done: scheduleDone,
     masterOpen,
     locked,
-    overrideOpen, // VSS: always false — ignores generic centre_overrides; only VSS tri-state via masterOpen matters
-    vssOpen: masterOpen && vssDeployForceOpen, // DB reopens lock+deadline ONLY under an explicit force-open
+    overrideOpen, // VSS: always false — generic centre_overrides must NOT reopen VSS
+    vssOpen: masterOpen, // VSS effective switch ON ⇒ open past lock + deadline
   })
   editableRef.current = canEdit
   // For VSS, the consent-given relaxation must also not be driven by a
@@ -1308,10 +1310,12 @@ function VssDeployTable({ schedules, scheduleId }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
             <Lock size={16} /> This schedule is done. Editing is disabled.
           </div>
-        ) : masterOpen && vssDeployForceOpen ? ( // v34: explicit VSS tri-state force-open reopens past lock + deadline — show the green opened banner, NOT the locked/deadline red banners
+        ) : masterOpen ? ( // v34: VSS effective switch ON ⇒ fully open past lock + deadline — show the green open banner, NOT the locked/deadline red banners
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#047857', marginBottom: '1rem' }}>
             <Unlock size={16} />
-            <>VSS deployment has been <strong>specially opened for your centre</strong> by the ASO — VSS consent and deployment are editable even though the deadline has passed and your centre locked deployment. Sewadars the ASO already finalized stay locked.</>
+            {vssDeployForceOpen
+              ? <>VSS deployment has been <strong>specially opened for your centre</strong> by the ASO — VSS consent and deployment are editable even though the deadline has passed and your centre locked deployment. Sewadars the ASO already finalized stay locked.</>
+              : <>VSS deployment is <strong>OPEN for your centre</strong> — you may mark VSS consent and deployment. Sewadars the ASO already finalized stay locked.</>}
           </div>
         ) : overrideOpen ? ( // VSS FIX: overrideOpen is intentionally always false for VSS (see loadGates) — generic centre_overrides must NOT show a "specially opened" banner for VSS. VSS respects ONLY the VSS-specific effective switch (masterOpen). A stale generic wildcard that keeps regular deployment open would otherwise show this green banner on the VSS page even though VSS is globally closed. This branch is kept structurally so the closed/locked/deadline banners below correctly reflect VSS state; it will never render for VSS.
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#047857', marginBottom: '1rem' }}>
