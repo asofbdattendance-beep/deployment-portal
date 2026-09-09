@@ -86,6 +86,29 @@ export const fetchAll = fetchAllRows
 export const fetchAllFrom = fetchAllRows
 export const fetchPaginated = fetchAllRows
 
+// ASO-dept sewadars (home department = AREA SECRETARY OFFICE) are deployed by
+// the super_admin and never consume a centre's deployment quota (v35 — mirrored
+// DB-side in get_dept_quota_remaining + the batch re-checks). Deployment rows
+// live in one shared table and carry no home-department column, so a page that
+// only holds ONE population's sewadar rows locally (Consent & Deploy = regular
+// sewadars, VSS = vss_sewadars) can't tell an ASO-dept deployment of the OTHER
+// population apart from a normal one — its savedAllCounts would count those
+// rows and inflate the quota bars / block eligible bulk assignments ("Quota
+// full"). This helper returns the full `${centre}|${badge_number}` key set for
+// ASO-dept sewadars across BOTH populations, so any page can exclude their
+// deployment rows regardless of which list it loaded.
+export async function fetchAsoDeptKeys(centres) {
+  if (!centres || !centres.length) return new Set()
+  const keys = new Set()
+  for (const table of ['dp_sewadars', 'vss_sewadars']) {
+    const rows = await fetchAllRows(table, 'centre, badge_number, department', (q) => q.in('centre', centres))
+    ;(rows || []).forEach(r => {
+      if (isAssoDepartment(r.department)) keys.add(`${r.centre}|${r.badge_number}`)
+    })
+  }
+  return keys
+}
+
 // ── DB-side count helper (v22.1) ───────────────────────────────────
 // Returns exact count via PostgREST head:true — NO rows are downloaded.
 // Use for pure-count stats (headers, badges, quota totals) where the rows

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { supabase, fetchSubtreeCentres, fetchAllRows, getRootCentre, eligibleBadgeStatusFilter, isAssoDepartment, fetchPortalSettings, shouldHideFromConsent } from '../lib/supabase'
+import { supabase, fetchSubtreeCentres, fetchAllRows, fetchAsoDeptKeys, getRootCentre, eligibleBadgeStatusFilter, isAssoDepartment, fetchPortalSettings, shouldHideFromConsent } from '../lib/supabase'
 import { computeEditGates, isDeptSelectable, isUndeployedCohort, computeDeptQuota, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, changedConsentFields, consentRowKey, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
@@ -20,6 +20,9 @@ export default function ConsentPage({ schedules, scheduleId }) {
   const [depts, setDepts] = useState([])
   const [allocations, setAllocations] = useState([])
   const [deployments, setDeployments] = useState([])
+  // ASO-dept badge keys (`centre|badge`) across BOTH populations — used to
+  // exclude super_admin-deployed ASO sewadars from quota counts (v35)
+  const [asoKeys, setAsoKeys] = useState(() => new Set())
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [savedAt, setSavedAt] = useState(null)
@@ -110,14 +113,16 @@ export default function ConsentPage({ schedules, scheduleId }) {
     const prevDirty = dirtyRef.current
     try {
       // Supabase max-rows=1000 — paginate every table that can exceed 1000
-      const [sewAll, consAll, deptAll, allocAll, deployAll, prevAll] = await Promise.all([
+      const [sewAll, consAll, deptAll, allocAll, deployAll, prevAll, asoAll] = await Promise.all([
         fetchAllRows('dp_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, gender', (q) => q.or(eligibleBadgeStatusFilter()).in('centre', subtree).order('sewadar_name')),
         fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree)),
         fetchAllRows('deployment_departments', '*', (q) => q.eq('is_active', true).order('name')),
         fetchAllRows('centre_allocations', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
         fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree)),
         fetchAllRows('prev_year_deployments', 'badge_number, prev_department, attendance_reported', null),
+        fetchAsoDeptKeys(subtree),
       ])
+      setAsoKeys(asoAll || new Set())
       const sewadars = (sewAll || []).filter(sw => !shouldHideFromConsent(sw, profile?.role))
       const existing = consAll || []
       const map = {}
@@ -789,20 +794,20 @@ export default function ConsentPage({ schedules, scheduleId }) {
     deployments.forEach(d => {
       // Exclude AREA SECRETARY OFFICE sewadars from quota — they don't consume centre quota
       const rowConsent = consentRows[`${d.centre}|${d.badge_number}`]
-      if (rowConsent && isAssoDepartment(rowConsent.department)) return
+      if (asoKeys.has(`${d.centre}|${d.badge_number}`) || (rowConsent && isAssoDepartment(rowConsent.department))) return
       counts[d.deployed_department_id || d.department_id] = (counts[d.deployed_department_id || d.department_id] || 0) + 1
     })
     return counts
-  }, [deployments, consentRows])
+  }, [deployments, consentRows, asoKeys])
   const savedOwnCounts = useMemo(() => {
     const counts = {}
     deployments.filter(d => !isVssBadge(d.badge_number)).forEach(d => {
       const rowConsent = consentRows[`${d.centre}|${d.badge_number}`]
-      if (rowConsent && isAssoDepartment(rowConsent.department)) return
+      if (asoKeys.has(`${d.centre}|${d.badge_number}`) || (rowConsent && isAssoDepartment(rowConsent.department))) return
       counts[d.deployed_department_id || d.department_id] = (counts[d.deployed_department_id || d.department_id] || 0) + 1
     })
     return counts
-  }, [deployments, consentRows])
+  }, [deployments, consentRows, asoKeys])
   const localCounts = useMemo(() => {
     const counts = {}
     Object.values(consentRows).forEach(r => {

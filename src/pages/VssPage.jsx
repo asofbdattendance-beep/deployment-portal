@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { supabase, fetchSubtreeCentres, fetchAllRows, getRootCentre, fetchPortalSettings, fetchCentres, fetchVssOverrides } from '../lib/supabase'
+import { supabase, fetchSubtreeCentres, fetchAllRows, fetchAsoDeptKeys, getRootCentre, fetchPortalSettings, fetchCentres, fetchVssOverrides } from '../lib/supabase'
 import { computeDeptQuota, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, changedConsentFields, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment, resolveVssOverride, effectiveVssCreation, effectiveVssDeployment } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
@@ -117,6 +117,9 @@ function VssDeployTable({ schedules, scheduleId }) {
   const [depts, setDepts] = useState([])
   const [allocations, setAllocations] = useState([])
   const [deployments, setDeployments] = useState([])
+  // ASO-dept badge keys (`centre|badge`) across BOTH populations — used to
+  // exclude super_admin-deployed ASO sewadars from quota counts (v35)
+  const [asoKeys, setAsoKeys] = useState(() => new Set())
   const [settings, setSettings] = useState({ vss_deployment_open: false })
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -245,13 +248,15 @@ function VssDeployTable({ schedules, scheduleId }) {
     const prevDirty = dirtyRef.current
     try {
       // Supabase max-rows=1000 — paginate every table that can exceed it
-      const [vssAll, consAll, deptAll, allocAll, deployAll] = await Promise.all([
+      const [vssAll, consAll, deptAll, allocAll, deployAll, asoAll] = await Promise.all([
         fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, gender, is_initiated, is_active, remarks, centre, department', (q) => q.in('centre', subtree).order('sewadar_name')),
         fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree)),
         fetchAllRows('deployment_departments', '*', (q) => q.eq('is_active', true).order('name')),
         fetchAllRows('centre_allocations', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
         fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree)),
+        fetchAsoDeptKeys(subtree),
       ])
+      setAsoKeys(asoAll || new Set())
 
       const vss = vssAll || []
       const existing = consAll || []
@@ -853,13 +858,13 @@ function VssDeployTable({ schedules, scheduleId }) {
   deployments.forEach(d => {
     // Exclude AREA SECRETARY OFFICE sewadars from quota — they don't consume centre quota
     const rowConsent = consentRows[`${d.centre}|${d.badge_number}`]
-    if (rowConsent && isAssoDepartment(rowConsent.department)) return
+    if (asoKeys.has(`${d.centre}|${d.badge_number}`) || (rowConsent && isAssoDepartment(rowConsent.department))) return
     savedAllCounts[d.deployed_department_id || d.department_id] = (savedAllCounts[d.deployed_department_id || d.department_id] || 0) + 1
   })
   const savedOwnCounts = {}
   deployments.filter(d => isVssBadge(d.badge_number)).forEach(d => {
     const rowConsent = consentRows[`${d.centre}|${d.badge_number}`]
-    if (rowConsent && isAssoDepartment(rowConsent.department)) return
+    if (asoKeys.has(`${d.centre}|${d.badge_number}`) || (rowConsent && isAssoDepartment(rowConsent.department))) return
     savedOwnCounts[d.deployed_department_id || d.department_id] = (savedOwnCounts[d.deployed_department_id || d.department_id] || 0) + 1
   })
   const localOwnCounts = {}
