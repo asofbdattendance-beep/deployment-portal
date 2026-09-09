@@ -147,9 +147,9 @@ export default function ScanResultPopup({
 
   // ESC + focus trap
   const handleKeyDown = useCallback((e) => {
-    if (e.key === 'Escape' && onClose) {
-      e.stopPropagation()
-      onClose()
+    if (e.key === 'Escape') {
+      if (canBackdropClose) onClose?.()
+      return
     }
     if (e.key === 'Tab' && mounted) {
       const root = overlayRef.current
@@ -161,7 +161,7 @@ export default function ScanResultPopup({
       if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() }
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
     }
-  }, [mounted, onClose])
+  }, [mounted, onClose, canBackdropClose])
 
   useEffect(() => {
     if (!mounted) return

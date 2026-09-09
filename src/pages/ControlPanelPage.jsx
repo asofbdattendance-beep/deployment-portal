@@ -365,18 +365,22 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
   }
 
   const setVssKnob = async (centre, key, value) => {
+    // VSS overrides are keyed by ROOT centre — SC_SP children share their
+    // parent CENTRE's quota so the override must be stored under the root.
+    // Resolve here so a child-centre selection never writes an orphan row.
+    const rootCentre = getRootCentre(centres, centre) || centre
     // send ONLY the knobs — spreading the stored row would re-send id/timestamps
-    const current = vssOverrides.find(o => o.centre === centre) || {}
+    const current = vssOverrides.find(o => o.centre === rootCentre) || {}
     setBusy(true)
     try {
-      await setVssOverride(centre, {
+      await setVssOverride(rootCentre, {
         creation_open: current.creation_open ?? null,
         deployment_open: current.deployment_open ?? null,
         [key]: value,
       }, profile?.name || null)
       setVssOverrides(await fetchVssOverrides())
-      audit('vss_override', { centre, [key]: value })
-      toast.success(`VSS ${key.replace('_open', '').replace('_', ' ')} ${value === null ? 'reset to inherit' : value ? 'forced OPEN' : 'forced CLOSED'} — ${centre === OVERRIDE_ALL_CENTRES ? 'all centres' : centre}`)
+      audit('vss_override', { centre: rootCentre, [key]: value })
+      toast.success(`VSS ${key.replace('_open', '').replace('_', ' ')} ${value === null ? 'reset to inherit' : value ? 'forced OPEN' : 'forced CLOSED'} — ${rootCentre === OVERRIDE_ALL_CENTRES ? 'all centres' : rootCentre}`)
     } catch (err) {
       toast.error(err.message || 'Could not update VSS override')
     } finally { setBusy(false) }

@@ -176,8 +176,19 @@ function VssDeployTable({ schedules, scheduleId }) {
       setOverrideOpen(false)
       setUndeployedOverrideOpen(!!gates?.undeployed_override_open)
       if (gates && typeof gates.vss_deployment_open === 'boolean') {
-        // RPC already hard — use it directly
-        setSettings(s => ({ ...s, vss_deployment_open: !!gates.vss_deployment_open }))
+        // RPC already hard in v31, but cross-check locally for safety:
+        // if RPC is stale / not yet migrated or realtime hasn't propagated,
+        // the local hard gate is authoritative. Generic centre_overrides must
+        // NOT reopen VSS (hard gate: global && (override ?? true)).
+        try {
+          const rawSettings = await fetchPortalSettings()
+          const overrides = await fetchVssOverrides()
+          const rawOverride = resolveVssOverride(overrides, { rootCentre: myRoot, key: 'deployment_open' })
+          const localEffective = effectiveVssDeployment({ overrideValue: rawOverride, globalOpen: !!rawSettings.vss_deployment_open })
+          setSettings(s => ({ ...s, vss_deployment_open: localEffective }))
+        } catch {
+          setSettings(s => ({ ...s, vss_deployment_open: !!gates.vss_deployment_open }))
+        }
         return
       }
     } catch { /* RPC missing — fall back to local hard compute */ }

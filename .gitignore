@@ -10,3 +10,10 @@ coverage
 certs/
 public/mkcert-ca.pem
 .env*
+
+# Local backups, caches, temp
+backups/
+scripts/__pycache__/
+.playwright-mcp/
+supabase/.temp/
+Mmemory bank - dumo/
