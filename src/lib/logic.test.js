@@ -323,6 +323,28 @@ describe('canEditDeployment override (v21)', () => {
   })
 })
 
+describe('canEditDeployment vssOpen (VSS bypass lock+deadline)', () => {
+  const schedule = { status: 'open' }
+  it('vssOpen bypasses deadline passed', () => {
+    expect(canEditDeployment({ editableRole: true, schedule, deadlinePassed: true, done: false, masterOpen: true, vssOpen: true })).toBe(true)
+  })
+  it('vssOpen bypasses centre lock', () => {
+    expect(canEditDeployment({ editableRole: true, schedule, deadlinePassed: false, done: false, masterOpen: true, locked: true, vssOpen: true })).toBe(true)
+  })
+  it('vssOpen bypasses both lock and deadline', () => {
+    expect(canEditDeployment({ editableRole: true, schedule, deadlinePassed: true, done: false, masterOpen: true, locked: true, vssOpen: true })).toBe(true)
+  })
+  it('vssOpen never reopens a done schedule', () => {
+    expect(canEditDeployment({ editableRole: true, schedule: { status: 'done' }, deadlinePassed: false, done: true, masterOpen: true, vssOpen: true })).toBe(false)
+  })
+  it('vssOpen never reopens a non-editable role', () => {
+    expect(canEditDeployment({ editableRole: false, schedule, deadlinePassed: true, done: false, masterOpen: true, vssOpen: true })).toBe(false)
+  })
+  it('vssOpen=false still blocks normally (back-compat)', () => {
+    expect(canEditDeployment({ editableRole: true, schedule, deadlinePassed: true, done: false, masterOpen: true, locked: true, vssOpen: false })).toBe(false)
+  })
+})
+
 describe('computeEditGates (v21 override scope)', () => {
   const schedule = { status: 'open' }
   const base = { isEditableRole: true, schedule, scheduleDone: false, deadlinePassed: false, locked: false, masterOpen: true }

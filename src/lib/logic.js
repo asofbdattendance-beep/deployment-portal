@@ -202,12 +202,17 @@ export function vssEligibilityReasons(consentRow, vssSewadar, dept) {
 
 /* ─── Editing gating ─── */
 
-export function canEditDeployment({ editableRole, schedule, deadlinePassed, done, masterOpen, locked = false, overrideOpen = false }) {
+export function canEditDeployment({ editableRole, schedule, deadlinePassed, done, masterOpen, locked = false, overrideOpen = false, vssOpen = false }) {
   if (!editableRole || !schedule) return false
   if (schedule.status !== 'open' || done) return false
   // v21: the super_admin's Control Panel can reopen a centre even while the
   // switch is off / deadline passed / centre locked ('done' stays terminal)
   if (overrideOpen) return true
+  // VSS: the DB trigger block_after_deadline (v30) bypasses lock + deadline
+  // for VSS rows when vss_deploy_open_for_centre() is true (global switch ON
+  // with override applied). The frontend must match — otherwise the UI shows
+  // "locked" / "deadline passed" while the DB would allow the write.
+  if (vssOpen) return true
   if (deadlinePassed || locked) return false
   return masterOpen !== false
 }

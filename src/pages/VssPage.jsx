@@ -814,6 +814,7 @@ function VssDeployTable({ schedules, scheduleId }) {
     masterOpen,
     locked,
     overrideOpen, // VSS: always false — ignores generic centre_overrides; only VSS tri-state via masterOpen matters
+    vssOpen: masterOpen, // VSS: the DB trigger block_after_deadline (v30) bypasses lock+deadline when vss_deploy_open_for_centre() is true — frontend must match
   })
   editableRef.current = canEdit
   // For VSS, the consent-given relaxation must also not be driven by a
