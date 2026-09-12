@@ -113,6 +113,27 @@ export function computeDeptQuota(allocations, savedAll, localOwn, savedOwn) {
   return out
 }
 
+/* ─── vss_operator quota scope ───
+   The operator has no home centre: the quota root follows the centre
+   filter (a picked centre resolves to its CENTRE root); 'All centres'
+   (null root) unions every in-scope centre's allocations so all allocated
+   departments stay offered (bars are approximate in that view). Shared by
+   ConsentPage + VssPage so the two pages cannot drift. */
+export function resolveOperatorQuotaRoot({ isVssOperator, filterCentre, centres }) {
+  if (!isVssOperator) return null
+  if (!filterCentre || filterCentre === 'all') return null
+  return getRootCentre(centres, filterCentre)
+}
+
+export function selectQuotaAllocations({ allocations, quotaRoot, isVssOperator, subtree }) {
+  const list = allocations || []
+  if (isVssOperator && !quotaRoot) {
+    const scope = subtree || []
+    return list.filter(a => scope.includes(a.centre))
+  }
+  return list.filter(a => a.centre === quotaRoot)
+}
+
 // VSS badges are prefixed with "VS" (e.g. VSFB5971GB4629)
 export function isVssBadge(badge) {
   return typeof badge === 'string' && /^VS/i.test(badge)

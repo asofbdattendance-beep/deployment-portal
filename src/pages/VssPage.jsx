@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, fetchAllRows, fetchAsoDeptKeys, getRootCentre, fetchPortalSettings, fetchCentres, fetchVssOverrides } from '../lib/supabase'
-import { computeDeptQuota, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, changedConsentFields, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment, resolveVssOverride, effectiveVssCreation, effectiveVssDeployment } from '../lib/logic'
+import { computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, changedConsentFields, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment, resolveVssOverride, effectiveVssCreation, effectiveVssDeployment } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import DeptDropdown from '../components/DeptDropdown'
@@ -168,7 +168,7 @@ function VssDeployTable({ schedules, scheduleId }) {
   // vss_operator has no home centre — the quota/gate root follows the centre
   // filter (a picked centre resolves to its CENTRE root); 'All centres' uses
   // the global VSS switch with no per-centre root
-  const operatorFilterRoot = isVssOperator && filterCentre !== 'all' ? getRootCentre(centres, filterCentre) : null
+  const operatorFilterRoot = resolveOperatorQuotaRoot({ isVssOperator, filterCentre, centres })
   const gateRoot = isVssOperator ? operatorFilterRoot : myRoot
   // CENTRE → SC_SP grouped ordering for the operator's all-centre filter
   // (CENTREs A–Z, each followed by its SC_SPs A–Z; orphans appended)
@@ -914,16 +914,24 @@ function VssDeployTable({ schedules, scheduleId }) {
   // exact bars; 'All centres' unions every in-scope centre's allocations so all
   // allocated departments stay offered (bars are approximate in that view)
   const quotaRoot = isVssOperator ? operatorFilterRoot : myRoot
-  const myAlloc = (isVssOperator && !quotaRoot)
-    ? allocations.filter(a => subtree.includes(a.centre))
-    : allocations.filter(a => a.centre === quotaRoot)
+  const myAlloc = selectQuotaAllocations({ allocations, quotaRoot, isVssOperator, subtree })
   // only departments the superadmin actually gave a quota to are offered/highlighted
   const allocatedQuota = myAlloc.filter(a => (a.max_count || 0) > 0)
   // VSS can only be deployed to departments the ASO opened for VSS (include_vss)
   // AND gave a quota — quota bars / dropdowns show only those.
   const vssAllocatedQuota = allocatedQuota.filter(a => depts.find(d => d.id === a.department_id)?.include_vss)
+  // Operator filtered view: narrow counts to the picked CENTRE's subtree so
+  // bars stay exact; 'All centres' keeps the global union (approximate).
+  const vssScopeSet = (() => {
+    if (!(isVssOperator && quotaRoot)) return null
+    const set = new Set()
+    ;(centres || []).forEach(c => { if (getRootCentre(centres, c.name) === quotaRoot) set.add(c.name) })
+    set.add(quotaRoot)
+    return set
+  })()
   const savedAllCounts = {}
   deployments.forEach(d => {
+    if (vssScopeSet && !vssScopeSet.has(d.centre)) return
     // Exclude AREA SECRETARY OFFICE sewadars from quota — they don't consume centre quota
     const rowConsent = consentRows[`${d.centre}|${d.badge_number}`]
     if (asoKeys.has(`${d.centre}|${d.badge_number}`) || (rowConsent && isAssoDepartment(rowConsent.department))) return
@@ -931,12 +939,14 @@ function VssDeployTable({ schedules, scheduleId }) {
   })
   const savedOwnCounts = {}
   deployments.filter(d => isVssBadge(d.badge_number)).forEach(d => {
+    if (vssScopeSet && !vssScopeSet.has(d.centre)) return
     const rowConsent = consentRows[`${d.centre}|${d.badge_number}`]
     if (asoKeys.has(`${d.centre}|${d.badge_number}`) || (rowConsent && isAssoDepartment(rowConsent.department))) return
     savedOwnCounts[d.deployed_department_id || d.department_id] = (savedOwnCounts[d.deployed_department_id || d.department_id] || 0) + 1
   })
   const localOwnCounts = {}
   Object.values(consentRows).forEach(r => {
+    if (vssScopeSet && !vssScopeSet.has(r.centre)) return
     if (r.consent_given && r.requested_dept && !isAssoDepartment(r.department)) {
       localOwnCounts[r.requested_dept] = (localOwnCounts[r.requested_dept] || 0) + 1
     }

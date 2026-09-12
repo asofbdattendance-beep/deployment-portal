@@ -107,7 +107,9 @@ function Dashboard() {
           <span className="role-badge" style={{ background: ROLE_COLORS[profile?.role] || '#888' }}>
             {ROLE_LABELS[profile?.role] || profile?.role}
           </span>
-          {profile?.centre && <span className="header-centre">({profile.centre})</span>}
+          {profile?.role === 'vss_operator'
+            ? <span className="header-centre">(All centres)</span>
+            : profile?.centre && <span className="header-centre">({profile.centre})</span>}
           <button onClick={signOut} className="btn btn-ghost signout-btn">
             Sign out
           </button>

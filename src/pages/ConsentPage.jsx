@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, fetchCentres, fetchAllRows, fetchAsoDeptKeys, getRootCentre, eligibleBadgeStatusFilter, isAssoDepartment, fetchPortalSettings, shouldHideFromConsent } from '../lib/supabase'
-import { computeEditGates, isDeptSelectable, isUndeployedCohort, computeDeptQuota, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, changedConsentFields, consentRowKey, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
+import { computeEditGates, isDeptSelectable, isUndeployedCohort, computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, changedConsentFields, consentRowKey, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import ConsentDashboard from '../components/ConsentDashboard'
@@ -73,7 +73,8 @@ export default function ConsentPage({ schedules, scheduleId }) {
   // vss_operator has no home centre — the quota root follows the centre
   // filter (a picked centre resolves to its CENTRE root); 'All centres' uses
   // a null root meaning "union every in-scope centre" (mirrors VssPage).
-  const operatorFilterRoot = isVssOperator && filterCentre !== 'all' ? getRootCentre(centres, filterCentre) : null
+  // Shared helpers in lib/logic.js keep the two pages from drifting.
+  const operatorFilterRoot = resolveOperatorQuotaRoot({ isVssOperator, filterCentre, centres })
   const quotaRoot = isVssOperator ? operatorFilterRoot : myRoot
 
   useEffect(() => {
@@ -313,7 +314,12 @@ export default function ConsentPage({ schedules, scheduleId }) {
 
       // Department incharges (one per CENTRE × department). Non-fatal fetches:
       // if the v12/v13 migrations haven't been run yet the page still loads fine.
-      try {
+      // vss_operator never edits incharges (RLS has no operator arm) — skip
+      // the home-centre fetch so nit2 state never leaks into the all-centre view.
+      if (isVssOperator) {
+        setIncharges({})
+        savedInchargesRef.current = {}
+      } else try {
         const { data: incData } = await supabase.from('department_incharges')
           .select('*').eq('schedule_id', selectedScheduleId).eq('centre', myRoot)
         const incMap = {}
@@ -323,7 +329,11 @@ export default function ConsentPage({ schedules, scheduleId }) {
         setIncharges(incMap)
         savedInchargesRef.current = { ...incMap }
       } catch { /* table missing — incharges stay empty until migrated */ }
-      try {
+      // The operator has no single lock — never show the home centre's lock.
+      // (Mirrors VssPage; the lock button stays hidden for the operator.)
+      if (isVssOperator) {
+        setLocked(false)
+      } else try {
         const { data: lockRow } = await supabase.from('centre_locks')
           .select('*').eq('schedule_id', selectedScheduleId).eq('centre', myRoot).maybeSingle()
         setLocked(!!lockRow)
@@ -341,7 +351,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
       // a failed refresh must not pretend in-flight edits were saved
       if (!prevDirty) dirtyRef.current = false
     } finally { setLoading(false) }
-  }, [selectedScheduleId, subtree, myRoot, toast, profile?.role])
+  }, [selectedScheduleId, subtree, myRoot, toast, profile?.role, isVssOperator])
 
   useEffect(() => { loadData() }, [loadData])
 
@@ -800,51 +810,65 @@ export default function ConsentPage({ schedules, scheduleId }) {
     anyOverrideOpen: anyOverrideOpen || isVssOperator,
   })
   editableRef.current = consentEditable || deploymentEditable
-  anyOverrideOpenRef.current = anyOverrideOpen
+  anyOverrideOpenRef.current = anyOverrideOpen || isVssOperator
   undeployedOverrideOpenRef.current = undeployedOverrideOpen
+  // Operator-effective override scope: the operator bypasses like super_admin,
+  // so per-row gating must not use the caller-centre (nit2) override list.
+  // null = all departments open for the operator.
+  const effAnyOverrideOpen = anyOverrideOpen || isVssOperator
+  const effOpenDepartments = isVssOperator ? null : openDepartments
 
   // Derived data is memoized — the table re-renders on every search keystroke
   // / every autosave, and these are O(rows) / O(rows × depts) scans.
   // vss_operator quota scope: a picked centre resolves to its CENTRE root for
   // exact bars; 'All centres' unions every in-scope centre's allocations so all
   // allocated departments stay offered (bars are approximate in that view).
-  const myAlloc = useMemo(() => (
-    isVssOperator && !quotaRoot
-      ? allocations.filter(a => subtree.includes(a.centre))
-      : allocations.filter(a => a.centre === quotaRoot)
-  ), [allocations, quotaRoot, isVssOperator, subtree])
+  const myAlloc = useMemo(() => selectQuotaAllocations({ allocations, quotaRoot, isVssOperator, subtree }), [allocations, quotaRoot, isVssOperator, subtree])
   // only departments the superadmin actually gave a quota to are offered/highlighted
   const allocatedQuota = useMemo(() => myAlloc.filter(a => (a.max_count || 0) > 0), [myAlloc])
+  // When the operator picks one centre, counts must narrow to that CENTRE's
+  // subtree so bars stay exact; on 'All centres' keep the global union
+  // (approximate, mirrors VssPage). Centre roles always count their subtree.
+  const quotaScopeSet = useMemo(() => {
+    if (!(isVssOperator && quotaRoot)) return null
+    const set = new Set()
+    ;(centres || []).forEach(c => { if (getRootCentre(centres, c.name) === quotaRoot) set.add(c.name) })
+    set.add(quotaRoot)
+    return set
+  }, [isVssOperator, quotaRoot, centres])
   const savedAllCounts = useMemo(() => {
     const counts = {}
     // quota consumption follows the EFFECTIVE department — the ASO's final
     // deployed dept when set, else the requested one (matches the DB)
     deployments.forEach(d => {
+      if (quotaScopeSet && !quotaScopeSet.has(d.centre)) return
       // Exclude AREA SECRETARY OFFICE sewadars from quota — they don't consume centre quota
       const rowConsent = consentRows[`${d.centre}|${d.badge_number}`]
       if (asoKeys.has(`${d.centre}|${d.badge_number}`) || (rowConsent && isAssoDepartment(rowConsent.department))) return
       counts[d.deployed_department_id || d.department_id] = (counts[d.deployed_department_id || d.department_id] || 0) + 1
     })
     return counts
-  }, [deployments, consentRows, asoKeys])
+  }, [deployments, consentRows, asoKeys, quotaScopeSet])
   const savedOwnCounts = useMemo(() => {
     const counts = {}
     deployments.filter(d => !isVssBadge(d.badge_number)).forEach(d => {
+      if (quotaScopeSet && !quotaScopeSet.has(d.centre)) return
       const rowConsent = consentRows[`${d.centre}|${d.badge_number}`]
       if (asoKeys.has(`${d.centre}|${d.badge_number}`) || (rowConsent && isAssoDepartment(rowConsent.department))) return
       counts[d.deployed_department_id || d.department_id] = (counts[d.deployed_department_id || d.department_id] || 0) + 1
     })
     return counts
-  }, [deployments, consentRows, asoKeys])
+  }, [deployments, consentRows, asoKeys, quotaScopeSet])
   const localCounts = useMemo(() => {
     const counts = {}
     Object.values(consentRows).forEach(r => {
+      if (quotaScopeSet && !quotaScopeSet.has(r.centre)) return
       if (r.consent_given && r.requested_dept && !isAssoDepartment(r.department)) {
         counts[r.requested_dept] = (counts[r.requested_dept] || 0) + 1
       }
     })
     return counts
-  }, [consentRows])
+  }, [consentRows, quotaScopeSet])
   const deptQuota = useMemo(() => computeDeptQuota(myAlloc, savedAllCounts, localCounts, savedOwnCounts), [myAlloc, savedAllCounts, localCounts, savedOwnCounts])
 
   // seats the ASO asked this CENTRE (whole subtree) to provide, summed across
@@ -916,6 +940,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
   }, [consentRows])
   const inchargeKey = useCallback((deptId) => `${myRoot}|${deptId}`, [myRoot])
   const setIncharge = (deptId, badgeNumber) => {
+    if (isVssOperator) return
     dirtyRef.current = true
     editVersionRef.current++
     const key = inchargeKey(deptId)
@@ -951,12 +976,14 @@ export default function ConsentPage({ schedules, scheduleId }) {
     return hasRegularAssigned && !incharges[inchargeKey(a.department_id)]
   }), [allocatedQuota, consentRows, incharges, inchargeKey])
   const startLock = () => {
+    if (isVssOperator) return
     if (missingIncharges.length > 0) { setLockWarn(missingIncharges); return }
     setLockAck(false)
     setLockConfirm(true)
   }
   const confirmLock = async () => {
     setLockConfirm(false)
+    if (isVssOperator) return
     setLockBusy(true)
     try {
       // Save any pending edits first — the lock compulsion checks PERSISTED data.
@@ -1240,7 +1267,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
       }
       // v21: a department-scoped override opens only the listed departments —
       // everything else stays locked for this centre.
-      if (!isDeptSelectable(a.department_id, { isCurrent, anyOverrideOpen, openDepartments })) {
+      if (!isDeptSelectable(a.department_id, { isCurrent, anyOverrideOpen: effAnyOverrideOpen, openDepartments: effOpenDepartments })) {
         reasons.push(openDeptNames
           ? `Department override not open for your centre — the ASO opened only: ${openDeptNames}`
           : 'Department override not open for your centre')
@@ -1255,7 +1282,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
             depts={depts}
             items={items}
             open={open}
-            disabled={!rowDeployEditable(r) || (!r.consent_given && !anyOverrideOpen) || r.finalized}
+            disabled={!rowDeployEditable(r) || (!r.consent_given && !effAnyOverrideOpen) || r.finalized}
             title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined)}
             onToggle={close => {
               if (close === false) { setOpenDeptDropdown(null); return }
@@ -1443,7 +1470,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
                 <Lock size={13} /> {lockBusy ? 'Locking…' : 'Lock Deployment'}
               </button>
             )}
-            {!locked && deploymentEditable && myCentre !== myRoot && (
+            {!locked && deploymentEditable && !isVssOperator && myCentre !== myRoot && (
               <span className="pill" style={{ fontSize: '0.72rem', fontWeight: 600, color: '#64748b', background: '#f1f5f9', border: '1px solid #e2e8f0' }} title="Only the CENTRE account locks the deployment — this covers your SC_SP too">
                 <Lock size={11} style={{ verticalAlign: '-1px', marginRight: '0.25rem' }} /> Locked at CENTRE level
               </span>
@@ -1607,7 +1634,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
             <span style={{ color: '#6366f1', fontSize: '0.75rem' }}>Dept:</span>
             <select className="select" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} disabled={!deploymentEditable} defaultValue="" aria-label="Assign to department" onChange={e => { if (e.target.value) { bulkAssignDept(e.target.value); e.target.value = '' } }}>
               <option value="" disabled>Assign…</option>
-              {allocatedQuota.filter(a => isDeptSelectable(a.department_id, { isCurrent: false, anyOverrideOpen, openDepartments })).map(a => {
+              {allocatedQuota.filter(a => isDeptSelectable(a.department_id, { isCurrent: false, anyOverrideOpen: effAnyOverrideOpen, openDepartments: effOpenDepartments })).map(a => {
                 const deptName = deptNameById[a.department_id]
                 if (!deptName) return null
                 return <option key={a.department_id} value={a.department_id}>{deptName} ({deptQuota[a.department_id]?.effective || 0}/{deptQuota[a.department_id]?.max || a.max_count})</option>

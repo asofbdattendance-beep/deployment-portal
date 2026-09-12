@@ -8,6 +8,8 @@ import {
   getRootCentre,
   getSubtreeCentres,
   computeDeptQuota,
+  selectQuotaAllocations,
+  resolveOperatorQuotaRoot,
   isVssBadge,
   isEligible,
   eligibilityReasons,
@@ -1033,3 +1035,39 @@ describe('VSS dropdown selection behavior', () => {
     })
   })
 })
+
+  describe('vss_operator quota scope (selectQuotaAllocations + resolveOperatorQuotaRoot)', () => {
+    const allocs = [
+      { department_id: 'd1', centre: 'GURGAON', max_count: 10 },
+      { department_id: 'd1', centre: 'HODAL', max_count: 5 },
+      { department_id: 'd2', centre: 'ANKHEER', max_count: 7 },
+    ]
+    it('All centres union: operator with null root gets every in-scope centre row', () => {
+      const out = selectQuotaAllocations({ allocations: allocs, quotaRoot: null, isVssOperator: true, subtree: ['GURGAON', 'HODAL'] })
+      expect(out.map(a => a.centre).sort()).toEqual(['GURGAON', 'HODAL'])
+    })
+    it('Filtered root: operator with a root gets only that root', () => {
+      const out = selectQuotaAllocations({ allocations: allocs, quotaRoot: 'GURGAON', isVssOperator: true, subtree: ['GURGAON', 'HODAL', 'ANKHEER'] })
+      expect(out).toEqual([{ department_id: 'd1', centre: 'GURGAON', max_count: 10 }])
+    })
+    it('Non-operator passthrough: ignores subtree', () => {
+      const out = selectQuotaAllocations({ allocations: allocs, quotaRoot: 'GURGAON', isVssOperator: false, subtree: ['GURGAON', 'HODAL', 'ANKHEER'] })
+      expect(out).toEqual([{ department_id: 'd1', centre: 'GURGAON', max_count: 10 }])
+    })
+    it('Empty allocations: returns [] for both roles', () => {
+      expect(selectQuotaAllocations({ allocations: [], quotaRoot: null, isVssOperator: true, subtree: ['GURGAON'] })).toEqual([])
+      expect(selectQuotaAllocations({ allocations: null, quotaRoot: 'GURGAON', isVssOperator: false, subtree: ['GURGAON'] })).toEqual([])
+    })
+    it('Unknown/null root non-operator: returns [] (no phantom match)', () => {
+      expect(selectQuotaAllocations({ allocations: allocs, quotaRoot: null, isVssOperator: false, subtree: ['GURGAON'] })).toEqual([])
+    })
+    it('resolveOperatorQuotaRoot: all -> null, picked centre -> its CENTRE root, non-operator -> null', () => {
+      const centres = [
+        { name: 'GURGAON', parent_centre: '' },
+        { name: 'HODAL', parent_centre: 'GURGAON' },
+      ]
+      expect(resolveOperatorQuotaRoot({ isVssOperator: true, filterCentre: 'all', centres })).toBe(null)
+      expect(resolveOperatorQuotaRoot({ isVssOperator: true, filterCentre: 'HODAL', centres })).toBe('GURGAON')
+      expect(resolveOperatorQuotaRoot({ isVssOperator: false, filterCentre: 'HODAL', centres })).toBe(null)
+    })
+  })
