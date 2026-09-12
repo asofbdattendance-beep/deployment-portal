@@ -70,6 +70,11 @@ export default function ConsentPage({ schedules, scheduleId }) {
   const [exporting, setExporting] = useState(false)
 
   const myRoot = getRootCentre(centres, myCentre)
+  // vss_operator has no home centre — the quota root follows the centre
+  // filter (a picked centre resolves to its CENTRE root); 'All centres' uses
+  // a null root meaning "union every in-scope centre" (mirrors VssPage).
+  const operatorFilterRoot = isVssOperator && filterCentre !== 'all' ? getRootCentre(centres, filterCentre) : null
+  const quotaRoot = isVssOperator ? operatorFilterRoot : myRoot
 
   useEffect(() => {
     // vss_operator: all-centre load — fetch every centre and treat the whole
@@ -800,7 +805,14 @@ export default function ConsentPage({ schedules, scheduleId }) {
 
   // Derived data is memoized — the table re-renders on every search keystroke
   // / every autosave, and these are O(rows) / O(rows × depts) scans.
-  const myAlloc = useMemo(() => allocations.filter(a => a.centre === myRoot), [allocations, myRoot])
+  // vss_operator quota scope: a picked centre resolves to its CENTRE root for
+  // exact bars; 'All centres' unions every in-scope centre's allocations so all
+  // allocated departments stay offered (bars are approximate in that view).
+  const myAlloc = useMemo(() => (
+    isVssOperator && !quotaRoot
+      ? allocations.filter(a => subtree.includes(a.centre))
+      : allocations.filter(a => a.centre === quotaRoot)
+  ), [allocations, quotaRoot, isVssOperator, subtree])
   // only departments the superadmin actually gave a quota to are offered/highlighted
   const allocatedQuota = useMemo(() => myAlloc.filter(a => (a.max_count || 0) > 0), [myAlloc])
   const savedAllCounts = useMemo(() => {
@@ -1512,10 +1524,10 @@ export default function ConsentPage({ schedules, scheduleId }) {
                       setOpenDeptDropdown(null)
                       setOpenIncharge(openIncharge === a.department_id ? null : a.department_id)
                     }}
-                    disabled={!deploymentEditable || !isDeptSelectable(a.department_id, { isCurrent: false, anyOverrideOpen, openDepartments })}
-                    title={anyOverrideOpen && openDepartments && !openDepartments.includes(a.department_id)
+                    disabled={!deploymentEditable || isVssOperator || !isDeptSelectable(a.department_id, { isCurrent: false, anyOverrideOpen, openDepartments })}
+                    title={isVssOperator ? 'Incharges are managed by the centre' : (anyOverrideOpen && openDepartments && !openDepartments.includes(a.department_id)
                       ? `Only the opened department(s) (${openDeptNames}) incharge can be changed under this override`
-                      : undefined}
+                      : undefined)}
                   />
                 </div>
               </div>
