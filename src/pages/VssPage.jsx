@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, fetchAllRows, fetchAsoDeptKeys, getRootCentre, fetchPortalSettings, fetchCentres, fetchVssOverrides } from '../lib/supabase'
-import { computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, changedConsentFields, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment, resolveVssOverride, effectiveVssCreation, effectiveVssDeployment } from '../lib/logic'
+import { computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, aggregateQuotaAllocations, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, changedConsentFields, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment, resolveVssOverride, effectiveVssCreation, effectiveVssDeployment } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import DeptDropdown from '../components/DeptDropdown'
@@ -915,8 +915,11 @@ function VssDeployTable({ schedules, scheduleId }) {
   // allocated departments stay offered (bars are approximate in that view)
   const quotaRoot = isVssOperator ? operatorFilterRoot : myRoot
   const myAlloc = selectQuotaAllocations({ allocations, quotaRoot, isVssOperator, subtree })
+  // All-centres union holds one row per centre×department — aggregate to one
+  // row per department (summed quota) so each department renders exactly once.
+  const displayAlloc = (isVssOperator && !quotaRoot) ? aggregateQuotaAllocations(myAlloc) : myAlloc
   // only departments the superadmin actually gave a quota to are offered/highlighted
-  const allocatedQuota = myAlloc.filter(a => (a.max_count || 0) > 0)
+  const allocatedQuota = displayAlloc.filter(a => (a.max_count || 0) > 0)
   // VSS can only be deployed to departments the ASO opened for VSS (include_vss)
   // AND gave a quota — quota bars / dropdowns show only those.
   const vssAllocatedQuota = allocatedQuota.filter(a => depts.find(d => d.id === a.department_id)?.include_vss)
@@ -951,7 +954,7 @@ function VssDeployTable({ schedules, scheduleId }) {
       localOwnCounts[r.requested_dept] = (localOwnCounts[r.requested_dept] || 0) + 1
     }
   })
-  const deptQuota = computeDeptQuota(myAlloc, savedAllCounts, localOwnCounts, savedOwnCounts)
+  const deptQuota = computeDeptQuota(displayAlloc, savedAllCounts, localOwnCounts, savedOwnCounts)
 
   const vssSewadarMap = {}
   Object.values(consentRows).forEach(r => { vssSewadarMap[`${r.centre}|${r.badge_number}`] = r })

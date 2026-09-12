@@ -134,6 +134,30 @@ export function selectQuotaAllocations({ allocations, quotaRoot, isVssOperator, 
   return list.filter(a => a.centre === quotaRoot)
 }
 
+/* ─── all-centres union aggregation ───
+   The union keeps one row per centre×department, which would render one
+   quota card per centre (121 cards). Aggregate to one row per department
+   with summed max_count so each department shows exactly once. */
+export function aggregateQuotaAllocations(allocations) {
+  const byDept = new Map()
+  ;(allocations || []).forEach(a => {
+    if (!a || !a.department_id) return
+    const cur = byDept.get(a.department_id)
+    if (cur) {
+      cur.max_count += (a.max_count || 0)
+      if (a.centre && !cur.centres.includes(a.centre)) cur.centres.push(a.centre)
+    } else {
+      byDept.set(a.department_id, {
+        department_id: a.department_id,
+        centre: 'ALL',
+        max_count: (a.max_count || 0),
+        centres: a.centre ? [a.centre] : [],
+      })
+    }
+  })
+  return [...byDept.values()]
+}
+
 // VSS badges are prefixed with "VS" (e.g. VSFB5971GB4629)
 export function isVssBadge(badge) {
   return typeof badge === 'string' && /^VS/i.test(badge)

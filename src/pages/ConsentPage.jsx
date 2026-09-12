@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, fetchCentres, fetchAllRows, fetchAsoDeptKeys, getRootCentre, eligibleBadgeStatusFilter, isAssoDepartment, fetchPortalSettings, shouldHideFromConsent } from '../lib/supabase'
-import { computeEditGates, isDeptSelectable, isUndeployedCohort, computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, changedConsentFields, consentRowKey, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
+import { computeEditGates, isDeptSelectable, isUndeployedCohort, computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, aggregateQuotaAllocations, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, changedConsentFields, consentRowKey, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import ConsentDashboard from '../components/ConsentDashboard'
@@ -824,8 +824,12 @@ export default function ConsentPage({ schedules, scheduleId }) {
   // exact bars; 'All centres' unions every in-scope centre's allocations so all
   // allocated departments stay offered (bars are approximate in that view).
   const myAlloc = useMemo(() => selectQuotaAllocations({ allocations, quotaRoot, isVssOperator, subtree }), [allocations, quotaRoot, isVssOperator, subtree])
+  // All-centres union holds one row per centre×department — aggregate to one
+  // row per department (summed quota) so each department renders exactly one
+  // card/option. Filtered/single-centre lists are already unique (pass-through).
+  const displayAlloc = useMemo(() => ((isVssOperator && !quotaRoot) ? aggregateQuotaAllocations(myAlloc) : myAlloc), [isVssOperator, quotaRoot, myAlloc])
   // only departments the superadmin actually gave a quota to are offered/highlighted
-  const allocatedQuota = useMemo(() => myAlloc.filter(a => (a.max_count || 0) > 0), [myAlloc])
+  const allocatedQuota = useMemo(() => displayAlloc.filter(a => (a.max_count || 0) > 0), [displayAlloc])
   // When the operator picks one centre, counts must narrow to that CENTRE's
   // subtree so bars stay exact; on 'All centres' keep the global union
   // (approximate, mirrors VssPage). Centre roles always count their subtree.
@@ -869,7 +873,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
     })
     return counts
   }, [consentRows, quotaScopeSet])
-  const deptQuota = useMemo(() => computeDeptQuota(myAlloc, savedAllCounts, localCounts, savedOwnCounts), [myAlloc, savedAllCounts, localCounts, savedOwnCounts])
+  const deptQuota = useMemo(() => computeDeptQuota(displayAlloc, savedAllCounts, localCounts, savedOwnCounts), [displayAlloc, savedAllCounts, localCounts, savedOwnCounts])
 
   // seats the ASO asked this CENTRE (whole subtree) to provide, summed across
   // every allocated department — shown right after the in-scope sewadar count

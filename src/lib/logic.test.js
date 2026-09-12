@@ -10,6 +10,7 @@ import {
   computeDeptQuota,
   selectQuotaAllocations,
   resolveOperatorQuotaRoot,
+  aggregateQuotaAllocations,
   isVssBadge,
   isEligible,
   eligibilityReasons,
@@ -1069,5 +1070,31 @@ describe('VSS dropdown selection behavior', () => {
       expect(resolveOperatorQuotaRoot({ isVssOperator: true, filterCentre: 'all', centres })).toBe(null)
       expect(resolveOperatorQuotaRoot({ isVssOperator: true, filterCentre: 'HODAL', centres })).toBe('GURGAON')
       expect(resolveOperatorQuotaRoot({ isVssOperator: false, filterCentre: 'HODAL', centres })).toBe(null)
+    })
+  })
+
+  describe('aggregateQuotaAllocations (all-centres union dedupe)', () => {
+    it('sums max_count per department across centres, one row per dept', () => {
+      const rows = [
+        { department_id: 'd1', centre: 'GURGAON', max_count: 10 },
+        { department_id: 'd1', centre: 'HODAL', max_count: 5 },
+        { department_id: 'd2', centre: 'ANKHEER', max_count: 7 },
+      ]
+      const out = aggregateQuotaAllocations(rows)
+      expect(out).toEqual([
+        { department_id: 'd1', centre: 'ALL', max_count: 15, centres: ['GURGAON', 'HODAL'] },
+        { department_id: 'd2', centre: 'ALL', max_count: 7, centres: ['ANKHEER'] },
+      ])
+    })
+    it('single-centre input is identity (besides ALL marker)', () => {
+      const rows = [{ department_id: 'd1', centre: 'GURGAON', max_count: 10 }]
+      expect(aggregateQuotaAllocations(rows)).toEqual([
+        { department_id: 'd1', centre: 'ALL', max_count: 10, centres: ['GURGAON'] },
+      ])
+    })
+    it('empty/null input returns []', () => {
+      expect(aggregateQuotaAllocations([])).toEqual([])
+      expect(aggregateQuotaAllocations(null)).toEqual([])
+      expect(aggregateQuotaAllocations(undefined)).toEqual([])
     })
   })
