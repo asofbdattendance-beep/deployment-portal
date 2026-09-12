@@ -39,6 +39,10 @@ const EMPTY_FORM = {
    aso/super_admin: create for any centre + assign the VSFB number
    (moves the record into the vss_sewadars roster), with a duplicate
    warning when the name / Aadhar already exists.
+   vss_operator: create for any centre (searchable picker) + assign the VSFB
+   number like super_admin — exempt from the creation switch + deadline window,
+   still bound by validation + the assigned-record lock. No Finalize, no master
+   switches, no unlocks.
    Creation is gated (v19): centre roles need BOTH the ASO's "Add VSS"
    master switch open AND an open deadline window. Once a registration
    is assigned its VSFB number it freezes for centres (DB-enforced). */
@@ -47,13 +51,19 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
   const toast = useToast()
   // phase-2 hardening (v20): aso accounts are read-only everywhere —
   // creation, edits, deletes and VSFB assignment are super_admin actions now.
+  // vss_operator: VSS create + VSFB assign for ANY centre (picker), exempt from
+  // the creation switch + deadline window like super_admin — still bound by
+  // age/Aadhar/photo validation and the assigned-record lock.
   const isAso = profile?.role === 'aso'
   const isSuperAdmin = profile?.role === 'super_admin'
+  const isVssOperator = profile?.role === 'vss_operator'
   const readOnlyAdmin = isAso
-  const isAllCentres = isAso || isSuperAdmin
-  const canAssign = isSuperAdmin
+  const isAllCentres = isAso || isSuperAdmin || isVssOperator
+  const canAssign = isSuperAdmin || isVssOperator
   // centres are gated by switch + deadline; super_admin bypasses both;
-  // aso never gets the form (view-only). creationOpen already equals
+  // aso never gets the form (view-only). vss_operator is in isAllCentres so
+  // both gates below are false for that role (exempt from the creation switch
+  // + deadline window, like super_admin). creationOpen already equals
   // override ?? (global && window), so the double `|| !windowOpen` would
   // defeat a per-centre force-open after deadline (override=true should
   // allow creation even when window=false). Edit gating mirrors the DB
@@ -71,6 +81,12 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
   const [statusFilter, setStatusFilter] = useState('all')
   const [centreFilter, setCentreFilter] = useState('all')
   const [searchReg, setSearchReg] = useState('')
+  // vss_operator picks ANY centre — searchable options keep the ~40-centre
+  // list usable (centre roles keep the plain subtree select)
+  const [centreSearch, setCentreSearch] = useState('')
+  const filteredCentreOptions = isVssOperator && centreSearch.trim()
+    ? centres.filter(c => c.name.toLowerCase().includes(centreSearch.trim().toLowerCase()))
+    : centres
   const [assignVals, setAssignVals] = useState({})
   const [assigningId, setAssigningId] = useState(null)
   const [dupCheck, setDupCheck] = useState(null)
@@ -356,10 +372,21 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
   const renderFields = (f, errs, onSet) => (
     <div className="vss-reg-grid">
       {renderField(errs, 'centre',
-        <select value={f.centre} onChange={onSet('centre')} style={errs.centre ? inputErr : input} required>
-          <option value="">Select centre…</option>
-          {centres.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
-        </select>, { text: 'Centre', required: true })}
+        <>
+          {isVssOperator && (
+            <input
+              value={centreSearch}
+              onChange={e => setCentreSearch(e.target.value)}
+              placeholder="Search centres…"
+              aria-label="Search centres"
+              style={{ ...input, marginBottom: '0.4rem' }}
+            />
+          )}
+          <select value={f.centre} onChange={onSet('centre')} style={errs.centre ? inputErr : input} required>
+            <option value="">Select centre…</option>
+            {filteredCentreOptions.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+          </select>
+        </>, { text: 'Centre', required: true })}
       {renderField(errs, 'sewadar_name',
         <input value={f.sewadar_name} onChange={onSet('sewadar_name')} style={errs.sewadar_name ? inputErr : input} required placeholder="Full name" />,
         { text: 'Sewadar name', required: true })}
@@ -433,15 +460,23 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
         <div>
           <h2 className="page-title"><UserPlus size={22} /> Add / Manage VSS</h2>
           <div className="page-sub">
-            {isAllCentres
-              ? 'Create new VSS records for any centre — the ASO assigns the final VSFB number'
-              : `Create new VSS records for ${profile?.centre} and its SC_SPs`}
+            {isVssOperator
+              ? 'VSS Operator access — create records for any centre + assign VSFB numbers'
+              : isAllCentres
+                ? 'Create new VSS records for any centre — the ASO assigns the final VSFB number'
+                : `Create new VSS records for ${profile?.centre} and its SC_SPs`}
           </div>
         </div>
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
       {/* ── creation gate (v19): ASO switch + deadline window ── */}
+      {isVssOperator && !centreGated && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#047857', marginBottom: '1rem' }}>
+          <BadgeCheck size={16} />
+          <>VSS Operator access — creation is <strong>open for any centre</strong> (deadline + creation window bypassed). Age / Aadhar / photo validation and the assigned-record lock still apply.</>
+        </div>
+      )}
       {centreGated && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
           <Lock size={16} />

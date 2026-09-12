@@ -30,6 +30,7 @@ export const ROLES = {
   SUPER_ADMIN: 'super_admin',
   DEPT_INCHARGE: 'dept_incharge',
   SCANNER: 'scanner',
+  VSS_OPERATOR: 'vss_operator',
 }
 
 export const ROLE_LABELS = {
@@ -39,6 +40,7 @@ export const ROLE_LABELS = {
   super_admin: 'ASO',
   dept_incharge: 'Dept Incharge',
   scanner: 'Scanner',
+  vss_operator: 'VSS Operator',
 }
 
 export const ROLE_COLORS = {
@@ -48,6 +50,7 @@ export const ROLE_COLORS = {
   super_admin: '#ef4444',
   dept_incharge: '#0ea5e9',
   scanner: '#10b981',
+  vss_operator: '#0d9488',
 }
 
 export async function getMyDeptIds(scheduleId) {

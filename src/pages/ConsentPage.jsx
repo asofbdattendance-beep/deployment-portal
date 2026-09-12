@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { supabase, fetchSubtreeCentres, fetchAllRows, fetchAsoDeptKeys, getRootCentre, eligibleBadgeStatusFilter, isAssoDepartment, fetchPortalSettings, shouldHideFromConsent } from '../lib/supabase'
+import { supabase, fetchSubtreeCentres, fetchCentres, fetchAllRows, fetchAsoDeptKeys, getRootCentre, eligibleBadgeStatusFilter, isAssoDepartment, fetchPortalSettings, shouldHideFromConsent } from '../lib/supabase'
 import { computeEditGates, isDeptSelectable, isUndeployedCohort, computeDeptQuota, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, changedConsentFields, consentRowKey, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
@@ -13,7 +13,8 @@ export default function ConsentPage({ schedules, scheduleId }) {
   const { profile } = usePortalAuth()
   const toast = useToast()
   const myCentre = profile?.centre
-  const isEditableRole = profile?.role === 'centre_user' || profile?.role === 'centre_admin'
+  const isVssOperator = profile?.role === 'vss_operator'
+  const isEditableRole = profile?.role === 'centre_user' || profile?.role === 'centre_admin' || isVssOperator
   const selectedScheduleId = scheduleId
 
   const [consentRows, setConsentRows] = useState({})
@@ -71,13 +72,24 @@ export default function ConsentPage({ schedules, scheduleId }) {
   const myRoot = getRootCentre(centres, myCentre)
 
   useEffect(() => {
+    // vss_operator: all-centre load — fetch every centre and treat the whole
+    // list as the subtree so the existing `.in('centre', subtree)` queries
+    // cover all centres with no new load path
+    if (isVssOperator) {
+      setSubtreeError(false)
+      fetchCentres().then((centres) => {
+        setCentres(centres || [])
+        setSubtree((centres || []).map(c => c.name))
+      }).catch(() => setSubtreeError(true))
+      return
+    }
     if (!myCentre) return
     setSubtreeError(false)
     fetchSubtreeCentres(myCentre).then(({ centres, subtree }) => {
       setCentres(centres)
       setSubtree(subtree)
     }).catch(() => setSubtreeError(true))
-  }, [myCentre, subtreeRetry])
+  }, [myCentre, subtreeRetry, isVssOperator])
 
   useEffect(() => { fetchPortalSettings().then(setSettings).catch(() => {}) }, [])
   // Escape closes every modal (bulk confirm, lock warnings) — the modals sit in
@@ -768,6 +780,10 @@ export default function ConsentPage({ schedules, scheduleId }) {
   // and centre lock — never past a done schedule. CONSENT rows reopen only via
   // a centre-wide override; DEPLOYMENT reopens via any override (incl. a
   // department-scoped one, where the consent-given requirement also relaxes).
+  // vss_operator: bypass like super_admin, never done — force override-open
+  // so lock/switch/deadline never gate the operator, while scheduleDone
+  // (checked first inside computeEditGates) still blocks. Quota/rules/FINAL/
+  // DEPLOYED keep binding via the unchanged persist skips + DB triggers.
   const { consentEditable, deploymentEditable } = computeEditGates({
     isEditableRole,
     schedule,
@@ -775,8 +791,8 @@ export default function ConsentPage({ schedules, scheduleId }) {
     deadlinePassed,
     locked,
     masterOpen: settings.sewadar_deployment_open,
-    centreWideOverrideOpen,
-    anyOverrideOpen,
+    centreWideOverrideOpen: centreWideOverrideOpen || isVssOperator,
+    anyOverrideOpen: anyOverrideOpen || isVssOperator,
   })
   editableRef.current = consentEditable || deploymentEditable
   anyOverrideOpenRef.current = anyOverrideOpen
@@ -1007,6 +1023,25 @@ export default function ConsentPage({ schedules, scheduleId }) {
     document.addEventListener('click', onDocClick)
     return () => document.removeEventListener('click', onDocClick)
   }, [openDeptDropdown, openIncharge])
+
+  // vss_operator centre filter: CENTREs (roots) A–Z, each CENTRE's SC_SPs
+  // A–Z (Finalize Deployment grouping via getRootCentre)
+  const centreOrder = useMemo(() => {
+    const rootOf = {}
+    ;(centres || []).forEach(c => { rootOf[c.name] = getRootCentre(centres, c.name) || c.name })
+    return (a, b) => {
+      const ra = rootOf[a] || a
+      const rb = rootOf[b] || b
+      if (ra !== rb) return ra.localeCompare(rb)
+      const aRoot = ra === a
+      const bRoot = rb === b
+      if (aRoot !== bRoot) return aRoot ? -1 : 1
+      return a.localeCompare(b)
+    }
+  }, [centres])
+  const filterCentreOptions = useMemo(() => (
+    isVssOperator ? [...subtree].sort(centreOrder) : subtree
+  ), [isVssOperator, subtree, centreOrder])
 
   // Memoized filter/sort/group of the rows (recomputed on every render by
   // default; the table re-renders on each search keystroke). Hoisted above the
@@ -1374,7 +1409,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
         <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
           <h2 className="page-title"><ClipboardCheck size={22} /> Consent &amp; Deployment</h2>
           <div className="page-sub" style={{ fontWeight: 700, fontSize: '0.95rem', color: '#1e293b', marginTop: 0 }}>
-            {myCentre}
+            {isVssOperator ? 'All centres' : myCentre}
           </div>
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
             {saving ? (
@@ -1391,7 +1426,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
               <span className="pill pill-red" style={{ fontSize: '0.75rem', fontWeight: 700 }} title="Only the ASO can reopen this deployment">
                 <Lock size={12} style={{ verticalAlign: '-1px', marginRight: '0.25rem' }} /> Deployment Locked
               </span>
-            ) : deploymentEditable && myCentre === myRoot && (
+            ) : deploymentEditable && !isVssOperator && myCentre === myRoot && (
               <button onClick={startLock} disabled={lockBusy} className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem', color: '#b91c1c', borderColor: '#fecaca', background: '#fef2f2' }}>
                 <Lock size={13} /> {lockBusy ? 'Locking…' : 'Lock Deployment'}
               </button>
@@ -1497,7 +1532,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
           <div style={{ flex: 1 }} />
           <select value={filterCentre} onChange={e => setFilterCentre(e.target.value)} className="select" aria-label="Filter by centre">
             <option value="all">All centres</option>
-            {subtree.map(c => <option key={c} value={c}>{c}</option>)}
+            {filterCentreOptions.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
           <select value={sortBy} onChange={e => setSortBy(e.target.value)} className="select" title="Sort rows" aria-label="Sort rows">
             <option value="name">Sort: Name</option>

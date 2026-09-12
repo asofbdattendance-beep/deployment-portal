@@ -17,6 +17,9 @@ import {
 export default function VssPage({ schedules, scheduleId }) {
   const { profile } = usePortalAuth()
   const isAso = profile?.role === 'aso' || profile?.role === 'super_admin'
+  // vss_operator bypasses the creation switch + deadline window like super_admin
+  // (creation stays open; age/Aadhar/photo validation still applies in AddVssForm)
+  const isVssOperator = profile?.role === 'vss_operator'
   const [tab, setTab] = useState('deploy')
   // Add-VSS creation gate (v19 + v21): the ASO's master switch + deadline
   // window, UNLESS a Control Panel tri-state override forces it for this
@@ -28,7 +31,9 @@ export default function VssPage({ schedules, scheduleId }) {
   const windowOpen = !!schedule && schedule.status !== 'done' && (!schedule.deadline || new Date(schedule.deadline) > new Date())
   useEffect(() => {
     if (tab !== 'add') return
-    const admin = isAso
+    // vss_operator is exempt from the creation gate (treated as open) — the
+    // operator note banner in AddVssForm states this explicitly
+    const admin = isAso || isVssOperator
     if (admin) {
       setCreationOpen(true)
       setCreationOverride(null)
@@ -81,7 +86,7 @@ export default function VssPage({ schedules, scheduleId }) {
       }
     })()
     return () => { cancelled = true }
-  }, [tab, windowOpen, scheduleId, isAso, profile?.centre])
+  }, [tab, windowOpen, scheduleId, isAso, isVssOperator, profile?.centre])
 
   return (
     <div>
@@ -105,12 +110,14 @@ export default function VssPage({ schedules, scheduleId }) {
   )
 }
 
-/* ─── VSS consent & deployment table (centre_user / centre_admin) ─── */
+/* ─── VSS consent & deployment table (centre_user / centre_admin / vss_operator) ─── */
 function VssDeployTable({ schedules, scheduleId }) {
   const { profile } = usePortalAuth()
   const toast = useToast()
   const myCentre = profile?.centre
-  const isEditableRole = profile?.role === 'centre_user' || profile?.role === 'centre_admin'
+  // vss_operator edits VSS consent + deployment for ANY centre (all-centre scope)
+  const isVssOperator = profile?.role === 'vss_operator'
+  const isEditableRole = profile?.role === 'centre_user' || profile?.role === 'centre_admin' || isVssOperator
   const selectedScheduleId = scheduleId
 
   const [consentRows, setConsentRows] = useState({})
@@ -158,15 +165,49 @@ function VssDeployTable({ schedules, scheduleId }) {
   const [exporting, setExporting] = useState(false)
 
   const myRoot = getRootCentre(centres, myCentre)
+  // vss_operator has no home centre — the quota/gate root follows the centre
+  // filter (a picked centre resolves to its CENTRE root); 'All centres' uses
+  // the global VSS switch with no per-centre root
+  const operatorFilterRoot = isVssOperator && filterCentre !== 'all' ? getRootCentre(centres, filterCentre) : null
+  const gateRoot = isVssOperator ? operatorFilterRoot : myRoot
+  // CENTRE → SC_SP grouped ordering for the operator's all-centre filter
+  // (CENTREs A–Z, each followed by its SC_SPs A–Z; orphans appended)
+  const orderedFilterCentres = (() => {
+    if (!isVssOperator) return subtree.map(c => ({ name: c, depth: 0 }))
+    const seen = new Set()
+    const out = []
+    centres
+      .filter(c => !c.parent_centre)
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .forEach(p => {
+        out.push({ name: p.name, depth: 0 })
+        seen.add(p.name)
+        centres
+          .filter(c => c.parent_centre === p.name)
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .forEach(ch => { out.push({ name: ch.name, depth: 1 }); seen.add(ch.name) })
+      })
+    subtree.filter(n => !seen.has(n)).sort().forEach(n => out.push({ name: n, depth: 0 }))
+    return out
+  })()
 
   useEffect(() => {
+    // vss_operator: all-centre scope — load every centre unfiltered
+    if (isVssOperator) {
+      setSubtreeError(false)
+      fetchCentres().then(all => {
+        setCentres(all || [])
+        setSubtree((all || []).map(c => c.name))
+      }).catch(() => setSubtreeError(true))
+      return
+    }
     if (!myCentre) return
     setSubtreeError(false)
     fetchSubtreeCentres(myCentre).then(({ centres, subtree }) => {
       setCentres(centres)
       setSubtree(subtree)
     }).catch(() => setSubtreeError(true))
-  }, [myCentre, subtreeRetry])
+  }, [myCentre, subtreeRetry, isVssOperator])
 
   // v31 HARD VSS CLOSE: global is the master.
   // Before v31 a per-centre `true` (`centre_vss_overrides.deployment_open=true`)
@@ -177,7 +218,19 @@ function VssDeployTable({ schedules, scheduleId }) {
   // so the UI is hard-closed even before the DB migration v31 is applied.
   // Generic `centre_overrides` (any_override_open) must NOT reopen VSS.
   const loadGates = useCallback(async () => {
-    if (!selectedScheduleId || !myRoot) return
+    if (!selectedScheduleId) return
+    // vss_operator on 'All centres' has no per-centre root — gate purely on the
+    // global VSS switch (v34 hard close still applies: switch OFF stays closed)
+    if (isVssOperator && !gateRoot) {
+      setOverrideOpen(false)
+      setUndeployedOverrideOpen(false)
+      try {
+        const raw = await fetchPortalSettings()
+        setSettings(s => ({ ...s, vss_deployment_open: !!raw.vss_deployment_open }))
+      } catch { /* keep previous */ }
+      return
+    }
+    if (!gateRoot) return
     try {
       // 1) Try the authoritative RPC first (now hard in v31)
       const { data: gates } = await supabase.rpc('get_my_effective_gates', { p_schedule: selectedScheduleId })
@@ -195,7 +248,7 @@ function VssDeployTable({ schedules, scheduleId }) {
         try {
           const rawSettings = await fetchPortalSettings()
           const overrides = await fetchVssOverrides()
-          const rawOverride = resolveVssOverride(overrides, { rootCentre: myRoot, key: 'deployment_open' })
+          const rawOverride = resolveVssOverride(overrides, { rootCentre: gateRoot, key: 'deployment_open' })
           const localEffective = effectiveVssDeployment({ overrideValue: rawOverride, globalOpen: !!rawSettings.vss_deployment_open })
           setSettings(s => ({ ...s, vss_deployment_open: localEffective }))
           if (rawOverride != null) setVssDeployForceOpen(rawOverride === true)
@@ -212,7 +265,7 @@ function VssDeployTable({ schedules, scheduleId }) {
       let rawOverride = null
       try {
         const overrides = await fetchVssOverrides()
-        rawOverride = resolveVssOverride(overrides, { rootCentre: myRoot, key: 'deployment_open' })
+        rawOverride = resolveVssOverride(overrides, { rootCentre: gateRoot, key: 'deployment_open' })
       } catch { /* RLS or missing — keep null */ }
       const hardEffective = effectiveVssDeployment({ overrideValue: rawOverride, globalOpen })
       setSettings(s => ({ ...s, vss_deployment_open: hardEffective }))
@@ -224,7 +277,7 @@ function VssDeployTable({ schedules, scheduleId }) {
         setSettings(s => ({ ...s, vss_deployment_open: !!raw.vss_deployment_open }))
       } catch { /* keep previous */ }
     }
-  }, [selectedScheduleId, myRoot])
+  }, [selectedScheduleId, gateRoot, isVssOperator])
 
   useEffect(() => {
     fetchPortalSettings()
@@ -413,12 +466,18 @@ function VssDeployTable({ schedules, scheduleId }) {
       setExpanded(ex)
 
       // Centre deployment lock (v13) — non-fatal: if the migration hasn't run,
-      // the page still loads fine with the lock off.
-      try {
-        const { data: lockRow } = await supabase.from('centre_locks')
-          .select('*').eq('schedule_id', selectedScheduleId).eq('centre', myRoot).maybeSingle()
-        setLocked(!!lockRow)
-      } catch { /* table missing — lock stays off until migrated */ }
+      // the page still loads fine with the lock off. vss_operator bypasses the
+      // centre lock like super_admin (the VSS switch still gates edits), so the
+      // lock is never loaded for that role.
+      if (isVssOperator) {
+        setLocked(false)
+      } else {
+        try {
+          const { data: lockRow } = await supabase.from('centre_locks')
+            .select('*').eq('schedule_id', selectedScheduleId).eq('centre', myRoot).maybeSingle()
+          setLocked(!!lockRow)
+        } catch { /* table missing — lock stays off until migrated */ }
+      }
       await loadGates()
     } catch (err) {
       console.error('Failed to load VSS consent data:', err)
@@ -426,7 +485,7 @@ function VssDeployTable({ schedules, scheduleId }) {
       // a failed refresh must not pretend in-flight edits were saved
       if (!prevDirty) dirtyRef.current = false
     } finally { setLoading(false) }
-  }, [selectedScheduleId, subtree, myRoot, toast, loadGates])
+  }, [selectedScheduleId, subtree, myRoot, isVssOperator, toast, loadGates])
 
   const loadDataRef = useRef(loadData)
   loadDataRef.current = loadData
@@ -829,6 +888,9 @@ function VssDeployTable({ schedules, scheduleId }) {
   // / batch / block_locked_delete all key off vss_deploy_open_for_centre). So the
   // UI bypasses lock + deadline whenever masterOpen (effective switch) is true —
   // never off a generic override (overrideOpen stays false for VSS).
+  // vss_operator passes the same editableRole gate with vssOpen=masterOpen:
+  // switch ON ⇒ open past lock + deadline like super_admin; switch OFF ⇒ still
+  // closed (v34 hard close).
   const canEdit = canEditDeployment({
     editableRole: isEditableRole,
     schedule,
@@ -848,7 +910,13 @@ function VssDeployTable({ schedules, scheduleId }) {
   overrideOpenRef.current = overrideOpen
   undeployedOverrideOpenRef.current = undeployedOverrideOpen
 
-  const myAlloc = allocations.filter(a => a.centre === myRoot)
+  // vss_operator quota scope: a picked centre resolves to its CENTRE root for
+  // exact bars; 'All centres' unions every in-scope centre's allocations so all
+  // allocated departments stay offered (bars are approximate in that view)
+  const quotaRoot = isVssOperator ? operatorFilterRoot : myRoot
+  const myAlloc = (isVssOperator && !quotaRoot)
+    ? allocations.filter(a => subtree.includes(a.centre))
+    : allocations.filter(a => a.centre === quotaRoot)
   // only departments the superadmin actually gave a quota to are offered/highlighted
   const allocatedQuota = myAlloc.filter(a => (a.max_count || 0) > 0)
   // VSS can only be deployed to departments the ASO opened for VSS (include_vss)
@@ -1243,7 +1311,7 @@ function VssDeployTable({ schedules, scheduleId }) {
         <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
           <h2 className="page-title"><Star size={22} /> VSS Consent &amp; Deployment</h2>
           <div className="page-sub" style={{ fontWeight: 700, fontSize: '0.95rem', color: '#1e293b', marginTop: 0 }}>
-            {myCentre}
+            {isVssOperator ? (filterCentre === 'all' ? 'All centres' : filterCentre) : myCentre}
           </div>
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
             {saving ? (
@@ -1325,7 +1393,9 @@ function VssDeployTable({ schedules, scheduleId }) {
           <div style={{ flex: 1 }} />
           <select value={filterCentre} onChange={e => setFilterCentre(e.target.value)} className="select">
             <option value="all">All centres</option>
-            {subtree.map(c => <option key={c} value={c}>{c}</option>)}
+            {orderedFilterCentres.map(({ name, depth }) => (
+              <option key={name} value={name}>{depth > 0 ? `↳ ${name}` : name}</option>
+            ))}
           </select>
           <select value={sortBy} onChange={e => setSortBy(e.target.value)} className="select" title="Sort rows">
             <option value="name">Sort: Name</option>

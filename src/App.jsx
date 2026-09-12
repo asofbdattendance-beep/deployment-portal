@@ -41,8 +41,8 @@ const ControlPanelPage = lazy(() => import('./pages/ControlPanelPage'))
 
 const PAGES = {
   schedule: { label: 'Schedule', icon: Calendar, roles: ['aso', 'super_admin'] },
-  consent: { label: 'Consent & Deploy', icon: ClipboardCheck, roles: ['centre_user', 'centre_admin', 'aso', 'super_admin'] },
-  vss: { label: 'VSS', icon: Star, roles: ['centre_user', 'centre_admin', 'aso', 'super_admin'] },
+  consent: { label: 'Consent & Deploy', icon: ClipboardCheck, roles: ['centre_user', 'centre_admin', 'aso', 'super_admin', 'vss_operator'] },
+  vss: { label: 'VSS', icon: Star, roles: ['centre_user', 'centre_admin', 'aso', 'super_admin', 'vss_operator'] },
   alloc: { label: 'Finalize Deployment', icon: Tags, roles: ['aso', 'super_admin'] },
   deployment: { label: 'Overview', icon: Users, roles: ['aso', 'super_admin'] },
   centreLists: { label: 'Centre Lists', icon: Building2, roles: ['aso', 'super_admin'] },
@@ -213,7 +213,7 @@ export default function App() {
     return <AccessDenied signOut={signOut} />
   }
 
-  const allowedRoles = ['centre_user', 'centre_admin', 'aso', 'super_admin', 'dept_incharge', 'scanner']
+  const allowedRoles = ['centre_user', 'centre_admin', 'aso', 'super_admin', 'dept_incharge', 'scanner', 'vss_operator']
   if (!allowedRoles.includes(profile.role)) return <AccessDenied signOut={signOut} />
 
   return <Dashboard />
