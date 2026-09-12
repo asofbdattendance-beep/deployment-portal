@@ -92,10 +92,13 @@ CREATE POLICY vss_registrations_read ON public.vss_registrations
     OR centre = ANY (public.get_my_subtree_centres())
   );
 
--- sewadars roster itself (v9 sewadars_portal_read body + operator arm) —
--- the Consent page lists sewadars of ANY centre for the operator.
-DROP POLICY IF EXISTS sewadars_portal_read ON public.sewadars;
-CREATE POLICY sewadars_portal_read ON public.sewadars
+-- sewadar roster itself (v28 sewadars_portal_read body on dp_sewadars +
+-- operator arm) — the Consent page lists sewadars of ANY centre for the
+-- operator. NOTE: post-v28 the real table is dp_sewadars; public.sewadars
+-- is only a read-only compat VIEW, and CREATE/DROP POLICY on a view
+-- raises 42809 ("sewadars is not a table") — hence dp_sewadars here.
+DROP POLICY IF EXISTS sewadars_portal_read ON public.dp_sewadars;
+CREATE POLICY sewadars_portal_read ON public.dp_sewadars
   FOR SELECT TO authenticated
   USING (
     public.get_portal_user_role() IN ('aso', 'super_admin', 'vss_operator')
@@ -639,7 +642,7 @@ BEGIN
     END IF;
 
     IF EXISTS (
-      SELECT 1 FROM public.sewadars s
+      SELECT 1 FROM public.dp_sewadars s
       WHERE s.badge_number = NEW.badge_number AND s.centre = NEW.centre
         AND s.badge_status = 'ELDERLY'
     ) THEN
@@ -656,7 +659,7 @@ BEGIN
 
     IF v_dept.requires_initiated THEN
       IF NOT EXISTS (
-        SELECT 1 FROM public.sewadars s
+        SELECT 1 FROM public.dp_sewadars s
         WHERE s.badge_number = NEW.badge_number AND s.centre = NEW.centre
           AND s.is_initiated = true
       ) THEN
@@ -772,7 +775,7 @@ BEGIN
         AND COALESCE(d.deployed_department_id, d.department_id) = r.dept_id
         AND public.get_root_centre(d.centre) = v_root
         AND NOT EXISTS (
-          SELECT 1 FROM public.sewadars s
+          SELECT 1 FROM public.dp_sewadars s
           WHERE s.badge_number = d.badge_number AND s.centre = d.centre
             AND upper(trim(s.department)) = 'AREA SECRETARY OFFICE'
         )
@@ -884,7 +887,7 @@ BEGIN
         AND COALESCE(d.deployed_department_id, d.department_id) = r.dept_id
         AND public.get_root_centre(d.centre) = v_root
         AND NOT EXISTS (
-          SELECT 1 FROM public.sewadars s
+          SELECT 1 FROM public.dp_sewadars s
           WHERE s.badge_number = d.badge_number AND s.centre = d.centre
             AND upper(trim(s.department)) = 'AREA SECRETARY OFFICE'
         )
@@ -899,7 +902,7 @@ BEGIN
         AND COALESCE(o.deployed_department_id, o.department_id) = r.dept_id
         AND public.get_root_centre(o.centre) = v_root
         AND NOT EXISTS (
-          SELECT 1 FROM public.sewadars s
+          SELECT 1 FROM public.dp_sewadars s
           WHERE s.badge_number = o.badge_number AND s.centre = o.centre
             AND upper(trim(s.department)) = 'AREA SECRETARY OFFICE'
         )
