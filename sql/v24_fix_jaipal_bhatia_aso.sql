@@ -4,11 +4,11 @@
 -- Symptom (29/8/2026):
 --   New user created via attendance portal (public.users) as:
 --     Name:   JAIPAL BHATIA
---     Email:  qualityestate_123@rediffmail.com
+--     Email:  <REDACTED-EMAIL>
 --     Badge:  FB5978GA0088 (sewadars.centre = SECTOR-15-A, PERMANENT)
 --     Centre: SECTOR-15-A (root CENTRE, parent_centre IS NULL)
 --     Role:   aso
---     Auth:   55e943b5-d5e1-444d-b185-976f12eee2da  (password SEC0088 verified)
+--     Auth:   <REDACTED-AUTH-UUID>  (password <REDACTED-PASSWORD — rotate in Supabase Auth; never commit credentials> verified)
 --   Login to deployment portal SUCCEEDS (auth.users + public.users OK)
 --   but deployment portal shows "Couldn't load your profile" / Access Denied
 --   because public.portal_users has NO row for that auth_id — so
@@ -43,8 +43,8 @@ SELECT
   COALESCE(u.permissions, '{}'::jsonb),
   true
 FROM public.users u
-WHERE u.email = 'qualityestate_123@rediffmail.com'
-  AND u.auth_id = '55e943b5-d5e1-444d-b185-976f12eee2da'
+WHERE u.email = '<REDACTED-EMAIL>'
+  AND u.auth_id = '<REDACTED-AUTH-UUID>'
   AND lower(u.role) = 'aso'
 ON CONFLICT (auth_id) DO UPDATE SET
   name         = EXCLUDED.name,
@@ -82,7 +82,7 @@ ON CONFLICT (auth_id) DO NOTHING;
 -- Should now return 1 row with role=aso
 SELECT auth_id, name, email, centre, role, badge_number, is_active
 FROM public.portal_users
-WHERE email = 'qualityestate_123@rediffmail.com';
+WHERE email = '<REDACTED-EMAIL>';
 
 -- Cross-check attendance ↔ portal match
 SELECT u.email, u.role AS attendance_role, p.role AS portal_role,
@@ -90,7 +90,7 @@ SELECT u.email, u.role AS attendance_role, p.role AS portal_role,
        u.centre AS att_centre, p.centre AS portal_centre
 FROM public.users u
 JOIN public.portal_users p USING (auth_id)
-WHERE u.email = 'qualityestate_123@rediffmail.com';
+WHERE u.email = '<REDACTED-EMAIL>';
 
 -- Confirm get_portal_profile will succeed once the user logs in again:
 -- (run as that user or check that row exists)
@@ -105,5 +105,5 @@ SELECT role, count(*) FROM public.portal_users GROUP BY role ORDER BY role;
 -- • Sewadar FB5978GA0088 exists in sewadars as PERMANENT / AREA SECRETARY
 --   OFFICE / SECTOR-15-A — valid, not ELDERLY, so deployment eligibility
 --   checks will pass.
--- • Password SEC0088 verified via supabase.auth.signInWithPassword (anon key).
+-- • Password was verified via supabase.auth.signInWithPassword at authoring time; credential redacted, rotate it.
 --   No reset needed.

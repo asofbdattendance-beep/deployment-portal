@@ -5,8 +5,10 @@
 -- Run this in Supabase SQL Editor AFTER portal_setup.sql. Safe to re-run.
 
 -- 1) Empty portal_users leaving only aso + super_admin logins
-DELETE FROM public.portal_users
-WHERE role NOT IN ('aso', 'super_admin');
+-- NOTE: one-shot backfill, never a migration — run once in the SQL editor only.
+-- UNCOMMENT TO ARM (destructive — SQL editor only, never a migration):
+-- DELETE FROM public.portal_users
+-- WHERE role NOT IN ('aso', 'super_admin');
 
 -- 2) Copy centre admins from public.users (same auth_id = same password)
 INSERT INTO public.portal_users (auth_id, name, email, badge_number, centre, role, permissions, is_active)

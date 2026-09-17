@@ -364,14 +364,14 @@ describe('computeEditGates (v21 override scope)', () => {
     const g = computeEditGates({ ...base, locked: true, masterOpen: false, deadlinePassed: true, centreWideOverrideOpen: true, anyOverrideOpen: true })
     expect(g).toEqual({ consentEditable: true, deploymentEditable: true })
   })
-  it('department-scoped override reopens both CONSENT and DEPLOYMENT (consent rows have no department to scope against)', () => {
+  it('department-scoped override reopens DEPLOYMENT but NOT consent', () => {
     const g = computeEditGates({ ...base, locked: true, centreWideOverrideOpen: false, anyOverrideOpen: true })
-    expect(g).toEqual({ consentEditable: true, deploymentEditable: true })
+    expect(g).toEqual({ consentEditable: false, deploymentEditable: true })
   })
-  it('department-scoped override still reopens deployment on a closed switch / passed deadline', () => {
+  it('department-scoped override reopens deployment on a closed switch / passed deadline, consent stays frozen', () => {
     const g = computeEditGates({ ...base, masterOpen: false, deadlinePassed: true, centreWideOverrideOpen: false, anyOverrideOpen: true })
     expect(g.deploymentEditable).toBe(true)
-    expect(g.consentEditable).toBe(true)
+    expect(g.consentEditable).toBe(false)
   })
   it('a done schedule is terminal regardless of override', () => {
     expect(computeEditGates({ ...base, scheduleDone: true, centreWideOverrideOpen: true, anyOverrideOpen: true }))
@@ -1098,3 +1098,131 @@ describe('VSS dropdown selection behavior', () => {
       expect(aggregateQuotaAllocations(undefined)).toEqual([])
     })
   })
+
+/* ─── Batch B: operator quota union + days + edit-gate edge cases ───
+   Pins implementation truth for helpers the operator surface relies on.
+   Note: the quota helper is named `aggregateQuotaAllocations` (there is no
+   `aggregateQuotaByDepartment` export), and `computeEditGates` splits the
+   override scope — `centreWideOverrideOpen` reopens consent, while
+   `anyOverrideOpen` (centre-wide OR department-scoped) reopens deployment. */
+describe('operator quota union + days + edit-gate edge cases (Batch B)', () => {
+  it('aggregateQuotaAllocations skips null rows and rows without department_id', () => {
+    const rows = [
+      { department_id: 'd1', centre: 'GURGAON', max_count: 10 },
+      null,
+      undefined,
+      { centre: 'HODAL', max_count: 5 },
+      {},
+    ]
+    expect(aggregateQuotaAllocations(rows)).toEqual([
+      { department_id: 'd1', centre: 'ALL', max_count: 10, centres: ['GURGAON'] },
+    ])
+  })
+  it('aggregateQuotaAllocations keeps zero-quota rows (missing max_count counts as 0)', () => {
+    const rows = [
+      { department_id: 'd1', centre: 'GURGAON' },
+      { department_id: 'd1', centre: 'HODAL', max_count: 0 },
+    ]
+    expect(aggregateQuotaAllocations(rows)).toEqual([
+      { department_id: 'd1', centre: 'ALL', max_count: 0, centres: ['GURGAON', 'HODAL'] },
+    ])
+  })
+  it('aggregateQuotaAllocations sums repeated same-centre rows but lists the centre once', () => {
+    const rows = [
+      { department_id: 'd1', centre: 'GURGAON', max_count: 10 },
+      { department_id: 'd1', centre: 'GURGAON', max_count: 5 },
+    ]
+    expect(aggregateQuotaAllocations(rows)).toEqual([
+      { department_id: 'd1', centre: 'ALL', max_count: 15, centres: ['GURGAON'] },
+    ])
+  })
+  it('aggregateQuotaAllocations does not exclude AREA SECRETARY OFFICE centre rows', () => {
+    const rows = [{ department_id: 'd1', centre: 'AREA SECRETARY OFFICE', max_count: 4 }]
+    expect(aggregateQuotaAllocations(rows)).toEqual([
+      { department_id: 'd1', centre: 'ALL', max_count: 4, centres: ['AREA SECRETARY OFFICE'] },
+    ])
+  })
+  it('resolveOperatorQuotaRoot: null/undefined filterCentre means All-centres (null)', () => {
+    const centres = [
+      { name: 'GURGAON', parent_centre: '' },
+      { name: 'HODAL', parent_centre: 'GURGAON' },
+    ]
+    expect(resolveOperatorQuotaRoot({ isVssOperator: true, filterCentre: null, centres })).toBe(null)
+    expect(resolveOperatorQuotaRoot({ isVssOperator: true, filterCentre: undefined, centres })).toBe(null)
+  })
+  it('resolveOperatorQuotaRoot: picked CENTRE resolves to itself, unknown centre echoes back', () => {
+    const centres = [
+      { name: 'GURGAON', parent_centre: '' },
+      { name: 'HODAL', parent_centre: 'GURGAON' },
+    ]
+    expect(resolveOperatorQuotaRoot({ isVssOperator: true, filterCentre: 'GURGAON', centres })).toBe('GURGAON')
+    expect(resolveOperatorQuotaRoot({ isVssOperator: true, filterCentre: 'NOWHERE', centres })).toBe('NOWHERE')
+  })
+  it('selectQuotaAllocations: operator with null root and no subtree matches nothing', () => {
+    const allocs = [{ department_id: 'd1', centre: 'GURGAON', max_count: 10 }]
+    expect(selectQuotaAllocations({ allocations: allocs, quotaRoot: null, isVssOperator: true })).toEqual([])
+    expect(selectQuotaAllocations({ allocations: allocs, quotaRoot: null, isVssOperator: true, subtree: [] })).toEqual([])
+  })
+  it('isOeEscortsDept prefix behavior: longer names match, near-misses do not', () => {
+    expect(isOeEscortsDept('OE ESCORTS EXTRA DUTY')).toBe(true)
+    expect(isOeEscortsDept('OE ESCORT')).toBe(false)
+    expect(isOeEscortsDept('XOE ESCORTS')).toBe(false)
+    expect(isOeEscortsDept(123)).toBe(false)
+  })
+  it('daysForDept: prefix variants get 3, near-misses and non-strings get 5', () => {
+    expect(daysForDept('OE ESCORTS EXTRA DUTY')).toBe(3)
+    expect(daysForDept('OE ESCORT')).toBe(5)
+    expect(daysForDept('XOE ESCORTS')).toBe(5)
+    expect(daysForDept(123)).toBe(5)
+    expect(daysForDept('   ')).toBe(5)
+  })
+  it('computeEditGates: null schedule is always locked even with an override', () => {
+    expect(computeEditGates({ isEditableRole: true, schedule: null, scheduleDone: false, deadlinePassed: false, locked: false, masterOpen: true, anyOverrideOpen: true }))
+      .toEqual({ consentEditable: false, deploymentEditable: false })
+  })
+  it('computeEditGates: deadline-passed alone blocks without an override, dept-scoped/any override reopens deployment only', () => {
+    const base = { isEditableRole: true, schedule: { status: 'open' }, scheduleDone: false, deadlinePassed: true, locked: false, masterOpen: true }
+    expect(computeEditGates({ ...base, anyOverrideOpen: false }))
+      .toEqual({ consentEditable: false, deploymentEditable: false })
+    expect(computeEditGates({ ...base, anyOverrideOpen: true }))
+      .toEqual({ consentEditable: false, deploymentEditable: true })
+  })
+  it('computeEditGates: masterOpen undefined (not false) still counts as open', () => {
+    expect(computeEditGates({ isEditableRole: true, schedule: { status: 'open' }, scheduleDone: false, deadlinePassed: false, locked: false, masterOpen: undefined, anyOverrideOpen: false }))
+      .toEqual({ consentEditable: true, deploymentEditable: true })
+  })
+})
+
+describe('computeEditGates centre-wide vs dept-scoped split (Batch C)', () => {
+  const schedule = { status: 'open' }
+  const base = { isEditableRole: true, schedule, scheduleDone: false, deadlinePassed: false, locked: false, masterOpen: true }
+
+  it('dept-scoped override (any=true, centreWide=false) under lock reopens deployment only', () => {
+    expect(computeEditGates({ ...base, locked: true, centreWideOverrideOpen: false, anyOverrideOpen: true }))
+      .toEqual({ consentEditable: false, deploymentEditable: true })
+  })
+  it('centre-wide override (any=true, centreWide=true) under lock reopens both', () => {
+    expect(computeEditGates({ ...base, locked: true, centreWideOverrideOpen: true, anyOverrideOpen: true }))
+      .toEqual({ consentEditable: true, deploymentEditable: true })
+  })
+  it('neither flag under lock blocks both', () => {
+    expect(computeEditGates({ ...base, locked: true, centreWideOverrideOpen: false, anyOverrideOpen: false }))
+      .toEqual({ consentEditable: false, deploymentEditable: false })
+  })
+  it('dept-scoped override with passed deadline reopens deployment only', () => {
+    expect(computeEditGates({ ...base, deadlinePassed: true, centreWideOverrideOpen: false, anyOverrideOpen: true }))
+      .toEqual({ consentEditable: false, deploymentEditable: true })
+  })
+  it('done schedule stays terminal even with both flags true', () => {
+    expect(computeEditGates({ ...base, locked: true, deadlinePassed: true, masterOpen: false, scheduleDone: true, centreWideOverrideOpen: true, anyOverrideOpen: true }))
+      .toEqual({ consentEditable: false, deploymentEditable: false })
+  })
+  it('non-editable role stays locked even with both flags true', () => {
+    expect(computeEditGates({ ...base, isEditableRole: false, locked: true, deadlinePassed: true, centreWideOverrideOpen: true, anyOverrideOpen: true }))
+      .toEqual({ consentEditable: false, deploymentEditable: false })
+  })
+  it('normal-open path needs no flags (both true without overrides)', () => {
+    expect(computeEditGates({ ...base, centreWideOverrideOpen: false, anyOverrideOpen: false }))
+      .toEqual({ consentEditable: true, deploymentEditable: true })
+  })
+})

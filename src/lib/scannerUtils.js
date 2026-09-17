@@ -25,6 +25,9 @@ export const MAX_DRAIN_ATTEMPTS = 12     // after this, mark permanently failed
 export function withTimeout(promise, ms = 8000, label = 'Operation') {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
+  // Attach a no-op late handler so a slow wrapped promise that loses the
+  // race never raises unhandled-rejection noise when it settles late.
+  promise.then(() => {}, () => {});
   return Promise.race([
     promise.catch(e => { throw e; }),
     new Promise((_, reject) => {

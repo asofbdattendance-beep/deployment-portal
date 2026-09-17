@@ -26,4 +26,58 @@ jobs:
         run: npm run test:coverage
 
       - name: Build
+        env:
+          VITE_SUPABASE_URL: https://example.supabase.co
+          VITE_SUPABASE_ANON_KEY: ci-placeholder-key
         run: npm run build
+
+  migration-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Migration parity (sql/ <-> supabase/migrations/)
+        run: |
+          set -eu
+          fail=0
+          # portal_setup.sql <-> 0001
+          if ! ls supabase/migrations/0001_portal_setup.sql >/dev/null 2>&1; then
+            echo "missing counterpart: sql/portal_setup.sql <-> supabase/migrations/0001_portal_setup.sql"
+            fail=1
+          fi
+          # every versioned sql/v<N>_<name>.sql needs a counterpart (excludes sql/vss_*.sql)
+          for f in sql/v[0-9]*_*.sql; do
+            base=${f#sql/v}
+            ver=${base%%_*}
+            case $ver in
+              '' | *[!0-9]*) continue ;;
+            esac
+            if [ "$ver" -ge 30 ]; then
+              # N>=30: sql/v<N>_ <-> zero-padded 00<N+1>_
+              expected=$(printf '%04d' "$((ver + 1))")
+              if ! ls supabase/migrations/"${expected}"_*.sql >/dev/null 2>&1; then
+                echo "missing counterpart: $f <-> supabase/migrations/${expected}_*"
+                fail=1
+              fi
+            else
+              # N<30: counterpart carries the same version marker (0002<->v2, ...)
+              if ! ls supabase/migrations/*_v"${ver}"_*.sql >/dev/null 2>&1; then
+                echo "missing counterpart: $f <-> supabase/migrations/*_v${ver}_*.sql"
+                fail=1
+              fi
+            fi
+          done
+          # known-divergent pairs must be byte-identical
+          if ! diff -q sql/portal_setup.sql supabase/migrations/0001_portal_setup.sql; then
+            echo "content drift: sql/portal_setup.sql differs from supabase/migrations/0001_portal_setup.sql"
+            fail=1
+          fi
+          if ! diff -q sql/v28_rename_shared_tables.sql supabase/migrations/0029_v28_rename_shared_tables.sql; then
+            echo "content drift: sql/v28_rename_shared_tables.sql differs from supabase/migrations/0029_v28_rename_shared_tables.sql"
+            fail=1
+          fi
+          if [ "$fail" -ne 0 ]; then
+            echo "migration-parity check FAILED"
+            exit 1
+          fi
+          echo "migration-parity check passed"

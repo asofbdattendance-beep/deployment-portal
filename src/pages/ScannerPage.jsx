@@ -19,27 +19,33 @@ export default function ScannerPage({ schedules, scheduleId }){
   const [popup, setPopup]=useState(null)
   const [outTime, setOutTime]=useState('')
   const [syncing, setSyncing]=useState(false)
+  const [offline, setOffline]=useState(false)
   const dismissTimerRef = useRef(null)
 
   const refresh=useCallback(async()=>{
     if(!scheduleId) return
-    const sess = await supabase.from('dp_attendance_sessions').select('*')
-      .eq('schedule_id',scheduleId).eq('in_date',todayStrIST())
-      .order('created_at',{ascending:false}).limit(30)
-      .then(r=>r.data||[])
-    setSessions(sess)
-    setQueued(await getQueuedScans())
+    try {
+      const sess = await supabase.from('dp_attendance_sessions').select('*')
+        .eq('schedule_id',scheduleId).eq('in_date',todayStrIST())
+        .order('created_at',{ascending:false}).limit(30)
+        .then(r=>r.data||[])
+      setSessions(sess)
+      setQueued(await getQueuedScans())
+      setOffline(false)
+    } catch(e){ console.warn('[Scanner] session refresh failed — keeping last data:', e?.message); setOffline(true) }
   },[scheduleId])
 
   const refreshDeployments=useCallback(async()=>{
     if(!scheduleId) return
-    const dep = await fetchAllRows('deployments', 'badge_number, department_id, deployed_department_id',
-      (q) => q.eq('schedule_id',scheduleId))
-    preloadDeployed(scheduleId, (dep||[]).map(d=>({
-      badge_number:d.badge_number,
-      deptId:d.deployed_department_id||d.department_id,
-      is_vss: d.badge_number?.startsWith('VS'),
-    })))
+    try {
+      const dep = await fetchAllRows('deployments', 'badge_number, department_id, deployed_department_id',
+        (q) => q.eq('schedule_id',scheduleId))
+      await preloadDeployed(scheduleId, (dep||[]).map(d=>({
+        badge_number:d.badge_number,
+        deptId:d.deployed_department_id||d.department_id,
+        is_vss: d.badge_number?.startsWith('VS'),
+      })))
+    } catch(e){ console.warn('[Scanner] deployment preload failed:', e?.message) }
   },[scheduleId])
 
   useEffect(()=>{ refresh(); refreshDeployments() },[refresh, refreshDeployments])
@@ -63,14 +69,14 @@ export default function ScannerPage({ schedules, scheduleId }){
     }
   }
 
-  const { handleScan: rawHandleScan, getBusy, resetBusy } = useScanHandler({
+  const { handleScan: rawHandleScan, busy, resetBusy } = useScanHandler({
     scheduleId,
     profile,
     deptName: null,
     showPopup,
     toast,
-    onQueued: () => getQueuedScans().then(setQueued),
-    onAfterScan: async () => { refresh(); refreshDeployments() },
+    onQueued: () => getQueuedScans().then(setQueued).catch(e=>console.warn('[Scanner] queue refresh failed:', e?.message)),
+    onAfterScan: async () => { try { await refresh(); await refreshDeployments() } catch(e){ console.warn('[Scanner] post-scan refresh failed:', e?.message); setOffline(true) } },
   })
 
   // keep resetBusy referenced to avoid unused-var lint (hook exposes it for safety timeout)
@@ -80,6 +86,9 @@ export default function ScannerPage({ schedules, scheduleId }){
     if(dismissTimerRef.current) clearTimeout(dismissTimerRef.current)
     const result = await rawHandleScan(badge)
     if (result?.outTimeDefault) setOutTime(result.outTimeDefault)
+    // Clear the manual input only on a successful scan — keep it on failure
+    // so the user can retry without retyping.
+    if (result?.ok || result?.outTimeDefault) setManualBadge('')
   }
 
   const confirmForgot=async()=>{
@@ -115,10 +124,11 @@ export default function ScannerPage({ schedules, scheduleId }){
           {navigator.onLine ? <Wifi size={10}/> : <WifiOff size={10}/>}
           {navigator.onLine ? 'Online' : 'Offline'}
         </span>
+        {offline && <span style={{fontSize:'0.7rem', color:'#b45309'}}>· refresh failed — showing last data</span>}
       </div></div></div>
       <div className="card" style={{padding:'1rem', marginBottom:12}}>
         <BarcodeScanner onScan={handleScan} />
-        <div style={{display:'flex', gap:8, marginTop:10}}><input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Manual FB/BH/VS badge" className="input" style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ handleScan(manualBadge); setManualBadge('') }}}/><button onClick={()=>{ handleScan(manualBadge); setManualBadge('') }} className="btn btn-primary" disabled={getBusy()||!manualBadge.trim()}>{getBusy() ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark In/Out</button></div>
+        <div style={{display:'flex', gap:8, marginTop:10}}><input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Manual FB/BH/VS badge" className="input" style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ handleScan(manualBadge) }}}/><button onClick={()=>{ handleScan(manualBadge) }} className="btn btn-primary" disabled={busy||!manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark In/Out</button></div>
       </div>
       <div className="card" style={{padding:'1rem'}}>
         <div style={{fontWeight:700, display:'flex', alignItems:'center', gap:6}}><Clock size={14}/> Recent scans (today, any dept incl. VSS)</div>

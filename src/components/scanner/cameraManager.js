@@ -149,66 +149,69 @@ export async function applyTapFocus(track, x, y, debug = false) {
 
 // ─── Camera Initialization ────────────────────────────────────────────────────
 
-let _openingCamera = false
+let _openingPromise = null
 
 /**
  * Open camera with progressive resolution fallback + platform-specific constraints.
  *
+ * Concurrent callers (e.g. StrictMode double-mount) share the single in-flight
+ * open attempt instead of getting a null rejection.
+ *
  * @param {object} opts
  * @param {number} [opts.startIndex] — resolution chain start index
  * @param {boolean} [opts.debug]
- * @param {AbortSignal} [opts.signal] — optional abort signal to cancel getUserMedia
  * @returns {Promise<{stream: MediaStream, torchSupported: boolean}>}
  * @throws {Error} with name 'NotAllowedError' | 'NotFoundError' | 'TimeoutError'
  */
-export async function openCamera(opts = {}) {
-  const { startIndex, debug = false, signal } = opts
+export function openCamera(opts = {}) {
+  const { startIndex, debug = false } = opts
 
-  if (_openingCamera) {
-    if (debug) console.warn('[CameraMgr] openCamera called while already opening')
-    return null
+  if (_openingPromise) {
+    if (debug) console.warn('[CameraMgr] openCamera called while already opening — sharing in-flight attempt')
+    return _openingPromise
   }
-  _openingCamera = true
-  try {
-    const isIOS = platform.isIOS
-    const chain = isIOS ? RESOLUTION_CHAIN.slice(1) : RESOLUTION_CHAIN
-    const startIdx = startIndex ?? (isIOS ? 0 : 0)
+  _openingPromise = openCameraInner({ startIndex, debug }).finally(() => { _openingPromise = null })
+  return _openingPromise
+}
 
-    let lastError = null
+async function openCameraInner({ startIndex, debug }) {
+  const isIOS = platform.isIOS
+  const chain = isIOS ? RESOLUTION_CHAIN.slice(1) : RESOLUTION_CHAIN
+  const startIdx = startIndex ?? (isIOS ? 0 : 0)
 
-    for (let i = startIdx; i < chain.length; i++) {
-      try {
-        if (debug) console.log(`[CameraMgr] Trying resolution ${i}: ${JSON.stringify(chain[i])}`)
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { ...chain[i], facingMode: { ideal: 'environment' } },
-          audio: false,
-          signal,
-        })
-        if (debug) console.log(`[CameraMgr] Camera opened at resolution ${i}`)
-        return { stream, torchSupported: detectTorch(stream) }
-      } catch (e) {
-        lastError = e
-        if (debug) console.warn(`[CameraMgr] Resolution ${i} failed:`, e.message)
-        // Don't try further resolutions if permission denied
-        if (e.name === 'NotAllowedError') throw e
-      }
-    }
+  let lastError = null
 
-    // Final fallback: no resolution constraints
+  for (let i = startIdx; i < chain.length; i++) {
     try {
-      if (debug) console.log('[CameraMgr] Trying fallback (no resolution constraints)')
+      if (debug) console.log(`[CameraMgr] Trying resolution ${i}: ${JSON.stringify(chain[i])}`)
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' } },
+        video: { ...chain[i], facingMode: { ideal: 'environment' } },
         audio: false,
-        signal,
       })
+      if (debug) console.log(`[CameraMgr] Camera opened at resolution ${i}`)
       return { stream, torchSupported: detectTorch(stream) }
     } catch (e) {
+      lastError = e
+      if (debug) console.warn(`[CameraMgr] Resolution ${i} failed:`, e.message)
+      // Don't try further resolutions if permission denied
       if (e.name === 'NotAllowedError') throw e
-      throw lastError || e
     }
-  } finally {
-    _openingCamera = false
+  }
+
+  // Final fallback: no resolution constraints
+  // (no AbortSignal: browsers ignore `signal` inside getUserMedia
+  // constraints — cancellation is handled by the caller's open-generation
+  // counter, which discards stale streams on resolve.)
+  try {
+    if (debug) console.log('[CameraMgr] Trying fallback (no resolution constraints)')
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' } },
+      audio: false,
+    })
+    return { stream, torchSupported: detectTorch(stream) }
+  } catch (e) {
+    if (e.name === 'NotAllowedError') throw e
+    throw lastError || e
   }
 }
 

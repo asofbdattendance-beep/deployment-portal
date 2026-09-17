@@ -98,6 +98,8 @@ export default function DeptDropdown({
         onClick={e => { e.stopPropagation(); if (open) onToggle(false); else openMenu() }}
         disabled={disabled}
         className="select"
+        aria-haspopup="listbox"
+        aria-expanded={open}
         style={{ width: '100%', textAlign: 'left', padding: '0.25rem 0.5rem', fontSize: '0.8rem', background: '#fff', cursor: disabled ? 'not-allowed' : 'pointer' }}
       >
         {current ? current.name : '—'}
@@ -107,6 +109,8 @@ export default function DeptDropdown({
         <div
           ref={menuRef}
           className="dept-menu"
+          role="listbox"
+          aria-labelledby={id}
           onClick={e => e.stopPropagation()}
           style={{
             position: 'fixed',
@@ -128,14 +132,19 @@ export default function DeptDropdown({
               No departments with an allocated quota for your centre yet. Contact your ASO.
             </div>
           )}
-          {items.map(it => {
+          {items.map((it, idx) => {
             const disabled = it.reasons.length > 0 && !it.isCurrent
             const reasonKey = `${row.centre}|${row.badge_number}|${it.deptId}`
             const showReasons = openReasons === reasonKey
+            const activeIdx = items.findIndex(x => x.isCurrent)
+            const baseIdx = activeIdx >= 0 ? activeIdx : 0
             return (
               <div key={it.deptId}>
                 <div
                   className="dept-item"
+                  role="option"
+                  aria-selected={!!it.isCurrent}
+                  tabIndex={idx === baseIdx ? 0 : -1}
                   onClick={e => {
                     e.stopPropagation()
                     if (disabled) {
@@ -143,6 +152,31 @@ export default function DeptDropdown({
                       return
                     }
                     onSelect(it.deptId)
+                  }}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      if (disabled) {
+                        setOpenReasons(showReasons ? null : reasonKey)
+                        return
+                      }
+                      onSelect(it.deptId)
+                    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      const menu = menuRef.current
+                      if (!menu) return
+                      const focusables = Array.from(menu.querySelectorAll('.dept-item'))
+                      const at = focusables.indexOf(e.currentTarget)
+                      const next = e.key === 'ArrowDown'
+                        ? focusables[(at + 1) % focusables.length]
+                        : focusables[(at - 1 + focusables.length) % focusables.length]
+                      if (next) next.focus()
+                    } else if (e.key === 'Escape') {
+                      e.stopPropagation()
+                      onToggle(false)
+                    }
                   }}
                   onMouseEnter={() => { if (disabled) setOpenReasons(reasonKey) }}
                   onMouseLeave={() => { if (disabled) setOpenReasons(null) }}
@@ -182,7 +216,31 @@ export default function DeptDropdown({
           {current && (
             <div
               className="dept-item"
+              role="option"
+              aria-selected={false}
+              tabIndex={items.length === 0 ? 0 : -1}
               onClick={e => { e.stopPropagation(); onSelect('') }}
+              onKeyDown={e => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  onSelect('')
+                } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  const menu = menuRef.current
+                  if (!menu) return
+                  const focusables = Array.from(menu.querySelectorAll('.dept-item'))
+                  const at = focusables.indexOf(e.currentTarget)
+                  const next = e.key === 'ArrowDown'
+                    ? focusables[(at + 1) % focusables.length]
+                    : focusables[(at - 1 + focusables.length) % focusables.length]
+                  if (next) next.focus()
+                } else if (e.key === 'Escape') {
+                  e.stopPropagation()
+                  onToggle(false)
+                }
+              }}
               style={{
                 display: 'flex',
                 alignItems: 'center',

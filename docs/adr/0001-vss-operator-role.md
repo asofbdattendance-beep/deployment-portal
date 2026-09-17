@@ -1,7 +1,8 @@
 # ADR 0001: Reusable `vss_operator` Role
 
-- Status: Accepted
+- Status: Accepted — amended by v37
 - Date: 2026-09-12
+- Amended: 2026-09-17 (v37)
 - Scope: DB + docs third of the `vss_operator` feature (`sql/v36_vss_operator.sql`)
 
 ## Context
@@ -114,3 +115,30 @@ WHERE role = 'vss_operator';
 then revert the frontend role gating. Optionally re-run
 v20/v34/v35 to strip the operator arms; harmless to leave them once no
 user holds the role.
+
+## Amendment (v37, 2026-09-17)
+
+`sql/v37_operator_switch_and_registration_guards.sql` (run after v36)
+makes THREE reversals on top of the decision above:
+
+1. The operator now HONORS the effective VSS switch
+   (`vss_deploy_open_for_centre`) for VSS-population rows — fail-closed.
+   Regular rows keep the bypass. The v34 hard-global-close contract
+   binds the operator too.
+2. The `aso` arm is removed from `vss_registrations_write` and from the
+   registration-guard bypass (v20 read-only restored — v36 had
+   re-introduced an aso write path as a side effect of moving the arm),
+   and operator UPDATE/DELETE of `assigned` registrations raises.
+3. The `done` check moves above the operator bypass in
+   `block_after_deadline` and is added to the `block_locked_delete`
+   operator branch — `done` binds everyone.
+
+Plus: `assign_vss_registration` takes `SELECT FOR UPDATE` on the roster
+row (`vss_sewadars.badge_number` UNIQUE already existed via v4, so no
+new index); storage `vss-photos` read + delete gain the operator arm.
+
+Reasons: the fail-closed switch contract was decided 2026-09-17 (a
+globally-closed VSS switch must stop VSS writes from every non-admin
+role, operator included); the aso write path was a v20 regression to
+close, not a feature; and `done` must bind everyone or a terminal
+schedule is not terminal.

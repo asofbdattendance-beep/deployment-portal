@@ -124,12 +124,24 @@ function createEnginePool(debug) {
       activeIndex++
       if (debug) console.log(`[Engine] Fallback: ${prev} → ${getActive().id}`)
     } else {
-      // All engines exhausted — reset after cooldown
-      engines.forEach(e => { e.failures = 0; e.ready = true })
+      // All engines exhausted — reset failures only for engines with a live
+      // detector; re-run init for the rest so the loop never spins on null.
+      const reinits = [initNative, initWASM, initZXing]
+      engines.forEach((e, i) => {
+        const live = i === 2 ? !!zxingReader : !!e.detector
+        e.failures = 0
+        if (live) { e.ready = true }
+        else { try { Promise.resolve(reinits[i]()).catch(() => {}) } catch {} }
+      })
       activeIndex = 0
       if (debug) console.log('[Engine] All scan engines failed — resetting in 5s…')
       setTimeout(() => {
-        engines.forEach(e => { e.failures = 0; e.ready = true })
+        engines.forEach((e, i) => {
+          const live = i === 2 ? !!zxingReader : !!e.detector
+          e.failures = 0
+          if (live) { e.ready = true }
+          else { try { Promise.resolve(reinits[i]()).catch(() => {}) } catch {} }
+        })
         activeIndex = 0
         if (debug) console.log('[Engine] Engines reset')
       }, 5000)
@@ -213,6 +225,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const focusRetryRef = useRef(null)
   const timeoutRef = useRef(null)
   const pausedRef = useRef(false)
+  const openGenRef = useRef(0)
   const channelRef = useRef(null)
   const isLeaderRef = useRef(true)
   const tapFocusCleanupRef = useRef(null)
@@ -390,8 +403,16 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
 
   const startScanner = useCallback(async () => {
     if (!mountedRef.current) return
+    pausedRef.current = false
     stopScanner()
     if (!isLeaderRef.current) return
+    // Insecure contexts (plain http:// on a non-localhost host) have no
+    // mediaDevices at all — fail fast instead of attempting openCamera.
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setStatus('error')
+      setErrorMsg('Camera needs HTTPS or localhost — open the portal over https://')
+      return
+    }
     // Double-tab guard — only one active scanner tab
     try {
       channelRef.current?.close()
@@ -432,7 +453,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     }
     setEngineLabel(pool.getActiveId())
 
-    // 2. Open camera (with timeout)
+    // 2. Open camera (with timeout) — open-generation counter: if a newer
+    // open attempt started while getUserMedia was in flight, this result is
+    // stale → stop its tracks immediately and never assign it.
+    const openGen = ++openGenRef.current
     let stream, torchSupported
     try {
       const result = await withTimeout(
@@ -441,6 +465,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         'Camera'
       )
       if (!result) throw new Error('Camera is already being opened — please wait')
+      if (openGen !== openGenRef.current) {
+        try { result.stream.getTracks().forEach(t => t.stop()) } catch {}
+        return
+      }
       stream = result.stream
       torchSupported = result.torchSupported
     } catch (err) {
@@ -520,7 +548,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    const handleVisibility = () => {
+    const handleVisibility = async () => {
       if (document.visibilityState === 'hidden') {
         pausedRef.current = true
         // Stop detection loop but keep camera alive
@@ -540,16 +568,21 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         // Re-enable camera track
         const track = trackRef.current
         if (track) track.enabled = true
-        // Resume detection — also re-play video if Safari paused it
-        if (videoRef.current && videoRef.current.paused) {
-          videoRef.current.play().catch(() => {})
+        // Resume detection — Safari pauses <video> on hidden and never
+        // resumes it, so always re-play (catch → ignore) and re-apply the
+        // focus constraints the hidden state may have dropped.
+        if (videoRef.current) {
+          try { await videoRef.current.play() } catch {}
+        }
+        if (track && typeof applyFocusConstraints === 'function') {
+          try { await applyFocusConstraints(track, { debug }) } catch {}
         }
         detectLoop()
       }
     }
     document.addEventListener('visibilitychange', handleVisibility)
     return () => document.removeEventListener('visibilitychange', handleVisibility)
-  }, [status, detectLoop, startScanner])
+  }, [status, detectLoop, startScanner, debug])
 
   useImperativeHandle(ref, () => ({ restart: startScanner, stop: stopScanner }))
 
@@ -558,11 +591,12 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const handleTorchToggle = useCallback(async () => {
     const track = trackRef.current
     if (!track) return
-    setTorchOn(prev => {
-      toggleTorch(track, !prev)
-      return !prev
-    })
-  }, [])
+    // Compute next outside the updater (StrictMode double-invokes updaters)
+    // so the single hardware toggle can't desync from state.
+    const next = !torchOn
+    try { await toggleTorch(track, next) } catch {}
+    setTorchOn(next)
+  }, [torchOn])
 
   // ─── Error State ──────────────────────────────────────────────────
 

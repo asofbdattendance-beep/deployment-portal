@@ -122,6 +122,7 @@ export default function ScanResultPopup({
 
   const overlayRef = useRef(null)
   const primaryRef = useRef(null)
+  const prevFocusRef = useRef(null)
   const [visible, setVisible] = useState(false)
   const [mounted, setMounted] = useState(false)
 
@@ -144,6 +145,19 @@ export default function ScanResultPopup({
     const id = setTimeout(() => primaryRef.current?.focus(), 60)
     return () => clearTimeout(id)
   }, [mounted, visible])
+
+  // restore focus on dismiss/unmount (the popup auto-dismisses, which would
+  // otherwise drop focus to <body>). No scanner-region id exists in the repo,
+  // so the fallback is the previously-focused element only. No timer changes.
+  useEffect(() => {
+    if (!mounted) return
+    prevFocusRef.current = document.activeElement
+    return () => {
+      const prev = prevFocusRef.current
+      prevFocusRef.current = null
+      if (prev && document.contains(prev)) prev.focus({ preventScroll: true })
+    }
+  }, [mounted])
 
   // ESC + focus trap
   const handleKeyDown = useCallback((e) => {

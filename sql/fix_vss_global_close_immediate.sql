@@ -32,13 +32,15 @@ ORDER BY schedule_id, centre;
 --    Pick the block that matches what you closed:
 
 -- If you closed "VSS Deployment" globally and want it truly closed for everyone:
-UPDATE public.centre_vss_overrides SET deployment_open = NULL WHERE deployment_open = true;
+-- UNCOMMENT TO ARM (destructive — SQL editor only, never a migration):
+-- UPDATE public.centre_vss_overrides SET deployment_open = NULL WHERE deployment_open = true;
 -- Optional: remove rows that are now fully Auto (both knobs null)
-DELETE FROM public.centre_vss_overrides WHERE creation_open IS NULL AND deployment_open IS NULL;
+-- DELETE FROM public.centre_vss_overrides WHERE creation_open IS NULL AND deployment_open IS NULL;
 
 -- If you closed "Add VSS" globally:
-UPDATE public.centre_vss_overrides SET creation_open = NULL WHERE creation_open = true;
-DELETE FROM public.centre_vss_overrides WHERE creation_open IS NULL AND deployment_open IS NULL;
+-- UNCOMMENT TO ARM (destructive — SQL editor only, never a migration):
+-- UPDATE public.centre_vss_overrides SET creation_open = NULL WHERE creation_open = true;
+-- DELETE FROM public.centre_vss_overrides WHERE creation_open IS NULL AND deployment_open IS NULL;
 
 -- If you also want to clear generic deployment overrides that were opened
 -- for testing and now keep BOTH regular and (before v30) VSS open:

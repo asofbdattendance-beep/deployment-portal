@@ -5,7 +5,7 @@ import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import BarcodeScanner from '../components/scanner/BarcodeScanner'
 import ScanResultPopup from '../components/scanner/ScanResultPopup'
-import { getQueuedScans, installDrainListeners, preloadDeployed } from '../lib/offlineQueue'
+import { getQueuedScans, installDrainListeners, preloadDeployed, clearFailedQueue } from '../lib/offlineQueue'
 import { friendly, todayStrIST, withTimeout } from '../lib/scannerUtils'
 import { useScanHandler } from '../hooks/useScanHandler'
 import { ScanLine, Users, UserX, Search, Clock, AlertTriangle, Download, Wifi, WifiOff, RefreshCw, Loader2 } from 'lucide-react'
@@ -30,6 +30,7 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
   const [outTime, setOutTime] = useState('')
   const [search, setSearch] = useState('')
   const [syncing, setSyncing] = useState(false)
+  const [offline, setOffline] = useState(false)
   const dismissTimerRef = useRef(null)
 
   const load = useCallback(async () => {
@@ -52,7 +53,7 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
       setSewadars(sewAll||[])
       setSessions(sessRes.data||[])
       const deployed = (depAll||[]).map(d=>({ badge_number:d.badge_number, deptId: d.deployed_department_id||d.department_id, is_vss: d.badge_number?.startsWith('VS') }))
-      preloadDeployed(selectedScheduleId, deployed)
+      await preloadDeployed(selectedScheduleId, deployed)
       const q = await getQueuedScans()
       setQueued(q||[])
     } catch(e){ toast.error(e.message) } finally{ setLoading(false) }
@@ -107,16 +108,18 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
     }
   }, [])
 
-  const { handleScan: rawHandleScan, getBusy, resetBusy } = useScanHandler({
+  const { handleScan: rawHandleScan, busy, resetBusy } = useScanHandler({
     scheduleId: selectedScheduleId,
     profile,
     deptName: myDeptName,
     showPopup,
     toast,
-    onQueued: () => getQueuedScans().then(setQueued),
+    onQueued: () => getQueuedScans().then(setQueued).catch(e=>console.warn('[Scanner] queue refresh failed:', e?.message)),
     onAfterScan: async () => {
-      const sess = await supabase.from('dp_attendance_sessions').select('*').eq('schedule_id', selectedScheduleId).eq('in_date', todayStrIST()).order('created_at', { ascending: false }).limit(200).then(r => r.data || [])
-      setSessions(sess)
+      try {
+        const sess = await supabase.from('dp_attendance_sessions').select('*').eq('schedule_id', selectedScheduleId).eq('in_date', todayStrIST()).order('created_at', { ascending: false }).limit(200).then(r => r.data || [])
+        setSessions(sess)
+      } catch(e){ console.warn('[Scanner] post-scan refresh failed:', e?.message); setOffline(true) }
     },
   })
   void resetBusy
@@ -124,6 +127,9 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
   const handleScan = async (badge) => {
     const result = await rawHandleScan(badge)
     if (result?.outTimeDefault) setOutTime(result.outTimeDefault)
+    // Clear the manual input only on a successful scan — keep it on failure
+    // so the user can retry without retyping.
+    if (result?.ok || result?.outTimeDefault) setManualBadge('')
   }
 
   const confirmForgotOut = async () => {
@@ -170,6 +176,8 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
               {navigator.onLine ? <Wifi size={10}/> : <WifiOff size={10}/>}
               {navigator.onLine ? 'Online' : 'Offline'}
             </span>
+            {offline && <span style={{fontSize:'0.7rem', color:'#b45309'}}>· refresh failed — showing last data</span>}
+            {queued.some(q=>q.failed) && <button onClick={async ()=>{ await clearFailedQueue(); getQueuedScans().then(setQueued).catch(()=>{}) }} style={{fontSize:'0.7rem', color:'#b45309', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear failed scans</button>}
           </div>
           {myDeptIds.length>1 && <select value={myDept} onChange={e=>setActiveDept(e.target.value)} className="select" style={{marginTop:6}}>{myDeptIds.map(id=> <option key={id} value={id}>{deptMap.get(id)?.name||id}</option>)}</select>}
         </div>
@@ -187,8 +195,8 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
           <div className="card" style={{padding:'1rem'}}>
             <BarcodeScanner onScan={handleScan} />
             <div style={{display:'flex', gap:8, marginTop:10}}>
-              <input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input" style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ handleScan(manualBadge); setManualBadge('') } }} />
-              <button onClick={()=>{ handleScan(manualBadge); setManualBadge('') }} className="btn btn-primary" disabled={getBusy() || !manualBadge.trim()}>{getBusy() ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark</button>
+              <input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input" style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ handleScan(manualBadge) } }} />
+              <button onClick={()=>{ handleScan(manualBadge) }} className="btn btn-primary" disabled={busy || !manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark</button>
             </div>
           </div>
           <div className="card" style={{padding:'1rem'}}>

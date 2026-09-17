@@ -86,10 +86,10 @@ function Toast({ toast, onClose }) {
   }
 
   return (
-    <div className={`toast toast-${toast.type}`}>
+    <div className={`toast toast-${toast.type}`} role="status" aria-live="polite">
       <span className="toast-icon">{icons[toast.type]}</span>
       <span className="toast-message">{toast.message}</span>
-      <button className="toast-close" onClick={onClose}>
+      <button className="toast-close" onClick={onClose} aria-label="Dismiss notification" title="Dismiss notification">
         <X size={16} />
       </button>
     </div>

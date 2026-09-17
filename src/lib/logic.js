@@ -284,15 +284,19 @@ export function computeEditGates({
   deadlinePassed,
   locked,
   masterOpen,
+  centreWideOverrideOpen = false,
   anyOverrideOpen = false,
 }) {
   const open = !!isEditableRole && !!schedule && schedule.status === 'open' && !scheduleDone
   if (!open) return { consentEditable: false, deploymentEditable: false }
   const normal = !deadlinePassed && !locked && masterOpen !== false
   return {
-    // Consent rows carry no department, so any override (centre-wide OR
-    // department-scoped) reopens consent editing for the centre.
-    consentEditable: anyOverrideOpen || normal,
+    // Consent rows carry no department, so ONLY a centre-wide/global override
+    // reopens consent editing — a department-scoped unlock leaves consent
+    // frozen while still reopening deployment (see below).
+    consentEditable: centreWideOverrideOpen || normal,
+    // Deployment (the requested-department assignment) reopens via ANY
+    // override (centre-wide OR department-scoped).
     deploymentEditable: anyOverrideOpen || normal,
   }
 }

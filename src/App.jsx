@@ -151,6 +151,15 @@ function Dashboard() {
   )
 }
 
+function SigningIn() {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', background: '#f6f7fb', gap: '1rem' }}>
+      <div style={{ width: 32, height: 32, border: '3px solid #e2e8f0', borderTopColor: '#6366f1', borderRadius: '50%', animation: 'spin 0.6s linear infinite' }} />
+      <p style={{ color: '#64748b', fontSize: '0.9rem', margin: 0 }}>Signing you in…</p>
+    </div>
+  )
+}
+
 function AccessDenied({ signOut }) {
   return (
     <div style={{ maxWidth: 400, margin: '4rem auto', padding: '0 1rem', textAlign: 'center' }}>
@@ -188,7 +197,7 @@ function ProfileError({ message, onRetry, onSignOut }) {
 }
 
 export default function App() {
-  const { isAuthenticated, loading, profile, profileError, signOut, refreshProfile, isRecovery } = usePortalAuth()
+  const { isAuthenticated, loading, profile, profileError, profilePending, signOut, refreshProfile, isRecovery } = usePortalAuth()
 
   if (MAINTENANCE_MODE) return <MaintenanceScreen />
 
@@ -211,6 +220,11 @@ export default function App() {
   if (!profile) {
     if (profileError) {
       return <ProfileError message={profileError} onRetry={refreshProfile} onSignOut={signOut} />
+    }
+    // Profile fetch still in flight (e.g. right after sign-in) — neutral
+    // loading state. Access Denied is only for a definitive no-access.
+    if (profilePending) {
+      return <SigningIn />
     }
     return <AccessDenied signOut={signOut} />
   }

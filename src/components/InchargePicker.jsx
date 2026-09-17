@@ -119,21 +119,32 @@ export default function InchargePicker({ id, value, currentName = '', sewadars, 
               onChange={e => setQuery(e.target.value)}
               onKeyDown={e => { if (e.key === 'Escape') onToggle(false) }}
               placeholder="Search name / badge…"
+              aria-label="Search department incharge"
               className="input"
               style={{ flex: 1, padding: '0.3rem 0.5rem', fontSize: '0.78rem' }}
             />
             {query && (
-              <button type="button" onClick={() => setQuery('')} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#94a3b8', display: 'inline-flex', padding: 0 }} title="Clear search">
+              <button type="button" onClick={() => setQuery('')} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#94a3b8', display: 'inline-flex', padding: 0 }} title="Clear search" aria-label="Clear search">
                 <X size={13} />
               </button>
             )}
           </div>
 
-          <div style={{ overflowY: 'auto', maxHeight: 240 }}>
+          <div style={{ overflowY: 'auto', maxHeight: 240 }} role="listbox" aria-label="Eligible sewadars">
             {current && (
               <div
                 className="dept-item"
+                role="option"
+                aria-selected={false}
+                tabIndex={0}
                 onClick={e => { e.stopPropagation(); pick('') }}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    pick('')
+                  }
+                }}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -160,7 +171,17 @@ export default function InchargePicker({ id, value, currentName = '', sewadars, 
                 <div
                   key={s.badge_number}
                   className="dept-item"
+                  role="option"
+                  aria-selected={isCurrent}
+                  tabIndex={0}
                   onClick={e => { e.stopPropagation(); pick(s.badge_number) }}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      pick(s.badge_number)
+                    }
+                  }}
                   style={{
                     display: 'flex',
                     alignItems: 'center',

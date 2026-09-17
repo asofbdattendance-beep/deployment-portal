@@ -4,7 +4,7 @@ import { supabase } from '../lib/supabase'
 import { LogIn, AlertCircle, Users, KeyRound, ArrowLeft, MailCheck } from 'lucide-react'
 
 export default function LoginPage() {
-  const { signIn } = usePortalAuth()
+  const { signIn, recoveryLinkError } = usePortalAuth()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -36,11 +36,17 @@ export default function LoginPage() {
     setResetLoading(true)
     try {
       // redirectTo points back at this app so Supabase's reset page can
-      // return the user here after setting a new password
-      await supabase.auth.resetPasswordForEmail(resetEmail.trim(), {
+      // return the user here after setting a new password.
+      // supabase-js resolves { error } instead of throwing — read it, or
+      // every failure would wrongly show the success state.
+      const { error: resetErr } = await supabase.auth.resetPasswordForEmail(resetEmail.trim(), {
         redirectTo: window.location.origin,
       })
-      setResetSent(true)
+      if (resetErr) {
+        setResetError(resetErr.message || 'Could not send reset link')
+      } else {
+        setResetSent(true)
+      }
     } catch (err) {
       setResetError(err.message || 'Could not send reset link')
     } finally {
@@ -106,6 +112,13 @@ export default function LoginPage() {
           <>
             <h1>Deployment Portal</h1>
             <p className="login-subtitle">Sewadar Consent & Deployment</p>
+
+            {recoveryLinkError && (
+              <div className="error-message">
+                <AlertCircle size={16} />
+                <span>{recoveryLinkError}</span>
+              </div>
+            )}
 
             <form onSubmit={handleSubmit}>
               <div className="form-group">

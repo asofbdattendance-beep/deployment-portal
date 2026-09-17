@@ -14,6 +14,12 @@ export function PortalAuthProvider({ children }) {
   const [session, setSession] = useState(null)
   const [profileError, setProfileError] = useState(null)
   const [isRecovery, setIsRecovery] = useState(false)
+  // True while a profile fetch is in flight (boot or auth-event driven), so
+  // callers can tell "still loading" apart from "loaded, no access".
+  const [profilePending, setProfilePending] = useState(false)
+  // Set when boot finds Supabase error params in the URL (e.g. an expired or
+  // already-used reset link yields no session) — shown on the login screen.
+  const [recoveryLinkError, setRecoveryLinkError] = useState(null)
 
   const fetchProfile = useCallback(async () => {
     setProfileError(null)
@@ -37,6 +43,17 @@ export function PortalAuthProvider({ children }) {
 
   useEffect(() => {
     let mounted = true
+    // An expired/invalid recovery link lands back here with error params in
+    // the hash/query and no session — surface an explanation on login.
+    try {
+      const hashParams = new URLSearchParams((window.location.hash || '').replace(/^#/, ''))
+      const queryParams = new URLSearchParams(window.location.search || '')
+      if (hashParams.get('error') || queryParams.get('error')) {
+        setRecoveryLinkError('Your reset link expired or was already used — request a new one')
+      }
+    } catch {
+      // URL parsing must never break boot
+    }
     supabase.auth.getSession().then(async ({ data: { session: s } }) => {
       if (!mounted) return
       setSession(s)
@@ -48,8 +65,11 @@ export function PortalAuthProvider({ children }) {
         sessionStorage.removeItem(RECOVERY_FLAG)
       }
       if (s?.user) {
+        setProfilePending(true)
         const p = await fetchProfile()
-        if (mounted) setProfile(p)
+        if (!mounted) return
+        setProfile(p)
+        setProfilePending(false)
       }
       setLoading(false)
     }).catch((err) => {
@@ -58,6 +78,7 @@ export function PortalAuthProvider({ children }) {
       console.error('Boot session load failed:', err)
       if (!mounted) return
       setProfileError(err?.message || 'Could not reach the authentication service')
+      setProfilePending(false)
       setLoading(false)
     })
 
@@ -74,11 +95,14 @@ export function PortalAuthProvider({ children }) {
         sessionStorage.removeItem(RECOVERY_FLAG)
         setIsRecovery(false)
       }
-      // INITIAL_SESSION duplicates the getSession() boot path above — skip it
-      // so the profile RPC doesn't fire twice on every load
-      if (s?.user && event !== 'INITIAL_SESSION') {
+      // Fetch the profile only on sign-in-ish events. TOKEN_REFRESHED
+      // (hourly) and any other event must not re-hit the profile RPC.
+      if (s?.user && ['SIGNED_IN', 'INITIAL_SESSION', 'USER_UPDATED', 'PASSWORD_RECOVERY'].includes(event)) {
+        setProfilePending(true)
         const p = await fetchProfile()
-        if (mounted) setProfile(p)
+        if (!mounted) return
+        setProfile(p)
+        setProfilePending(false)
       } else if (!s?.user) {
         setProfile(null)
         setProfileError(null)
@@ -94,6 +118,7 @@ export function PortalAuthProvider({ children }) {
     // a normal sign-in means the recovery session (if any) is done
     sessionStorage.removeItem(RECOVERY_FLAG)
     setIsRecovery(false)
+    setRecoveryLinkError(null)
   }
 
   const signOut = async () => {
@@ -103,6 +128,8 @@ export function PortalAuthProvider({ children }) {
     setProfile(null)
     setSession(null)
     setProfileError(null)
+    setProfilePending(false)
+    setRecoveryLinkError(null)
   }
 
   const clearRecovery = useCallback(() => {
@@ -121,6 +148,8 @@ export function PortalAuthProvider({ children }) {
     session,
     loading,
     profileError,
+    profilePending,
+    recoveryLinkError,
     isRecovery,
     clearRecovery,
     refreshProfile,

@@ -108,9 +108,16 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
   useEffect(() => () => { revokePreview(); revokeEditPreview() }, [revokePreview, revokeEditPreview])
 
   const loadRegistrations = useCallback(async () => {
-    const { data } = await supabase.from('vss_registrations').select('*').order('created_at', { ascending: false }).limit(200)
-    if (data) setRegistrations(data)
-  }, [])
+    // paginated via fetchAllRows — no 200-row cap, so the all-centres view no
+    // longer loses older pending registrations. Centre-scoped views push their
+    // subtree into the query; all-centre roles fetch everything. Silent on
+    // error (same as the previous fetch — no toast, no state change).
+    const rows = await fetchAllRows('vss_registrations', '*', (q) => {
+      const scoped = !isAllCentres && centres.length ? q.in('centre', centres.map(c => c.name)) : q
+      return scoped.order('created_at', { ascending: false })
+    }).catch(() => null)
+    if (rows) setRegistrations(rows)
+  }, [isAllCentres, centres])
 
   useEffect(() => {
     fetchCentres().then(allCentres => {

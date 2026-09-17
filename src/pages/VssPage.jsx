@@ -355,6 +355,10 @@ function VssDeployTable({ schedules, scheduleId }) {
           requested_dept: deployMap[key]?.department_id || '',
           finalized: !!deployMap[key]?.deployed_department_id,
           final_dept: deployMap[key]?.deployed_department_id || '',
+          // a deployments row exists ⇒ this VSS sewadar is DEPLOYED — frozen
+          // for centre/operator editing (v36 INSERT-only). The flag is
+          // recomputed from fresh deployments on every merge/load (ConsentPage parity).
+          deployed: !!deployMap[key]?.department_id,
         })
       })
 
@@ -369,6 +373,7 @@ function VssDeployTable({ schedules, scheduleId }) {
           // overlay ONLY user-editable fields — fresh rows keep server-side
           // values for read-only data (is_active, is_initiated, gender, etc.)
           const dropped = []
+          const deployDropped = []
           Object.keys(rows).forEach(key => {
             const edit = editsByKey[key]
             if (!edit) return
@@ -376,6 +381,9 @@ function VssDeployTable({ schedules, scheduleId }) {
             // row is locked centre-side) and persist would silently filter it
             // while the UI kept showing it as saved; drop it loudly instead
             if (rows[key].finalized) { dropped.push(key); return }
+            // a peer session deployed this VSS row mid-refresh — deployed VSS
+            // are frozen (v36): the edit can never be saved, so drop it too
+            if (rows[key].deployed) { deployDropped.push(key); return }
             EDITABLE_CONSENT_FIELDS.forEach(f => { if (f in edit) rows[key][f] = edit[f] })
             // even after the overlay, days stay auto-set (5 / 3 for OE ESCORTS)
             rows[key] = autoSetDays(rows[key])
@@ -389,14 +397,16 @@ function VssDeployTable({ schedules, scheduleId }) {
           const ex = {}
           subtree.forEach(c => { ex[c] = true })
           setExpanded(ex)
-          if (dropped.length > 0) {
-            // baseline the dropped rows at their fresh (finalized) state so
-            // they no longer count as pending changes
+          if (dropped.length > 0 || deployDropped.length > 0) {
+            // baseline the dropped rows at their fresh (finalized/deployed)
+            // state so they no longer count as pending changes
             const nextBaseline = { ...savedConsentRef.current }
             dropped.forEach(k => { nextBaseline[k] = consentRowSignature(rows[k]) })
+            deployDropped.forEach(k => { nextBaseline[k] = consentRowSignature(rows[k]) })
             savedConsentRef.current = nextBaseline
             dirtyRef.current = changedConsentRows(rows, savedConsentRef.current).length > 0
-            toast.info(`${dropped.length} sewadar${dropped.length > 1 ? 's' : ''} finalized by the ASO — pending edits discarded`)
+            if (dropped.length > 0) toast.info(`${dropped.length} sewadar${dropped.length > 1 ? 's' : ''} finalized by the ASO — pending edits discarded`)
+            if (deployDropped.length > 0) toast.info(`${deployDropped.length} VSS sewadar${deployDropped.length > 1 ? 's' : ''} deployed — pending edits discarded (deployed VSS are locked)`)
           }
           // Baseline-sync untouched rows: every row this session did NOT edit
           // is now at its fresh server state, so peer changes stop counting as
@@ -610,6 +620,11 @@ function VssDeployTable({ schedules, scheduleId }) {
       // deployments, NOT from r.requested_dept (which is the intended NEW state —
       // a VSS being newly assigned must NOT be excluded).
       const alreadyDeployed = (r) => depRows.some(d => `${d.centre}|${d.badge_number}` === `${r.centre}|${r.badge_number}` && d.department_id != null)
+      // Deployed VSS are FROZEN — the DB rejects centre/operator writes to
+      // their deployments/consents rows. Never include them in an upsert (an
+      // upsert on an existing row becomes an UPDATE → the trigger fires).
+      // Checked from the persisted snapshot AND the row flag (ConsentPage parity).
+      const deployedKeys = new Set(depRows.filter(d => d.department_id != null).map(d => `${d.centre}|${d.badge_number}`))
       const toInsert = []
       const patchByFields = new Map() // fieldsKey -> { fields, keys: [] }
       // one source of truth for the consent-row payload — shared by the
@@ -629,8 +644,9 @@ function VssDeployTable({ schedules, scheduleId }) {
       changed.forEach(r => {
         // ASO-finalized rows are locked on the centre side — never write them,
         // even from a pre-lock snapshot (debounce / unmount / switch flush).
+        // Deployed VSS are frozen too (v36) — skip by row flag AND snapshot.
         // Under an undeployed-only override, already-deployed VSS are frozen too.
-        if (r.finalized || (undeployedOnly && alreadyDeployed(r))) return
+        if (r.finalized || r.deployed || deployedKeys.has(`${r.centre}|${r.badge_number}`) || (undeployedOnly && alreadyDeployed(r))) return
         const key = consentRowKey(r)
         const candidate = consentPayload(r)
         const saved = savedConsentRef.current[key]
@@ -646,7 +662,7 @@ function VssDeployTable({ schedules, scheduleId }) {
       // (v21): a sewadar whose consent is No may still be deployed.
       const overrideDeploy = overrideOpenRef.current
       const toDeploy = changed
-        .filter(r => !r.finalized && !(undeployedOnly && alreadyDeployed(r)) && r.requested_dept && r.is_active && activeDeptIds.has(r.requested_dept) && (r.consent_given || overrideDeploy) && !isAssoDepartment(r.department))
+        .filter(r => !r.finalized && !r.deployed && !deployedKeys.has(`${r.centre}|${r.badge_number}`) && !(undeployedOnly && alreadyDeployed(r)) && r.requested_dept && r.is_active && activeDeptIds.has(r.requested_dept) && (r.consent_given || overrideDeploy) && !isAssoDepartment(r.department))
         .map(r => ({
           schedule_id: scheduleId,
           department_id: r.requested_dept,
@@ -661,7 +677,7 @@ function VssDeployTable({ schedules, scheduleId }) {
       // must be kept (the consent check is relaxed). Under an undeployed-only
       // override, already-deployed VSS are frozen and never removed.
       const toRemove = Object.values(rows)
-        .filter(r => !r.finalized && !(undeployedOnly && alreadyDeployed(r)) && ((!r.requested_dept || !r.is_active || !activeDeptIds.has(r.requested_dept)) || (!r.consent_given && !overrideDeploy)))
+        .filter(r => !r.finalized && !r.deployed && !deployedKeys.has(`${r.centre}|${r.badge_number}`) && !(undeployedOnly && alreadyDeployed(r)) && ((!r.requested_dept || !r.is_active || !activeDeptIds.has(r.requested_dept)) || (!r.consent_given && !overrideDeploy)))
         .map(consentRowKey)
         .filter(key => depRows.some(d => `${d.centre}|${d.badge_number}` === key))
 
@@ -902,12 +918,14 @@ function VssDeployTable({ schedules, scheduleId }) {
     vssOpen: masterOpen, // VSS effective switch ON ⇒ open past lock + deadline
   })
   editableRef.current = canEdit
-  // For VSS, the consent-given relaxation must also not be driven by a
-  // generic regular override — keep it false so persist does not deploy
-  // consent=No VSS rows just because regular deployment was specially opened.
-  // The DB still relaxes consent via generic v_open, but the UI now stays
-  // stricter for VSS (persist will not create those rows).
-  overrideOpenRef.current = overrideOpen
+  // For VSS, the consent-given relaxation must not be driven by a generic
+  // regular override for centre roles — keep it false so persist does not
+  // deploy consent=No VSS rows just because regular deployment was specially
+  // opened. vss_operator bypasses like super_admin: force it open (mirrors
+  // ConsentPage's `anyOverrideOpen || isVssOperator`) so the operator may
+  // deploy consent-No VSS with days auto-set via daysForDept — which the DB
+  // allows. Non-operator roles unchanged.
+  overrideOpenRef.current = overrideOpen || isVssOperator
   undeployedOverrideOpenRef.current = undeployedOverrideOpen
 
   // vss_operator quota scope: a picked centre resolves to its CENTRE root for
@@ -974,9 +992,13 @@ function VssDeployTable({ schedules, scheduleId }) {
 
   // ASO-finalized rows are locked — the final department belongs to the ASO
   const isFinalizedRow = (row) => !!row?.finalized
+  // Deployed rows (a deployments row exists) are frozen for centre/operator
+  // editing (v36 INSERT-only) — once deployed, a VSS sewadar may not be edited
+  // or moved between departments (ConsentPage v32-freeze parity).
+  const isDeployedRow = (row) => !!row?.deployed
   // Under an undeployed-only override, a VSS sewadar who ALREADY has a requested
   // department is frozen at the UI too (the DB enforces the same).
-  const isRowLocked = (row) => isFinalizedRow(row) || (undeployedOverrideOpen && !!row?.requested_dept)
+  const isRowLocked = (row) => isFinalizedRow(row) || isDeployedRow(row) || (undeployedOverrideOpen && !!row?.requested_dept)
   const setConsent = (key, value) => {
     dirtyRef.current = true
     editVersionRef.current++
@@ -1073,14 +1095,14 @@ function VssDeployTable({ schedules, scheduleId }) {
             value={r.consent_given ? 'yes' : 'no'}
             onChange={e => setConsent(`${r.centre}|${r.badge_number}`, e.target.value === 'yes')}
             disabled={!canEdit || !r.is_active || locked}
-            title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined)}
+            title={r.finalized ? 'Finalized by the ASO — locked' : (r.deployed ? 'Deployed — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined))}
             className="select"
             style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem', minWidth: 52 }}
           >
             <option value="no">No</option>
             <option value="yes">Yes</option>
           </select>
-          {locked && <span className="pill pill-red" style={{ fontSize: '0.55rem', padding: '0.1rem 0.3rem' }} title={r.finalized ? 'Finalized by the ASO' : 'Already deployed'}>🔒</span>}
+          {locked && <span className="pill pill-red" style={{ fontSize: '0.55rem', padding: '0.1rem 0.3rem' }} title={r.finalized ? 'Finalized by the ASO' : (r.deployed ? 'Deployed — locked' : 'Already deployed')}>🔒</span>}
         </div>
       </td>
     )
@@ -1096,11 +1118,11 @@ function VssDeployTable({ schedules, scheduleId }) {
             onClick={() => toggleBhati(`${r.centre}|${r.badge_number}`)}
             disabled={!canEdit || !r.consent_given || !r.is_active || locked}
             className="toggle"
-            title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : 'Stay at bhati')}
+            title={r.finalized ? 'Finalized by the ASO — locked' : (r.deployed ? 'Deployed — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : 'Stay at bhati'))}
           >
             <span className="toggle-knob" />
           </button>
-          {locked && <span style={{ fontSize: '0.55rem', color: '#dc2626' }} title={r.finalized ? 'Finalized' : 'Deployed'}>🔒</span>}
+          {locked && <span style={{ fontSize: '0.55rem', color: '#dc2626' }} title={r.finalized ? 'Finalized' : (r.deployed ? 'Deployed — locked' : 'Already deployed')}>🔒</span>}
         </div>
       </td>
     )
@@ -1137,6 +1159,22 @@ function VssDeployTable({ schedules, scheduleId }) {
         </td>
       )
     }
+    // Deployed VSS sewadars are frozen (v36 INSERT-only): once a VSS sewadar
+    // has a deployments row, centre/operator users can no longer change or
+    // remove it — the DB rejects the writes, so show a read-only pill instead
+    // of a dropdown (ConsentPage DEPLOYED parity + the FINAL branch above).
+    if (r.deployed) {
+      return (
+        <td style={{ textAlign: 'center' }} data-label="Deployment">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', justifyContent: 'center' }}>
+            <span className="pill pill-indigo" title="Deployed — locked" style={{ whiteSpace: 'nowrap' }}>
+              {deptNameOf(r.requested_dept) || '—'}
+            </span>
+            <span className="pill pill-indigo" style={{ fontSize: '0.6rem', whiteSpace: 'nowrap' }} title="Deployed — locked">DEPLOYED</span>
+          </div>
+        </td>
+      )
+    }
     // Only departments the ASO allocated a quota > 0 for AND opened for VSS
     // (include_vss) are offered — everything else is hidden entirely.
     const isCentreAdmin = profile?.role === 'centre_admin'
@@ -1164,7 +1202,7 @@ function VssDeployTable({ schedules, scheduleId }) {
             items={items}
             open={open}
             disabled={!canEdit || !r.consent_given || rowDisabled || isRowLocked(r)}
-            title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined)}
+            title={r.finalized ? 'Finalized by the ASO — locked' : (r.deployed ? 'Deployed — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined))}
             onToggle={close => close === false ? setOpenDeptDropdown(null) : setOpenDeptDropdown(open ? null : key)}
             onSelect={deptId => { setRequestedDept(key, deptId); setOpenDeptDropdown(null) }}
             openReasons={openReasons}
@@ -1209,9 +1247,10 @@ function VssDeployTable({ schedules, scheduleId }) {
       setPendingBulk(null)
       return
     }
-    // finalized rows are locked by the ASO; under an undeployed-only override,
-    // already-deployed VSS stay locked — never apply a bulk action to them
-    const locked = selectedRows.filter(r => (r.finalized || (undeployedOverrideOpen && r.requested_dept)) && !(pendingBulk.keys && pendingBulk.keys.has(`${r.centre}|${r.badge_number}`)))
+    // finalized rows are locked by the ASO; deployed VSS sewadars are frozen
+    // (v36); under an undeployed-only override, already-deployed VSS stay
+    // locked too — never apply a bulk action to them
+    const locked = selectedRows.filter(r => (r.finalized || r.deployed || (undeployedOverrideOpen && r.requested_dept)) && !(pendingBulk.keys && pendingBulk.keys.has(`${r.centre}|${r.badge_number}`)))
     dirtyRef.current = true
     editVersionRef.current++
     setConsentRows(prev => {
@@ -1219,13 +1258,13 @@ function VssDeployTable({ schedules, scheduleId }) {
       selectedRows.forEach(r => {
         const key = `${r.centre}|${r.badge_number}`
         if (pendingBulk.keys && !pendingBulk.keys.has(key)) return
-        if (r.finalized || (undeployedOverrideOpen && r.requested_dept)) return
+        if (r.finalized || r.deployed || (undeployedOverrideOpen && r.requested_dept)) return
         next[key] = pendingBulk.updater(next[key])
       })
       return next
     })
     setPendingBulk(null)
-    if (locked.length > 0) toast.info(`${locked.length} deployed VSS sewadar${locked.length > 1 ? 's' : ''} skipped — locked under this override`)
+    if (locked.length > 0) toast.info(`${locked.length} finalized/deployed VSS sewadar${locked.length > 1 ? 's' : ''} skipped — locked`)
   }
 
   const bulkConsent = (value) => {
@@ -1253,8 +1292,8 @@ function VssDeployTable({ schedules, scheduleId }) {
     let remaining = q ? q.rem : Infinity
     selectedRows.forEach(r => {
       const key = `${r.centre}|${r.badge_number}`
-      if (r.finalized) {
-        skipped.push({ name: r.sewadar_name, badge: r.badge_number, reasons: ['Finalized by the ASO — locked'] })
+      if (r.finalized || r.deployed) {
+        skipped.push({ name: r.sewadar_name, badge: r.badge_number, reasons: [r.finalized ? 'Finalized by the ASO — locked' : 'Deployed — locked'] })
         return
       }
       if (undeployedOverrideOpen && r.requested_dept) {
@@ -1431,12 +1470,10 @@ function VssDeployTable({ schedules, scheduleId }) {
               ? <>VSS deployment has been <strong>specially opened for your centre</strong> by the ASO — VSS consent and deployment are editable even though the deadline has passed and your centre locked deployment. Sewadars the ASO already finalized stay locked.</>
               : <>VSS deployment is <strong>OPEN for your centre</strong> — you may mark VSS consent and deployment. Sewadars the ASO already finalized stay locked.</>}
           </div>
-        ) : overrideOpen ? ( // VSS FIX: overrideOpen is intentionally always false for VSS (see loadGates) — generic centre_overrides must NOT show a "specially opened" banner for VSS. VSS respects ONLY the VSS-specific effective switch (masterOpen). A stale generic wildcard that keeps regular deployment open would otherwise show this green banner on the VSS page even though VSS is globally closed. This branch is kept structurally so the closed/locked/deadline banners below correctly reflect VSS state; it will never render for VSS.
+        ) : undeployedOverrideOpen ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#047857', marginBottom: '1rem' }}>
             <Unlock size={16} />
-            {undeployedOverrideOpen
-              ? <>VSS deployment has been <strong>opened for undeployed VSS only</strong> by the ASO — you may deploy VSS sewadars who have not yet been assigned a department (consent Yes or No). VSS already deployed stay locked. VSS finalized by the ASO stay locked.</>
-              : <>VSS deployment has been <strong>specially opened for your centre</strong> by the ASO — edit as permitted by the ASO. Sewadars already finalized by the ASO stay locked.</>}
+            <>VSS deployment has been <strong>opened for undeployed VSS only</strong> by the ASO — you may deploy VSS sewadars who have not yet been assigned a department (consent Yes or No). VSS already deployed stay locked. VSS finalized by the ASO stay locked.</>
           </div>
         ) : (
           <>
@@ -1577,7 +1614,7 @@ function VssDeployTable({ schedules, scheduleId }) {
                                 }}>
                                   <td style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }} data-label="S.No.">{i + 1}</td>
                                   <td style={{ textAlign: 'center' }} data-label="Select">
-                                    <input type="checkbox" checked={!!selected[key]} onChange={() => toggleSelect(key)} disabled={!canEdit || !r.is_active || (undeployedOverrideOpen && r.requested_dept)} style={{ cursor: canEdit && r.is_active && !(undeployedOverrideOpen && r.requested_dept) ? 'pointer' : 'not-allowed' }} title={inactive ? 'Inactive VSS sewadar — cannot be selected' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined)} />
+                                    <input type="checkbox" checked={!!selected[key]} onChange={() => toggleSelect(key)} disabled={!canEdit || !r.is_active || r.deployed || (undeployedOverrideOpen && r.requested_dept)} style={{ cursor: canEdit && r.is_active && !r.deployed && !(undeployedOverrideOpen && r.requested_dept) ? 'pointer' : 'not-allowed' }} title={inactive ? 'Inactive VSS sewadar — cannot be selected' : (r.finalized ? 'Finalized by the ASO — locked' : (r.deployed ? 'Deployed — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined)))} />
                                   </td>
                                   <td style={{ fontFamily: 'monospace', fontSize: '0.8rem' }} data-label="Badge">
                                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>

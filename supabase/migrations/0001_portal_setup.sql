@@ -93,7 +93,9 @@ AS $$
 DECLARE
   v_role text;
 BEGIN
-  SELECT role INTO v_role FROM public.portal_users WHERE auth_id = auth.uid();
+  SELECT role INTO v_role FROM public.portal_users
+  WHERE auth_id = auth.uid() AND is_active = true;
+  IF v_role IS NULL THEN RETURN NULL; END IF;
   RETURN v_role;
 END;
 $$;
@@ -110,7 +112,9 @@ AS $$
 DECLARE
   v_centre text;
 BEGIN
-  SELECT centre INTO v_centre FROM public.portal_users WHERE auth_id = auth.uid();
+  SELECT centre INTO v_centre FROM public.portal_users
+  WHERE auth_id = auth.uid() AND is_active = true;
+  IF v_centre IS NULL THEN RETURN NULL; END IF;
   RETURN v_centre;
 END;
 $$;

@@ -32,10 +32,17 @@ export default function ResetPasswordPage() {
     try {
       const { error: upErr } = await supabase.auth.updateUser({ password })
       if (upErr) throw upErr
-      // normalize the session — the recovery token is consumed, so re-sign in
-      await signIn(email, password)
-      clearRecovery()
-      toast.success('Password updated — you are signed in')
+      if (email) {
+        // normalize the session — the recovery token is consumed, so re-sign in
+        await signIn(email, password)
+        clearRecovery()
+        toast.success('Password updated — you are signed in')
+      } else {
+        // session carries no email — never sign in with ''; the live
+        // recovery session still holds, so just exit recovery mode
+        clearRecovery()
+        toast.success('Password updated — please sign in with your email')
+      }
     } catch (err) {
       setError(err.message || 'Could not update password')
     } finally {

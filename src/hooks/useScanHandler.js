@@ -3,7 +3,7 @@
  * and DeptInchargePage. Eliminates code duplication and ensures consistent
  * timeout, busy-flag safety, and error handling.
  */
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { BADGE_REGEX } from '../lib/logic'
 import { enqueueScan } from '../lib/offlineQueue'
@@ -14,6 +14,29 @@ import {
   SESSION_RPC_TIMEOUT,
   BUSY_SAFETY_TIMEOUT,
 } from '../lib/scannerUtils'
+
+/**
+ * Network/timeout-type errors only — these may fall through to scan_in.
+ * Anything else (auth/RLS/permission/validation) must surface directly.
+ * Supabase JS errors carry { message, code, hint }; when in doubt, surface
+ * rather than swallow.
+ */
+function isNetworkOrTimeoutError(e) {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true
+  const msg = String(e?.message || '')
+  return msg.includes('Failed to fetch') || msg.includes('timed out')
+    || msg.includes('NetworkError') || msg.includes('Network request failed')
+    || e?.name === 'TimeoutError'
+}
+
+/** Auth/RLS-type errors — never swallowed, surfaced with their message. */
+function isAuthError(e) {
+  const code = String(e?.code || '')
+  const msg = String(e?.message || '')
+  return code === '401' || code === '403' || code === '42501'
+    || code.startsWith('PGRST3')
+    || /jwt|auth|permission|not authorized|row-level|rls|policy/i.test(msg)
+}
 
 /**
  * @param {object} opts
@@ -53,6 +76,11 @@ export function useScanHandler({ scheduleId, profile, deptName, showPopup, toast
     }, BUSY_SAFETY_TIMEOUT)
   }, [])
 
+  // Clear the busy safety timer on unmount — no setBusy after unmount.
+  useEffect(() => () => {
+    if (safetyTimerRef.current) { clearTimeout(safetyTimerRef.current); safetyTimerRef.current = null }
+  }, [])
+
   const handleScan = useCallback(async (badge) => {
     if (busyRef.current) return
     const b = String(badge).trim().toUpperCase()
@@ -63,6 +91,7 @@ export function useScanHandler({ scheduleId, profile, deptName, showPopup, toast
     }
 
     setBusySafe()
+    let scanOk = false
     try {
       // Step 1: check for existing open session (with timeout)
       let open = null
@@ -75,8 +104,16 @@ export function useScanHandler({ scheduleId, profile, deptName, showPopup, toast
         if (sessionErr) throw sessionErr
         open = openData
       } catch (e) {
-        // If session lookup fails, treat as "no open session" — try scan_in
-        console.warn('[Scanner] get_open_session failed, proceeding with scan_in:', e.message)
+        if (isNetworkOrTimeoutError(e) && !isAuthError(e)) {
+          // Network/timeout only — treat as "no open session", try scan_in
+          console.warn('[Scanner] get_open_session failed, proceeding with scan_in:', e.message)
+        } else {
+          // Auth/RLS (or anything else) — surface directly, no scan_in fall-through
+          const msg = String(e.message || '')
+          showPopup({ status: 'error', badge: b, message: friendly(msg), time: new Date().toLocaleTimeString() })
+          toast.error(friendly(msg))
+          return { ok: false }
+        }
       }
 
       if (open) {
@@ -93,7 +130,7 @@ export function useScanHandler({ scheduleId, profile, deptName, showPopup, toast
           const now = new Date()
           const hh = String(now.getHours()).padStart(2, '0')
           const mm = String(now.getMinutes()).padStart(2, '0')
-          return { outTimeDefault: `${hh}:${mm}` }
+          return { outTimeDefault: `${hh}:${mm}`, ok: true }
         }
 
         const ts = new Date().toISOString()
@@ -106,6 +143,7 @@ export function useScanHandler({ scheduleId, profile, deptName, showPopup, toast
           if (outError) throw outError
           showPopup({ status: 'out', badge: b, name: open.sewadar_name, centre: open.centre, deptName, time: new Date().toLocaleTimeString(), message: 'OUT marked' })
           toast.success(`OUT ${b}`)
+          scanOk = true
         } catch (e) {
           const msg = String(e.message || '')
           if (!navigator.onLine || msg.includes('Failed to fetch') || msg.includes('timed out')) {
@@ -117,6 +155,7 @@ export function useScanHandler({ scheduleId, profile, deptName, showPopup, toast
             }
             showPopup({ status: 'queued', badge: b, time: new Date().toLocaleTimeString(), message: 'Queued offline — will sync when online' })
             toast.success(`OUT queued (offline) ${b}`)
+            scanOk = true
             onQueued?.()
           } else {
             showPopup({ status: 'error', badge: b, message: friendly(msg), time: new Date().toLocaleTimeString() })
@@ -141,6 +180,7 @@ export function useScanHandler({ scheduleId, profile, deptName, showPopup, toast
             message: `IN marked${flag}`,
           })
           toast[data?.undeployed ? 'warning' : 'success'](`IN ${b}${flag}`)
+          scanOk = true
         } catch (e) {
           const msg = String(e.message || '')
           if (msg.includes('Already IN')) {
@@ -159,7 +199,7 @@ export function useScanHandler({ scheduleId, profile, deptName, showPopup, toast
                 const now = new Date()
                 const hh = String(now.getHours()).padStart(2, '0')
                 const mm = String(now.getMinutes()).padStart(2, '0')
-                return { outTimeDefault: `${hh}:${mm}` }
+                return { outTimeDefault: `${hh}:${mm}`, ok: true }
               }
             } catch { /* fall through to error popup */ }
             showPopup({ status: 'error', badge: b, message: 'Already checked IN — please OUT first', time: new Date().toLocaleTimeString() })
@@ -173,6 +213,7 @@ export function useScanHandler({ scheduleId, profile, deptName, showPopup, toast
             }
             showPopup({ status: 'queued', badge: b, time: new Date().toLocaleTimeString(), message: 'Queued offline — will sync when online' })
             toast.success(`IN queued (offline) ${b}`)
+            scanOk = true
             onQueued?.()
           } else {
             showPopup({ status: 'error', badge: b, message: friendly(msg), time: new Date().toLocaleTimeString() })
@@ -181,6 +222,7 @@ export function useScanHandler({ scheduleId, profile, deptName, showPopup, toast
         }
       }
       onAfterScan?.()
+      return { ok: scanOk }
     } finally {
       resetBusy()
     }

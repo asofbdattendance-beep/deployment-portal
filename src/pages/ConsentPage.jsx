@@ -9,6 +9,21 @@ import InchargePicker from '../components/InchargePicker'
 import DeadlinePill, { DeadlineWarning } from '../components/DeadlinePill'
 import { Save, Lock, Unlock, CheckCircle2, Search, ClipboardCheck, ChevronDown, Users, AlertTriangle, CheckSquare, Download } from 'lucide-react'
 
+// PostgREST or()-filter values are double-quoted, but `"`, `,`, `(` and `)`
+// still break the filter grammar — a chunk containing them falls back to a
+// per-row single PATCH (correctness over speed on the rare path).
+function orKeyNeedsFallback(c, b) {
+  return /["(),]/.test(String(c ?? '')) || /["(),]/.test(String(b ?? ''))
+}
+
+// Split a `centre|badge` / `centre|department_id` key on the LAST pipe —
+// centre names may legally contain '|' themselves.
+function splitRowKey(key) {
+  const s = String(key ?? '')
+  const i = s.lastIndexOf('|')
+  return i < 0 ? [s, ''] : [s.slice(0, i), s.slice(i + 1)]
+}
+
 export default function ConsentPage({ schedules, scheduleId }) {
   const { profile } = usePortalAuth()
   const toast = useToast()
@@ -129,6 +144,12 @@ export default function ConsentPage({ schedules, scheduleId }) {
     const prevLoadedSchedule = scheduleIdRef.current
     const prevRows = liveRef.current.rows
     const prevDirty = dirtyRef.current
+    // Snapshot the persist inputs alongside prevRows BEFORE the fetch: the
+    // switch-drain flush below must save the PREVIOUS schedule's data, not
+    // whatever the new schedule's fetch has since put live.
+    const prevDeployments = liveRef.current.deployments
+    const prevDepts = liveRef.current.depts
+    const prevSubtree = liveRef.current.subtree
     try {
       // Supabase max-rows=1000 — paginate every table that can exceed 1000
       const [sewAll, consAll, deptAll, allocAll, deployAll, prevAll, asoAll] = await Promise.all([
@@ -282,9 +303,9 @@ export default function ConsentPage({ schedules, scheduleId }) {
           await persistRef.current({
             scheduleId: prevLoadedSchedule,
             rows: prevRows,
-            deployments: liveRef.current.deployments,
-            depts: liveRef.current.depts,
-            subtree: liveRef.current.subtree,
+            deployments: prevDeployments,
+            depts: prevDepts,
+            subtree: prevSubtree,
             incharges: liveRef.current.incharges,
           })
         }
@@ -452,9 +473,9 @@ export default function ConsentPage({ schedules, scheduleId }) {
     // Read-only page (deadline passed / schedule done / centre locked / master
     // switch closed): the DB rejects these writes, so skip the round-trip —
     // otherwise a legacy-days normalization on load would spam error toasts.
-    // Clear the dirty flag: nothing on this page is saveable.
+    // Leave the dirty flag SET so the edits stay queued for retry once editing
+    // reopens (e.g. the ASO opens an override).
     if (!editableRef.current) {
-      dirtyRef.current = false
       retryCountRef.current = 0
       if (retryTimer.current) { clearTimeout(retryTimer.current); retryTimer.current = null }
       savingRef.current = false
@@ -575,6 +596,27 @@ export default function ConsentPage({ schedules, scheduleId }) {
       for (const patch of patchByFields.values()) {
         for (let i = 0; i < patch.rows.length; i += 40) {
           const chunk = patch.rows.slice(i, i + 40)
+          // A chunk containing a centre/badge with `"`, `,`, `(` or `)` cannot
+          // travel the batched or() path — persist it per-row instead.
+          if (chunk.some(r => orKeyNeedsFallback(r.centre, r.badge_number))) {
+            for (const r of chunk) {
+              const { error } = await supabase.from('sewadar_consents')
+                .update(patch.fields)
+                .eq('schedule_id', scheduleId)
+                .eq('centre', r.centre)
+                .eq('badge_number', r.badge_number)
+              if (error) {
+                const m = error.message || ''
+                if (m.includes('already deployed') || m.includes('consent is frozen') || m.includes('No consent recorded')) {
+                  toast.error(m)
+                  loadDataRef.current(true)
+                  return
+                }
+                toast.error(m); dirtyRef.current = true; scheduleRetry(); return
+              }
+            }
+            continue
+          }
           const orFilter = chunk.map(r => `and(centre.eq."${r.centre}",badge_number.eq."${r.badge_number}")`).join(',')
           const { error } = await supabase.from('sewadar_consents')
             .update(patch.fields)
@@ -632,9 +674,19 @@ export default function ConsentPage({ schedules, scheduleId }) {
         }
       }
       if (toRemove.length > 0) {
+        const depMap = {}
+        depRows.forEach(d => { depMap[`${d.centre}|${d.badge_number}`] = d })
         const byCentre = {}
         toRemove.forEach(key => {
-          const [centre, badge_number] = key.split('|')
+          const [centre, badge_number] = splitRowKey(key)
+          // Department-match the delete: only remove a row whose persisted
+          // department still matches what THIS session saw. A peer session may
+          // have just reassigned the sewadar — this stale delete must not
+          // destroy that newer assignment (mirrors VssPage persist).
+          const persisted = depMap[key]
+          if (!persisted) return
+          const row = rows[key]
+          if (row && row.requested_dept && persisted.department_id !== row.requested_dept) return
           ;(byCentre[centre] = byCentre[centre] || []).push(badge_number)
         })
         for (const [centre, badges] of Object.entries(byCentre)) {
@@ -648,14 +700,14 @@ export default function ConsentPage({ schedules, scheduleId }) {
       }
       // ── department incharges — one per CENTRE × department ──
       const rowByBadge = {}
-      Object.values(rows).forEach(r => { rowByBadge[r.badge_number] = r })
+      Object.values(rows).forEach(r => { rowByBadge[consentRowKey(r)] = r })
       const toUpsertInc = Object.entries(incState)
         .filter(([key, inc]) => {
           const saved = savedInchargesRef.current[key]
           return !saved || saved.badge_number !== inc.badge_number || saved.sewadar_name !== inc.sewadar_name
         })
         .map(([key, inc]) => {
-          const [centre, department_id] = key.split('|')
+          const [centre, department_id] = splitRowKey(key)
           return { schedule_id: scheduleId, centre, department_id, badge_number: inc.badge_number, sewadar_name: inc.sewadar_name }
         })
       const toDeleteInc = []
@@ -667,7 +719,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
       // that department — occupancy follows the EFFECTIVE dept (final else
       // requested), matching trg_check_incharge (v17)
       Object.entries(incState).forEach(([key, inc]) => {
-        const row = rowByBadge[inc.badge_number]
+        const row = rowByBadge[`${inc.centre}|${inc.badge_number}`]
         const effDept = row ? (row.final_dept || row.requested_dept) : null
         if (!row || !row.consent_given || effDept !== inc.department_id) toDeleteInc.push(key)
       })
@@ -676,7 +728,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
         if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
       }
       for (const key of [...new Set(toDeleteInc)]) {
-        const [centre, department_id] = key.split('|')
+        const [centre, department_id] = splitRowKey(key)
         const { error } = await supabase.from('department_incharges')
           .delete().eq('schedule_id', scheduleId).eq('centre', centre).eq('department_id', department_id)
         if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
@@ -867,12 +919,15 @@ export default function ConsentPage({ schedules, scheduleId }) {
     const counts = {}
     Object.values(consentRows).forEach(r => {
       if (quotaScopeSet && !quotaScopeSet.has(r.centre)) return
+      // Same AREA SECRETARY OFFICE exclusion the saved counts use (v35) — ASO
+      // sewadars don't consume centre quota, locally or persisted.
+      if (asoKeys.has(`${r.centre}|${r.badge_number}`)) return
       if (r.consent_given && r.requested_dept && !isAssoDepartment(r.department)) {
         counts[r.requested_dept] = (counts[r.requested_dept] || 0) + 1
       }
     })
     return counts
-  }, [consentRows, quotaScopeSet])
+  }, [consentRows, quotaScopeSet, asoKeys])
   const deptQuota = useMemo(() => computeDeptQuota(displayAlloc, savedAllCounts, localCounts, savedOwnCounts), [displayAlloc, savedAllCounts, localCounts, savedOwnCounts])
 
   // seats the ASO asked this CENTRE (whole subtree) to provide, summed across
@@ -943,7 +998,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
     return options
   }, [consentRows])
   const inchargeKey = useCallback((deptId) => `${myRoot}|${deptId}`, [myRoot])
-  const setIncharge = (deptId, badgeNumber) => {
+  const setIncharge = (deptId, badgeNumber, centre = myRoot) => {
     if (isVssOperator) return
     dirtyRef.current = true
     editVersionRef.current++
@@ -953,7 +1008,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
       if (!badgeNumber) {
         delete next[key]
       } else {
-        const row = Object.values(consentRows).find(r => r.badge_number === badgeNumber && r.consent_given && (r.final_dept || r.requested_dept) === deptId)
+        const row = Object.values(consentRows).find(r => r.centre === centre && r.badge_number === badgeNumber && r.consent_given && (r.final_dept || r.requested_dept) === deptId)
         if (row) next[key] = { centre: myRoot, department_id: deptId, badge_number: badgeNumber, sewadar_name: row.sewadar_name }
       }
       return next
@@ -1020,6 +1075,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
   const rowConsentEditable = (r) => consentEditable || (undeployedOverrideOpen && !isDeployedRow(r) && isUndeployedCohort(r))
   const rowDeployEditable = (r) => deploymentEditable || (undeployedOverrideOpen && !isDeployedRow(r) && isUndeployedCohort(r))
   const setConsent = (key, value) => {
+    if (isRowLocked(consentRows[key])) return
     dirtyRef.current = true
     editVersionRef.current++
     setConsentRows(prev => {
@@ -1027,12 +1083,16 @@ export default function ConsentPage({ schedules, scheduleId }) {
       return {
         ...prev,
         [key]: value
-          ? { ...prev[key], consent_given: true }
+          // flipping No→Yes must restore deployable days at once (5 by
+          // default, 3 for OE ESCORTS) — otherwise the row stays
+          // undeployable until the next reload
+          ? { ...prev[key], consent_given: true, available_days_count: daysForDept(deptNameOf(prev[key]?.requested_dept || '')) }
           : { ...prev[key], consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: null, requested_dept: '' },
       }
     })
   }
   const toggleBhati = (key) => {
+    if (isRowLocked(consentRows[key])) return
     dirtyRef.current = true
     editVersionRef.current++
     setConsentRows(prev => {
@@ -1041,6 +1101,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
     })
   }
   const toggleChairPass = (key) => {
+    if (isRowLocked(consentRows[key])) return
     dirtyRef.current = true
     editVersionRef.current++
     setConsentRows(prev => {
@@ -1049,6 +1110,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
     })
   }
   const setRequestedDept = (key, deptId) => {
+    if (isRowLocked(consentRows[key])) return
     dirtyRef.current = true
     editVersionRef.current++
     setConsentRows(prev => {
@@ -1171,6 +1233,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
         onChange={e => setConsent(`${r.centre}|${r.badge_number}`, e.target.value === 'yes')}
         disabled={!rowConsentEditable(r) || r.finalized || r.deployed}
         title={r.finalized ? 'Finalized by the ASO — locked' : (r.deployed ? 'Deployed — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined))}
+        aria-label={`Consent for ${r.badge_number}`}
         className="select"
         style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
       >
@@ -1184,6 +1247,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
       <button
         role="switch"
         aria-checked={r.stay_at_bhati}
+        aria-label={`Stay at bhati for ${r.badge_number}`}
         onClick={() => toggleBhati(`${r.centre}|${r.badge_number}`)}
         disabled={!rowConsentEditable(r) || !r.consent_given || r.finalized || r.deployed}
         className="toggle"
@@ -1198,6 +1262,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
       <button
         role="switch"
         aria-checked={r.chair_pass}
+        aria-label={`Chair pass for ${r.badge_number}`}
         onClick={() => toggleChairPass(`${r.centre}|${r.badge_number}`)}
         disabled={!rowConsentEditable(r) || !r.consent_given || r.finalized || r.deployed}
         className="toggle"
@@ -1348,24 +1413,70 @@ export default function ConsentPage({ schedules, scheduleId }) {
       'Mark consent',
       `Set consent to ${value ? 'Yes' : 'No'} for ${selectedRows.length} selected sewadar${selectedRows.length > 1 ? 's' : ''}?`,
       row => value
-        ? { ...row, consent_given: true }
+        // flipping No→Yes must restore deployable days at once (5 by default,
+        // 3 for OE ESCORTS) — otherwise the row stays undeployable until reload
+        ? { ...row, consent_given: true, available_days_count: daysForDept(deptNameOf(row.requested_dept || '')) }
         : { ...row, consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: null, requested_dept: '' },
     )
   }
 
+  // Stay-at-bhati / chair-pass need consent=Yes (mirrors the per-row disabled
+  // rule) — consent-No rows are skipped with a reason instead of written.
   const bulkSetBhati = (value) => {
+    const eligibleKeys = new Set()
+    const skipped = []
+    selectedRows.forEach(r => {
+      const key = `${r.centre}|${r.badge_number}`
+      if (r.finalized || r.deployed) {
+        skipped.push({ name: r.sewadar_name, badge: r.badge_number, reasons: [r.finalized ? 'Finalized by the ASO — locked' : 'Deployed — locked'] })
+        return
+      }
+      if (undeployedOverrideOpen && r.requested_dept) {
+        skipped.push({ name: r.sewadar_name, badge: r.badge_number, reasons: ['Already deployed — locked under this override'] })
+        return
+      }
+      if (!r.consent_given) {
+        skipped.push({ name: r.sewadar_name, badge: r.badge_number, reasons: ['Consent not given'] })
+        return
+      }
+      eligibleKeys.add(key)
+    })
+    const count = eligibleKeys.size
     requestBulk(
       'Stay at Bhati',
-      `Set stay at bhati to ${value ? 'Yes' : 'No'} for ${selectedRows.length} selected sewadar${selectedRows.length > 1 ? 's' : ''}?`,
+      `Set stay at bhati to ${value ? 'Yes' : 'No'} for ${count} selected sewadar${count === 1 ? '' : 's'}?${skipped.length ? ` ${skipped.length} skipped — see reasons below.` : ''}`,
       row => ({ ...row, stay_at_bhati: value }),
+      eligibleKeys,
+      skipped,
     )
   }
 
   const bulkSetChairPass = (value) => {
+    const eligibleKeys = new Set()
+    const skipped = []
+    selectedRows.forEach(r => {
+      const key = `${r.centre}|${r.badge_number}`
+      if (r.finalized || r.deployed) {
+        skipped.push({ name: r.sewadar_name, badge: r.badge_number, reasons: [r.finalized ? 'Finalized by the ASO — locked' : 'Deployed — locked'] })
+        return
+      }
+      if (undeployedOverrideOpen && r.requested_dept) {
+        skipped.push({ name: r.sewadar_name, badge: r.badge_number, reasons: ['Already deployed — locked under this override'] })
+        return
+      }
+      if (!r.consent_given) {
+        skipped.push({ name: r.sewadar_name, badge: r.badge_number, reasons: ['Consent not given'] })
+        return
+      }
+      eligibleKeys.add(key)
+    })
+    const count = eligibleKeys.size
     requestBulk(
       'Chair pass',
-      `Set chair pass to ${value ? 'Yes' : 'No'} for ${selectedRows.length} selected sewadar${selectedRows.length > 1 ? 's' : ''}?`,
+      `Set chair pass to ${value ? 'Yes' : 'No'} for ${count} selected sewadar${count === 1 ? '' : 's'}?${skipped.length ? ` ${skipped.length} skipped — see reasons below.` : ''}`,
       row => ({ ...row, chair_pass: value }),
+      eligibleKeys,
+      skipped,
     )
   }
 
@@ -1548,7 +1659,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
                     value={inc?.badge_number || ''}
                     currentName={inc?.sewadar_name || ''}
                     sewadars={inchargeOptions[a.department_id] || []}
-                    onChange={badge => setIncharge(a.department_id, badge)}
+                    onChange={badge => setIncharge(a.department_id, badge, myRoot)}
                     open={openIncharge === a.department_id}
                     onToggle={close => {
                       if (close === false) { setOpenIncharge(null); return }
@@ -1791,7 +1902,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
                             <tr>
                               <th style={{ width: 40, textAlign: 'center' }}>S.No.</th>
                               <th style={{ width: 30, textAlign: 'center' }}>
-                                <input type="checkbox" checked={rows.length > 0 && rows.every(r => selected[`${r.centre}|${r.badge_number}`])} ref={el => { if (el) el.indeterminate = rows.some(r => selected[`${r.centre}|${r.badge_number}`]) && !rows.every(r => selected[`${r.centre}|${r.badge_number}`]) }} onChange={() => selectAllCentre(rows)} disabled={!(consentEditable || deploymentEditable) || (undeployedOverrideOpen && rows.some(r => r.requested_dept))} style={{ cursor: (consentEditable || deploymentEditable) ? 'pointer' : 'not-allowed' }} title="Select all in this centre" aria-label={`Select all in ${centre}`} />
+                                <input type="checkbox" checked={rows.length > 0 && rows.every(r => selected[`${r.centre}|${r.badge_number}`])} ref={el => { if (el) el.indeterminate = rows.some(r => selected[`${r.centre}|${r.badge_number}`]) && !rows.every(r => selected[`${r.centre}|${r.badge_number}`]) }} onChange={() => selectAllCentre(rows)} disabled={!(consentEditable || deploymentEditable)} style={{ cursor: (consentEditable || deploymentEditable) ? 'pointer' : 'not-allowed' }} title="Select all in this centre" aria-label={`Select all in ${centre}`} />
                               </th>
                               <th>Badge</th>
                               <th>Name</th>
@@ -1811,7 +1922,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
                               <tr key={`${r.centre}|${r.badge_number}`} style={{ background: selected[`${r.centre}|${r.badge_number}`] ? '#f5f3ff' : undefined }}>
                                 <td style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }} data-label="S.No.">{i + 1}</td>
                                 <td style={{ textAlign: 'center' }} data-label="Select">
-                                  <input type="checkbox" checked={!!selected[`${r.centre}|${r.badge_number}`]} onChange={() => toggleSelect(`${r.centre}|${r.badge_number}`)} disabled={!(consentEditable || deploymentEditable) || isRowLocked(r)} style={{ cursor: (consentEditable || deploymentEditable) && !isRowLocked(r) ? 'pointer' : 'not-allowed' }} title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined)} />
+                                  <input type="checkbox" checked={!!selected[`${r.centre}|${r.badge_number}`]} onChange={() => toggleSelect(`${r.centre}|${r.badge_number}`)} disabled={!(consentEditable || deploymentEditable) || isRowLocked(r)} style={{ cursor: (consentEditable || deploymentEditable) && !isRowLocked(r) ? 'pointer' : 'not-allowed' }} title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined)} aria-label={`Select ${r.badge_number}`} />
                                 </td>
                                 <td style={{ fontFamily: 'monospace', fontSize: '0.8rem' }} data-label="Badge">
                                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>

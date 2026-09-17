@@ -1,8 +1,10 @@
 -- ============================================================
 -- CREATE TEST USERS for Scanner (v3 — SHORT EMAIL) — FIXED via Admin API
 -- ------------------------------------------------------------
+-- SQL-EDITOR-ONLY test-data helper, never a migration; create users via
+-- the Supabase Admin API instead (see the safe Node.js snippet at the bottom).
 -- v3: delete old test users (scanner.test@gmail.com / dept.incharge@gmail.com)
---     and create a single short scanner login: sc@test.com / 123456
+--     and create a single short scanner login: sc@test.com / <SET-A-STRONG-PASSWORD>
 -- Short email is easier to type on the handheld BigPickle scanner.
 --
 -- ⚠️  DO NOT INSERT DIRECTLY INTO auth.users WITH SQL — GoTrue will 500
@@ -22,34 +24,42 @@
 -- role check (idempotent — also covers "run before v25")
 ALTER TABLE public.portal_users DROP CONSTRAINT IF EXISTS portal_users_role_check;
 ALTER TABLE public.portal_users ADD CONSTRAINT portal_users_role_check
-  CHECK (role IN ('centre_user','centre_admin','aso','super_admin','dept_incharge','scanner'));
+  CHECK (role IN ('centre_user','centre_admin','aso','super_admin','dept_incharge','scanner','vss_operator'));
 
 -- 1) delete OLD test users + any prior sc@test.com (idempotent, for re-runs)
 -- Identities must be deleted first if FK is not CASCADE (prevents 500 "Database error querying schema")
-DELETE FROM auth.identities WHERE user_id IN (SELECT id FROM auth.users WHERE email IN ('scanner.test@gmail.com','dept.incharge@gmail.com','sc@test.com'));
-DELETE FROM auth.users WHERE email IN ('scanner.test@gmail.com','dept.incharge@gmail.com','sc@test.com');
-DELETE FROM public.portal_users WHERE email IN ('scanner.test@gmail.com','dept.incharge@gmail.com','sc@test.com');
+-- UNCOMMENT TO ARM (destructive — SQL editor only, never a migration):
+-- DELETE FROM auth.identities WHERE user_id IN (SELECT id FROM auth.users WHERE email IN ('scanner.test@gmail.com','dept.incharge@gmail.com','sc@test.com'));
+-- DELETE FROM auth.users WHERE email IN ('scanner.test@gmail.com','dept.incharge@gmail.com','sc@test.com');
+-- DELETE FROM public.portal_users WHERE email IN ('scanner.test@gmail.com','dept.incharge@gmail.com','sc@test.com');
 
+-- UNCOMMENT TO ARM (destructive — SQL editor only, never a migration):
+-- To arm, delete the `/*` line below and the `*/` line after END $$.
+-- Creates test auth + portal rows; prefer the Admin API snippet at the bottom.
+/*
 DO $$
 DECLARE v_instance uuid;
 BEGIN
   SELECT instance_id INTO v_instance FROM auth.users LIMIT 1;
   IF v_instance IS NULL THEN v_instance := '00000000-0000-0000-0000-000000000000'::uuid; END IF;
 
-  -- ============ SCANNER: sc@test.com / 123456 ============
+  -- ============ SCANNER: sc@test.com / <SET-A-STRONG-PASSWORD> ============
+  -- NOTE: direct SQL insert into auth.users is disarmed — create users via the
+  -- Supabase Admin API instead (see the safe Node.js snippet at the bottom).
+  -- UNCOMMENT TO ARM (destructive — SQL editor only, never a migration):
   IF NOT EXISTS (SELECT 1 FROM auth.users WHERE email='sc@test.com') THEN
-    INSERT INTO auth.users (
-      instance_id, id, aud, role, email, encrypted_password,
-      email_confirmed_at, confirmation_sent_at, created_at, updated_at,
-      raw_app_meta_data, raw_user_meta_data, is_super_admin, is_sso_user
-    ) VALUES (
-      v_instance, gen_random_uuid(), 'authenticated', 'authenticated',
-      'sc@test.com', crypt('123456', gen_salt('bf')),
-      now(), now(), now(), now(),
-      '{"provider":"email","providers":["email"]}'::jsonb,
-      '{"name":"Test Scanner"}'::jsonb,
-      false, false
-    );
+  --   INSERT INTO auth.users (
+  --     instance_id, id, aud, role, email, encrypted_password,
+  --     email_confirmed_at, confirmation_sent_at, created_at, updated_at,
+  --     raw_app_meta_data, raw_user_meta_data, is_super_admin, is_sso_user
+  --   ) VALUES (
+  --     v_instance, gen_random_uuid(), 'authenticated', 'authenticated',
+  --     'sc@test.com', crypt('<SET-A-STRONG-PASSWORD>', gen_salt('bf')),
+  --     now(), now(), now(), now(),
+  --     '{"provider":"email","providers":["email"]}'::jsonb,
+  --     '{"name":"Test Scanner"}'::jsonb,
+  --     false, false
+  --   );
     INSERT INTO auth.identities (
       id, user_id, provider_id, provider, identity_data,
       last_sign_in_at, created_at, updated_at
@@ -77,8 +87,9 @@ BEGIN
   FROM auth.users WHERE email='sc@test.com'
   ON CONFLICT (auth_id) DO UPDATE SET badge_number='FB5971GA0001', role='scanner', centre='SECTOR-15-A', is_active=true, updated_at=now();
 
-  RAISE NOTICE 'Test scanner ready: sc@test.com / 123456';
+  RAISE NOTICE 'Test scanner ready: sc@test.com / <SET-A-STRONG-PASSWORD>';
 END $$;
+*/
 
 -- VERIFY
 SELECT email, role, centre, is_active, badge_number FROM public.portal_users
@@ -99,7 +110,7 @@ WHERE u.email IN ('sc@test.com') ORDER BY u.email;
 -- const supabase = createClient(url, service_role_key);
 -- await supabase.auth.admin.createUser({
 --   email: 'sc@test.com',
---   password: '123456',
+--   password: '<SET-A-STRONG-PASSWORD>',
 --   email_confirm: true,
 --   user_metadata: { name: 'Test Scanner', badge_number: 'FB5971GA0001', centre: 'SECTOR-15-A', role: 'scanner' }
 -- });
