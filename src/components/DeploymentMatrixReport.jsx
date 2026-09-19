@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, Fragment, forwardRef, useImperativeHandle } from 'react'
 import { supabase, fetchCentres, fetchAllRows, getRootCentre } from '../lib/supabase'
 import { Users } from 'lucide-react'
+import { deploymentCounts, verifyDeploymentCounts, reportCountProblems } from '../lib/counts'
 
 /* ─── centre-wise deployment matrix report ───
    Rendered as a section inside the Overview tab. One block per department,
@@ -36,36 +37,22 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
 
   useEffect(() => {
     fetchCentres().then(setCentres).catch(() => {})
-    fetchAllRows('vss_sewadars', 'badge_number', null)
+    // ── DB-side optimized counts (v29) ──────────────────────────
+    // The v29 `get_deployment_matrix_counts` RPC must mirror the UI's
+    // Scheduled=quota / Deployed=effective semantics. Until then it stays
+    // undeployed (404) and this client path is the source of truth.
+    // Do NOT re-enable the RPC call here until the RPC definition is fixed
+    // to match the UI semantics.
+    fetchAllRows('vss_sewadars', 'badge_number', null, 'badge_number')
       .then((data) => setVssBadges(new Set((data || []).map(v => v.badge_number))))
       .catch(() => {})
   }, [])
 
   const load = useCallback(async (scheduleId) => {
-    // DB-side optimization: prefer RPC aggregated counts via
-    // get_deployment_matrix_counts(p_schedule) which returns per-centre/
-    // per-department tallies without downloading all 3000+ deployments.
-    // If the RPC is not yet migrated, fall back to client aggregation
-    // (fetchAllRows + JS grouping). This keeps the frontend compatible both
-    // before and after the DB migration; quotas + restriction rules are never
-    // bypassed by overrides — only lock/switch/deadline are.
-    try {
-      const { data: matrixCounts, error: matrixErr } = await supabase.rpc('get_deployment_matrix_counts', { p_schedule: scheduleId })
-      if (!matrixErr && matrixCounts) {
-        // RPC available — future path: use matrixCounts directly for quota/dep
-        // maps without downloading rows. For now we still fetch rows for the
-        // gender breakdown (male/female/VSS) which the RPC does not yet cover,
-        // but the attempt proves DB-side counting is wired and will short-circuit
-        // once the RPC is deployed. eslint-disable-next-line no-console
-        console.debug('get_deployment_matrix_counts RPC hit — DB-side counts available', matrixCounts)
-      }
-    } catch {
-      // RPC not deployed yet — silently fall back to client aggregation below
-    }
     const [deployAll, allocAll, deptAll] = await Promise.all([
-      fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', scheduleId).order('centre')),
-      fetchAllRows('centre_allocations', '*', (q) => q.eq('schedule_id', scheduleId)),
-      fetchAllRows('deployment_departments', 'id, name', null),
+      fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', scheduleId).order('centre'), 'id'),
+      fetchAllRows('centre_allocations', '*', (q) => q.eq('schedule_id', scheduleId), 'id'),
+      fetchAllRows('deployment_departments', 'id, name', null, 'id'),
     ])
     const deptNameById = {}
     ;(deptAll || []).forEach(d => { deptNameById[d.id] = d.name })
@@ -87,7 +74,7 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
       let allGender = []
       for (let i = 0; i < badges.length; i += CHUNK) {
         const chunk = badges.slice(i, i + CHUNK)
-        const part = await fetchAllRows('dp_sewadars', 'badge_number, gender', (q) => q.in('badge_number', chunk))
+        const part = await fetchAllRows('dp_sewadars', 'badge_number, gender', (q) => q.in('badge_number', chunk), ['centre', 'badge_number'])
         allGender.push(...(part || []))
       }
       setSewadars(allGender)
@@ -135,6 +122,11 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
 
   const swByBadge = {}
   sewadars.forEach(s => { swByBadge[s.badge_number] = s })
+  // centre-aware match first (a badge is looked up with its own centre),
+  // badge-only as fallback — mirrors the RPC join on badge+centre
+  const swByBadgeCentre = {}
+  sewadars.forEach(s => { swByBadgeCentre[`${s.centre}|${s.badge_number}`] = s })
+  const swFor = (r) => swByBadgeCentre[`${r.centre}|${r.badge_number}`] || swByBadge[r.badge_number]
 
   // quota: root → dept → max_count (Scheduled)
   const quota = {}
@@ -147,6 +139,8 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
   })
 
   // deployed breakdown: root → dept → { deployed, male, female, vss, noGender }
+  // VSS rows are counted in `vss` and NEVER in male/female, so
+  // deployed === male + female + vss + noGender always holds.
   const dep = {}
   rows.forEach(r => {
     const root = rootOf(r.centre)
@@ -156,7 +150,7 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     const d = (dep[root][dept] = dep[root][dept] || { deployed: 0, male: 0, female: 0, vss: 0, noGender: 0 })
     d.deployed++
     if (vssBadges.has(r.badge_number)) { d.vss++; return }
-    const sw = swByBadge[r.badge_number]
+    const sw = swFor(r)
     if (!sw?.gender) { d.noGender++; return }
     if (isMale(sw.gender)) d.male++; else d.female++
   })
@@ -180,22 +174,63 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
   const grandDeployed = departments.reduce((s, d) => s + rowTotal(dep, d, 'deployed'), 0)
   const grandM = departments.reduce((s, d) => s + rowTotal(dep, d, 'male'), 0)
   const grandF = departments.reduce((s, d) => s + rowTotal(dep, d, 'female'), 0)
+  const grandVss = departments.reduce((s, d) => s + rowTotal(dep, d, 'vss'), 0)
+  const grandNoGender = departments.reduce((s, d) => s + rowTotal(dep, d, 'noGender'), 0)
 
-  // per-centre sums across all departments
+  // per-centre sums across all departments.
+  // Additional/Shortfall are accumulated PER DEPARTMENT (never netted):
+  // a centre over in one department and under in another must show both.
   const centreAll = {}
   rootCentres.forEach(c => {
-    centreAll[c] = { scheduled: 0, deployed: 0, male: 0, female: 0 }
+    centreAll[c] = { scheduled: 0, deployed: 0, male: 0, female: 0, vss: 0, noGender: 0, additional: 0, shortfall: 0 }
     departments.forEach(dept => {
-      centreAll[c].scheduled += schedTotal(c, dept)
+      const sched = schedTotal(c, dept)
       const d = dep[c]?.[dept]
+      const depd = d ? d.deployed : 0
+      centreAll[c].scheduled += sched
+      centreAll[c].deployed += depd
+      centreAll[c].additional += Math.max(0, depd - sched)
+      centreAll[c].shortfall += Math.max(0, sched - depd)
       if (!d) return
-      centreAll[c].deployed += d.deployed
       centreAll[c].male += d.male
       centreAll[c].female += d.female
+      centreAll[c].vss += d.vss
+      centreAll[c].noGender += d.noGender
     })
   })
+  const grandAdditional = rootCentres.reduce((s, c) => s + centreAll[c].additional, 0)
+  const grandShortfall = rootCentres.reduce((s, c) => s + centreAll[c].shortfall, 0)
 
-  const blockRows = dept => (isVssDept(dept) ? 6 : 5)
+  const blockRows = dept => {
+    const base = isVssDept(dept) ? 6 : 5 // Scheduled/Deployed/Difference/Male/Female/(VSS)
+    return base
+  }
+
+  // canonical cross-check: the matrix's Deployed grouping must reconcile
+  // with the shared counting module (total === regular + VSS, sums match).
+  // Gender-less rows have no on-screen line (per requirement) — if any ever
+  // appear, this dev assertion fires instead of silently breaking RATIO.
+  if (import.meta.env?.DEV) {
+    reportCountProblems(verifyDeploymentCounts(
+      deploymentCounts(rows.map(r => ({
+        centre: r.centre,
+        badge_number: r.badge_number,
+        department_id: r.department_id,
+        deployed_department_id: r.deployed_department_id,
+      })), { vssBadgeSet: vssBadges, rootOf }),
+      'overview-matrix',
+    ))
+    if (grandNoGender > 0) {
+      console.error(`[counts] overview-matrix: ${grandNoGender} deployed rows have no gender — RATIO Total excludes them`)
+    }
+    // Additional/Shortfall must be per-department sums, never netted:
+    // recompute from the per-dept cells and compare with the COMPLETE REPORT.
+    const checkAdd = departments.reduce((s, d) => s + Math.max(0, rowTotal(dep, d, 'deployed') - schedGrand(d)), 0)
+    const checkShort = departments.reduce((s, d) => s + Math.max(0, schedGrand(d) - rowTotal(dep, d, 'deployed')), 0)
+    if (checkAdd !== grandAdditional || checkShort !== grandShortfall) {
+      console.error(`[counts] overview-matrix: Additional/Shortfall netted — per-dept sums ${checkAdd}/${checkShort} !== centre sums ${grandAdditional}/${grandShortfall}`)
+    }
+  }
 
   // ── Excel export — formatted, mirrors the on-screen matrix ────────
   const exportExcel = async () => {
@@ -296,28 +331,31 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
 
     const diffCol = v => (v < 0 ? DANGER : v > 0 ? SUCCESS : undefined)
 
-    // COMPLETE REPORT block
+    // COMPLETE REPORT block — one signed Difference row; its Total is the net effect
     writeBlock('COMPLETE REPORT', [
       { label: 'Scheduled', color: LABEL.sched, total: grandScheduled, centres: rootCentres.map(c => centreAll[c].scheduled) },
       { label: 'Deployed', color: LABEL.deploy, total: grandDeployed, centres: rootCentres.map(c => centreAll[c].deployed) },
       { label: 'Difference', total: grandDeployed - grandScheduled, diffColor: diffCol(grandDeployed - grandScheduled), centresDiff: true, centres: rootCentres.map(c => centreAll[c].deployed - centreAll[c].scheduled) },
     ], FILL_HEAD)
 
-    // RATIO block
+    // RATIO block — every line reconciles with COMPLETE REPORT Deployed
     writeBlock('RATIO', [
-      { label: 'Male', color: LABEL.male, total: grandM, centres: rootCentres.map(c => centreAll[c].male) },
-      { label: 'Female', color: LABEL.female, total: grandF, centres: rootCentres.map(c => centreAll[c].female) },
-      { label: 'Total', total: grandM + grandF, centres: rootCentres.map(c => centreAll[c].male + centreAll[c].female) },
+      { label: 'Male (regular)', color: LABEL.male, total: grandM, centres: rootCentres.map(c => centreAll[c].male) },
+      { label: 'Female (regular)', color: LABEL.female, total: grandF, centres: rootCentres.map(c => centreAll[c].female) },
+      { label: 'VSS', color: LABEL.vss, total: grandVss, centres: rootCentres.map(c => centreAll[c].vss) },
+      { label: 'Total (= Deployed)', total: grandM + grandF + grandVss, centres: rootCentres.map(c => centreAll[c].male + centreAll[c].female + centreAll[c].vss) },
       { label: 'Ratio (M:F)', total: ratioStr(grandM, grandF), centres: rootCentres.map(c => ratioStr(centreAll[c].male, centreAll[c].female)) },
     ], FILL_HEAD)
 
     // per-department blocks — same row order as the table; VSS only for TRAFFIC OUTSIDE BHATI
     departments.forEach((dept, i) => {
       const vss = isVssDept(dept)
+      const depTotal = rowTotal(dep, dept, 'deployed')
+      const sched = schedGrand(dept)
       const rowsSpec = [
-        { label: 'Scheduled', color: LABEL.sched, total: schedGrand(dept), centres: rootCentres.map(c => schedTotal(c, dept)) },
-        { label: 'Deployed', color: LABEL.deploy, total: rowTotal(dep, dept, 'deployed'), centres: rootCentres.map(c => (dep[c]?.[dept]?.deployed || 0)) },
-        { label: 'Difference', total: rowTotal(dep, dept, 'deployed') - schedGrand(dept), diffColor: diffCol(rowTotal(dep, dept, 'deployed') - schedGrand(dept)), centresDiff: true, centres: rootCentres.map(c => (dep[c]?.[dept]?.deployed || 0) - schedTotal(c, dept)) },
+        { label: 'Scheduled', color: LABEL.sched, total: sched, centres: rootCentres.map(c => schedTotal(c, dept)) },
+        { label: 'Deployed', color: LABEL.deploy, total: depTotal, centres: rootCentres.map(c => (dep[c]?.[dept]?.deployed || 0)) },
+        { label: 'Difference', total: depTotal - sched, diffColor: diffCol(depTotal - sched), centresDiff: true, centres: rootCentres.map(c => (dep[c]?.[dept]?.deployed || 0) - schedTotal(c, dept)) },
         { label: 'Male', color: LABEL.male, total: rowTotal(dep, dept, 'male'), centres: rootCentres.map(c => (dep[c]?.[dept]?.male || 0)) },
         { label: 'Female', color: LABEL.female, total: rowTotal(dep, dept, 'female'), centres: rootCentres.map(c => (dep[c]?.[dept]?.female || 0)) },
       ]
@@ -397,15 +435,15 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
               <span className="legend-item"><i className="legend-dot legend-deploy" /> Deployed (effective — live, no lock)</span>
             </span>
             <span className="legend-group">
-              <span className="legend-item"><i className="legend-dot legend-male" /> Male</span>
-              <span className="legend-item"><i className="legend-dot legend-female" /> Female</span>
+              <span className="legend-item"><i className="legend-dot legend-male" /> Male (regular)</span>
+              <span className="legend-item"><i className="legend-dot legend-female" /> Female (regular)</span>
             </span>
             <span className="legend-group">
               <span className="legend-item"><i className="legend-dot legend-vss" /> VSS</span>
             </span>
             <span className="legend-group">
-              <span className="legend-item"><i className="legend-dot legend-deficit" /> Deficit (deployed &lt; scheduled)</span>
-              <span className="legend-item"><i className="legend-dot legend-excess" /> Excess (deployed &gt; scheduled)</span>
+              <span className="legend-item"><i className="legend-dot legend-excess" /> Difference + (over schedule)</span>
+              <span className="legend-item"><i className="legend-dot legend-deficit" /> Difference − (under schedule)</span>
             </span>
           </div>
       <div className="table-wrap table-wrap-sticky" style={{ border: 'none', borderRadius: 0 }}>
@@ -419,7 +457,8 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
             </tr>
           </thead>
           <tbody>
-            {/* COMPLETE REPORT */}
+            {/* COMPLETE REPORT — one signed Difference row: green = over schedule, red = under.
+                The Total column is the net effect (Deployed − Scheduled). */}
             <tr className="matrix-report-head matrix-block-start">
               <td rowSpan={3} className="table-sticky-col matrix-dept" data-label="DETAILS">COMPLETE REPORT</td>
               <td className="table-sticky-col-2 matrix-label matrix-sched">Scheduled</td>
@@ -440,22 +479,28 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
               })}
             </tr>
 
-            {/* RATIO */}
+            {/* RATIO — Male/Female/VSS only; any gender-less row is a data
+                defect and is asserted (dev) in the canonical check above */}
             <tr className="matrix-report-head matrix-block-start">
-              <td rowSpan={4} className="table-sticky-col matrix-dept" data-label="DETAILS">RATIO</td>
-              <td className="table-sticky-col-2 matrix-label matrix-male">Male</td>
+              <td rowSpan={5} className="table-sticky-col matrix-dept" data-label="DETAILS">RATIO</td>
+              <td className="table-sticky-col-2 matrix-label matrix-male">Male (regular)</td>
               <td className="table-sticky-col-3 matrix-num matrix-total">{cellNum(grandM)}</td>
               {rootCentres.map(c => <td key={c} className="matrix-num matrix-centre" data-label={c}>{cellNum(centreAll[c].male)}</td>)}
             </tr>
             <tr className="matrix-report-head">
-              <td className="table-sticky-col-2 matrix-label matrix-female">Female</td>
+              <td className="table-sticky-col-2 matrix-label matrix-female">Female (regular)</td>
               <td className="table-sticky-col-3 matrix-num matrix-total">{cellNum(grandF)}</td>
               {rootCentres.map(c => <td key={c} className="matrix-num matrix-centre" data-label={c}>{cellNum(centreAll[c].female)}</td>)}
             </tr>
             <tr className="matrix-report-head">
-              <td className="table-sticky-col-2 matrix-label">Total</td>
-              <td className="table-sticky-col-3 matrix-num matrix-total">{cellNum(grandM + grandF)}</td>
-              {rootCentres.map(c => <td key={c} className="matrix-num matrix-centre" data-label={c}>{cellNum(centreAll[c].male + centreAll[c].female)}</td>)}
+              <td className="table-sticky-col-2 matrix-label matrix-vss">VSS</td>
+              <td className="table-sticky-col-3 matrix-num matrix-total">{cellNum(grandVss)}</td>
+              {rootCentres.map(c => <td key={c} className="matrix-num matrix-centre" data-label={c}>{cellNum(centreAll[c].vss)}</td>)}
+            </tr>
+            <tr className="matrix-report-head">
+              <td className="table-sticky-col-2 matrix-label">Total (= Deployed)</td>
+              <td className="table-sticky-col-3 matrix-num matrix-total">{cellNum(grandM + grandF + grandVss)}</td>
+              {rootCentres.map(c => <td key={c} className="matrix-num matrix-centre" data-label={c}>{cellNum(centreAll[c].male + centreAll[c].female + centreAll[c].vss)}</td>)}
             </tr>
             <tr className="matrix-report-head matrix-block-end">
               <td className="table-sticky-col-2 matrix-label">Ratio (M:F)</td>

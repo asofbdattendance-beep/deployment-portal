@@ -26,7 +26,7 @@ export default function VssRoster() {
 
   const load = useCallback(async () => {
     try {
-      const data = await fetchAllRows('vss_sewadars', '*', (q) => q.order('sewadar_name'))
+      const data = await fetchAllRows('vss_sewadars', '*', (q) => q.order('sewadar_name'), 'badge_number')
       setRows(data || [])
     } catch (err) { toast.error(err.message) }
     setLoading(false)

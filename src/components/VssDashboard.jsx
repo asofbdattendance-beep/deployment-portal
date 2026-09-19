@@ -37,10 +37,10 @@ export default function VssDashboard({ schedules, scheduleId }) {
   const load = async (scheduleId) => {
     const [centres, vssAll, consAll, depAll, deptAll] = await Promise.all([
       fetchCentres(),
-      fetchAllRows('vss_sewadars', '*', null),
-      fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', scheduleId)),
-      fetchAllRows('deployments', 'centre, badge_number, department_id, deployed_department_id', (q) => q.eq('schedule_id', scheduleId)),
-      fetchAllRows('deployment_departments', 'id, name, include_vss', (q) => q.eq('is_active', true)),
+      fetchAllRows('vss_sewadars', '*', null, 'badge_number'),
+      fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', scheduleId), 'id'),
+      fetchAllRows('deployments', 'centre, badge_number, department_id, deployed_department_id', (q) => q.eq('schedule_id', scheduleId), 'id'),
+      fetchAllRows('deployment_departments', 'id, name, include_vss', (q) => q.eq('is_active', true), 'id'),
     ])
     const consentMap = {}
     ;(consAll || []).forEach(c => { consentMap[`${c.centre}|${c.badge_number}`] = c })
@@ -54,7 +54,7 @@ export default function VssDashboard({ schedules, scheduleId }) {
     // migration hasn't been run yet (paginated)
     let locks = []
     try {
-      locks = await fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', scheduleId)) || []
+      locks = await fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', scheduleId), 'id') || []
     } catch { /* v13 not migrated yet */ }
     return {
       centres: centres || [],

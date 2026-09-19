@@ -115,7 +115,7 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
     const rows = await fetchAllRows('vss_registrations', '*', (q) => {
       const scoped = !isAllCentres && centres.length ? q.in('centre', centres.map(c => c.name)) : q
       return scoped.order('created_at', { ascending: false })
-    }).catch(() => null)
+    }, 'id').catch(() => null)
     if (rows) setRegistrations(rows)
   }, [isAllCentres, centres])
 
@@ -322,8 +322,8 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
     const name = reg.sewadar_name.trim().toLowerCase()
     const aadhar = reg.aadhar_number ? reg.aadhar_number.replace(/\s/g, '') : ''
     const [rosterAll, regAll] = await Promise.all([
-      fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, aadhar_number', null),
-      fetchAllRows('vss_registrations', 'id, temp_vss_id, sewadar_name, aadhar_number, status', (q) => q.neq('id', reg.id)),
+      fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, aadhar_number', null, 'badge_number'),
+      fetchAllRows('vss_registrations', 'id, temp_vss_id, sewadar_name, aadhar_number, status', (q) => q.neq('id', reg.id), 'id'),
     ])
     const dups = []
     ;(rosterAll || []).forEach(r => {

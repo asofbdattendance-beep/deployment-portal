@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { supabase, fetchCentres, fetchAllRows, getParentCentres, getCount } from '../lib/supabase'
+import { supabase, fetchCentres, fetchAllRows, getParentCentres, getRootCentre, getCount } from '../lib/supabase'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import { Plus, Trash2, Edit3, Calendar, Lock, Unlock, ChevronRight, X } from 'lucide-react'
@@ -335,7 +335,7 @@ function DepartmentsPanel({ isSuper, toast }) {
 
   const loadDepts = useCallback(async () => {
     try {
-      const data = await fetchAllRows('deployment_departments', '*', (q) => q.order('name'))
+      const data = await fetchAllRows('deployment_departments', '*', (q) => q.order('name'), 'id')
       setDepts(data || [])
     } catch (err) { toast.error(`Could not load departments: ${err.message}`) }
   }, [toast])
@@ -581,8 +581,8 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
   const load = useCallback(async () => {
     // centre_allocations per schedule is small (<100) but still paginated via helper to never silently cap
     const [aAll, dAll] = await Promise.all([
-      fetchAllRows('centre_allocations', '*, deployment_departments(name)', (q) => q.eq('schedule_id', schedule.id).order('created_at')),
-      fetchAllRows('deployment_departments', '*', (q) => q.order('name')),
+      fetchAllRows('centre_allocations', '*, deployment_departments(name)', (q) => q.eq('schedule_id', schedule.id).order('created_at'), 'id'),
+      fetchAllRows('deployment_departments', '*', (q) => q.order('name'), 'id'),
     ])
     setAllocations(aAll || [])
     setDepts(dAll || [])
@@ -707,7 +707,7 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
 
   const removeDeptAll = async (deptId) => {
     // capture rows BEFORE the delete so the audit payload records what was removed (paginated, though at most ~40 rows)
-    const existing = { data: await fetchAllRows('centre_allocations', '*', (q) => q.eq('schedule_id', schedule.id).eq('department_id', deptId)), error: null }
+    const existing = { data: await fetchAllRows('centre_allocations', '*', (q) => q.eq('schedule_id', schedule.id).eq('department_id', deptId), 'id'), error: null }
     const { error } = await supabase.from('centre_allocations').delete().eq('schedule_id', schedule.id).eq('department_id', deptId)
     if (error) { toast.error(error.message); return }
     // audit AFTER a successful delete — a failed delete must not leave a phantom log
@@ -983,6 +983,8 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
 }
 function ReadOnlySummary({ schedule }) {
   const [rows, setRows] = useState([])
+  const [schedByRootDept, setSchedByRootDept] = useState({})
+  const [rootOfFn, setRootOfFn] = useState(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(null)
   const [totalDeployCount, setTotalDeployCount] = useState(null)
@@ -995,12 +997,16 @@ function ReadOnlySummary({ schedule }) {
       try {
         // fetch department names separately instead of relying on a hard-coded
         // FK constraint name in the select hint (that name can differ between DBs)
-        const [deployAll, deptAll, dbTotal] = await Promise.all([
-          fetchAllRows('deployments', 'centre, department_id, deployed_department_id', (q) => q.eq('schedule_id', schedule.id)),
-          fetchAllRows('deployment_departments', 'id, name', null),
+        const [deployAll, deptAll, dbTotal, allocAll, centresAll] = await Promise.all([
+          fetchAllRows('deployments', 'centre, department_id, deployed_department_id', (q) => q.eq('schedule_id', schedule.id), 'id'),
+          fetchAllRows('deployment_departments', 'id, name', null, 'id'),
           // DB-side pure count (head:true) — no rows downloaded, useful for the
           // "Total deployed" header. Falls back to rows.length if RPC fails.
           getCount('deployments', (q) => q.eq('schedule_id', schedule.id)).catch(() => null),
+          // the schedule (allocated quota) per root CENTRE — to show
+          // Scheduled vs Deployed vs Additional like the Overview
+          fetchAllRows('centre_allocations', 'department_id, centre, max_count', (q) => q.eq('schedule_id', schedule.id), ['department_id', 'centre']).catch(() => []),
+          fetchCentres().catch(() => []),
         ])
         if (mounted) {
           const deptNameById = {}
@@ -1013,6 +1019,14 @@ function ReadOnlySummary({ schedule }) {
             overridden: !!r.deployed_department_id && r.deployed_department_id !== r.department_id,
           })))
           if (dbTotal != null) setTotalDeployCount(dbTotal)
+          const rootOf = (c) => getRootCentre(centresAll || [], c) || c
+          setRootOfFn(() => rootOf)
+          const sched = {}
+          ;(allocAll || []).forEach(a => {
+            const k = `${rootOf(a.centre)}|||${deptNameById[a.department_id] || a.department_id}`
+            sched[k] = (sched[k] || 0) + (a.max_count || 0)
+          })
+          setSchedByRootDept(sched)
         }
       } catch (err) {
         console.warn('summary load failed:', err?.message)
@@ -1030,6 +1044,13 @@ function ReadOnlySummary({ schedule }) {
   })
 
   const centres = Object.keys(byCentre)
+  // schedule-vs-actual rollup (root CENTRE): Scheduled from allocations,
+  // Deployed from the rows above, Additional/Shortfall derived
+  const schedTotal = Object.entries(schedByRootDept).reduce((s, [, v]) => s + v, 0)
+  const additionalTotal = centres.reduce((s, c) => s + Object.entries(byCentre[c]).reduce((t, [dept, n]) => {
+    const sched = (rootOfFn && schedByRootDept[`${rootOfFn(c)}|||${dept}`]) || 0
+    return t + Math.max(0, n - sched)
+  }, 0), 0)
 
   if (loading) return <section className="card" style={{ padding: '1.25rem' }}><p style={{ color: '#9ca3af', fontSize: '0.85rem' }}>Loading summary...</p></section>
 
@@ -1048,7 +1069,7 @@ function ReadOnlySummary({ schedule }) {
   return (
     <section className="card" style={{ padding: '1.25rem' }}>
       <div className="section-header">
-        <div className="section-title">Deployment Summary — {schedule.name} <span style={{ fontWeight: 600, color: '#64748b', fontSize: '0.82rem' }}>({headerTotal} total)</span></div>
+        <div className="section-title">Deployment Summary — {schedule.name} <span style={{ fontWeight: 600, color: '#64748b', fontSize: '0.82rem' }}>({headerTotal} deployed · {schedTotal} scheduled{additionalTotal > 0 ? ` · +${additionalTotal} additional` : ''})</span></div>
       </div>
       {centres.length === 0 ? (
         <p style={{ color: '#9ca3af', fontSize: '0.85rem', textAlign: 'center', padding: '1rem' }}>No deployments yet.</p>
@@ -1060,9 +1081,13 @@ function ReadOnlySummary({ schedule }) {
                 <span style={{ fontWeight: 600, fontSize: '0.88rem' }}>{c}</span>
               </div>
               <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginTop: '0.35rem' }}>
-                {Object.entries(byCentre[c]).map(([dept, count]) => (
-                  <span key={dept} className="pill pill-blue">{dept}: {count}</span>
-                ))}
+                {Object.entries(byCentre[c]).map(([dept, count]) => {
+                  const sched = (rootOfFn && schedByRootDept[`${rootOfFn(c)}|||${dept}`]) || 0
+                  const extra = Math.max(0, count - sched)
+                  return (
+                    <span key={dept} className="pill pill-blue" title={sched ? `Scheduled ${sched} · Deployed ${count}` : `No scheduled quota · Deployed ${count}`}>{dept}: {count}{extra > 0 && <span style={{ color: '#ef4444', fontWeight: 700 }}> +{extra} additional</span>}</span>
+                  )
+                })}
               </div>
             </div>
           ))}

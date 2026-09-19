@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, fetchAllRows, fetchAsoDeptKeys, getRootCentre, fetchPortalSettings, fetchCentres, fetchVssOverrides } from '../lib/supabase'
 import { computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, aggregateQuotaAllocations, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, changedConsentFields, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment, resolveVssOverride, effectiveVssCreation, effectiveVssDeployment } from '../lib/logic'
+import { consentCounts } from '../lib/counts'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import DeptDropdown from '../components/DeptDropdown'
@@ -117,6 +118,10 @@ function VssDeployTable({ schedules, scheduleId }) {
   const myCentre = profile?.centre
   // vss_operator edits VSS consent + deployment for ANY centre (all-centre scope)
   const isVssOperator = profile?.role === 'vss_operator'
+  // super_admin + vss_operator may deploy BEYOND the allocated quota
+  // (v38 bypass); the extra rows surface as Additional. Centre roles stay
+  // capped — the quota-full block below still binds them.
+  const canExceedQuota = profile?.role === 'super_admin' || isVssOperator
   const isEditableRole = profile?.role === 'centre_user' || profile?.role === 'centre_admin' || isVssOperator
   const selectedScheduleId = scheduleId
 
@@ -302,11 +307,11 @@ function VssDeployTable({ schedules, scheduleId }) {
     try {
       // Supabase max-rows=1000 — paginate every table that can exceed it
       const [vssAll, consAll, deptAll, allocAll, deployAll, asoAll] = await Promise.all([
-        fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, gender, is_initiated, is_active, remarks, centre, department', (q) => q.in('centre', subtree).order('sewadar_name')),
-        fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree)),
-        fetchAllRows('deployment_departments', '*', (q) => q.eq('is_active', true).order('name')),
-        fetchAllRows('centre_allocations', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
-        fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree)),
+        fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, gender, is_initiated, is_active, remarks, centre, department', (q) => q.in('centre', subtree).order('sewadar_name'), 'badge_number'),
+        fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree), 'id'),
+        fetchAllRows('deployment_departments', '*', (q) => q.eq('is_active', true).order('name'), 'id'),
+        fetchAllRows('centre_allocations', '*', (q) => q.eq('schedule_id', selectedScheduleId), 'id'),
+        fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree), 'id'),
         fetchAsoDeptKeys(subtree),
       ])
       setAsoKeys(asoAll || new Set())
@@ -795,7 +800,7 @@ function VssDeployTable({ schedules, scheduleId }) {
       }
       if (mountedRef.current && scheduleIdRef.current === scheduleId) {
         try {
-          const fresh = await fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', scheduleId).in('centre', sub))
+          const fresh = await fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', scheduleId).in('centre', sub), 'id')
           if (fresh && mountedRef.current) setDeployments(fresh)
         } catch { /* keep previous deployments on transient error */ }
       }
@@ -1081,9 +1086,10 @@ function VssDeployTable({ schedules, scheduleId }) {
     byCentre[r.centre].push(r)
   })
 
-  const totalAll = Object.values(consentRows).length
-  const consentedAll = Object.values(consentRows).filter(r => r.consent_given).length
-  const requestedAll = Object.values(consentRows).filter(r => r.consent_given && r.requested_dept).length
+  const _vssConsentCounts = consentCounts(Object.values(consentRows))
+  const totalAll = _vssConsentCounts.total
+  const consentedAll = _vssConsentCounts.yes
+  const requestedAll = _vssConsentCounts.requested
   const inactiveAll = Object.values(consentRows).filter(r => !r.is_active).length
 
   const renderConsentCell = (r) => {
@@ -1184,7 +1190,7 @@ function VssDeployTable({ schedules, scheduleId }) {
       const q = deptQuota[a.department_id]
       const reasons = rowEligibilityReasons(key, a.department_id)
       const isCurrent = r.requested_dept === a.department_id
-      const full = q && !isCurrent && q.rem < 1
+      const full = q && !isCurrent && !canExceedQuota && q.rem < 1
       if (full) reasons.push(`Allocated quota reached (${q ? q.effective : 0}/${q ? q.max : a.max_count})`)
       // ASO department restriction: centre_admin cannot deploy AREA SECRETARY OFFICE sewadars
       if (isCentreAdmin && isAssoDepartment(r.department) && !isCurrent) {
@@ -1289,7 +1295,7 @@ function VssDeployTable({ schedules, scheduleId }) {
     const eligibleKeys = new Set()
     const skipped = []
     const q = deptQuota[deptId]
-    let remaining = q ? q.rem : Infinity
+    let remaining = (q && !canExceedQuota) ? q.rem : Infinity
     selectedRows.forEach(r => {
       const key = `${r.centre}|${r.badge_number}`
       if (r.finalized || r.deployed) {
@@ -1422,11 +1428,12 @@ function VssDeployTable({ schedules, scheduleId }) {
             const q = deptQuota[a.department_id]
             const pct = q ? Math.round(q.effective / q.max * 100) : 0
             const over = q && q.rem < 0
+            const additional = q ? Math.max(0, q.effective - q.max) : 0
             return (
               <div key={a.department_id} className="card" style={{ padding: '0.85rem 1rem' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
                   <span style={{ fontWeight: 700, fontSize: '0.85rem' }}>{dept?.name || '—'}</span>
-                  <span style={{ fontWeight: 800, fontSize: '0.9rem', color: over ? '#ef4444' : '#0f172a' }}>{q ? q.effective : 0}<span style={{ color: '#94a3b8', fontWeight: 600, fontSize: '0.78rem' }}>/{q ? q.max : a.max_count}</span></span>
+                  <span style={{ fontWeight: 800, fontSize: '0.9rem', color: over ? '#ef4444' : '#0f172a' }}>{q ? q.effective : 0}<span style={{ color: '#94a3b8', fontWeight: 600, fontSize: '0.78rem' }}>/{q ? q.max : a.max_count}</span>{over && <span title="Deployed beyond the scheduled quota (Additional)" style={{ color: '#ef4444', fontWeight: 700, fontSize: '0.72rem', marginLeft: '0.3rem' }}>+{additional} additional</span>}</span>
                 </div>
                 <div className="progress">
                   <div className={`progress-bar ${over ? 'danger' : pct >= 100 ? 'success' : ''}`} style={{ width: `${Math.min(Math.max(pct, 0), 100)}%` }} />

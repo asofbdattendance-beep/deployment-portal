@@ -35,7 +35,7 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
     fetchPortalSettings().then(setSettings).catch(() => {})
     Promise.all([
       fetchCentres(),
-      fetchAllRows('deployment_departments', 'id, name', (q) => q.eq('is_active', true)),
+      fetchAllRows('deployment_departments', 'id, name', (q) => q.eq('is_active', true), 'id'),
     ]).then(([c, d]) => {
       setCentres(c)
       setDepts(d || [])
@@ -46,14 +46,14 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
     if (!scheduleId) return
     const [consentRes, allocAll] = await Promise.all([
       supabase.rpc('get_parent_consent_matrix', { p_schedule: scheduleId }),
-      fetchAllRows('centre_allocations', 'department_id, centre, max_count', (q) => q.eq('schedule_id', scheduleId)),
+      fetchAllRows('centre_allocations', 'department_id, centre, max_count', (q) => q.eq('schedule_id', scheduleId), ['department_id', 'centre']),
     ])
     setConsentMatrix(consentRes.data || [])
     setAllocations(allocAll || [])
     // centre deployment locks (v13) — non-fatal: strip just stays empty if the
     // migration hasn't been run yet (paginated, though locks are < 50 rows)
     try {
-      const lockAll = await fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', scheduleId))
+      const lockAll = await fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', scheduleId), 'id')
       setLocks(lockAll || [])
     } catch { setLocks([]) }
     // recent major actions (v17 sewadar_audit_log) — non-fatal: card stays

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { supabase, fetchAllRows } from '../lib/supabase'
 import { getRootCentre, isVssBadge } from '../lib/logic'
+import { isVssRow, deploymentCounts, verifyDeploymentCounts, reportCountProblems } from '../lib/counts'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import { Building2, Users, Search, Download, Filter, X, Star, CheckCircle2, ShieldCheck, Lock, Unlock, Crown } from 'lucide-react'
@@ -66,12 +67,12 @@ export default function CentreListsPage({ schedules, scheduleId }) {
     try {
       // Supabase max-rows=1000 — paginate every table that can exceed it
       const [deptAll, centreAll, deployAll, consentAll, sewAll, vssAll] = await Promise.all([
-        fetchAllRows('deployment_departments', '*', (q) => q.order('name')),
-        fetchAllRows('dp_centres', 'name, parent_centre', (q) => q.order('name')),
-        fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId).order('centre')),
-        fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
-        fetchAllRows('dp_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, gender, badge_status', null),
-        fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, gender, is_active', (q) => q.order('sewadar_name')),
+        fetchAllRows('deployment_departments', '*', (q) => q.order('name'), 'id'),
+        fetchAllRows('dp_centres', 'name, parent_centre', (q) => q.order('name'), 'id'),
+        fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId).order('centre'), 'id'),
+        fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', selectedScheduleId), 'id'),
+        fetchAllRows('dp_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, gender, badge_status', null, ['centre', 'badge_number']),
+        fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, gender, is_active', (q) => q.order('sewadar_name'), 'badge_number'),
       ])
 
       setDepts(deptAll || [])
@@ -84,9 +85,9 @@ export default function CentreListsPage({ schedules, scheduleId }) {
       // incharges + locks + selections — non-fatal (small tables but still paginated for consistency)
       try {
         const [incAll, lockAll, selAll] = await Promise.all([
-          fetchAllRows('department_incharges', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
-          fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
-          fetchAllRows('department_incharge_selections', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
+          fetchAllRows('department_incharges', '*', (q) => q.eq('schedule_id', selectedScheduleId), 'id'),
+          fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', selectedScheduleId), 'id'),
+          fetchAllRows('department_incharge_selections', '*', (q) => q.eq('schedule_id', selectedScheduleId), 'id'),
         ])
         setInchargesRaw(incAll || [])
         setLocksRaw(lockAll || [])
@@ -191,12 +192,13 @@ export default function CentreListsPage({ schedules, scheduleId }) {
   }, [locksRaw])
 
   // build deployed rows from deploymentsRaw
+  const vssSetForRows = useMemo(() => new Set((vssSewadars || []).map(s => s.badge_number)), [vssSewadars])
   const deployedRows = useMemo(() => {
     return (deploymentsRaw || []).map(d => {
       const key = `${d.centre}|${d.badge_number}`
       const sw = swMap[d.badge_number] || {}
       const consent = consentMap[key] || {}
-      const isVss = isVssBadge(d.badge_number) || !!sw.is_vss
+      const isVss = isVssRow(d, vssSetForRows)
       const reqId = d.department_id || ''
       const finalId = d.deployed_department_id || null
       const effectiveId = finalId || reqId
@@ -224,11 +226,13 @@ export default function CentreListsPage({ schedules, scheduleId }) {
         _root: getRootCentre(centres, d.centre) || d.centre,
       }
     })
-  }, [deploymentsRaw, swMap, consentMap, deptMap, centres])
+  }, [deploymentsRaw, swMap, consentMap, deptMap, centres, vssSetForRows])
 
-  // split by type
-  const sewadarRows = useMemo(() => deployedRows.filter(r => !r.is_vss), [deployedRows])
-  const vssRows = useMemo(() => deployedRows.filter(r => r.is_vss), [deployedRows])
+  // split by type — one canonical VSS classifier (membership OR prefix,
+  // mirroring the DB triggers) so this page agrees with the Overview
+  const vssBadgeSet = vssSetForRows
+  const sewadarRows = useMemo(() => deployedRows.filter(r => !isVssRow(r, vssBadgeSet)), [deployedRows, vssBadgeSet])
+  const vssRows = useMemo(() => deployedRows.filter(r => isVssRow(r, vssBadgeSet)), [deployedRows, vssBadgeSet])
 
   // incharges enriched
   const inchargesRows = useMemo(() => {
@@ -259,8 +263,17 @@ export default function CentreListsPage({ schedules, scheduleId }) {
   // adds no extra download. For pure DB counts without rows, use:
   //   await getCount('deployments', q => q.eq('schedule_id', sid))
   //   await getCount('department_incharges', q => q.eq('schedule_id', sid))
-  // Grouped counts should prefer an RPC (e.g. get_deployment_matrix_counts)
-  // with client fallback — see DeploymentMatrixReport.
+  // Canonical invariant: regular + VSS === all deployments. A violation is
+  // logged loudly (dev) so a drift can never render silently.
+  if (import.meta.env?.DEV) {
+    reportCountProblems(verifyDeploymentCounts(
+      deploymentCounts(deploymentsRaw || [], {
+        vssBadgeSet,
+        rootOf: (c) => getRootCentre(centres, c) || c,
+      }),
+      'centre-lists',
+    ))
+  }
   const sewadarStats = useMemo(() => {
     const total = sewadarRows.length
     const finalized = sewadarRows.filter(r => r.is_finalized).length
@@ -960,7 +973,7 @@ export default function CentreListsPage({ schedules, scheduleId }) {
                         if (!sel1 && cur1 && !toSave.some(r=>r.rank===1)) await supabase.from('department_incharge_selections').delete().eq('schedule_id',selectedScheduleId).eq('centre',selCentre).eq('department_id',selDept).eq('rank',1)
                         if (!sel2 && cur2 && !toSave.some(r=>r.rank===2)) await supabase.from('department_incharge_selections').delete().eq('schedule_id',selectedScheduleId).eq('centre',selCentre).eq('department_id',selDept).eq('rank',2)
                         toast.success('Incharge selection saved'); setSel1(''); setSel2('')
-                        const freshSel = await fetchAllRows('department_incharge_selections', '*', (q) => q.eq('schedule_id',selectedScheduleId))
+                        const freshSel = await fetchAllRows('department_incharge_selections', '*', (q) => q.eq('schedule_id',selectedScheduleId), 'id')
                         setSelectionsRaw(freshSel||[])
                       }catch(e){ toast.error(e.message) } finally{ setSavingSel(false) }
                     }}

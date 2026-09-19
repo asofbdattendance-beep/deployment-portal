@@ -23,14 +23,31 @@ export function PortalAuthProvider({ children }) {
 
   const fetchProfile = useCallback(async () => {
     setProfileError(null)
-    const { data, error } = await supabase.rpc('get_portal_profile')
-
-    if (error) {
+    // Transport blips (net::ERR_CONNECTION_CLOSED, Failed to fetch, brief
+    // project wake-ups) must not kill boot on the first try — retry twice
+    // with a short backoff. Only network-shaped errors are retried; a real
+    // API/RLS error returns immediately.
+    const isNetworkError = (err) => {
+      if (!err) return false
+      if (err.code) return false // PostgREST error (has code) — not transport
+      return /failed to fetch|network|connection|abort|timeout|ERR_|load failed/i.test(
+        `${err.message || ''} ${err.name || ''} ${String(err)}`,
+      )
+    }
+    let lastError = null
+    for (let attempt = 0; attempt <= 2; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, 1200 * attempt))
+      const { data, error } = await supabase.rpc('get_portal_profile')
+      if (!error) return data
+      lastError = error
+      if (!isNetworkError(error)) break
+    }
+    const error = lastError
+    {
       console.error('Error fetching portal profile:', error)
       setProfileError(error.message || 'Could not load your profile')
       return null
     }
-    return data
   }, [])
 
   const refreshProfile = useCallback(async () => {

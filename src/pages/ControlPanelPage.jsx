@@ -114,7 +114,7 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
   const loadStatic = useCallback(async () => {
     const [c, d] = await Promise.all([
       fetchCentres(),
-      fetchAllRows('deployment_departments', 'id, name, is_active', (q) => q.eq('is_active', true).order('name')),
+      fetchAllRows('deployment_departments', 'id, name, is_active', (q) => q.eq('is_active', true).order('name'), 'id'),
     ])
     setCentres(c)
     setDepts(d || [])
@@ -131,10 +131,10 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
       return
     }
     const [allocAll, deployAll, ovRes, lockAll, vssOvRes, allocCount, deployCount] = await Promise.all([
-      fetchAllRows('centre_allocations', 'id, department_id, centre, max_count', (q) => q.eq('schedule_id', sid)),
-      fetchAllRows('deployments', 'centre, badge_number, department_id, deployed_department_id', (q) => q.eq('schedule_id', sid)),
+      fetchAllRows('centre_allocations', 'id, department_id, centre, max_count', (q) => q.eq('schedule_id', sid), 'id'),
+      fetchAllRows('deployments', 'centre, badge_number, department_id, deployed_department_id', (q) => q.eq('schedule_id', sid), 'id'),
       fetchCentreOverrides(sid),
-      fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', sid)),
+      fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', sid), 'id'),
       fetchVssOverrides(),
       // Pure counts via head:true — no rows downloaded, useful for header stats
       // where the per-row detail is already fetched above for the quota table,
@@ -173,7 +173,7 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', ...schedFilter }, () => {
         if (!selectedScheduleId) return
-        fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', selectedScheduleId)).then((data) => setLocks(data || [])).catch(() => {})
+        fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', selectedScheduleId), 'id').then((data) => setLocks(data || [])).catch(() => {})
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_overrides', ...schedFilter }, () => {
         if (!selectedScheduleId) return
@@ -355,7 +355,7 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
         })
         setOverrides(await fetchCentreOverrides(selectedScheduleId))
       }
-      const freshAlloc = await fetchAllRows('centre_allocations', 'id, department_id, centre, max_count', (q) => q.eq('schedule_id', selectedScheduleId))
+      const freshAlloc = await fetchAllRows('centre_allocations', 'id, department_id, centre, max_count', (q) => q.eq('schedule_id', selectedScheduleId), 'id')
       setAllocations(freshAlloc || [])
       audit('allocate_additional', { department_id: deptId, max_count: n, centres: allRootNames ? '*' : scopeCentre, also_open: !!alsoOpen })
       toast.success(`Allocated ${n} × ${deptName}${alsoOpen ? ' and opened it' : ''}`)

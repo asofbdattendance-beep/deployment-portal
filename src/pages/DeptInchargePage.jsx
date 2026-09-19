@@ -41,10 +41,10 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
       setMyDeptIds(deptIds)
       // Supabase max-rows=1000 — paginate every table that can exceed it (attendance_sessions intentionally stays capped at 200)
       const [deptAll, depAll, vssAll, sewAll, sessRes] = await Promise.all([
-        fetchAllRows('deployment_departments', '*', (q) => q.order('name')),
-        fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
-        fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, centre, is_initiated, gender, is_active', null),
-        fetchAllRows('dp_sewadars', 'badge_number, sewadar_name, centre, is_initiated, gender', null),
+        fetchAllRows('deployment_departments', '*', (q) => q.order('name'), 'id'),
+        fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId), 'id'),
+        fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, centre, is_initiated, gender, is_active', null, 'badge_number'),
+        fetchAllRows('dp_sewadars', 'badge_number, sewadar_name, centre, is_initiated, gender', null, ['centre', 'badge_number']),
         supabase.from('dp_attendance_sessions').select('*').eq('schedule_id', selectedScheduleId).eq('in_date', todayStrIST()).order('created_at', { ascending:false }).limit(200),
       ])
       setDepts(deptAll||[])

@@ -59,32 +59,91 @@ export async function getMyDeptIds(scheduleId) {
   return data || []
 }
 
-// ── Pagination helper (v22) ────────────────────────────────
+// ── Pagination helper (v22, hardened) ────────────────────────
 // Supabase / PostgREST caps single-query rows at 1000 (max-rows). Any table
 // that can exceed 1000 (3597+ sewadars live) must be fetched via ranged
 // pagination, otherwise rows beyond 1000 are silently dropped.
 // `applyFilters` receives the query builder and may chain .eq/.in/.or/.order
 // — the helper appends .range() and loops until a short page is returned.
 // Keep `fetchAll` / `fetchAllFrom` as aliases for ergonomics at call sites.
-export async function fetchAllRows(table, selectColumns = '*', applyFilters = null) {
-  const pageSize = 1000
-  let from = 0
-  let all = []
-  while (true) {
-    let q = supabase.from(table).select(selectColumns)
-    if (typeof applyFilters === 'function') {
-      const maybe = applyFilters(q)
-      if (maybe) q = maybe
-    }
-    q = q.range(from, from + pageSize - 1)
-    const { data, error } = await q
-    if (error) throw error
-    all.push(...(data || []))
-    if (!data || data.length < pageSize) break
-    from += pageSize
-  }
-  return all
+//
+// stableKey (string | string[]) — UNIQUE column(s) appended as the FINAL
+// .order() tiebreaker(s) so the sort is a TOTAL order. OFFSET paging over a
+// non-unique order is unstable: Postgres may order ties differently on each
+// page request, so rows straddling a 1000-row boundary get duplicated and
+// others dropped (proven: 31 dup + 10 missed GURGAON rows from deployments
+// ordered by centre only). The unique key also drives a Map dedupe, and the
+// first page requests count:'exact' — if the final set is short, refetch
+// once, and if still short THROW (never silently truncate). The key columns
+// are appended to the select when missing (ordering by an unselected column
+// is legal; dedupe needs the values).
+// For tables: deployments/sewadar_consents/centre_allocations/... -> 'id';
+// dp_sewadars/prev_year_deployments/vss_sewadars -> 'badge_number'.
+const MAX_FETCH_PAGES = 500
+function stableKeyCols(stableKey) {
+  if (!stableKey) return []
+  return (Array.isArray(stableKey) ? stableKey : [stableKey]).filter(Boolean)
 }
+export async function fetchAllRows(table, selectColumns = '*', applyFilters = null, stableKey = null) {
+  const pageSize = 1000
+  const keys = stableKeyCols(stableKey)
+  let select = selectColumns
+  if (select.trim() !== '*' && keys.length) {
+    const missing = keys.filter(k => !new RegExp(`(^|[\\s,(])${k}($|[\\s,)])`).test(select))
+    if (missing.length) select = `${select}, ${missing.join(', ')}`
+  }
+  const keyOf = (row) => JSON.stringify(keys.map(k => row?.[k] ?? null))
+  const runOnce = async () => {
+    const byKey = new Map()
+    let serverCount = null
+    let from = 0
+    let pages = 0
+    while (true) {
+      if (++pages > MAX_FETCH_PAGES) throw new Error(`fetchAllRows(${table}): page guard tripped (> ${MAX_FETCH_PAGES} pages)`)
+      let q = supabase.from(table).select(select, pages === 1 ? { count: 'exact' } : undefined)
+      if (typeof applyFilters === 'function') {
+        const maybe = applyFilters(q)
+        if (maybe) q = maybe
+      }
+      // Unique tiebreaker LAST — existing display orders are preserved, and
+      // the composite sort is a total order so LIMIT/OFFSET pages cannot
+      // overlap. (PostgREST allows ordering by a column omitted from select.)
+      keys.forEach(k => { q = q.order(k, { ascending: true }) })
+      q = q.range(from, from + pageSize - 1)
+      const { data, error, count } = await q
+      if (error) throw error
+      if (pages === 1 && typeof count === 'number') serverCount = count
+      for (const row of (data || [])) {
+        if (keys.length) {
+          const k = keyOf(row)
+          if (!byKey.has(k)) byKey.set(k, row)
+        } else {
+          byKey.set(`${from}:${byKey.size}`, row)
+        }
+      }
+      if (!data || data.length < pageSize) break
+      from += pageSize
+    }
+    return { rows: [...byKey.values()], serverCount }
+  }
+  let { rows, serverCount } = await runOnce()
+  if (keys.length && typeof serverCount === 'number' && rows.length !== serverCount) {
+    // Genuine drift or a mid-fetch write: one full retry on a fresh snapshot.
+    // If it STILL disagrees, fail loudly — a short count must never render
+    // as truth. (Pure read path: retries never write.)
+    const retry = await runOnce()
+    rows = retry.rows
+    serverCount = retry.serverCount
+    if (typeof serverCount === 'number' && rows.length !== serverCount) {
+      throw new Error(
+        `fetchAllRows(${table}): count mismatch after retry — server reports ${serverCount} rows but ${rows.length} unique rows were readable. ` +
+        `Refusing to render a partial dataset.`,
+      )
+    }
+  }
+  return rows
+}
+// Keep `fetchAll` / `fetchAllFrom` as aliases for ergonomics at call sites.
 export const fetchAll = fetchAllRows
 export const fetchAllFrom = fetchAllRows
 export const fetchPaginated = fetchAllRows
@@ -103,8 +162,9 @@ export const fetchPaginated = fetchAllRows
 export async function fetchAsoDeptKeys(centres) {
   if (!centres || !centres.length) return new Set()
   const keys = new Set()
-  for (const table of ['dp_sewadars', 'vss_sewadars']) {
-    const rows = await fetchAllRows(table, 'centre, badge_number, department', (q) => q.in('centre', centres))
+  const tables = [['dp_sewadars', ['centre', 'badge_number']], ['vss_sewadars', 'badge_number']]
+  for (const [table, stableKey] of tables) {
+    const rows = await fetchAllRows(table, 'centre, badge_number, department', (q) => q.in('centre', centres), stableKey)
     ;(rows || []).forEach(r => {
       if (isAssoDepartment(r.department)) keys.add(`${r.centre}|${r.badge_number}`)
     })
@@ -152,7 +212,7 @@ export async function getGroupedCounts(
 
 export async function fetchCentres() {
   // 40 rows today — still paginated via fetchAllRows so a future import never hits the 1000 cap silently
-  return fetchAllRows('dp_centres', 'id, name, parent_centre', (q) => q.order('name'))
+  return fetchAllRows('dp_centres', 'id, name, parent_centre', (q) => q.order('name'), 'id')
 }
 
 export async function fetchPortalSettings() {
@@ -193,6 +253,7 @@ export async function fetchCentreOverrides(scheduleId) {
     'centre_overrides',
     'id, schedule_id, centre, department_id, undeployed_only, note, created_by, created_at',
     (q) => q.eq('schedule_id', scheduleId),
+    'id',
   )
 }
 
@@ -247,7 +308,7 @@ export async function removeAllCentreOverrides({ scheduleId, centre }) {
 // Tri-state VSS knobs per centre ('*' = all): creation_open / deployment_open,
 // null = inherit the global switch.
 export async function fetchVssOverrides() {
-  return fetchAllRows('centre_vss_overrides', '*', (q) => q.order('centre'))
+  return fetchAllRows('centre_vss_overrides', '*', (q) => q.order('centre'), 'centre')
 }
 
 export async function setVssOverride(centre, patch, updatedBy = null) {

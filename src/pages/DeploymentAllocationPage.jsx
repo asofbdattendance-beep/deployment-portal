@@ -165,13 +165,13 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
     try {
       // Supabase max-rows=1000 — paginate EVERY table that can exceed 1000 via the shared helper
       const [sewAll, vssAll, consAll, deptAll, deployAll, centreAll, allocAll] = await Promise.all([
-        fetchAllRows('dp_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, badge_status', (q) => q.or(eligibleBadgeStatusFilter()).order('sewadar_name')),
-        fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, is_active, badge_status', (q) => q.or(notElderlyFilter()).order('sewadar_name')),
-        fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
-        fetchAllRows('deployment_departments', '*', (q) => q.order('name')),
-        fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId)),
-        fetchAllRows('dp_centres', 'name, parent_centre', (q) => q.order('name')),
-        fetchAllRows('centre_allocations', 'department_id, centre, max_count', (q) => q.eq('schedule_id', selectedScheduleId)),
+        fetchAllRows('dp_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, badge_status', (q) => q.or(eligibleBadgeStatusFilter()).order('sewadar_name'), ['centre', 'badge_number']),
+        fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, is_active, badge_status', (q) => q.or(notElderlyFilter()).order('sewadar_name'), 'badge_number'),
+        fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', selectedScheduleId), 'id'),
+        fetchAllRows('deployment_departments', '*', (q) => q.order('name'), 'id'),
+        fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId), 'id'),
+        fetchAllRows('dp_centres', 'name, parent_centre', (q) => q.order('name'), 'id'),
+        fetchAllRows('centre_allocations', 'department_id, centre, max_count', (q) => q.eq('schedule_id', selectedScheduleId), ['department_id', 'centre']),
       ])
 
       const sewadars = [...(sewAll || []), ...(vssAll || [])].filter(sw => !shouldHideFromConsent(sw, profile?.role))
@@ -225,6 +225,12 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
           // deployed defaults to the requested department, so the ASO only
           // touches the records that genuinely need to change
           deployed_dept_id: dep?.deployed_department_id || dep?.department_id || null,
+          // raw final flag — true ONLY when the ASO actually set a final
+          // department (never defaulted). Counts/exports use this so the
+          // "Finalized" number matches Centre Lists + Overview (44, not 2562).
+          // deployed_dept_id above is intentionally left defaulted: the save
+          // logic depends on it.
+          is_finalized: !!dep?.deployed_department_id,
         }
         savedDeployedRef.current[key] = dep?.deployed_department_id || dep?.department_id || null
         existingConsentRef.current[key] = ex ? true : false
@@ -345,7 +351,7 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
       markDirty()
       setRows(prev => {
         const cur = prev[key]
-        const next = { ...cur, deployed_dept_id: deptId || null }
+        const next = { ...cur, deployed_dept_id: deptId || null, is_finalized: !!deptId }
         // super_admin deploying auto-creates consent (Yes) so check_deployment never fails on "No consent recorded"
         if (deptId && !cur.consent_given) {
           next.consent_given = true
@@ -480,7 +486,7 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
           const key = `${r.centre}|${r.badge_number}`
           savedDeployedRef.current[key] = null
           setRows(prev => prev[key]
-            ? { ...prev, [key]: { ...prev[key], deployment_id: null, requested_dept_id: '', deployed_dept_id: null, available_days_count: DEFAULT_AVAILABLE_DAYS } }
+            ? { ...prev, [key]: { ...prev[key], deployment_id: null, requested_dept_id: '', deployed_dept_id: null, is_finalized: false, available_days_count: DEFAULT_AVAILABLE_DAYS } }
             : prev)
         })
       }
@@ -583,23 +589,23 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
   // of fetchAllRows + .length (see src/lib/supabase.js).
   const all = useMemo(() => Object.values(rows), [rows])
   const requestedAll = useMemo(() => all.filter(r => r.requested_dept_id).length, [all])
-  const deployedAll = useMemo(() => all.filter(r => r.deployed_dept_id).length, [all])
+  const finalizedAll = useMemo(() => all.filter(r => r.is_finalized).length, [all])
   const overriddenAll = useMemo(() => all.filter(r => r.requested_dept_id && r.deployed_dept_id && r.deployed_dept_id !== r.requested_dept_id).length, [all])
   const awaitingAll = useMemo(() => all.filter(r => r.consent_given && !r.requested_dept_id).length, [all])
   const statusChips = useMemo(() => [
-    { key: 'all', label: 'All', count: all.length },
+    { key: 'all', label: 'All (roster)', count: all.length },
     { key: 'requested', label: 'Deployment', count: requestedAll },
-    { key: 'deployed', label: 'Finalized', count: deployedAll },
+    { key: 'deployed', label: 'Finalized', count: finalizedAll },
     { key: 'overridden', label: 'Overridden', count: overriddenAll },
     { key: 'awaiting', label: 'Awaiting', count: awaitingAll },
-  ], [all, requestedAll, deployedAll, overriddenAll, awaitingAll])
+  ], [all, requestedAll, finalizedAll, overriddenAll, awaitingAll])
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase()
     return all.filter(r => {
       if (filterCentre !== 'all' && r.centre !== filterCentre) return false
       if (filterStatus === 'requested' && !r.requested_dept_id) return false
-      if (filterStatus === 'deployed' && !r.deployed_dept_id) return false
+      if (filterStatus === 'deployed' && !r.is_finalized) return false
       if (filterStatus === 'overridden' && !(r.requested_dept_id && r.deployed_dept_id && r.deployed_dept_id !== r.requested_dept_id)) return false
       if (filterStatus === 'awaiting' && !(r.consent_given && !r.requested_dept_id)) return false
       if (q && !`${r.sewadar_name} ${r.badge_number}`.toLowerCase().includes(q)) return false
@@ -771,6 +777,11 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
             <button onClick={exportExcel} disabled={exporting} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               <Download size={13} /> {exporting ? 'Exporting…' : 'Export Excel'}
             </button>
+            {(filterCentre !== 'all' || filterStatus !== 'all' || search.trim()) && (
+              <span className="pill pill-indigo" title="The table and the Excel export show this filtered set; header chips show the full schedule">
+                Showing {visible.length} of {all.length}
+              </span>
+            )}
           </div>
         </div>
       </div>

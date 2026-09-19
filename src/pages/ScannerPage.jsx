@@ -39,7 +39,7 @@ export default function ScannerPage({ schedules, scheduleId }){
     if(!scheduleId) return
     try {
       const dep = await fetchAllRows('deployments', 'badge_number, department_id, deployed_department_id',
-        (q) => q.eq('schedule_id',scheduleId))
+        (q) => q.eq('schedule_id',scheduleId), 'id')
       await preloadDeployed(scheduleId, (dep||[]).map(d=>({
         badge_number:d.badge_number,
         deptId:d.deployed_department_id||d.department_id,
