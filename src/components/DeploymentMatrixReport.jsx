@@ -34,6 +34,9 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
   const [sewadars, setSewadars] = useState([])      // gender for deployed badges
   const [vssBadges, setVssBadges] = useState(new Set())
   const [loading, setLoading] = useState(true)
+  // M1: fetchAllRows throws (rather than truncates) on count mismatch — the
+  // old catch swallowed that into a silent partial matrix with export enabled.
+  const [loadError, setLoadError] = useState(null)
 
   useEffect(() => {
     fetchCentres().then(setCentres).catch(() => {})
@@ -88,8 +91,8 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     setLoading(true)
     let mounted = true
     load(scheduleId)
-      .then(() => { if (mounted) setLoading(false) })
-      .catch(() => { if (mounted) setLoading(false) })
+      .then(() => { if (mounted) { setLoadError(null); setLoading(false) } })
+      .catch((e) => { if (mounted) { console.error('[Overview] load failed:', e); setLoadError(e?.message || 'Could not load deployment report'); setLoading(false) } })
     return () => { mounted = false }
   }, [scheduleId, load])
 
@@ -102,7 +105,7 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     const scheduleReload = () => {
       if (!mounted) return
       if (reloadTimer) clearTimeout(reloadTimer)
-      reloadTimer = setTimeout(() => { if (mounted) load(scheduleId).catch(() => {}) }, 400)
+      reloadTimer = setTimeout(() => { if (mounted) load(scheduleId).catch((e) => { console.error('[Overview] reload failed:', e?.message) }) }, 400)
     }
     const channel = supabase
       .channel(`deploy-overview-${scheduleId}`)
@@ -343,7 +346,9 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
       { label: 'Male (regular)', color: LABEL.male, total: grandM, centres: rootCentres.map(c => centreAll[c].male) },
       { label: 'Female (regular)', color: LABEL.female, total: grandF, centres: rootCentres.map(c => centreAll[c].female) },
       { label: 'VSS', color: LABEL.vss, total: grandVss, centres: rootCentres.map(c => centreAll[c].vss) },
-      { label: 'Total (= Deployed)', total: grandM + grandF + grandVss, centres: rootCentres.map(c => centreAll[c].male + centreAll[c].female + centreAll[c].vss) },
+      // M5: gender-less rows count in Deployed but never in M/F/VSS, so the
+      // old 'Total (= Deployed)' label was a false reconciliation claim.
+      { label: 'Total (M+F+VSS)', total: grandM + grandF + grandVss, centres: rootCentres.map(c => centreAll[c].male + centreAll[c].female + centreAll[c].vss) },
       { label: 'Ratio (M:F)', total: ratioStr(grandM, grandF), centres: rootCentres.map(c => ratioStr(centreAll[c].male, centreAll[c].female)) },
     ], FILL_HEAD)
 
@@ -429,6 +434,11 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
 
   return (
     <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+      {loadError && (
+        <div role="alert" style={{ margin: '0.75rem 1.25rem 0', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.6rem 0.75rem', fontSize: '0.82rem', color: '#b91c1c' }}>
+          Could not load the full report ({loadError}) — numbers below may be partial. Refresh to retry.
+        </div>
+      )}
   <div className="deploy-matrix-legend">
             <span className="legend-group">
               <span className="legend-item"><i className="legend-dot legend-sched" /> Scheduled (allocated quota)</span>
@@ -498,7 +508,7 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
               {rootCentres.map(c => <td key={c} className="matrix-num matrix-centre" data-label={c}>{cellNum(centreAll[c].vss)}</td>)}
             </tr>
             <tr className="matrix-report-head">
-              <td className="table-sticky-col-2 matrix-label">Total (= Deployed)</td>
+              <td className="table-sticky-col-2 matrix-label">Total (M+F+VSS)</td>
               <td className="table-sticky-col-3 matrix-num matrix-total">{cellNum(grandM + grandF + grandVss)}</td>
               {rootCentres.map(c => <td key={c} className="matrix-num matrix-centre" data-label={c}>{cellNum(centreAll[c].male + centreAll[c].female + centreAll[c].vss)}</td>)}
             </tr>

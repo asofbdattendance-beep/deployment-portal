@@ -560,3 +560,48 @@ export function changedConsentFields(row, saved) {
   })
   return Object.keys(diff).length > 0 ? diff : null
 }
+
+// Group per-row consent PATCHes so one PostgREST UPDATE never writes row A's
+// values into row B. Groups split on field-set AND values: rows sharing only
+// the field names (e.g. two bhati toggles with opposite values in one debounce
+// window) must travel in separate UPDATEs. Items are { fields, ref }; refs are
+// opaque to the grouping and returned per group for the caller's or-filter.
+export function groupConsentPatches(items) {
+  const groups = new Map()
+  for (const { fields, ref } of items || []) {
+    const groupKey = Object.keys(fields)
+      .sort()
+      .map(k => `${k}=${JSON.stringify(fields[k] ?? null)}`)
+      .join(',')
+    let g = groups.get(groupKey)
+    if (!g) { g = { fields, refs: [] }; groups.set(groupKey, g) }
+    g.refs.push(ref)
+  }
+  return [...groups.values()]
+}
+
+// UUID check for the link-auth-account form (v48): the superadmin pastes the
+// auth.users id from the Supabase dashboard.
+export function isUuid(value) {
+  return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(value || '').trim())
+}
+
+// ─── v48 user management ─────────────────────────────────────────────
+// Roles whose login must be scoped to a centre, and roles that must carry a
+// badge_number (the join key into the sewadar domain for scanner/incharge
+// enforcement). Mirrored server-side by claim_portal_invite — keep in sync.
+export const INVITE_ROLES = ['centre_user', 'centre_admin', 'aso', 'super_admin', 'dept_incharge', 'scanner', 'vss_operator']
+export const INVITE_CENTRE_ROLES = ['centre_user', 'centre_admin']
+export const INVITE_BADGE_ROLES = ['dept_incharge', 'scanner']
+
+// Pure validation for superadmin-issued invites. Returns [] when valid.
+// The claim_portal_invite RPC enforces the same rules server-side.
+export function invitationErrors({ email = '', name = '', role = '', centre = '', badge = '' } = {}) {
+  const errors = []
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email).trim())) errors.push('Enter a valid email address')
+  if (!String(name).trim()) errors.push('Enter the person’s name')
+  if (!INVITE_ROLES.includes(role)) errors.push('Pick a valid role')
+  if (INVITE_CENTRE_ROLES.includes(role) && !String(centre).trim()) errors.push('Pick a centre for this role')
+  if (INVITE_BADGE_ROLES.includes(role) && !String(badge).trim()) errors.push('Enter a badge number for this role')
+  return errors
+}

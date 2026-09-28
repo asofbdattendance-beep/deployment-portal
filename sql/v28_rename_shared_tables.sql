@@ -478,7 +478,17 @@ BEGIN
   RETURN v_v;
 END; $$;
 
-DROP FUNCTION IF EXISTS public.get_open_session(p_badge text, p_schedule uuid)
+-- The two lines below were, until 2026-09-27, malformed in a way that
+-- made this whole statement a syntax error, so the redefinition never
+-- took effect and v26's version silently survived:
+--   1. DROP FUNCTION named its ARGUMENTS by parameter name
+--      (p_badge text, p_schedule uuid). Postgres requires argument
+--      TYPES there; the correct form is (text, uuid) — see v26:83.
+--   2. The statement had no terminating semicolon, and the
+--      CREATE OR REPLACE FUNCTION keyword was missing entirely.
+-- Fixed to match the idiom at line 468 and 492 below.
+DROP FUNCTION IF EXISTS public.get_open_session(text, uuid);
+CREATE OR REPLACE FUNCTION public.get_open_session(p_badge text, p_schedule uuid)
 RETURNS public.dp_attendance_sessions LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE v_row public.dp_attendance_sessions;
 BEGIN

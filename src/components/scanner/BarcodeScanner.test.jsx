@@ -1,0 +1,193 @@
+// @vitest-environment jsdom
+/**
+ * BarcodeScanner — camera session lifecycle.
+ *
+ * The bug this file exists to prevent: the preview used to freeze on a black
+ * box while the camera LED stayed on. Two `startScanner` runs raced over one
+ * shared `openCamera` promise and the loser called `track.stop()` on the stream
+ * the winner had already attached — a live track that nothing was painting.
+ *
+ * React 18 StrictMode (and the iOS camera-permission prompt) reliably produce
+ * that second, overlapping run, so the regression test mounts inside
+ * StrictMode and resolves the two open attempts out of order.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import React from 'react'
+import { render, act, cleanup } from '@testing-library/react'
+
+const mocks = vi.hoisted(() => ({ openCamera: vi.fn() }))
+
+// Override only openCamera; keep the real ownership/teardown semantics.
+vi.mock('./cameraManager', async (importOriginal) => {
+  const actual = await importOriginal()
+  return { ...actual, openCamera: (...args) => mocks.openCamera(...args) }
+})
+
+const BarcodeScanner = (await import('./BarcodeScanner')).default
+
+/* ── fakes ─────────────────────────────────────────────────────────────────── */
+
+function makeStream(name = 'stream') {
+  const track = {
+    kind: 'video',
+    readyState: 'live',
+    stop: vi.fn(function () { track.readyState = 'ended' }),
+    getSettings: () => ({ facingMode: 'environment', width: 1280, height: 720 }),
+    getCapabilities: () => ({ focusMode: ['continuous'], zoom: { min: 1, max: 2 } }),
+    applyConstraints: vi.fn().mockResolvedValue(undefined),
+  }
+  return { name, getTracks: () => [track], getVideoTracks: () => [track], track }
+}
+
+/** A pending promise we can settle by hand, to force the race. */
+function deferred() {
+  let resolve, reject
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+
+const flush = () => act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+beforeEach(() => {
+  mocks.openCamera.mockReset()
+
+  // jsdom ships no camera API; the component's secure-context guard needs one.
+  Object.defineProperty(window.navigator, 'mediaDevices', {
+    configurable: true, writable: true,
+    value: { getUserMedia: vi.fn(), enumerateDevices: vi.fn().mockResolvedValue([]) },
+  })
+
+  // Keep the engine pool on the cheap native path so no WASM/ZXing bundle loads.
+  window.BarcodeDetector = class {
+    static getSupportedFormats = () => Promise.resolve(['code_39', 'code_128'])
+    detect = () => Promise.resolve([])
+  }
+
+  // jsdom implements none of these; the component uses all three.
+  Object.defineProperty(window.HTMLMediaElement.prototype, 'play', {
+    configurable: true, writable: true, value: vi.fn().mockResolvedValue(undefined),
+  })
+  Object.defineProperty(window.HTMLMediaElement.prototype, 'pause', {
+    configurable: true, writable: true, value: vi.fn(),
+  })
+  Object.defineProperty(window.HTMLMediaElement.prototype, 'load', {
+    configurable: true, writable: true, value: vi.fn(),
+  })
+  // 2D context is enough for the quality checker + detection surface.
+  window.HTMLCanvasElement.prototype.getContext = vi.fn(() => ({
+    drawImage: vi.fn(), getImageData: vi.fn(() => ({ data: new Uint8ClampedArray(64 * 48 * 4) })),
+  }))
+  window.OffscreenCanvas = class { constructor(w, h) { this.width = w; this.height = h } getContext() { return { drawImage: vi.fn() } } }
+})
+
+afterEach(() => {
+  // Vitest runs without `globals: true`, so RTL's auto-cleanup never
+  // registers — unmount here or earlier components leak into document.body and
+  // make the container-scoped queries ambiguous.
+  cleanup()
+  delete window.BarcodeDetector
+})
+
+/* ── tests ─────────────────────────────────────────────────────────────────── */
+
+describe('BarcodeScanner camera session lifecycle', () => {
+  it('attaches the live stream to the video element', async () => {
+    const stream = makeStream()
+    mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: true, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+
+    const { container } = render(<BarcodeScanner onScan={vi.fn()} />)
+    await flush()
+
+    const video = container.querySelector('video')
+    expect(video.srcObject).toBe(stream)
+  })
+
+  it('a stale session never stops a stream a newer session adopted', async () => {
+    // One stream, two overlapping open attempts — exactly what StrictMode and
+    // the iOS permission prompt produce.
+    const shared = makeStream('shared')
+    const first = deferred()
+    const second = deferred()
+    mocks.openCamera.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+
+    const { container, unmount } = render(
+      <React.StrictMode><BarcodeScanner onScan={vi.fn()} /></React.StrictMode>,
+    )
+
+    // Newer session wins the race and attaches the stream.
+    await act(async () => {
+      second.resolve({ stream: shared, track: shared.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+      await flush()
+    })
+    expect(container.querySelector('video').srcObject).toBe(shared)
+
+    // Now the stale session resolves with the same stream. It must walk away.
+    await act(async () => {
+      first.resolve({ stream: shared, track: shared.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: true })
+      await flush()
+    })
+
+    expect(shared.track.stop).not.toHaveBeenCalled()
+    expect(container.querySelector('video').srcObject).toBe(shared)
+
+    unmount()
+  })
+
+  it('stops the stream on a real unmount so the camera LED is not left on', async () => {
+    const stream = makeStream()
+    mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+
+    const { unmount } = render(<BarcodeScanner onScan={vi.fn()} />)
+    await flush()
+
+    unmount()
+    await flush()
+
+    expect(stream.track.stop).toHaveBeenCalled()
+  })
+
+  it('reclaims a stream that resolves after a real unmount (no orphaned camera)', async () => {
+    const stream = makeStream()
+    const late = deferred()
+    mocks.openCamera.mockReturnValue(late.promise)
+
+    const { unmount } = render(<BarcodeScanner onScan={vi.fn()} />)
+    unmount()
+
+    await act(async () => {
+      late.resolve({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+      await flush()
+    })
+
+    expect(stream.track.stop).toHaveBeenCalled()
+  })
+
+  it('surfaces a permission error with a retry affordance instead of a black box', async () => {
+    const err = new Error('denied')
+    err.name = 'NotAllowedError'
+    mocks.openCamera.mockRejectedValue(err)
+
+    const { getByText, getByRole } = render(<BarcodeScanner onScan={vi.fn()} />)
+    await flush()
+
+    expect(getByText(/permission denied/i)).toBeTruthy()
+    expect(getByRole('button', { name: /retry/i })).toBeTruthy()
+  })
+
+  it('never mutates state after unmount (no act() warnings from late resolutions)', async () => {
+    const stream = makeStream()
+    const late = deferred()
+    mocks.openCamera.mockReturnValue(late.promise)
+
+    const { unmount } = render(<BarcodeScanner onScan={vi.fn()} />)
+    unmount()
+
+    await act(async () => {
+      late.resolve({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+      await flush()
+    })
+
+    // The only assertion that matters here: the track was reclaimed, not leaked.
+    expect(stream.track.stop).toHaveBeenCalled()
+  })
+})

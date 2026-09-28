@@ -270,14 +270,17 @@ export async function drainQueue(supabase, onProgress) {
         try {
           if (q.action === 'IN') {
             const { error } = await withTimeout(
-              supabase.rpc('scan_in', { p_badge: q.badge, p_schedule: q.schedule_id, p_ts: ts, p_nonce: q.id, p_centre: q.centre }),
+              supabase.rpc('scan_in', { p_badge: q.badge, p_schedule: q.schedule_id, p_ts: ts, p_nonce: q.id, p_centre: q.centre, p_is_manual: q.is_manual || false }),
               10000,
               `Drain IN`
             )
             if (error) throw error
           } else {
             const { error } = await withTimeout(
-              supabase.rpc('scan_out', { p_badge: q.badge, p_schedule: q.schedule_id, p_ts: ts, p_open_id: q.open_id || null, p_nonce: q.id }),
+              // scan_out declares (p_badge, p_schedule, p_ts, p_open_id) only —
+              // an extra p_nonce makes PostgREST return PGRST202 and the row
+              // below is marked failed + head-of-line-blocks the queue.
+              supabase.rpc('scan_out', { p_badge: q.badge, p_schedule: q.schedule_id, p_ts: ts, p_open_id: q.open_id || null }),
               10000,
               `Drain OUT`
             )

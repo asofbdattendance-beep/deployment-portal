@@ -171,10 +171,13 @@ export default function CentreListsPage({ schedules, scheduleId }) {
     }
   }, [centres])
 
+  // Centre-scoped: a badge is looked up with its own centre (consentMap
+  // already keys this way) so two centres sharing a badge number never
+  // display each other's sewadar name, gender or initiated status.
   const swMap = useMemo(() => {
     const m = {}
-    ;(regularSewadars || []).forEach(s => { m[s.badge_number] = s })
-    ;(vssSewadars || []).forEach(s => { m[s.badge_number] = { ...s, is_vss: true } })
+    ;(regularSewadars || []).forEach(s => { m[`${s.centre}|${s.badge_number}`] = s })
+    ;(vssSewadars || []).forEach(s => { m[`${s.centre}|${s.badge_number}`] = { ...s, is_vss: true } })
     return m
   }, [regularSewadars, vssSewadars])
 
@@ -196,7 +199,7 @@ export default function CentreListsPage({ schedules, scheduleId }) {
   const deployedRows = useMemo(() => {
     return (deploymentsRaw || []).map(d => {
       const key = `${d.centre}|${d.badge_number}`
-      const sw = swMap[d.badge_number] || {}
+      const sw = swMap[key] || {}
       const consent = consentMap[key] || {}
       const isVss = isVssRow(d, vssSetForRows)
       const reqId = d.department_id || ''
@@ -238,7 +241,7 @@ export default function CentreListsPage({ schedules, scheduleId }) {
   const inchargesRows = useMemo(() => {
     return (inchargesRaw || []).map(inc => {
       const deptName = deptMap.get(inc.department_id)?.name || '—'
-      const sw = swMap[inc.badge_number] || {}
+      const sw = swMap[`${inc.centre}|${inc.badge_number}`] || {}
       const isLocked = locksSet.has(inc.centre)
       const lock = lockByCentre[inc.centre] || null
       return {

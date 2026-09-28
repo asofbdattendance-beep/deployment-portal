@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, fetchCentres, fetchAllRows, fetchAsoDeptKeys, getRootCentre, eligibleBadgeStatusFilter, isAssoDepartment, fetchPortalSettings, shouldHideFromConsent } from '../lib/supabase'
-import { computeEditGates, isDeptSelectable, isUndeployedCohort, computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, aggregateQuotaAllocations, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, changedConsentFields, consentRowKey, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
+import { computeEditGates, isDeptSelectable, isUndeployedCohort, computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, aggregateQuotaAllocations, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, changedConsentFields, consentRowKey, buildConsentSnapshot, groupConsentPatches, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
 import { consentCounts } from '../lib/counts'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
@@ -514,7 +514,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
       //   rows with local field diffs  → PATCH only the fields that differ,
       //     grouped by identical field-set, matched per-row via an or-filter
       const toInsert = []
-      const patchByFields = new Map()
+      const patchItems = []
       // one source of truth for the consent-row payload — shared by the
       // new-row inserts and the deploy-existence guarantee below
       const consentPayload = (r) => ({
@@ -535,17 +535,20 @@ export default function ConsentPage({ schedules, scheduleId }) {
         const saved = savedConsentRef.current[key]
         const fields = changedConsentFields(r, saved)
         if (!fields) return
-        if (saved) {
+        // C3: route on row EXISTENCE, not on the snapshot entry — the baseline
+        // covers every loaded row so `saved` is always truthy, and a sewadar
+        // with no persisted consent row used to fall into an UPDATE matching
+        // zero rows (success toast, edit silently lost).
+        if (consentExistsRef.current.has(key)) {
           // force the canonical days value at save time (mirrors the insert path)
           if ('available_days_count' in fields) {
             fields.available_days_count = r.consent_given
               ? daysForDept(deptNameById[r.requested_dept])
               : (anyOverrideOpenRef.current && r.requested_dept ? daysForDept(deptNameById[r.requested_dept]) : null)
           }
-          const groupKey = Object.keys(fields).sort().join(',')
-          const patch = patchByFields.get(groupKey) || { fields, rows: [] }
-          patch.rows.push({ centre: r.centre, badge_number: r.badge_number })
-          patchByFields.set(groupKey, patch)
+          // C2: collect now, group by field-set AND values at apply time — one
+          // UPDATE must never write row A's values into row B.
+          patchItems.push({ fields, ref: { centre: r.centre, badge_number: r.badge_number } })
         } else {
           toInsert.push(consentPayload(r))
         }
@@ -593,14 +596,16 @@ export default function ConsentPage({ schedules, scheduleId }) {
             toast.error(m); dirtyRef.current = true; scheduleRetry(); return
           }
         }
+        // rows now exist — later saves in this session take the PATCH path
+        toInsert.forEach(p => consentExistsRef.current.add(`${p.centre}|${p.badge_number}`))
       }
       // per-field PATCH — only fields that actually differ from the saved state,
-      // grouped by identical field-set so each group needs exactly one update.
-      // Rows match via a PostgREST or-filter; values are double-quoted because
-      // centre names contain spaces/hyphens (e.g. "NIT - 2").
-      for (const patch of patchByFields.values()) {
-        for (let i = 0; i < patch.rows.length; i += 40) {
-          const chunk = patch.rows.slice(i, i + 40)
+      // grouped by identical field-set AND values so each group needs exactly
+      // one update. Rows match via a PostgREST or-filter; values are
+      // double-quoted because centre names contain spaces/hyphens (e.g. "NIT - 2").
+      for (const patch of groupConsentPatches(patchItems)) {
+        for (let i = 0; i < patch.refs.length; i += 40) {
+          const chunk = patch.refs.slice(i, i + 40)
           // A chunk containing a centre/badge with `"`, `,`, `(` or `)` cannot
           // travel the batched or() path — persist it per-row instead.
           if (chunk.some(r => orKeyNeedsFallback(r.centre, r.badge_number))) {
@@ -692,6 +697,14 @@ export default function ConsentPage({ schedules, scheduleId }) {
           if (!persisted) return
           const row = rows[key]
           if (row && row.requested_dept && persisted.department_id !== row.requested_dept) return
+          // I9: a cleared department (requested_dept falsy) deletes only when
+          // it is a clear WE authored that no peer has since overwritten —
+          // the persisted dept must still match what we last saved. Untouched
+          // orphan rows are left alone, never auto-deleted.
+          if (!row?.requested_dept) {
+            const lastSavedDept = savedConsentRef.current[key]?.requested_dept || ''
+            if (!lastSavedDept || persisted.department_id !== lastSavedDept) return
+          }
           ;(byCentre[centre] = byCentre[centre] || []).push(badge_number)
         })
         for (const [centre, badges] of Object.entries(byCentre)) {
@@ -920,6 +933,15 @@ export default function ConsentPage({ schedules, scheduleId }) {
     })
     return counts
   }, [deployments, consentRows, asoKeys, quotaScopeSet])
+  // I7: persisted deployment rows by row-key — lets the local quota count
+  // attribute by the EFFECTIVE department (final else requested), matching
+  // the saved counts and the DB. Requested-only attribution displayed
+  // ASO-finalized rows under the wrong department.
+  const depRowMap = useMemo(() => {
+    const m = {}
+    ;(deployments || []).forEach(d => { m[`${d.centre}|${d.badge_number}`] = d })
+    return m
+  }, [deployments])
   const localCounts = useMemo(() => {
     const counts = {}
     Object.values(consentRows).forEach(r => {
@@ -927,12 +949,20 @@ export default function ConsentPage({ schedules, scheduleId }) {
       // Same AREA SECRETARY OFFICE exclusion the saved counts use (v35) — ASO
       // sewadars don't consume centre quota, locally or persisted.
       if (asoKeys.has(`${r.centre}|${r.badge_number}`)) return
-      if (r.consent_given && r.requested_dept && !isAssoDepartment(r.department)) {
-        counts[r.requested_dept] = (counts[r.requested_dept] || 0) + 1
+      let bucket = r.requested_dept
+      const d = depRowMap[`${r.centre}|${r.badge_number}`]
+      if (d) {
+        // A pending requested move (deployment row still holds the old dept)
+        // previews under the NEW department; otherwise the persisted
+        // effective department (final else requested).
+        bucket = (d.department_id !== r.requested_dept) ? r.requested_dept : (d.deployed_department_id || d.department_id)
+      }
+      if (r.consent_given && bucket && !isAssoDepartment(r.department)) {
+        counts[bucket] = (counts[bucket] || 0) + 1
       }
     })
     return counts
-  }, [consentRows, quotaScopeSet, asoKeys])
+  }, [consentRows, quotaScopeSet, asoKeys, depRowMap])
   const deptQuota = useMemo(() => computeDeptQuota(displayAlloc, savedAllCounts, localCounts, savedOwnCounts), [displayAlloc, savedAllCounts, localCounts, savedOwnCounts])
 
   // seats the ASO asked this CENTRE (whole subtree) to provide, summed across
@@ -1035,8 +1065,12 @@ export default function ConsentPage({ schedules, scheduleId }) {
   // ── Lock deployment ──
   // Departments that MUST have an incharge before locking: every allocated
   // department that has at least one regular sewadar deployed to it.
+  // M4: no consent_given requirement — the DB trigger counts any non-VSS
+  // deployments row (consent-No deployments under an override count too), so
+  // requiring consent here under-reported and the lock died with a raw error.
   const missingIncharges = useMemo(() => allocatedQuota.filter(a => {
-    const hasRegularAssigned = Object.values(consentRows).some(r => r.consent_given && r.requested_dept === a.department_id && !isVssBadge(r.badge_number))
+    const hasRegularAssigned = Object.values(consentRows).some(r =>
+      r.requested_dept === a.department_id && !isVssBadge(r.badge_number))
     return hasRegularAssigned && !incharges[inchargeKey(a.department_id)]
   }), [allocatedQuota, consentRows, incharges, inchargeKey])
   const startLock = () => {

@@ -5,17 +5,20 @@ import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import BarcodeScanner from '../components/scanner/BarcodeScanner'
 import ScanResultPopup from '../components/scanner/ScanResultPopup'
+import RecentScansTable from '../components/scanner/RecentScansTable'
 import { getQueuedScans, installDrainListeners, preloadDeployed, clearFailedQueue } from '../lib/offlineQueue'
-import { friendly, todayStrIST, withTimeout } from '../lib/scannerUtils'
+import { friendly, todayStrIST, withTimeout, isDecisionPopup } from '../lib/scannerUtils'
+import { deptNameMap } from '../lib/scanDisplay'
 import { useScanHandler } from '../hooks/useScanHandler'
-import { ScanLine, Users, UserX, Search, Clock, AlertTriangle, Download, Wifi, WifiOff, RefreshCw, Loader2 } from 'lucide-react'
+import { ScanLine, Users, UserX, UserCheck, Search, Clock, AlertTriangle, Download, Wifi, WifiOff, RefreshCw, Loader2 } from 'lucide-react'
 
 export default function DeptInchargePage({ schedules, scheduleId }) {
   const { profile } = usePortalAuth()
   const toast = useToast()
   const selectedScheduleId = scheduleId
   const schedule = schedules.find(s => s.id === selectedScheduleId)
-  const [tab, setTab] = useState('scan') // scan | list | absentees
+  const [tab, setTab] = useState('scan') // scan | list | present | absent
+  const [centreFilter, setCentreFilter] = useState('') // '' = all centres
   const [myDeptIds, setMyDeptIds] = useState([])
   const [activeDept, setActiveDept] = useState('')
   const [depts, setDepts] = useState([])
@@ -39,19 +42,24 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
     try {
       const deptIds = await supabase.rpc('get_my_dept_ids', { p_schedule: selectedScheduleId }).then(r=>r.data||[]).catch(()=>[])
       setMyDeptIds(deptIds)
-      // Supabase max-rows=1000 — paginate every table that can exceed it (attendance_sessions intentionally stays capped at 200)
-      const [deptAll, depAll, vssAll, sewAll, sessRes] = await Promise.all([
+      // Supabase max-rows=1000 — paginate every table that can exceed it.
+      // I4: sessions follow the v45 event-date law (IN *or* OUT today counts —
+      // in_date-only reads miss overnight sessions and contradict the ASO's
+      // Daily tab) and are paginated, not capped: a 200-row cap silently
+      // listed everyone past it as Absent on busy days.
+      const today = todayStrIST()
+      const [deptAll, depAll, vssAll, sewAll, sessAll] = await Promise.all([
         fetchAllRows('deployment_departments', '*', (q) => q.order('name'), 'id'),
         fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId), 'id'),
         fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, centre, is_initiated, gender, is_active', null, 'badge_number'),
         fetchAllRows('dp_sewadars', 'badge_number, sewadar_name, centre, is_initiated, gender', null, ['centre', 'badge_number']),
-        supabase.from('dp_attendance_sessions').select('*').eq('schedule_id', selectedScheduleId).eq('in_date', todayStrIST()).order('created_at', { ascending:false }).limit(200),
+        fetchAllRows('dp_attendance_sessions', '*', (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id'),
       ])
       setDepts(deptAll||[])
       setDeployments(depAll||[])
       setVss(vssAll||[])
       setSewadars(sewAll||[])
-      setSessions(sessRes.data||[])
+      setSessions(sessAll||[])
       const deployed = (depAll||[]).map(d=>({ badge_number:d.badge_number, deptId: d.deployed_department_id||d.department_id, is_vss: d.badge_number?.startsWith('VS') }))
       await preloadDeployed(selectedScheduleId, deployed)
       const q = await getQueuedScans()
@@ -59,12 +67,14 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
     } catch(e){ toast.error(e.message) } finally{ setLoading(false) }
   }, [selectedScheduleId, toast])
 
-  // Separate effect for initial dept selection
+  // Separate effect for initial dept selection — defaults to ALL of the
+  // incharge's departments ('' = every id from get_my_dept_ids), so the three
+  // list tabs cover the incharge's whole remit by default.
   useEffect(() => {
-    if (myDeptIds.length && !activeDept) {
-      setActiveDept(myDeptIds[0])
+    if (myDeptIds.length && activeDept && !myDeptIds.includes(activeDept)) {
+      setActiveDept('')
     }
-  }, [myDeptIds]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [myDeptIds, activeDept])
 
   useEffect(()=>{ load() },[load])
   const onDrainProgress = useCallback(() => {
@@ -77,27 +87,57 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
   }, [onDrainProgress])
 
   const deptMap = useMemo(()=>{ const m=new Map(); depts.forEach(d=>m.set(d.id,d)); return m },[depts])
-  const swMap = useMemo(()=>{ const m={}; [...sewadars,...vss].forEach(s=>{m[s.badge_number]=s}); return m },[sewadars,vss])
+  // id -> department NAME, for the scan popup and the Recent scans table.
+  // `deptMap` above stays id -> full object for the page's own dropdown/labels.
+  const deptNameById = useMemo(() => deptNameMap(depts), [depts])
+  // Centre-scoped: a badge is looked up with its own centre so two centres
+  // sharing a badge number never display each other's sewadar identity.
+  const swMap = useMemo(()=>{ const m={}; [...sewadars,...vss].forEach(s=>{m[`${s.centre}|${s.badge_number}`]=s}); return m },[sewadars,vss])
   const effectiveDept = (d)=> d.deployed_department_id || d.department_id
 
-  const myDept = activeDept || myDeptIds[0] || ''
-  const myDeptName = deptMap.get(myDept)?.name || '—'
+  const myDeptIdsSet = useMemo(()=> new Set(myDeptIds),[myDeptIds])
+  // '' = all incharge departments; otherwise the single selected department.
+  const deptLabel = activeDept ? (deptMap.get(activeDept)?.name || activeDept) : `All my departments (${myDeptIds.length})`
+  const isMyDept = useCallback((d)=>{
+    const eff = effectiveDept(d)
+    return Boolean(eff) && myDeptIdsSet.has(eff) && (!activeDept || eff === activeDept)
+  },[myDeptIdsSet,activeDept])
 
-  const myDeployed = useMemo(()=> deployments.filter(d=> effectiveDept(d)===myDept),[deployments,myDept])
+  const myDeployed = useMemo(()=> deployments.filter(isMyDept),[deployments,isMyDept])
   const myDeployedEnriched = useMemo(()=> myDeployed.map(d=>{
-    const sw=swMap[d.badge_number]||{}
-    return { ...d, sewadar_name: d.sewadar_name||sw.sewadar_name||'—', centre: d.centre, is_vss: isVssBadge(d.badge_number), is_initiated: !!sw.is_initiated, gender: sw.gender||'' }
-  }),[myDeployed,swMap])
+    const sw=swMap[`${d.centre}|${d.badge_number}`]||{}
+    const eff=effectiveDept(d)
+    return { ...d, sewadar_name: d.sewadar_name||sw.sewadar_name||'—', centre: d.centre, deptName: deptMap.get(eff)?.name||'—', is_vss: isVssBadge(d.badge_number), is_initiated: !!sw.is_initiated, gender: sw.gender||'' }
+  }),[myDeployed,swMap,deptMap])
 
-  const presentBadges = useMemo(()=> new Set(sessions.filter(s=>s.in_date===todayStrIST()).map(s=>s.badge_number)),[sessions])
+  // v45 event-date law: an IN *or* an OUT today counts as present today.
+  const isTodayEvent = (s) => { const t = todayStrIST(); return s.in_date === t || s.out_date === t }
+  const presentBadges = useMemo(()=> new Set(sessions.filter(isTodayEvent).map(s=>s.badge_number)),[sessions])
+  // Latest session per badge today — used for the export's In/Out columns.
+  // (fetchAllRows returns id-ascending order, so the newest wins by overwrite.)
+  const sessionByBadge = useMemo(()=> {
+    const m = new Map()
+    sessions.filter(isTodayEvent).forEach(s=>{ m.set(s.badge_number, s) })
+    return m
+  },[sessions])
+  // Present = at least one session today; Absent = none. Both scoped to the
+  // incharge's own departments (myDeployedEnriched), never the raw session list.
+  const present = useMemo(()=> myDeployedEnriched.filter(d=> presentBadges.has(d.badge_number)),[myDeployedEnriched,presentBadges])
   const absentees = useMemo(()=> myDeployedEnriched.filter(d=> !presentBadges.has(d.badge_number)),[myDeployedEnriched,presentBadges])
 
+  // Centre options come from the rows already in scope — a pure client-side
+  // filter over fetched data, so it never widens or fights the RLS gate.
+  const centreOptions = useMemo(()=> [...new Set(myDeployedEnriched.map(r=>r.centre).filter(Boolean))].sort((a,b)=>String(a).localeCompare(String(b))),[myDeployedEnriched])
+
+  const TAB_LABEL = { list:'total', present:'present', absent:'absent' }
   const filteredList = useMemo(()=>{
     const q=search.trim().toLowerCase()
-    const arr = tab==='absentees' ? absentees : myDeployedEnriched
-    return arr.filter(r=> !q || `${r.sewadar_name} ${r.badge_number} ${r.centre}`.toLowerCase().includes(q))
+    const arr = tab==='absent' ? absentees : tab==='present' ? present : myDeployedEnriched
+    return arr
+      .filter(r=> !centreFilter || r.centre===centreFilter)
+      .filter(r=> !q || `${r.sewadar_name} ${r.badge_number} ${r.centre}`.toLowerCase().includes(q))
       .sort((a,b)=> a.sewadar_name.localeCompare(b.sewadar_name))
-  },[myDeployedEnriched,absentees,tab,search])
+  },[myDeployedEnriched,absentees,present,tab,search,centreFilter])
 
   const closePopup = useCallback(()=> setPopup(null), [])
   const showPopup = useCallback((data) => {
@@ -111,25 +151,64 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
   const { handleScan: rawHandleScan, busy, resetBusy } = useScanHandler({
     scheduleId: selectedScheduleId,
     profile,
-    deptName: myDeptName,
+    deptName: activeDept ? deptLabel : null,
+    deptNameById,
     showPopup,
     toast,
     onQueued: () => getQueuedScans().then(setQueued).catch(e=>console.warn('[Scanner] queue refresh failed:', e?.message)),
     onAfterScan: async () => {
       try {
-        const sess = await supabase.from('dp_attendance_sessions').select('*').eq('schedule_id', selectedScheduleId).eq('in_date', todayStrIST()).order('created_at', { ascending: false }).limit(200).then(r => r.data || [])
-        setSessions(sess)
+        // Same event-date predicate as the initial load (I4) — a capped
+        // in_date-only refresh here would regress the list right after a scan.
+        const today = todayStrIST()
+        const sess = await fetchAllRows('dp_attendance_sessions', '*', (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id')
+        setSessions(sess||[])
       } catch(e){ console.warn('[Scanner] post-scan refresh failed:', e?.message); setOffline(true) }
     },
   })
   void resetBusy
 
-  const handleScan = async (badge) => {
-    const result = await rawHandleScan(badge)
+  const handleScan = async (badge, scanOpts) => {
+    const result = await rawHandleScan(badge, scanOpts)
     if (result?.outTimeDefault) setOutTime(result.outTimeDefault)
     // Clear the manual input only on a successful scan — keep it on failure
-    // so the user can retry without retyping.
+    // so the user can retry without retyping. A `confirm_required` return is
+    // neither: the operator still has a popup to answer.
     if (result?.ok || result?.outTimeDefault) setManualBadge('')
+  }
+
+  // The camera fires on its own — a second badge scanned behind an open
+  // decision popup must not silently replace the question the operator is
+  // answering (their Confirm click is aimed at the dialog they see). While a
+  // confirm/forgot popup is open, camera scans are dropped with a hint;
+  // answering it resumes the camera. Manual entry is deliberately NOT gated —
+  // it is a deliberate act, and it stays available as the escape hatch.
+  // Safe for the camera lifecycle: BarcodeScanner reads onScan through a ref,
+  // so a fresh closure per render never restarts the stream.
+  const handleCameraScan = (code) => {
+    if (isDecisionPopup(popup?.status)) {
+      toast.warning('Answer the pending prompt first — camera paused')
+      return
+    }
+    handleScan(code)
+  }
+
+  // v44 — Confirm on a toggle gate. `confirmFor` scopes the approval to the
+  // direction the question was asked about, and `openId` pins an OUT to the
+  // exact session the prompt named, so a state change in between re-asks
+  // instead of writing the wrong entry.
+  const isConfirm = popup?.status === 'confirm_out' || popup?.status === 'confirm_in'
+  const confirmLabel = popup?.status === 'confirm_out' ? 'Yes, mark OUT'
+    : popup?.status === 'confirm_in' ? 'Yes, mark IN' : undefined
+  const confirmScan = async () => {
+    const p = popup
+    if (!p) return
+    await handleScan(p.badge, {
+      confirmed: true,
+      confirmFor: p.status === 'confirm_out' ? 'OUT' : 'IN',
+      openId: p.openId || null,
+      display: { name: p.name, centre: p.centre, deptName: p.deptName },
+    })
   }
 
   const confirmForgotOut = async () => {
@@ -145,15 +224,32 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
       toast.success('OUT closed, now you can IN')
       setPopup(null)
       setOutTime('')
-      setTimeout(() => handleScan(popup.badge), 200)
+      // `confirmFor: 'IN'` — the operator already decided this OUT, and the next
+      // entry is the fresh IN. Scoped to 'IN' so the approval cannot also
+      // authorise closing a session that appeared in the 200ms window.
+      setTimeout(() => handleScan(popup.badge, { confirmed: true, confirmFor: 'IN' }), 200)
     } catch (e) { toast.error(friendly(e.message)) }
   }
 
+  // Sheet name / filename slug per non-scanning tab. `sheet` labels the export,
+  // `slug` names the file — both track the tab so an export is self-describing.
+  const EXPORT_TABS = { list: { sheet:'Complete List', slug:'complete-list' }, present: { sheet:'Present', slug:'present' }, absent: { sheet:'Absent', slug:'absent' } }
+
   const exportList = async () => {
+    const meta = EXPORT_TABS[tab] || EXPORT_TABS.list
     const XLSX=await import('xlsx'); const wb=XLSX.utils.book_new()
-    const rows=filteredList.map((r,i)=>({ 'S.No.':i+1, Centre:r.centre, Badge:r.badge_number, Name:r.sewadar_name, Type: r.is_vss?'VSS':'Regular', Gender:r.gender||'—', Initiated: r.is_initiated?'Yes':'No', Dept: myDeptName }))
-    XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows), tab==='absentees'?'Absentees':'My Dept')
-    XLSX.writeFile(wb, `${schedule?.name||'schedule'}_${tab}.xlsx`)
+    // Status + In/Out make the three tabs distinguishable in the sheet itself,
+    // not just by which file it arrived in.
+    const rows=filteredList.map((r,i)=>({
+      'S.No.':i+1, Centre:r.centre, Badge:r.badge_number, Name:r.sewadar_name,
+      Type: r.is_vss?'VSS':'Regular', Gender:r.gender||'—', Initiated: r.is_initiated?'Yes':'No',
+      Dept: r.deptName,
+      Status: presentBadges.has(r.badge_number)?'Present':'Absent',
+      'In Time': sessionByBadge.get(r.badge_number)?.in_time || '—',
+      'Out Time': sessionByBadge.get(r.badge_number)?.out_time || '—',
+    }))
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),meta.sheet)
+    XLSX.writeFile(wb, `${schedule?.name||'schedule'}_${meta.slug}.xlsx`)
   }
 
   if(!schedules.length) return <div className="page"><div className="card" style={{padding:'2rem', textAlign:'center'}}>No schedules</div></div>
@@ -163,7 +259,7 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
     <div className="page" style={{maxWidth:1400}}>
       <div className="page-header" style={{alignItems:'center', gap:'1rem'}}>
         <div style={{flex:'1 1 auto'}}>
-          <h2 className="page-title"><ScanLine size={22}/> Dept Incharge — {myDeptName}</h2>
+          <h2 className="page-title"><ScanLine size={22}/> Dept Incharge{activeDept ? ` — ${deptLabel}` : ''}</h2>
           <div className="page-sub" style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
             {profile?.centre} · {schedule?.name||''}
             {queued.filter(q=>!q.synced&&!q.failed).length > 0 && (
@@ -179,53 +275,61 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
             {offline && <span style={{fontSize:'0.7rem', color:'#b45309'}}>· refresh failed — showing last data</span>}
             {queued.some(q=>q.failed) && <button onClick={async ()=>{ await clearFailedQueue(); getQueuedScans().then(setQueued).catch(()=>{}) }} style={{fontSize:'0.7rem', color:'#b45309', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear failed scans</button>}
           </div>
-          {myDeptIds.length>1 && <select value={myDept} onChange={e=>setActiveDept(e.target.value)} className="select" style={{marginTop:6}}>{myDeptIds.map(id=> <option key={id} value={id}>{deptMap.get(id)?.name||id}</option>)}</select>}
+          {myDeptIds.length>1 && <select value={activeDept} onChange={e=>{ setActiveDept(e.target.value); setCentreFilter('') }} className="select" style={{marginTop:6}} aria-label="Filter by department">
+            <option value="">All my departments ({myDeptIds.length})</option>
+            {myDeptIds.map(id=> <option key={id} value={id}>{deptMap.get(id)?.name||id}</option>)}
+          </select>}
         </div>
         <button onClick={exportList} className="btn btn-primary" style={{height:36}}><Download size={14}/> Export</button>
       </div>
 
-      <div style={{display:'flex', gap:6, marginBottom:12}}>
+      <div style={{display:'flex', gap:6, marginBottom:12, flexWrap:'wrap'}}>
         <button className={`seg-btn ${tab==='scan'?'seg-active':''}`} onClick={()=>setTab('scan')}><ScanLine size={14}/> Scanning</button>
-        <button className={`seg-btn ${tab==='list'?'seg-active':''}`} onClick={()=>setTab('list')}><Users size={14}/> My Dept ({myDeployedEnriched.length})</button>
-        <button className={`seg-btn ${tab==='absentees'?'seg-active':''}`} onClick={()=>setTab('absentees')}><UserX size={14}/> Absentees ({absentees.length})</button>
+        <button className={`seg-btn ${tab==='list'?'seg-active':''}`} onClick={()=>setTab('list')}><Users size={14}/> Complete list ({myDeployedEnriched.length})</button>
+        <button className={`seg-btn ${tab==='present'?'seg-active':''}`} onClick={()=>setTab('present')}><UserCheck size={14}/> Present ({present.length})</button>
+        <button className={`seg-btn ${tab==='absent'?'seg-active':''}`} onClick={()=>setTab('absent')}><UserX size={14}/> Absent ({absentees.length})</button>
       </div>
 
       {tab==='scan' && (
         <div style={{display:'grid', gap:12}}>
           <div className="card" style={{padding:'1rem'}}>
-            <BarcodeScanner onScan={handleScan} />
+            <BarcodeScanner onScan={handleCameraScan} />
             <div style={{display:'flex', gap:8, marginTop:10}}>
-              <input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input" style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ handleScan(manualBadge) } }} />
-              <button onClick={()=>{ handleScan(manualBadge) }} className="btn btn-primary" disabled={busy || !manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark</button>
+              <input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input" style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ handleScan(manualBadge, { manual: true }) } }} />
+              <button onClick={()=>{ handleScan(manualBadge, { manual: true }) }} className="btn btn-primary" disabled={busy || !manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark</button>
             </div>
           </div>
           <div className="card" style={{padding:'1rem'}}>
             <div className="section-title" style={{display:'flex', alignItems:'center', gap:6}}><Clock size={14}/> Recent scans (today) {queued.length? <span className="pill pill-amber">{queued.length} queued</span>:null}</div>
             <div style={{maxHeight:260, overflow:'auto', marginTop:8}}>
-              <table className="table">
-                <thead><tr><th>Badge</th><th>Name</th><th>In</th><th>Out</th><th>Status</th></tr></thead>
-                <tbody>
-                  {sessions.slice(0,20).map(s=> <tr key={s.id}><td style={{fontFamily:'monospace'}}>{s.badge_number} {s.is_vss?<span className="pill pill-amber" style={{fontSize:'0.6rem'}}>VSS</span>:null} {s.undeployed_scan?<span className="pill pill-red" style={{fontSize:'0.6rem'}}>Flagged</span>:null}</td><td>{s.sewadar_name}</td><td>{s.in_time}</td><td>{s.out_time||'—'}</td><td><span className={`pill ${s.status==='OPEN'?'pill-green':'pill-gray'}`}>{s.status}</span></td></tr>)}
-                  {sessions.length===0 && <tr><td colSpan={5} style={{textAlign:'center', color:'#94a3b8', padding:'1rem'}}>No scans today</td></tr>}
-                </tbody>
-              </table>
+              <RecentScansTable
+                rows={sessions}
+                deptNameById={deptNameById}
+                limit={20}
+                emptyMessage="No scans today"
+              />
             </div>
           </div>
         </div>
       )}
 
-      {(tab==='list' || tab==='absentees') && (
+      {(tab==='list' || tab==='present' || tab==='absent') && (
         <div className="card" style={{padding:'1.25rem'}}>
-          <div style={{display:'flex', gap:8, alignItems:'center', marginBottom:10}}>
+          <div style={{display:'flex', gap:8, alignItems:'center', marginBottom:10, flexWrap:'wrap'}}>
             <div style={{position:'relative', flex:'1 1 200px'}}><Search size={14} style={{position:'absolute', left:10, top:'50%', transform:'translateY(-50%)', color:'#94a3b8'}}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search name/badge/centre..." className="input" style={{width:'100%', paddingLeft:30}}/></div>
-            <span style={{fontSize:'0.8rem', color:'#64748b'}}>{filteredList.length} {tab==='absentees'?'absent':'total'}</span>
+            <select value={centreFilter} onChange={e=>setCentreFilter(e.target.value)} className="select" style={{flex:'0 0 auto', minWidth:150}} aria-label="Filter by centre">
+              <option value="">All centres ({centreOptions.length})</option>
+              {centreOptions.map(c=> <option key={c} value={c}>{c}</option>)}
+            </select>
+            <span style={{fontSize:'0.8rem', color:'#64748b'}}>{filteredList.length} {TAB_LABEL[tab]||'total'}</span>
           </div>
+          {centreFilter && <div style={{fontSize:'0.75rem', color:'#b45309', marginBottom:8}}>Centre: <strong>{centreFilter}</strong> · {(tab==='absent'?absentees:tab==='present'?present:myDeployedEnriched).filter(r=>r.centre===centreFilter).length} {TAB_LABEL[tab]||'total'} before search</div>}
           <div className="table-wrap">
             <table className="table">
-              <thead><tr><th>#</th><th>Centre</th><th>Badge</th><th>Name</th><th>Type</th><th>Gender</th><th>Initiated</th><th>Dept</th></tr></thead>
+              <thead><tr><th>#</th><th>Centre</th><th>Badge</th><th>Name</th><th>Type</th><th>Gender</th><th>Initiated</th><th>Dept</th><th>Today</th></tr></thead>
               <tbody>
-                {filteredList.map((r,i)=> <tr key={r.badge_number}><td style={{color:'#94a3b8', fontWeight:600}}>{i+1}</td><td>{r.centre}</td><td style={{fontFamily:'monospace'}}>{r.badge_number} {r.is_vss?<span className="pill pill-amber" style={{fontSize:'0.6rem'}}>VSS</span>:null}</td><td>{r.sewadar_name}</td><td><span className={`pill ${r.is_vss?'pill-amber':'pill-gray'}`} style={{fontSize:'0.68rem'}}>{r.is_vss?'VSS':'Regular'}</span></td><td>{r.gender||'—'}</td><td>{r.is_initiated?'Yes':'No'}</td><td><span className="pill pill-blue">{myDeptName}</span></td></tr>)}
-                {filteredList.length===0 && <tr><td colSpan={8} style={{textAlign:'center', color:'#94a3b8', padding:'1rem'}}>{tab==='absentees'?'No absentees — all scanned!' : 'No sewadars in this dept'}</td></tr>}
+                {filteredList.map((r,i)=> <tr key={r.badge_number}><td style={{color:'#94a3b8', fontWeight:600}}>{i+1}</td><td>{r.centre}</td><td style={{fontFamily:'monospace'}}>{r.badge_number} {r.is_vss?<span className="pill pill-amber" style={{fontSize:'0.6rem'}}>VSS</span>:null}</td><td>{r.sewadar_name}</td><td><span className={`pill ${r.is_vss?'pill-amber':'pill-gray'}`} style={{fontSize:'0.68rem'}}>{r.is_vss?'VSS':'Regular'}</span></td><td>{r.gender||'—'}</td><td>{r.is_initiated?'Yes':'No'}</td><td><span className="pill pill-blue">{r.deptName}</span></td><td>{presentBadges.has(r.badge_number)?<span className="pill pill-green" style={{fontSize:'0.68rem'}}>Present</span>:<span className="pill pill-gray" style={{fontSize:'0.68rem'}}>Absent</span>}</td></tr>)}
+                {filteredList.length===0 && <tr><td colSpan={9} style={{textAlign:'center', color:'#94a3b8', padding:'1rem'}}>{tab==='absent'?'No absentees — everyone has a scan today':tab==='present'?'No one scanned yet today':centreFilter?'No sewadars in this centre':'No sewadars in this dept'}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -246,7 +350,8 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
         outTime={outTime}
         onOutTimeChange={setOutTime}
         onClose={closePopup}
-        onConfirm={popup?.status==='forgot' ? confirmForgotOut : closePopup}
+        confirmLabel={confirmLabel}
+        onConfirm={popup?.status==='forgot' ? confirmForgotOut : isConfirm ? confirmScan : closePopup}
       />
     </div>
   )

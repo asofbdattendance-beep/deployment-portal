@@ -28,6 +28,9 @@ import {
   changedConsentRows,
   changedConsentFields,
   buildConsentSnapshot,
+  groupConsentPatches,
+  invitationErrors,
+  isUuid,
   EDITABLE_CONSENT_FIELDS,
   DEFAULT_AVAILABLE_DAYS,
   OE_ESCORTS_DEPT_NAME,
@@ -1224,5 +1227,77 @@ describe('computeEditGates centre-wide vs dept-scoped split (Batch C)', () => {
   it('normal-open path needs no flags (both true without overrides)', () => {
     expect(computeEditGates({ ...base, centreWideOverrideOpen: false, anyOverrideOpen: false }))
       .toEqual({ consentEditable: true, deploymentEditable: true })
+  })
+})
+
+describe('groupConsentPatches', () => {
+  // C2: grouping by field names alone wrote row A's values into row B. Groups
+  // must split on field-set AND values so one UPDATE never mixes rows.
+  it('splits the same field-set with different values into separate groups', () => {
+    const groups = groupConsentPatches([
+      { fields: { stay_at_bhati: true }, ref: 'C|B1' },
+      { fields: { stay_at_bhati: false }, ref: 'C|B2' },
+    ])
+    expect(groups).toHaveLength(2)
+    expect(groups[0]).toEqual({ fields: { stay_at_bhati: true }, refs: ['C|B1'] })
+    expect(groups[1]).toEqual({ fields: { stay_at_bhati: false }, refs: ['C|B2'] })
+  })
+  it('merges identical field-sets and values into one group', () => {
+    const groups = groupConsentPatches([
+      { fields: { stay_at_bhati: true }, ref: 'C|B1' },
+      { fields: { stay_at_bhati: true }, ref: 'C|B2' },
+    ])
+    expect(groups).toHaveLength(1)
+    expect(groups[0]).toEqual({ fields: { stay_at_bhati: true }, refs: ['C|B1', 'C|B2'] })
+  })
+  it('keeps distinct field-sets apart regardless of values', () => {
+    const groups = groupConsentPatches([
+      { fields: { stay_at_bhati: true }, ref: 'C|B1' },
+      { fields: { stay_at_bhati: true, chair_pass: false }, ref: 'C|B2' },
+    ])
+    expect(groups).toHaveLength(2)
+  })
+  it('returns [] for empty input', () => {
+    expect(groupConsentPatches([])).toEqual([])
+    expect(groupConsentPatches()).toEqual([])
+  })
+})
+
+describe('invitationErrors', () => {
+  // v48 user management: pure validation for superadmin-issued invites.
+  // Same checks the claim_portal_invite RPC enforces server-side.
+  const base = { email: 'ram@example.com', name: 'Ram', role: 'centre_user', centre: 'DELHI', badge: '' }
+  it('accepts a complete centre-user invite', () => {
+    expect(invitationErrors(base)).toEqual([])
+  })
+  it('rejects a bad email', () => {
+    expect(invitationErrors({ ...base, email: 'not-an-email' }).length).toBeGreaterThan(0)
+  })
+  it('rejects a missing name', () => {
+    expect(invitationErrors({ ...base, name: '  ' }).length).toBeGreaterThan(0)
+  })
+  it('rejects an unknown role', () => {
+    expect(invitationErrors({ ...base, role: 'president' }).length).toBeGreaterThan(0)
+  })
+  it('requires a centre for centre roles', () => {
+    expect(invitationErrors({ ...base, centre: '' }).length).toBeGreaterThan(0)
+    expect(invitationErrors({ ...base, role: 'centre_admin', centre: '' }).length).toBeGreaterThan(0)
+  })
+  it('does not require a centre for aso', () => {
+    expect(invitationErrors({ ...base, role: 'aso', centre: '' })).toEqual([])
+  })
+  it('requires a badge for dept_incharge and scanner', () => {
+    expect(invitationErrors({ ...base, role: 'dept_incharge', centre: '', badge: '' }).length).toBeGreaterThan(0)
+    expect(invitationErrors({ ...base, role: 'scanner', centre: '', badge: 'SC01' })).toEqual([])
+  })
+})
+
+describe('isUuid', () => {
+  it('accepts a canonical UUID and rejects the rest', () => {
+    expect(isUuid('123e4567-e89b-12d3-a456-426614174000')).toBe(true)
+    expect(isUuid('  123e4567-e89b-12d3-a456-426614174000  ')).toBe(true)
+    expect(isUuid('not-a-uuid')).toBe(false)
+    expect(isUuid('')).toBe(false)
+    expect(isUuid(null)).toBe(false)
   })
 })

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, fetchAllRows, fetchAsoDeptKeys, getRootCentre, fetchPortalSettings, fetchCentres, fetchVssOverrides } from '../lib/supabase'
-import { computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, aggregateQuotaAllocations, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, changedConsentFields, consentRowKey, consentRowSignature, buildConsentSnapshot, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment, resolveVssOverride, effectiveVssCreation, effectiveVssDeployment } from '../lib/logic'
+import { computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, aggregateQuotaAllocations, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, changedConsentFields, consentRowKey, consentRowSignature, buildConsentSnapshot, groupConsentPatches, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment, resolveVssOverride, effectiveVssCreation, effectiveVssDeployment } from '../lib/logic'
 import { consentCounts } from '../lib/counts'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
@@ -631,7 +631,7 @@ function VssDeployTable({ schedules, scheduleId }) {
       // Checked from the persisted snapshot AND the row flag (ConsentPage parity).
       const deployedKeys = new Set(depRows.filter(d => d.department_id != null).map(d => `${d.centre}|${d.badge_number}`))
       const toInsert = []
-      const patchByFields = new Map() // fieldsKey -> { fields, keys: [] }
+      const patchItems = []
       // one source of truth for the consent-row payload — shared by the
       // new-row inserts and the deploy-existence guarantee below
       const consentPayload = (r) => ({
@@ -655,12 +655,15 @@ function VssDeployTable({ schedules, scheduleId }) {
         const key = consentRowKey(r)
         const candidate = consentPayload(r)
         const saved = savedConsentRef.current[key]
-        if (!saved) { toInsert.push(candidate); return }
+        // Route on row EXISTENCE, not on the snapshot entry — the baseline
+        // covers every loaded row, so `!saved` never fires and a row-less VSS
+        // used to fall into an UPDATE matching zero rows (silent loss).
+        if (!consentExistsRef.current.has(key)) { toInsert.push(candidate); return }
         const fields = changedConsentFields(candidate, saved)
         if (!fields) return
-        const fkey = Object.keys(fields).sort().join(',')
-        if (!patchByFields.has(fkey)) patchByFields.set(fkey, { fields, keys: [] })
-        patchByFields.get(fkey).keys.push(key)
+        // Collected now, grouped by field-set AND values at apply time — one
+        // UPDATE must never write row A's values into row B.
+        patchItems.push({ fields, ref: key })
       })
       const activeDeptIds = new Set(depList.map(d => d.id))
       // Under a Control Panel override the consent-given requirement relaxes
@@ -700,10 +703,12 @@ function VssDeployTable({ schedules, scheduleId }) {
             toast.error(m); dirtyRef.current = true; scheduleRetry(); return
           }
         }
+        // rows now exist — later saves in this session take the PATCH path
+        toInsert.forEach(p => consentExistsRef.current.add(`${p.centre}|${p.badge_number}`))
       }
-      // partial per-field UPDATEs — one PATCH per identical field-set, matched
-      // row-by-row via or=(and(...)) so only this centre's rows are touched
-      for (const { fields, keys } of patchByFields.values()) {
+      // partial per-field UPDATEs — one PATCH per identical field-set AND values,
+      // matched row-by-row via or=(and(...)) so only this centre's rows are touched
+      for (const { fields, keys } of groupConsentPatches(patchItems).map(g => ({ fields: g.fields, keys: g.refs }))) {
         for (let i = 0; i < keys.length; i += 40) {
           const orFilter = keys.slice(i, i + 40).map(k => {
             const [centre, badge_number] = k.split('|')
@@ -777,6 +782,13 @@ function VssDeployTable({ schedules, scheduleId }) {
           if (!persisted) return
           const row = rows[key]
           if (row && row.requested_dept && persisted.department_id !== row.requested_dept) return
+          // I9 (ConsentPage parity): a cleared department deletes only when
+          // it is a clear WE authored that no peer has since overwritten.
+          // Untouched orphan rows are left alone, never auto-deleted.
+          if (!row?.requested_dept) {
+            const lastSavedDept = savedConsentRef.current[key]?.requested_dept || ''
+            if (!lastSavedDept || persisted.department_id !== lastSavedDept) return
+          }
           ;(byCentre[centre] = byCentre[centre] || []).push(badge_number)
         })
         for (const [centre, badges] of Object.entries(byCentre)) {
@@ -970,11 +982,21 @@ function VssDeployTable({ schedules, scheduleId }) {
     if (asoKeys.has(`${d.centre}|${d.badge_number}`) || (rowConsent && isAssoDepartment(rowConsent.department))) return
     savedOwnCounts[d.deployed_department_id || d.department_id] = (savedOwnCounts[d.deployed_department_id || d.department_id] || 0) + 1
   })
+  // I7: persisted deployment rows by row-key — lets the local quota count
+  // attribute by the EFFECTIVE department (final else requested), matching
+  // the saved counts and the DB (ConsentPage parity).
+  const depRowMap = {}
+  deployments.forEach(d => { depRowMap[`${d.centre}|${d.badge_number}`] = d })
   const localOwnCounts = {}
   Object.values(consentRows).forEach(r => {
     if (vssScopeSet && !vssScopeSet.has(r.centre)) return
-    if (r.consent_given && r.requested_dept && !isAssoDepartment(r.department)) {
-      localOwnCounts[r.requested_dept] = (localOwnCounts[r.requested_dept] || 0) + 1
+    let bucket = r.requested_dept
+    const d = depRowMap[`${r.centre}|${r.badge_number}`]
+    if (d) {
+      bucket = (d.department_id !== r.requested_dept) ? r.requested_dept : (d.deployed_department_id || d.department_id)
+    }
+    if (r.consent_given && bucket && !isAssoDepartment(r.department)) {
+      localOwnCounts[bucket] = (localOwnCounts[bucket] || 0) + 1
     }
   })
   const deptQuota = computeDeptQuota(displayAlloc, savedAllCounts, localOwnCounts, savedOwnCounts)

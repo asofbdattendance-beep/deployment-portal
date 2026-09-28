@@ -1,0 +1,111 @@
+// @vitest-environment jsdom
+// ScanResultPopup — the v44 confirm gates.
+//
+// The popup is how the scanner asks "this toggle is too close to the last one,
+// are you sure?". Three things must hold, and none of them is cosmetic:
+//
+//  1. The question is ACTUALLY ASKED. The title has to say which direction the
+//     next entry is, or the operator is being asked to confirm an action they
+//     cannot see.
+//  2. The secondary button must read "Cancel", never "Done". "Done" on a
+//     yes/no gate is the exact misread the gate exists to prevent — it reads
+//     as "yes, go ahead" and the OUT is written.
+//  3. Both answers must be reachable: primary -> onConfirm, secondary /
+//     backdrop / ESC -> onClose. A gate the operator cannot decline is not a
+//     gate, it is a delay.
+//
+// No @testing-library/jest-dom in this project, so every assertion below is a
+// plain textContent / toBeNull check.
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import React from 'react'
+import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import ScanResultPopup from './ScanResultPopup'
+
+afterEach(cleanup)
+
+// The global `keydown` listener and the rAF visibility transition are the only
+// things that would leak between renders; rAF is not needed to assert content.
+function open(status, props = {}) {
+  return render(
+    <ScanResultPopup open status={status} badge="FB5971GA0001" {...props} />
+  )
+}
+
+describe('ScanResultPopup — confirm gates', () => {
+  it('confirm_out asks the OUT question by name', () => {
+    open('confirm_out', { onConfirm: vi.fn(), onClose: vi.fn() })
+    expect(screen.getByText('Already IN — mark OUT?')).toBeTruthy()
+    expect(screen.getByText('CONFIRM OUT')).toBeTruthy()
+  })
+
+  it('confirm_in asks the IN question by name', () => {
+    open('confirm_in', { onConfirm: vi.fn(), onClose: vi.fn() })
+    expect(screen.getByText('Already OUT — mark IN?')).toBeTruthy()
+    expect(screen.getByText('CONFIRM IN')).toBeTruthy()
+  })
+
+  it('labels the secondary button Cancel, never Done', () => {
+    open('confirm_out', { onConfirm: vi.fn(), onClose: vi.fn() })
+    expect(screen.getByText('Cancel')).toBeTruthy()
+    expect(screen.queryByText('Done')).toBeNull()
+  })
+
+  it('shows the elapsed-time reason the gate fired', () => {
+    open('confirm_out', {
+      onConfirm: vi.fn(), onClose: vi.fn(),
+      message: "Only 8 min since IN at 09:02 — mark OUT?",
+    })
+    expect(screen.getByText(/Only 8 min since IN at 09:02/)).toBeTruthy()
+  })
+
+  it('Confirm calls onConfirm and Cancel calls onClose', () => {
+    const onConfirm = vi.fn()
+    const onClose = vi.fn()
+    open('confirm_out', { onConfirm, onClose })
+    fireEvent.click(screen.getByText('Cancel'))
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onConfirm).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByText('Confirm'))
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses confirmLabel when the caller supplies one', () => {
+    open('confirm_out', { onConfirm: vi.fn(), onClose: vi.fn(), confirmLabel: 'Yes, mark OUT' })
+    expect(screen.getByText('Yes, mark OUT')).toBeTruthy()
+    expect(screen.queryByText('Confirm')).toBeNull()
+  })
+
+  it('backdrop and ESC are Cancel — declining must always be reachable', () => {
+    const onClose = vi.fn()
+    const { container } = open('confirm_out', { onConfirm: vi.fn(), onClose })
+
+    const overlay = container.firstChild
+    fireEvent.click(overlay)                       // backdrop
+    expect(onClose).toHaveBeenCalledTimes(1)
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(2)
+  })
+
+  it('renders no OUT-time input — that belongs to the forgot prompt only', () => {
+    open('confirm_out', { onConfirm: vi.fn(), onClose: vi.fn() })
+    expect(document.querySelector('#scan-forgot-time')).toBeNull()
+  })
+
+  it('regression: the forgot prompt keeps its own time input and labels', () => {
+    open('forgot', { onConfirm: vi.fn(), onClose: vi.fn(), outTime: '17:30', onOutTimeChange: vi.fn() })
+    expect(screen.getByText('Forgot OUT?')).toBeTruthy()
+    expect(screen.getByText('Close OUT then IN')).toBeTruthy()
+    expect(document.querySelector('#scan-forgot-time')).toBeTruthy()
+  })
+
+  it('regression: a plain IN popup still says Done, not Cancel', () => {
+    open('in', { onConfirm: vi.fn(), onClose: vi.fn() })
+    // 'in' renders a secondary (close) and a primary (dismiss) action, so the
+    // label legitimately appears twice — what matters is that neither is
+    // "Cancel", which would imply a choice this popup does not offer.
+    expect(screen.getAllByText('Done')).toHaveLength(2)
+    expect(screen.queryByText('Cancel')).toBeNull()
+  })
+})

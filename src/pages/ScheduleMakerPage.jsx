@@ -623,8 +623,14 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
       : source === 'editor' ? editCounts
       : (formDeptId === deptId ? formCounts : editCounts)
     // Number() not parseInt: type=number inputs accept "1e3" which parseInt
-    // silently truncates to 1
-    const entries = centres.map(c => ({ centre: c.name, count: Number(String(counts[c.name]).trim()) })).filter(e => Number.isInteger(e.count) && e.count > 0)
+    // silently truncates to 1.
+    // I6: scheduled-zero is a real v38c state — "0" writes max_count 0, while
+    // a blank cell still means "no entry" (delete path preserved).
+    const entries = centres
+      .map(c => ({ centre: c.name, raw: String(counts[c.name] ?? '').trim() }))
+      .filter(e => e.raw !== '')
+      .map(e => ({ centre: e.centre, count: Number(e.raw) }))
+      .filter(e => Number.isInteger(e.count) && e.count >= 0)
     const existing = deptAlloc(deptId)
     const existingMap = {}
     existing.forEach(a => { existingMap[a.centre] = a })
@@ -789,7 +795,7 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
                     <label key={c.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', padding: '0.35rem 0.6rem', border: '1px solid #eef2f7', borderRadius: 6, fontSize: '0.8rem', fontWeight: 500 }}>
                       <span>{c.name}{savedCount != null ? <span style={{ display: 'block', fontSize: '0.62rem', color: '#94a3b8', fontWeight: 400 }}>allotted</span> : null}</span>
                       <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
-                        <input type="number" min="1" value={formCounts[c.name] || ''} onChange={e => setFormCount(c.name, e.target.value)} placeholder="0" style={{ width: 64, padding: '0.25rem 0.4rem', border: '1px solid #e5e7eb', borderRadius: 4, fontSize: '0.8rem', textAlign: 'center' }} />
+                        <input type="number" min="0" value={formCounts[c.name] || ''} onChange={e => setFormCount(c.name, e.target.value)} placeholder="0" style={{ width: 64, padding: '0.25rem 0.4rem', border: '1px solid #e5e7eb', borderRadius: 4, fontSize: '0.8rem', textAlign: 'center' }} />
                         {savedCount != null && <CountChangeChip saved={savedCount} draft={formCounts[c.name]} />}
                       </span>
                     </label>
@@ -860,7 +866,7 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
                                 <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.35rem 0.6rem', border: '1px solid #eef2f7', borderRadius: 6, fontSize: '0.8rem' }}>
                                   <span style={{ flex: 1, fontWeight: 500, color: '#111827' }}>{a.centre}</span>
                                   <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
-                                    <input type="number" min="1" value={editCounts[a.centre] ?? ''} onChange={e => setEditCount(a.centre, e.target.value)} title={`Change ${a.centre}'s count (currently ${a.max_count})`} style={inputStyle} />
+                                    <input type="number" min="0" value={editCounts[a.centre] ?? ''} onChange={e => setEditCount(a.centre, e.target.value)} title={`Change ${a.centre}'s count (currently ${a.max_count})`} style={inputStyle} />
                                     <CountChangeChip saved={a.max_count} draft={editCounts[a.centre]} />
                                   </span>
                                   <button onClick={() => removeAllocation(a)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#dc2626', padding: '0.2rem' }} title="Remove"><Trash2 size={13} /></button>
@@ -872,7 +878,7 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
                                     {stagedHere}
                                     <span className="pill pill-blue" style={{ fontSize: '0.58rem', marginLeft: '0.35rem' }}>NEW</span>
                                   </span>
-                                  <input type="number" min="1" autoFocus value={editCounts[stagedHere] || ''} onChange={e => setEditCount(stagedHere, e.target.value)} placeholder="count" style={inputStyle} />
+                                  <input type="number" min="0" autoFocus value={editCounts[stagedHere] || ''} onChange={e => setEditCount(stagedHere, e.target.value)} placeholder="count" style={inputStyle} />
                                   <button onClick={() => { setEditCount(stagedHere, ''); setStagedNewCentre(null) }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', padding: '0.2rem' }} title="Cancel adding">✕</button>
                                 </div>
                               )}

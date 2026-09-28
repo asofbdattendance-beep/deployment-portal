@@ -40,42 +40,92 @@ jobs:
         run: |
           set -eu
           fail=0
-          # portal_setup.sql <-> 0001
-          if ! ls supabase/migrations/0001_portal_setup.sql >/dev/null 2>&1; then
-            echo "missing counterpart: sql/portal_setup.sql <-> supabase/migrations/0001_portal_setup.sql"
-            fail=1
-          fi
-          # every versioned sql/v<N>_<name>.sql needs a counterpart (excludes sql/vss_*.sql)
+
+          # ---------------------------------------------------------------
+          # sql/ is the reviewed source of truth; supabase/migrations/ is
+          # what `supabase db push` actually applies. They must mirror each
+          # other exactly, in both directions.
+          #
+          # Every versioned sql/v<ver>_<name>.sql is mirrored as
+          # supabase/migrations/<slot>_v<ver>_<name>.sql.
+          #
+          # The FULL "v<ver>_<name>" marker is matched on purpose. Matching a
+          # bare slot glob ("does 0040_*.sql exist?") is what made this a
+          # false pass: sql/v39_attendance_analytics.sql looks for slot 0040,
+          # and 0040_v38b_restore_schedule.sql satisfied the glob even when
+          # 0042_v39_attendance_analytics.sql was missing -- so v39 could
+          # vanish from every db push with CI green.
+          #
+          # Sub-versions (v38b, v38c) carry a trailing letter and are covered
+          # by the same rule. They used to be skipped outright by a
+          # *[!0-9]* guard and therefore got no parity check at all.
+          # ---------------------------------------------------------------
+          markers=''
           for f in sql/v[0-9]*_*.sql; do
             base=${f#sql/v}
+            base=${base%.sql}
             ver=${base%%_*}
+            name=${base#*_}
             case $ver in
-              '' | *[!0-9]*) continue ;;
+              '' | *[!0-9a-z]*) continue ;;
             esac
-            if [ "$ver" -ge 30 ]; then
-              # N>=30: sql/v<N>_ <-> zero-padded 00<N+1>_
-              expected=$(printf '%04d' "$((ver + 1))")
-              if ! ls supabase/migrations/"${expected}"_*.sql >/dev/null 2>&1; then
-                echo "missing counterpart: $f <-> supabase/migrations/${expected}_*"
+            marker="v${ver}_${name}.sql"
+            markers="${markers}${marker}"$'\n'
+
+            found=''
+            for c in supabase/migrations/*_"${marker}"; do
+              [ -e "$c" ] || continue
+              # assert the basename really carries the version marker
+              case $(basename "$c") in
+                *_"${marker}") found=$c; break ;;
+              esac
+            done
+
+            if [ -z "$found" ]; then
+              echo "missing counterpart: $f <-> supabase/migrations/*_${marker}"
+              fail=1
+              continue
+            fi
+
+            # A mirrored pair is byte-identical by design, so any difference
+            # means one copy was edited without the other and db push would
+            # apply something the repo does not document. Checked for every
+            # pair in the same loop -- previously only two pairs were covered,
+            # so v39<->0042 drift was invisible.
+            #
+            # These two are intentionally different:
+            #   v24  sql/ redacts the ASO email/auth-uuid/password
+            #   v26  sql/ additionally carries the scan_in timestamp
+            #        validation, centre-spoofing guard and idempotent close
+            case $ver in
+              24 | 26) ;;
+              *)
+                if ! diff -q "$f" "$found" >/dev/null 2>&1; then
+                  echo "content drift: $f differs from $found"
+                  fail=1
+                fi
+                ;;
+            esac
+          done
+
+          # Reverse direction: a migration with no sql/ source was never
+          # reviewed and still gets applied by db push.
+          for m in supabase/migrations/*.sql; do
+            tail=$(basename "$m")
+            tail=${tail#*_}
+            if [ "$tail" = 'portal_setup.sql' ]; then
+              if [ ! -f sql/portal_setup.sql ]; then
+                echo "missing source: $m <-> sql/portal_setup.sql"
                 fail=1
               fi
-            else
-              # N<30: counterpart carries the same version marker (0002<->v2, ...)
-              if ! ls supabase/migrations/*_v"${ver}"_*.sql >/dev/null 2>&1; then
-                echo "missing counterpart: $f <-> supabase/migrations/*_v${ver}_*.sql"
-                fail=1
-              fi
+              continue
+            fi
+            if ! printf '%s' "$markers" | grep -qxF "$tail"; then
+              echo "missing source: $m <-> sql/v*_${tail}"
+              fail=1
             fi
           done
-          # known-divergent pairs must be byte-identical
-          if ! diff -q sql/portal_setup.sql supabase/migrations/0001_portal_setup.sql; then
-            echo "content drift: sql/portal_setup.sql differs from supabase/migrations/0001_portal_setup.sql"
-            fail=1
-          fi
-          if ! diff -q sql/v28_rename_shared_tables.sql supabase/migrations/0029_v28_rename_shared_tables.sql; then
-            echo "content drift: sql/v28_rename_shared_tables.sql differs from supabase/migrations/0029_v28_rename_shared_tables.sql"
-            fail=1
-          fi
+
           if [ "$fail" -ne 0 ]; then
             echo "migration-parity check FAILED"
             exit 1

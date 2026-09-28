@@ -65,6 +65,27 @@ const VARIANT = {
     iconBg: '#fffbeb',
     iconColor: '#b45309',
   },
+  // v44 confirm gates — a toggle that would land within 1h of the opposite
+  // event is held for an explicit Confirm. Deliberately shares the amber
+  // "attention" palette of `forgot`: both are questions, neither is an error.
+  confirm_out: {
+    label: 'Mark OUT?',
+    icon: Clock,
+    accent: '#f59e0b',
+    bg: '#fffbeb',
+    border: '#fde68a',
+    iconBg: '#fffbeb',
+    iconColor: '#b45309',
+  },
+  confirm_in: {
+    label: 'Mark IN?',
+    icon: Clock,
+    accent: '#f59e0b',
+    bg: '#fffbeb',
+    border: '#fde68a',
+    iconBg: '#fffbeb',
+    iconColor: '#b45309',
+  },
 }
 
 /**
@@ -76,6 +97,7 @@ const VARIANT = {
  * Props
  *  open            boolean — controls visibility (with enter/exit transition)
  *  status          'in' | 'out' | 'flagged' | 'queued' | 'error' | 'forgot' | 'offline'
+ *                  | 'confirm_out' | 'confirm_in'   (v44 confirm gates)
  *                  alias `variant` is also accepted
  *  variant         alias for status
  *  badge           string — FB/BH/VS badge number
@@ -118,6 +140,10 @@ export default function ScanResultPopup({
 
   // allow explicit dismissible override; forgot defaults to non-dismissible via backdrop
   const isForgot = key === 'forgot'
+  // v44: a confirm gate is modal and must be answered with Confirm or Cancel —
+  // but backdrop/ESC closing it IS "Cancel" (no entry is written), so it keeps
+  // the default dismissible behaviour rather than trapping the operator.
+  const isConfirm = key === 'confirm_out' || key === 'confirm_in'
   const canBackdropClose = dismissible !== undefined ? dismissible : !isForgot
 
   const overlayRef = useRef(null)
@@ -192,6 +218,8 @@ export default function ScanResultPopup({
 
   const title = (() => {
     if (isForgot) return 'Forgot OUT?'
+    if (key === 'confirm_out') return 'Already IN — mark OUT?'
+    if (key === 'confirm_in') return 'Already OUT — mark IN?'
     if (key === 'in') return flag ? 'Checked In — Flagged' : 'Checked In'
     if (key === 'out') return 'Checked Out'
     if (key === 'flagged') return 'Flagged — Not deployed'
@@ -200,7 +228,13 @@ export default function ScanResultPopup({
     return cfg.label
   })()
 
-  const primaryLabel = confirmLabel || (isForgot ? 'Close OUT then IN' : 'Done')
+  const primaryLabel = confirmLabel
+    || (isForgot ? 'Close OUT then IN' : isConfirm ? 'Confirm' : 'Done')
+
+  // The secondary button. On a confirm gate "Done" would read as "yes, go
+  // ahead" — the exact misread the gate exists to prevent — so it must say
+  // "Cancel", which is also the honest description of what it does.
+  const secondaryLabel = key === 'error' ? 'Close' : isConfirm ? 'Cancel' : 'Done'
 
   return (
     <div
@@ -310,7 +344,10 @@ export default function ScanResultPopup({
                     letterSpacing: '0.04em',
                   }}
                 >
-                  {key === 'in' ? 'IN' : key === 'out' ? 'OUT' : key.toUpperCase()}
+                  {key === 'in' ? 'IN' : key === 'out' ? 'OUT'
+                    : key === 'confirm_out' ? 'CONFIRM OUT'
+                    : key === 'confirm_in' ? 'CONFIRM IN'
+                    : key.toUpperCase()}
                 </span>
               </div>
 
@@ -435,7 +472,7 @@ export default function ScanResultPopup({
                 className="btn"
                 style={{ flex: isForgot ? 1 : undefined }}
               >
-                {key === 'error' ? 'Close' : 'Done'}
+                {secondaryLabel}
               </button>
               {onConfirm && key !== 'error' && key !== 'in' && key !== 'out' && (
                 <button ref={primaryRef} onClick={onConfirm} className="btn btn-primary">

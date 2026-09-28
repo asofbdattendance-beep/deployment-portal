@@ -276,7 +276,14 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
     let mounted = true
     const scheduleReload = () => {
       if (!mounted || dirtyRef.current || savingRef.current) return
-      if (Date.now() - lastSaveAtRef.current < 1200) return
+      // I8: defer, don't drop — an event swallowed inside our own echo window
+      // is a lost centre edit, and the lost edit is exactly what then loses
+      // the upsert race in saveAll above.
+      if (Date.now() - lastSaveAtRef.current < 1200) {
+        if (reloadTimer.current) clearTimeout(reloadTimer.current)
+        reloadTimer.current = setTimeout(() => { if (mounted) loadData() }, 1300)
+        return
+      }
       if (reloadTimer.current) clearTimeout(reloadTimer.current)
       reloadTimer.current = setTimeout(() => { if (mounted) loadData() }, 500)
     }
@@ -435,10 +442,32 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
       )
 
       if (toInsert.length > 0) {
+        // I8: deployment_id:null means "absent from my last snapshot" — a
+        // centre row created after that snapshot would take ON CONFLICT DO
+        // UPDATE and have its requested department overwritten with the ASO's
+        // final one. Re-check existence first; raced rows keep the centre's
+        // requested department and arrive via the (now deferred, never
+        // dropped) realtime reload instead.
+        let freshInserts = toInsert
+        try {
+          const { data: raced, error: racedError } = await supabase.from('deployments')
+            .select('centre, badge_number')
+            .eq('schedule_id', s.scheduleId)
+            .in('badge_number', [...new Set(toInsert.map(r => r.badge_number))])
+          if (!racedError) {
+            const racedKeys = new Set((raced || []).map(d => `${d.centre}|${d.badge_number}`))
+            const racedRows = toInsert.filter(r => racedKeys.has(`${r.centre}|${r.badge_number}`))
+            freshInserts = toInsert.filter(r => !racedKeys.has(`${r.centre}|${r.badge_number}`))
+            if (racedRows.length > 0) {
+              toast.info(`${racedRows.length} sewadar${racedRows.length === 1 ? ' was' : 's were'} assigned by a centre while saving — kept the centre's requested department`)
+            }
+          }
+        } catch { /* fall back to the full set — no worse than before */ }
+        if (freshInserts.length > 0) {
         // upsert (not insert) so a retry after an ambiguous network failure is
         // idempotent — the row may already exist from the first attempt
         const { data: inserted, error } = await supabase.from('deployments')
-          .upsert(toInsert.map(r => ({
+          .upsert(freshInserts.map(r => ({
             schedule_id: s.scheduleId,
             department_id: r.deployed_dept_id,
             deployed_department_id: r.deployed_dept_id,
@@ -458,6 +487,7 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
             ? { ...prev, [key]: { ...prev[key], deployment_id: rec.id, requested_dept_id: rec.department_id } }
             : prev)
         })
+        }
       }
 
       const idsByDept = {}
