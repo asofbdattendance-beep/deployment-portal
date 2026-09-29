@@ -65,6 +65,30 @@ describe('sessionMinutes', () => {
     expect(sessionMinutes('25:00', '26:00')).toBeNull()
     expect(sessionMinutes('09:99', '10:00')).toBeNull()
   })
+
+  // L-06: dates were discarded, so Wed 09:00 → Sun 16:00 read "7h 0m".
+  // With both dates present the true multi-day span is reported.
+  it('spans multiple days when the dates differ', () => {
+    // Wed 09:00 → Sun 16:00 = 4d + 7h = 6180 minutes, not 420.
+    expect(sessionMinutes('09:00', '16:00', '2026-09-23', '2026-09-27')).toBe(6180)
+  })
+  it('matches the legacy roll for an overnight pair with explicit dates', () => {
+    expect(sessionMinutes('22:00', '02:00', '2026-09-24', '2026-09-25')).toBe(240)
+  })
+  it('counts a full day for equal times on consecutive dates', () => {
+    expect(sessionMinutes('09:00', '09:00', '2026-09-24', '2026-09-25')).toBe(1440)
+  })
+  it('keeps legacy behaviour when the dates are equal or absent', () => {
+    expect(sessionMinutes('09:00', '18:30', '2026-09-24', '2026-09-24')).toBe(570)
+    expect(sessionMinutes('22:00', '02:00', null, null)).toBe(240)
+    expect(sessionMinutes('22:00', '02:00')).toBe(240)
+  })
+  it('returns null when the OUT date precedes the IN date', () => {
+    expect(sessionMinutes('09:00', '10:00', '2026-09-25', '2026-09-24')).toBeNull()
+  })
+  it('degrades to times-only when a date is malformed', () => {
+    expect(sessionMinutes('09:00', '10:00', 'not-a-date', '2026-09-24')).toBe(60)
+  })
 })
 
 /* ─── formatDuration ─── */

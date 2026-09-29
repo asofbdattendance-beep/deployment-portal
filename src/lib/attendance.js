@@ -30,19 +30,49 @@ export const UNASSIGNED_CENTRE = 'Unassigned centre'
  * exact same time-of-day is a zero-length session, NOT a 24-hour one.
  * Returns null when the session is still open or the times are unusable.
  *
+ * L-06: the dates are optional but load-bearing. Without them a Wed 09:00 →
+ * Sun 16:00 session reads as 7h (time-of-day delta only). With both dates
+ * the true multi-day span is reported; equal or absent dates keep the legacy
+ * time-only behaviour (including the overnight roll and the equal-times-zero
+ * rule), and a malformed date degrades to it rather than failing.
+ *
  * @param {string} inTime  'HH:MM' or 'HH:MM:SS'
  * @param {string} outTime 'HH:MM' or 'HH:MM:SS' — null/undefined means OPEN
+ * @param {string|null} [inDate]  'YYYY-MM-DD'
+ * @param {string|null} [outDate] 'YYYY-MM-DD'
  * @returns {number|null} whole minutes
  */
-export function sessionMinutes(inTime, outTime) {
+export function sessionMinutes(inTime, outTime, inDate = null, outDate = null) {
   if (!inTime || !outTime) return null
   const a = toMinutes(inTime)
   const b = toMinutes(outTime)
   if (a === null || b === null) return null
+  const days = dateDiffDays(inDate, outDate)
+  if (days !== null && days !== 0) {
+    if (days < 0) return null // OUT date precedes IN date: unusable, not negative
+    const span = days * 24 * 60 + (b - a)
+    return span < 0 ? null : span
+  }
   // Equal times are a zero-length session. Only a strictly-earlier OUT rolls
   // forward to the next day.
   if (b === a) return 0
   return b > a ? b - a : b + 24 * 60 - a
+}
+
+/**
+ * Whole-day difference between two 'YYYY-MM-DD' strings, or null when
+ * either side is absent or malformed. Timezone-free by construction (UTC
+ * date parts only) — session times are IST wall-clock and only the day
+ * count is taken from here.
+ */
+function dateDiffDays(a, b) {
+  const pa = /^(\d{4})-(\d{2})-(\d{2})$/.exec(a || '')
+  const pb = /^(\d{4})-(\d{2})-(\d{2})$/.exec(b || '')
+  if (!pa || !pb) return null
+  const da = Date.UTC(+pa[1], +pa[2] - 1, +pa[3])
+  const db = Date.UTC(+pb[1], +pb[2] - 1, +pb[3])
+  if (Number.isNaN(da) || Number.isNaN(db)) return null
+  return Math.round((db - da) / 86400000)
 }
 
 /**

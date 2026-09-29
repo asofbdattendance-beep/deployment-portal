@@ -57,10 +57,10 @@ async function rpcRows(name, params) {
 
 /**
  * Session duration for a sewadar row: the gap between the first IN and the last
- * OUT, with `sessionMinutes` rolling an overnight OUT forward a day. 'still IN'
- * when the last session is open, '—' when there is nothing to measure. This is
- * the consumer that makes `sessionMinutes` / `formatDuration` live code rather
- * than a tested-but-unused pair.
+ * OUT across days (L-06: time-only math read Wed 09:00 → Sun 16:00 as "7h").
+ * 'still IN' when the last session is open, '—' when there is nothing to
+ * measure. This is the consumer that makes `sessionMinutes` / `formatDuration`
+ * live code rather than a tested-but-unused pair.
  *
  * @param {object} r a display row from buildSewadarRows
  * @returns {string}
@@ -68,7 +68,7 @@ async function rpcRows(name, params) {
 function sessionDuration(r) {
   if (!r?.first_in_time) return '—'
   if (!r.last_out_time) return r.still_open ? 'still IN' : '—'
-  return formatDuration(sessionMinutes(r.first_in_time, r.last_out_time))
+  return formatDuration(sessionMinutes(r.first_in_time, r.last_out_time, r.first_in_date, r.last_out_date))
 }
 
 /**
