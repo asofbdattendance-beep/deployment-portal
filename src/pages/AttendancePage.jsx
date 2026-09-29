@@ -211,7 +211,15 @@ export default function AttendancePage({ schedules, scheduleId }) {
     const channel = supabase
       .channel(`attendance-${scheduleId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'dp_attendance_sessions', filter: `schedule_id=eq.${scheduleId}` }, reload)
-      .subscribe()
+      // L-34: deployments changes (ASO finalizes, rows become deployed)
+      // move the expected denominators behind these numbers — sessions
+      // alone leave them stale until a manual refresh.
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${scheduleId}` }, reload)
+      // L-40: realtime membership is not guaranteed — a dead channel
+      // used to fail silently. Name the state so it lands in devtools.
+      .subscribe((status) => {
+        if (status !== 'SUBSCRIBED') console.warn('[attendance] realtime ' + status + ' — data may be stale until refresh')
+      })
     return () => { alive = false; if (timer) clearTimeout(timer); supabase.removeChannel(channel) }
   }, [scheduleId, load])
 
@@ -223,7 +231,6 @@ export default function AttendancePage({ schedules, scheduleId }) {
   const allSewadars = useMemo(() => buildSewadarRows(rowsAreCurrent ? sewadarRaw : []), [sewadarRaw, rowsAreCurrent])
   const dailyRows = useMemo(() => buildDailyRows((rowsAreCurrent ? dailyRaw : []).map((r) => ({ ...r, centre: r?.centre || UNASSIGNED_CENTRE }))), [dailyRaw, rowsAreCurrent])
   const scannerRows = useMemo(() => buildScannerRows(rowsAreCurrent ? scannerRaw : []), [scannerRaw, rowsAreCurrent])
-  const stats = useMemo(() => attendanceStats(allSewadars), [allSewadars])
 
   const centres = useMemo(() => centreOptions(allSewadars), [allSewadars])
 
@@ -249,6 +256,12 @@ export default function AttendancePage({ schedules, scheduleId }) {
     rows = filterByDept(rows, filterDept)
     return searchRows(rows, search)
   }, [centreFiltered, filterDept, search])
+
+  // L-45: the header tiles describe the same filter set as the tables and
+  // the export (ReportsPage already totals its visible rows) — never the
+  // whole schedule behind a filtered view. The filter OPTION lists above
+  // stay unfiltered on purpose, so options never collapse under a filter.
+  const stats = useMemo(() => attendanceStats(visible), [visible])
 
   // A4: the Daily and Scanner tables use the SAME centre/dept/search controls as
   // the Sewadars table, so the export and both tables describe one filter set.

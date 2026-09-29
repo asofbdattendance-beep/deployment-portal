@@ -707,6 +707,17 @@ describe('buildTrendRows', () => {
     expect(rows[0].rate).toBe(80)
     expect(rows[1].rate).toBe(0)
   })
+
+  // L-32/L-51: a rate is a share of a day — it can never leave 0..100, even
+  // if the server over-counts present past the deployed total.
+  it('clamps the rate to 0..100 against server over-counts', () => {
+    const rows = buildTrendRows([
+      { day: '2026-08-05', present: 120, absent: 0 },
+      { day: '2026-08-06', present: -5, absent: 10 },
+    ])
+    expect(rows[0].rate).toBe(100)
+    expect(rows[1].rate).toBe(0)
+  })
 })
 
 describe('anomalyCounts', () => {

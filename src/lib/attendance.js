@@ -661,11 +661,15 @@ export function buildTrendRows(rows) {
     const present = Number(r?.present) || 0
     const absent = Number(r?.absent) || 0
     const total = present + absent
+    // L-32/L-51: a rate is a share of a day — clamp to 0..100 so a server
+    // over-count past the deployed total (or corrupt negatives) cannot
+    // render as 120% or -100%.
+    const raw = total > 0 ? Math.round((present / total) * 100) : 0
     return {
       day: r?.day || '',
       present,
       absent,
-      rate: total > 0 ? Math.round((present / total) * 100) : 0,
+      rate: Math.min(100, Math.max(0, raw)),
     }
   })
 }

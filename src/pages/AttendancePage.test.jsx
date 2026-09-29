@@ -371,6 +371,30 @@ vi.mock('xlsx', () => ({
   writeFile: vi.fn(),
 }))
 
+// L-45: the header tiles must describe the same filter set as the tables
+// and the export (ReportsPage already totals its visible rows — I1), not
+// the whole schedule behind a filtered view.
+const scannedTile = () => {
+  const label = screen.getByText('Scanned')
+  return label.closest('.stat').querySelector('.stat-value').textContent
+}
+
+describe('L-45 — header tiles follow the active filters', () => {
+  it('shows schedule-wide totals with no filter active', async () => {
+    await renderPage()
+    expect(scannedTile()).toBe('2')
+  })
+
+  it('narrows the tiles when a centre filter is active', async () => {
+    await renderPage()
+    fireEvent.change(screen.getByLabelText('Filter by centre'), { target: { value: 'DELHI' } })
+    await settle()
+    expect(scannedTile()).toBe('1')
+    // The table agrees — tiles and rows describe one filter set.
+    expect(screen.queryByText('SHAM')).toBeNull()
+  })
+})
+
 describe('C2 — exports use the shared driver naming (L-24/L-25)', () => {
   it('writes a slugged {schedule}_{date}_attendance.xlsx filename', async () => {
     await renderPage()
