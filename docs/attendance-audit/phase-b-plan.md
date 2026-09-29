@@ -26,8 +26,17 @@ restructure instead of two).
 ## Task 4: popup-contract — L-39/12
 Gate the ">12h open" pill + destructive action on the Already-IN refetch path (`useScanHandler.js:553-562`); stop `queued` rendering two identical "Done" buttons (`ScanResultPopup.jsx`). Depends: —. Verify: `useScanHandler.test.jsx`, `ScanResultPopup.test.jsx`.
 
-## Task 5: page-state — L-41/42/43/44/46 (+ useScannerSession extraction)
-Overnight filter parity (event-date `or()` both pages); poll on Incharge; real `setOffline(false)`; call `setSyncing(true)`; make "Camera paused" actually pause (imperative handle + ref — `BarcodeScanner` already exposes restart/stop; extend or reuse). Files: both pages. Depends: 3. Verify: new page tests.
+## Task 5: page-state — L-41/42/43/44/46 (+ useScannerSession extraction) — DONE
+
+New `src/hooks/useScannerSession.js` owns popup/outTime/queued/syncing,
+drain subscription, scan entry points, and the camera pause/resume effect;
+both pages rewired onto it (loads/lists/tabs/render stay in pages).
+L-41: ScannerPage uses the event-date `or()` predicate. L-42: Incharge
+polls sessions (light `refreshSessions`, never the full load) every 15s.
+L-43: Incharge load sets/clears the offline pin. L-44: `refreshQueue`
+raises `syncing` while rows pend. L-46: decision popups pause the decode
+loop via new `pause()`/`resume()` on BarcodeScanner's imperative handle
+(resume guarded against double chains + dead streams). real `setOffline(false)`; call `setSyncing(true)`; make "Camera paused" actually pause (imperative handle + ref — `BarcodeScanner` already exposes restart/stop; extend or reuse). Files: both pages. Depends: 3. Verify: new page tests.
 
 ## Task 6: page-tests — L-23
 `ScannerPage.test.jsx` + `DeptInchargePage.test.jsx` pinning tasks 3–5. Depends: 3, 4, 5.

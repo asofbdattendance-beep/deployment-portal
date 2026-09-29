@@ -749,7 +749,23 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     return () => document.removeEventListener('visibilitychange', onVisibility)
   }, [cancelFrame, detectLoop, startScanner, isCurrent])
 
-  useImperativeHandle(ref, () => ({ restart: startScanner, stop: () => teardown() }), [startScanner, teardown])
+  useImperativeHandle(ref, () => ({
+    restart: startScanner,
+    stop: () => teardown(),
+    // L-46: the pages' "camera paused" claim is only true if the decode loop
+    // actually halts. pause() stops scheduling (the preview keeps its last
+    // frame, the stream stays live); resume() restarts the loop only when no
+    // chain is already scheduled, mirroring the visibility handler, and
+    // re-opens the camera when the stream died while paused.
+    pause: () => { pausedRef.current = true; cancelFrame() },
+    resume: () => {
+      pausedRef.current = false
+      if (!mountedRef.current) return
+      if (!isStreamLive(streamRef.current)) { startScanner(); return }
+      if (frameHandleRef.current != null) return
+      detectLoop()
+    },
+  }), [startScanner, teardown, cancelFrame, detectLoop])
 
   // ─── Error State ────────────────────────────────────────────────────
 

@@ -226,7 +226,7 @@ describe('BarcodeScanner camera session lifecycle', () => {
     }
   })
 
-  // L-22: the watchdog error unmounts <video>, so a Retry that reads the ref
+    // L-22: the watchdog error unmounts <video>, so a Retry that reads the ref
   // synchronously dies at "Video element missing" and the error is permanent.
   it('recovers on Retry after the watchdog errors (no dead Video-element-missing)', async () => {    // React 18 schedules commits over MessageChannel (a REAL macrotask), which
     // never runs while only the fake clock advances — so the test yields to
@@ -320,5 +320,42 @@ describe('BarcodeScanner camera session lifecycle', () => {
     expect(guide.style.right).toBe('4%')
     expect(guide.style.top).toBe('19%')
     expect(guide.style.bottom).toBe('19%')
+  })
+
+  // L-46: the pages' "camera paused" claim must actually halt the decode
+  // loop — not just drop scans with a toast while the loop keeps burning.
+  it('pause() halts decoding and resume() restarts it without a second chain', async () => {
+    // React 18 commits over MessageChannel (real macrotask); yield once so
+    // the assertions below observe committed state, as a real browser would.
+    const realSetTimeout = setTimeout
+    const realYield = () => new Promise(r => realSetTimeout(r, 0))
+    vi.useFakeTimers()
+    try {
+      const stream = makeStream()
+      mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+      let decodeCalls = 0
+      window.BarcodeDetector = class {
+        static getSupportedFormats = () => Promise.resolve(['code_39'])
+        detect = () => { decodeCalls++; return Promise.resolve([]) }
+      }
+      let ref = null
+      const { container } = render(<BarcodeScanner ref={(r) => { ref = r }} onScan={vi.fn()} />)
+      const video = container.querySelector('video')
+      Object.defineProperty(video, 'videoWidth', { value: 1280, configurable: true })
+      Object.defineProperty(video, 'videoHeight', { value: 720, configurable: true })
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(800); await realYield() })
+      expect(decodeCalls).toBeGreaterThan(0)
+
+      await act(async () => { ref.pause(); await realYield() })
+      const frozen = decodeCalls
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); await realYield() })
+      expect(decodeCalls).toBe(frozen)
+
+      await act(async () => { ref.resume(); await vi.advanceTimersByTimeAsync(800); await realYield() })
+      expect(decodeCalls).toBeGreaterThan(frozen)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

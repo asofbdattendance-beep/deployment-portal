@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { supabase, fetchAllRows } from '../lib/supabase'
 import { isVssBadge } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
@@ -6,10 +6,10 @@ import { useToast } from '../components/Toast'
 import BarcodeScanner from '../components/scanner/BarcodeScanner'
 import ScanResultPopup from '../components/scanner/ScanResultPopup'
 import RecentScansTable from '../components/scanner/RecentScansTable'
-import { getQueuedScans, installDrainListeners, preloadDeployed, clearFailedQueue, clearOrphanedQueue } from '../lib/offlineQueue'
-import { todayStrIST, isDecisionPopup, resolveForgotOutTime } from '../lib/scannerUtils'
+import { preloadDeployed, clearFailedQueue, clearOrphanedQueue } from '../lib/offlineQueue'
+import { todayStrIST } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
-import { useScanHandler } from '../hooks/useScanHandler'
+import { useScannerSession } from '../hooks/useScannerSession'
 import { ScanLine, Users, UserX, UserCheck, Search, Clock, AlertTriangle, Download, Wifi, WifiOff, RefreshCw, Loader2 } from 'lucide-react'
 
 export default function DeptInchargePage({ schedules, scheduleId }) {
@@ -26,18 +26,12 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
   const [sewadars, setSewadars] = useState([])
   const [vss, setVss] = useState([])
   const [sessions, setSessions] = useState([])
-  const [queued, setQueued] = useState([])
   const [loading, setLoading] = useState(true)
   const [manualBadge, setManualBadge] = useState('')
-  const [popup, setPopup] = useState(null) // { status, badge, name, centre, deptName, time, message, flag, openSince, outTime }
-  const [outTime, setOutTime] = useState('')
   const [search, setSearch] = useState('')
-  const [syncing, setSyncing] = useState(false)
   const [offline, setOffline] = useState(false)
-  const dismissTimerRef = useRef(null)
-  // L-47: the forgot follow-up re-scan timer. Stored (not bare) so unmount
-  // or a second confirm cannot leak it into a dead component.
-  const followUpRef = useRef(null)
+  // popup/outTime/queued/syncing + the scan entry points live in the shared
+  // session hook (Phase B task 5) — this page owns loads, lists, tabs, and render.
 
   const load = useCallback(async () => {
     if (!selectedScheduleId) return
@@ -65,10 +59,12 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
       setSessions(sessAll||[])
       const deployed = (depAll||[]).map(d=>({ badge_number:d.badge_number, deptId: d.deployed_department_id||d.department_id, is_vss: d.badge_number?.startsWith('VS') }))
       await preloadDeployed(selectedScheduleId, deployed)
-      const q = await getQueuedScans()
-      setQueued(q||[])
-    } catch(e){ toast.error(e.message) } finally{ setLoading(false) }
-  }, [selectedScheduleId, toast])
+      await refreshQueue()
+      // L-43: the amber "showing last data" pin (line ~289) used to be
+      // unreachable from a failed load — success clears it, failure sets it.
+      setOffline(false)
+    } catch(e){ toast.error(e.message); setOffline(true) } finally{ setLoading(false) }
+  }, [selectedScheduleId, toast, refreshQueue])
 
   // Separate effect for initial dept selection — defaults to ALL of the
   // incharge's departments ('' = every id from get_my_dept_ids), so the three
@@ -80,14 +76,20 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
   }, [myDeptIds, activeDept])
 
   useEffect(()=>{ load() },[load])
-  const onDrainProgress = useCallback(() => {
-    getQueuedScans().then(q => { setQueued(q); if (!q.some(x => !x.synced && !x.failed)) setSyncing(false) })
-  }, [])
 
-  useEffect(() => {
-    const off = installDrainListeners(supabase, onDrainProgress)
-    return () => { off(); if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current); if (followUpRef.current) clearTimeout(followUpRef.current) }
-  }, [onDrainProgress])
+  // Light session poll (L-42): the scan tab used to refresh only on
+  // mount/after-scan, going stale all day. Polls sessions only — never the
+  // full load (which would flash the page spinner every 15s). Same
+  // event-date predicate as the initial load (I4); a capped in_date-only
+  // refresh would regress the list right after a scan.
+  const refreshSessions = useCallback(async () => {
+    try {
+      const today = todayStrIST()
+      const sess = await fetchAllRows('dp_attendance_sessions', '*', (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id')
+      setSessions(sess||[])
+    } catch(e){ console.warn('[Scanner] post-scan refresh failed:', e?.message); setOffline(true) }
+  }, [selectedScheduleId])
+  useEffect(()=>{ const id=setInterval(()=>refreshSessions(),15000); return()=>clearInterval(id) },[refreshSessions])
 
   const deptMap = useMemo(()=>{ const m=new Map(); depts.forEach(d=>m.set(d.id,d)); return m },[depts])
   // id -> department NAME, for the scan popup and the Recent scans table.
@@ -142,108 +144,24 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
       .sort((a,b)=> a.sewadar_name.localeCompare(b.sewadar_name))
   },[myDeployedEnriched,absentees,present,tab,search,centreFilter])
 
-  const closePopup = useCallback(()=> setPopup(null), [])
-  const showPopup = useCallback((data) => {
-    if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current)
-    setPopup(data)
-    // L-48: `queued` is a transient ack like in/out/flagged — it dismisses
-    // itself instead of hanging until the next scan replaces it. `error`
-    // deliberately stays: those paths ask the operator to retry the scan.
-    if (data.status === 'in' || data.status === 'out' || data.status === 'flagged' || data.status === 'queued') {
-      dismissTimerRef.current = setTimeout(()=> setPopup(null), 2500)
-    }
-  }, [])
+  const clearManual = useCallback(() => setManualBadge(''), [])
 
-  const { handleScan: rawHandleScan, busy, resetBusy, submitForgotOut } = useScanHandler({
+  const {
+    popup, outTime, setOutTime, closePopup,
+    handleScan, handleCameraScan, confirmScan, confirmForgot,
+    isConfirm, confirmLabel, busy, resetBusy,
+    queued, syncing, refreshQueue, scannerRef,
+  } = useScannerSession({
     scheduleId: selectedScheduleId,
     profile,
     deptName: activeDept ? deptLabel : null,
     deptNameById,
-    showPopup,
     toast,
-    onQueued: () => getQueuedScans().then(setQueued).catch(e=>console.warn('[Scanner] queue refresh failed:', e?.message)),
-    onAfterScan: async () => {
-      try {
-        // Same event-date predicate as the initial load (I4) — a capped
-        // in_date-only refresh here would regress the list right after a scan.
-        const today = todayStrIST()
-        const sess = await fetchAllRows('dp_attendance_sessions', '*', (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id')
-        setSessions(sess||[])
-      } catch(e){ console.warn('[Scanner] post-scan refresh failed:', e?.message); setOffline(true) }
-    },
+    onAfterScan: refreshSessions,
+    forgotSuccessToast: 'OUT closed, now you can IN',
+    clearManual,
   })
   void resetBusy
-
-  const handleScan = async (badge, scanOpts) => {
-    const result = await rawHandleScan(badge, scanOpts)
-    if (result?.outTimeDefault) setOutTime(result.outTimeDefault)
-    // Clear the manual input only on a successful scan — keep it on failure
-    // so the user can retry without retyping. A `confirm_required` return is
-    // neither: the operator still has a popup to answer.
-    if (result?.ok || result?.outTimeDefault) setManualBadge('')
-  }
-
-  // The camera fires on its own — a second badge scanned behind an open
-  // decision popup must not silently replace the question the operator is
-  // answering (their Confirm click is aimed at the dialog they see). While a
-  // confirm/forgot popup is open, camera scans are dropped with a hint;
-  // answering it resumes the camera. Manual entry is deliberately NOT gated —
-  // it is a deliberate act, and it stays available as the escape hatch.
-  // Safe for the camera lifecycle: BarcodeScanner reads onScan through a ref,
-  // so a fresh closure per render never restarts the stream.
-  const handleCameraScan = (code) => {
-    if (isDecisionPopup(popup?.status)) {
-      toast.warning('Answer the pending prompt first — camera paused')
-      return
-    }
-    handleScan(code)
-  }
-
-  // v44 — Confirm on a toggle gate. `confirmFor` scopes the approval to the
-  // direction the question was asked about, and `openId` pins an OUT to the
-  // exact session the prompt named, so a state change in between re-asks
-  // instead of writing the wrong entry.
-  const isConfirm = popup?.status === 'confirm_out' || popup?.status === 'confirm_in'
-  const confirmLabel = popup?.status === 'confirm_out' ? 'Yes, mark OUT'
-    : popup?.status === 'confirm_in' ? 'Yes, mark IN' : undefined
-  const confirmScan = async () => {
-    const p = popup
-    if (!p) return
-    await handleScan(p.badge, {
-      confirmed: true,
-      confirmFor: p.status === 'confirm_out' ? 'OUT' : 'IN',
-      openId: p.openId || null,
-      display: { name: p.name, centre: p.centre, deptName: p.deptName },
-    })
-  }
-
-  const confirmForgotOut = async () => {
-    if (!popup || popup.status !== 'forgot') return
-    const out = resolveForgotOutTime({ inDate: popup.in_date, inTime: popup.in_time, value: outTime })
-    if (out.invalid) { toast.error('Pick a valid OUT time'); return }
-    if (out.clamped) {
-      setOutTime(out.value)
-      toast.warning(out.clamped === 'future'
-        ? `OUT time was ahead of the scanner clock — using ${out.value} IST`
-        : `OUT time was before the IN — using ${out.value} IST`)
-    }
-    const ts = new Date(out.ts).toISOString()
-    // L-36: the OUT write goes through the hook's submitForgotOut — the same
-    // RPC attempt + offline enqueue as the main OUT flow — instead of a bare
-    // scan_out with a toast-only catch that lost the write offline.
-    const r = await submitForgotOut({ badge: popup.badge, openId: popup.openId, ts })
-    if (!r.ok && r.reason === 'server') { toast.error(r.message); return }
-    if (!r.ok) return // queued/duplicate/queue errors already surfaced by the hook; no follow-up while the OUT hasn't synced
-    toast.success('OUT closed, now you can IN')
-    setPopup(null)
-    setOutTime('')
-    // `confirmFor: 'IN'` — the operator already decided this OUT, and the next
-    // entry is the fresh IN. Scoped to 'IN' so the approval cannot also
-    // authorise closing a session that appeared in the 200ms window.
-    if (followUpRef.current) clearTimeout(followUpRef.current)
-    const badge = popup.badge
-    followUpRef.current = setTimeout(() => handleScan(badge, { confirmed: true, confirmFor: 'IN' }), 200)
-  }
 
   // Sheet name / filename slug per non-scanning tab. `sheet` labels the export,
   // `slug` names the file — both track the tab so an export is self-describing.
@@ -287,7 +205,7 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
               {navigator.onLine ? 'Online' : 'Offline'}
             </span>
             {offline && <span style={{fontSize:'0.7rem', color:'#b45309'}}>· refresh failed — showing last data</span>}
-            {queued.some(q=>q.failed) && <button onClick={async ()=>{ await clearFailedQueue(); await clearOrphanedQueue(); getQueuedScans().then(setQueued).catch(()=>{}) }} style={{fontSize:'0.7rem', color:'#b45309', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear failed scans</button>}
+            {queued.some(q=>q.failed) && <button onClick={async ()=>{ await clearFailedQueue(); await clearOrphanedQueue(); refreshQueue() }} style={{fontSize:'0.7rem', color:'#b45309', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear failed scans</button>}
           </div>
           {myDeptIds.length>1 && <select value={activeDept} onChange={e=>{ setActiveDept(e.target.value); setCentreFilter('') }} className="select" style={{marginTop:6}} aria-label="Filter by department">
             <option value="">All my departments ({myDeptIds.length})</option>
@@ -307,7 +225,7 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
       {tab==='scan' && (
         <div style={{display:'grid', gap:12}}>
           <div className="card" style={{padding:'1rem'}}>
-            <BarcodeScanner onScan={handleCameraScan} />
+            <BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />
             <div style={{display:'flex', gap:8, marginTop:10}}>
               <input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input" style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ handleScan(manualBadge, { manual: true }) } }} />
               <button onClick={()=>{ handleScan(manualBadge, { manual: true }) }} className="btn btn-primary" disabled={busy || !manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark</button>
@@ -365,7 +283,7 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
         onOutTimeChange={setOutTime}
         onClose={closePopup}
         confirmLabel={confirmLabel}
-        onConfirm={popup?.status==='forgot' ? confirmForgotOut : isConfirm ? confirmScan : closePopup}
+        onConfirm={popup?.status==='forgot' ? confirmForgot : isConfirm ? confirmScan : closePopup}
       />
     </div>
   )
