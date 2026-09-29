@@ -102,10 +102,22 @@ describe('ScanResultPopup — confirm gates', () => {
 
   it('regression: a plain IN popup still says Done, not Cancel', () => {
     open('in', { onConfirm: vi.fn(), onClose: vi.fn() })
-    // 'in' renders a secondary (close) and a primary (dismiss) action, so the
-    // label legitimately appears twice — what matters is that neither is
-    // "Cancel", which would imply a choice this popup does not offer.
-    expect(screen.getAllByText('Done')).toHaveLength(2)
+    // L-12: one ack, one button. The old second "Done" called the same
+    // onClose as the first — pure AT noise. What matters is that the single
+    // button is not "Cancel", which would imply a choice this popup does not
+    // offer.
+    expect(screen.getAllByText('Done')).toHaveLength(1)
+    expect(screen.queryByText('Cancel')).toBeNull()
+  })
+})
+
+describe('ScanResultPopup — ack statuses render one button (L-12)', () => {
+  // The pages pass onConfirm=closePopup as a fallback for every non-decision
+  // status, so in/out/queued/flagged rendered TWO identical "Done" buttons
+  // that both just close — AT noise inviting a mis-tap. One ack, one button.
+  it.each(['in', 'out', 'queued', 'flagged'])('%s shows a single Done', (status) => {
+    open(status, { onConfirm: vi.fn(), onClose: vi.fn() })
+    expect(screen.getAllByText('Done')).toHaveLength(1)
     expect(screen.queryByText('Cancel')).toBeNull()
   })
 })

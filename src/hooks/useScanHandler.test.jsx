@@ -354,6 +354,23 @@ describe('get_scan_state PostgREST error (D-2)', () => {
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error', message: 'Already checked IN — please OUT first' }))
     expect(toast.error).toHaveBeenCalledWith('Already IN — OUT first')
   })
+
+  // L-39: the Already-IN refetch path showed the forgot prompt (with its
+  // ">12h open" pill and destructive "Close OUT then IN") for a session of
+  // ANY age. A 2-minute session must get the plain Already-IN error instead.
+  it('refetches a young session as plain Already-IN, not a forgot prompt', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(FIXED_NOW)
+    rpc.mockResolvedValueOnce({ data: null }) // first lookup: no open session
+    rpc.mockRejectedValueOnce(new Error('Already IN')) // scan_in
+    rpc.mockResolvedValueOnce({ data: { open: { id: 'open-9', status: 'OPEN', ...istStamp(2, 'in') }, last_out: null } }) // refetch: 2h old
+    const { result, showPopup } = setup()
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(out.ok).toBe(false)
+    expect(out.outTimeDefault).toBeUndefined()
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error', message: 'Already checked IN — please OUT first' }))
+    expect(showPopup).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'forgot' }))
+  })
 })
 
 // ─── D-3: the online scan_in carries the same nonce the drain will replay ──────

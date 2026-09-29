@@ -474,13 +474,8 @@ export default function ScanResultPopup({
               >
                 {secondaryLabel}
               </button>
-              {onConfirm && key !== 'error' && key !== 'in' && key !== 'out' && (
+              {onConfirm && isConfirm && (
                 <button ref={primaryRef} onClick={onConfirm} className="btn btn-primary">
-                  {primaryLabel}
-                </button>
-              )}
-              {(key === 'in' || key === 'out') && (
-                <button ref={primaryRef} onClick={onConfirm || onClose} className="btn btn-primary">
                   {primaryLabel}
                 </button>
               )}

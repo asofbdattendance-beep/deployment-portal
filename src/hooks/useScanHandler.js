@@ -552,14 +552,24 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
             // is a timeout (D-1).
             const fresh = await lookupScanState(b, scheduleId)
             if (fresh.kind === 'ok' && fresh.open) {
-              const dispFresh = displayOf(fresh.open)
-              const forgot = resolveForgotOutTime({ inDate: fresh.open.in_date, inTime: fresh.open.in_time })
-              showPopup({
-                status: 'forgot', badge: b, name: dispFresh.name, centre: dispFresh.centre, deptName: dispFresh.deptName,
-                openSince: `${fresh.open.in_date} ${fresh.open.in_time}`, openId: fresh.open.id,
-                in_date: fresh.open.in_date, in_time: fresh.open.in_time,
-              })
-              return { outTimeDefault: forgot.value, ok: true }
+              // L-39: the forgot prompt (with its ">12h open" pill and the
+              // destructive "Close OUT then IN") is only honest past 12h — the
+              // primary path gates it at hrs > 12, and this refetch must too.
+              // A young session gets the plain Already-IN error instead.
+              const freshInTs = new Date(`${fresh.open.in_date}T${fresh.open.in_time}+05:30`).getTime()
+              if ((Date.now() - freshInTs) / 3600000 > 12) {
+                const dispFresh = displayOf(fresh.open)
+                const forgot = resolveForgotOutTime({ inDate: fresh.open.in_date, inTime: fresh.open.in_time })
+                showPopup({
+                  status: 'forgot', badge: b, name: dispFresh.name, centre: dispFresh.centre, deptName: dispFresh.deptName,
+                  openSince: `${fresh.open.in_date} ${fresh.open.in_time}`, openId: fresh.open.id,
+                  in_date: fresh.open.in_date, in_time: fresh.open.in_time,
+                })
+                return { outTimeDefault: forgot.value, ok: true }
+              }
+              showPopup({ status: 'error', badge: b, message: 'Already checked IN — please OUT first', time: new Date().toLocaleTimeString() })
+              toast.error('Already IN — OUT first')
+              return { ok: false, reason: 'already_in' }
             }
             // The sewadar IS checked in, but we could not read the session:
             // say which failure it was instead of a bare dead end, so the
