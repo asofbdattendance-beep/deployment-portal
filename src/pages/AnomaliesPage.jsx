@@ -152,7 +152,15 @@ export default function AnomaliesPage({ schedules, scheduleId, onNavigate: _onNa
     const channel = supabase
       .channel(`anomalies-${scheduleId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'dp_attendance_sessions', filter: `schedule_id=eq.${scheduleId}` }, reload)
-      .subscribe()
+      // L-34: deployments changes (ASO finalizes, rows become deployed)
+      // move the expected denominators behind these numbers — sessions
+      // alone leave them stale until a manual refresh.
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${scheduleId}` }, reload)
+      // L-40: realtime membership is not guaranteed — a dead channel
+      // used to fail silently. Name the state so it lands in devtools.
+      .subscribe((status) => {
+        if (status !== 'SUBSCRIBED') console.warn('[anomalies] realtime ' + status + ' — data may be stale until refresh')
+      })
     return () => { alive = false; if (timer) clearTimeout(timer); supabase.removeChannel(channel) }
   }, [scheduleId, load])
 

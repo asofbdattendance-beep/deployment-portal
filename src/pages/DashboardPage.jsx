@@ -253,7 +253,11 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
       .channel(`dashboard-${scheduleId}`)
       .on('postgres_changes', onScan, reload)
       .on('postgres_changes', onDeploy, reload)
-      .subscribe()
+      // L-40: realtime membership is not guaranteed — a dead channel
+      // used to fail silently. Name the state so it lands in devtools.
+      .subscribe((status) => {
+        if (status !== 'SUBSCRIBED') console.warn('[dashboard] realtime ' + status + ' — data may be stale until refresh')
+      })
     return () => { alive = false; if (timer) clearTimeout(timer); supabase.removeChannel(channel) }
   }, [scheduleId, load])
 
