@@ -47,10 +47,9 @@ export default function ScannerPage({ schedules, scheduleId }){
         .order('created_at',{ascending:false}).limit(10)
         .then(r=>r.data||[])
       setSessions(sess)
-      await refreshQueue()
       setOffline(false)
     } catch(e){ console.warn('[Scanner] session refresh failed — keeping last data:', e?.message); setOffline(true) }
-  },[scheduleId,myBadge,refreshQueue])
+  },[scheduleId,myBadge])
 
   const refreshDeployments=useCallback(async()=>{
     if(!scheduleId) return
@@ -98,6 +97,11 @@ export default function ScannerPage({ schedules, scheduleId }){
 
   // keep resetBusy referenced to avoid unused-var lint (hook exposes it for safety timeout)
   void resetBusy
+
+  // Initial queue read (mount only — the drain subscription keeps it fresh
+  // after that). A separate effect because refresh() is defined above the
+  // hook call and cannot list refreshQueue in its deps.
+  useEffect(()=>{ refreshQueue() },[refreshQueue])
 
   useEffect(()=>{ refresh(); refreshDeployments(); refreshDepts() },[refresh, refreshDeployments, refreshDepts])
   useEffect(()=>{ const id=setInterval(()=>refresh(),15000); return()=>clearInterval(id) },[refresh])

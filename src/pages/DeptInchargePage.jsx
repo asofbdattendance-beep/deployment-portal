@@ -59,12 +59,11 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
       setSessions(sessAll||[])
       const deployed = (depAll||[]).map(d=>({ badge_number:d.badge_number, deptId: d.deployed_department_id||d.department_id, is_vss: d.badge_number?.startsWith('VS') }))
       await preloadDeployed(selectedScheduleId, deployed)
-      await refreshQueue()
       // L-43: the amber "showing last data" pin (line ~289) used to be
       // unreachable from a failed load — success clears it, failure sets it.
       setOffline(false)
     } catch(e){ toast.error(e.message); setOffline(true) } finally{ setLoading(false) }
-  }, [selectedScheduleId, toast, refreshQueue])
+  }, [selectedScheduleId, toast])
 
   // Separate effect for initial dept selection — defaults to ALL of the
   // incharge's departments ('' = every id from get_my_dept_ids), so the three
@@ -162,6 +161,11 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
     clearManual,
   })
   void resetBusy
+
+  // Initial queue read (mount only — the drain subscription keeps it fresh
+  // after that). A separate effect because load() is defined above the hook
+  // call and cannot list refreshQueue in its deps.
+  useEffect(()=>{ refreshQueue() },[refreshQueue])
 
   // Sheet name / filename slug per non-scanning tab. `sheet` labels the export,
   // `slug` names the file — both track the tab so an export is self-describing.

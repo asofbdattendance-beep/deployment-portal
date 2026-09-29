@@ -170,3 +170,28 @@ describe('useScannerSession bundle', () => {
     }
   })
 })
+
+describe('camera pause effect (L-46)', () => {
+  it('pauses while a decision popup is open and resumes when it resolves', () => {
+    const { result, unmount } = setup()
+    const pause = vi.fn(), resume = vi.fn()
+    act(() => { result.current.scannerRef.current = { pause, resume } })
+    act(() => { result.current.showPopup({ status: 'confirm_out', badge: 'X' }) })
+    expect(pause).toHaveBeenCalledTimes(1)
+    expect(resume).not.toHaveBeenCalled()
+    act(() => { result.current.showPopup({ status: 'in', badge: 'X' }) })
+    expect(resume).toHaveBeenCalledTimes(1)
+    unmount()
+  })
+
+  it('ignores non-decision popups and never resumes without a prior pause', () => {
+    const { result, unmount } = setup()
+    const pause = vi.fn(), resume = vi.fn()
+    act(() => { result.current.scannerRef.current = { pause, resume } })
+    act(() => { result.current.showPopup({ status: 'in', badge: 'X' }) })
+    act(() => { result.current.closePopup() })
+    expect(pause).not.toHaveBeenCalled()
+    expect(resume).not.toHaveBeenCalled()
+    unmount()
+  })
+})

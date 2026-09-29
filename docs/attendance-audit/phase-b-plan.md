@@ -38,8 +38,15 @@ raises `syncing` while rows pend. L-46: decision popups pause the decode
 loop via new `pause()`/`resume()` on BarcodeScanner's imperative handle
 (resume guarded against double chains + dead streams). real `setOffline(false)`; call `setSyncing(true)`; make "Camera paused" actually pause (imperative handle + ref — `BarcodeScanner` already exposes restart/stop; extend or reuse). Files: both pages. Depends: 3. Verify: new page tests.
 
-## Task 6: page-tests — L-23
-`ScannerPage.test.jsx` + `DeptInchargePage.test.jsx` pinning tasks 3–5. Depends: 3, 4, 5.
+## Task 6: page-tests — L-23 — DONE
+
+`ScannerPage.test.jsx` (L-41 event-date predicate + render) and
+`DeptInchargePage.test.jsx` (incharge gate, L-43 offline pin on/off,
+L-42 15s session poll) close L-23 for the scanner pages; pause/resume
+transition pins live in `useScannerSession.test.jsx`. Both L-41 and L-42
+pins were mutation-checked (predicate reverted / interval removed → red).
+Full-page scan-flow choreography stays covered at the hook/popup unit
+level by design — the page files own queries, pins, and render only.
 
 ## Deferred
 - L-19 abort-signal propagation (changes RPC call shape; own task).
