@@ -47,6 +47,43 @@ function quarantineRow(id, reason) {
   })
 }
 
+// ─── Error taxonomy (Task 1: L-04 + L-08) ───────────────────────────────
+// Pure classifier — no I/O, unit-tested in offlineQueue.test.js.
+// Server contracts from sql/v46 (scan_in) + sql/v41 (scan_out):
+//  - dedup: replay already applied server-side → drop row, keep draining.
+//  - drop: row will never succeed, no operator action → remove, keep draining.
+//  - permanent: auth/clock failures needing human fix → quarantine terminal,
+//    keep draining (never backoff+break — that wedged the queue ~12 min).
+//  - retry: network/timeout/deploy-ordering → markFailed + backoff + break.
+export function classifyScanError(msg, err) {
+  const s = String(msg || err?.message || '')
+  if (s.includes('Already IN') || s.includes('No open session')) return 'dedup'
+  if (s.includes('Invalid badge') || s.includes('Badge not found')) return 'drop'
+  if (s.includes('Session does not match')) return 'drop' // L-08 stale p_open_id
+  if (
+    s.includes('Not authorized to scan') ||
+    s.includes('Timestamp cannot be in the future') ||
+    s.includes('Timestamp too old')
+  ) return 'permanent'
+  return 'retry'
+}
+
+export function getDrainTiming() {
+  const g = typeof globalThis !== 'undefined' ? globalThis : {}
+  const base = Number(g.__OFFLINEQ_BASE_INTERVAL__ ?? 7000)
+  const max = Number(g.__OFFLINEQ_MAX_INTERVAL__ ?? 60000)
+  return {
+    base: Number.isFinite(base) && base > 0 ? base : 7000,
+    max: Number.isFinite(max) && max > 0 ? max : 60000,
+  }
+}
+
+// Test-only reset for the sticky-backoff regression (L-02 follow-up).
+export function __resetDrainState() {
+  _consecutiveFailures = 0
+  _draining = false
+}
+
 const MAX_QUEUE_SIZE = 200
 
 const DB_NAME = 'sewadar_offline_q'
@@ -220,8 +257,7 @@ export async function getCachedDeployed(scheduleId) {
 
 let _draining = false
 let _consecutiveFailures = 0
-const BASE_INTERVAL = 7000
-const MAX_INTERVAL = 60000
+// Timing defaults live in getDrainTiming() (globalThis-injectable for T2).
 
 // drain — called on online, visibility, interval. Returns rows synced.
 // D1d: guarded by a cross-tab `navigator.locks` lock when available, with the
@@ -288,13 +324,18 @@ export async function drainQueue(supabase, onProgress) {
           }
           await removeQueued(q.id)
           drained++
+          // Decay sticky backoff on forward progress (else ~6 blips pin 60s forever).
+          _consecutiveFailures = Math.max(0, _consecutiveFailures - 1)
           onProgress?.(q, true)
         } catch (e) {
           const msg = String(e?.message || '')
-          if (msg.includes('Already IN') || msg.includes('No open session')) {
-            await markFailed(q.id)
-          } else if (msg.includes('Invalid badge') || msg.includes('Badge not found')) {
+          const kind = classifyScanError(msg, e)
+          if (kind === 'dedup' || kind === 'drop') {
             await removeQueued(q.id)
+            drained++
+            _consecutiveFailures = Math.max(0, _consecutiveFailures - 1)
+          } else if (kind === 'permanent') {
+            await quarantineRow(q.id, msg.slice(0, 160) || 'permanent')
           } else {
             await markFailed(q.id)
             _consecutiveFailures++
@@ -317,7 +358,8 @@ export async function drainQueue(supabase, onProgress) {
 export function installDrainListeners(supabase, cb) {
   let intervalId = null
   const getInterval = () => {
-    const base = Math.min(BASE_INTERVAL * Math.pow(1.5, _consecutiveFailures), MAX_INTERVAL)
+    const { base: BASE, max: MAX } = getDrainTiming()
+    const base = Math.min(BASE * Math.pow(1.5, _consecutiveFailures), MAX)
     const jitter = base * 0.8 + Math.random() * base * 0.4 // ±20% jitter
     return Math.round(jitter)
   }

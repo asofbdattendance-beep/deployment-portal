@@ -13,7 +13,7 @@ import {
   withTimeout,
   SCAN_RPC_TIMEOUT,
   SESSION_RPC_TIMEOUT,
-  BUSY_SAFETY_TIMEOUT,
+  getBusySafetyTimeout,
   withinToggleGuard,
   minutesSince,
 } from '../lib/scannerUtils'
@@ -222,7 +222,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
         busyRef.current = false
         setBusy(false)
       }
-    }, BUSY_SAFETY_TIMEOUT)
+    }, getBusySafetyTimeout())
   }, [])
 
   // Clear the busy safety timer on unmount — no setBusy after unmount.

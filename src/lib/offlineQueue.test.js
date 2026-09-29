@@ -21,7 +21,7 @@ vi.mock('./supabase', () => ({
   },
 }))
 
-const { enqueueScan, getQueuedScans, removeQueued, markFailed, clearFailedQueue, drainQueue } = await import('./offlineQueue')
+const { enqueueScan, getQueuedScans, removeQueued, markFailed, clearFailedQueue, drainQueue, classifyScanError, getDrainTiming, __resetDrainState } = await import('./offlineQueue')
 
 /** Read EVERY row in the store, bypassing the owner filter — test-only helper. */
 function allRows() {
@@ -186,6 +186,78 @@ describe('drainQueue scan_out contract', () => {
     await enqueueScan({ id: 'out-2', badge: 'FB5971GA0002', schedule_id: 'sched-1', action: 'OUT', ts: '2026-09-24T13:05:00Z', open_id: 'open-2' })
     const drained = await drainQueue(fakeSupabase(calls, () => ({ data: { ok: true, dedup: true }, error: null })))
     expect(drained).toBe(1)
+    expect(await getQueuedScans()).toHaveLength(0)
+  })
+})
+
+describe('classifyScanError (Task 1: L-04 + L-08)', () => {
+  it.each([
+    ['Already IN — OUT first (open since 2026-09-24 09:00)', 'dedup'],
+    ['No open session to close', 'dedup'],
+    ['Invalid badge format', 'drop'],
+    ['Badge not found', 'drop'],
+    ['Session does not match badge/schedule', 'drop'],
+    ['Not authorized to scan', 'permanent'],
+    ['Timestamp cannot be in the future', 'permanent'],
+    ['Timestamp too old (more than 30 days)', 'permanent'],
+    ['Failed to fetch', 'retry'],
+    ['Drain IN timed out after 10000ms', 'retry'],
+    ['PGRST202 whatever', 'retry'],
+    ['', 'retry'],
+  ])('classifies %p as %p', (msg, expected) => {
+    expect(classifyScanError(msg)).toBe(expected)
+  })
+
+  it('exposes injectable drain timing for T2', () => {
+    expect(getDrainTiming()).toEqual({ base: 7000, max: 60000 })
+    globalThis.__OFFLINEQ_BASE_INTERVAL__ = 100
+    globalThis.__OFFLINEQ_MAX_INTERVAL__ = 200
+    expect(getDrainTiming()).toEqual({ base: 100, max: 200 })
+    delete globalThis.__OFFLINEQ_BASE_INTERVAL__
+    delete globalThis.__OFFLINEQ_MAX_INTERVAL__
+  })
+})
+
+describe('drainQueue poison-row behaviour (L-04)', () => {
+  function fakeSupabase(calls, impl) {
+    return {
+      auth: { getSession: async () => ({ data: { session: { user: { id: 'user-A' } } } }) },
+      rpc: async (name, params) => {
+        calls.push([name, params])
+        return impl ? impl(name, params) : { data: { ok: true }, error: null }
+      },
+    }
+  }
+
+  it('drains past a permanent row without head-of-line block', async () => {
+    __resetDrainState()
+    const calls = []
+    await enqueueScan({ id: 'poison', badge: 'FB5971GA0001', schedule_id: 'sched-1', action: 'IN', ts: '2026-09-24T09:00:00Z' })
+    await enqueueScan({ id: 'good', badge: 'FB5971GA0002', schedule_id: 'sched-1', action: 'IN', ts: '2026-09-24T09:01:00Z' })
+    const drained = await drainQueue(fakeSupabase(calls, (name, params) => {
+      if (params.p_badge === 'FB5971GA0001') return { data: null, error: new Error('Not authorized to scan') }
+      return { data: { ok: true }, error: null }
+    }))
+    // poison quarantined (terminal, skipped on next pass), good row synced
+    expect(drained).toBe(1)
+    expect(calls).toHaveLength(2)
+    const rows = await getQueuedScans()
+    expect(rows.map((r) => r.id)).toEqual(['poison'])
+    expect(rows[0].failed).toBe(true)
+    expect(rows[0].status).toBe('failed')
+  })
+
+  it('drops a stale open_id row and keeps draining (L-08)', async () => {
+    __resetDrainState()
+    const calls = []
+    await enqueueScan({ id: 'stale', badge: 'FB5971GA0003', schedule_id: 'sched-1', action: 'OUT', ts: '2026-09-24T13:00:00Z', open_id: 'wrong-id' })
+    await enqueueScan({ id: 'next', badge: 'FB5971GA0004', schedule_id: 'sched-1', action: 'IN', ts: '2026-09-24T13:01:00Z' })
+    const drained = await drainQueue(fakeSupabase(calls, (name, params) => {
+      if (params.p_open_id === 'wrong-id') return { data: null, error: new Error('Session does not match badge/schedule') }
+      return { data: { ok: true }, error: null }
+    }))
+    expect(drained).toBe(2)
+    expect(calls).toHaveLength(2)
     expect(await getQueuedScans()).toHaveLength(0)
   })
 })

@@ -7,7 +7,12 @@
 export const SCAN_RPC_TIMEOUT = 8000   // ms — scan_in / scan_out
 export const SESSION_RPC_TIMEOUT = 5000 // ms — get_open_session
 export const CAMERA_INIT_TIMEOUT = 10000 // ms — getUserMedia + play
-export const BUSY_SAFETY_TIMEOUT = 15000 // ms — auto-reset stuck busy flag
+export const BUSY_SAFETY_TIMEOUT = 15000 // ms — auto-reset stuck busy flag (default; override via getBusySafetyTimeout)
+export function getBusySafetyTimeout() {
+  const g = typeof globalThis !== 'undefined' ? globalThis : {}
+  const v = Number(g.__BUSY_SAFETY_TIMEOUT__ ?? BUSY_SAFETY_TIMEOUT)
+  return Number.isFinite(v) && v > 0 ? v : BUSY_SAFETY_TIMEOUT
+}
 export const CACHE_TTL = 10 * 60 * 1000 // 10 minutes for preloadDeployed cache
 export const MAX_DRAIN_ATTEMPTS = 12     // after this, mark permanently failed
 export const SCAN_TOGGLE_GUARD_MS = 60 * 60 * 1000 // 1h — minimum dwell before an automatic IN↔OUT toggle
