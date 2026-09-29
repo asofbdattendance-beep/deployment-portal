@@ -21,6 +21,7 @@ import {
   CalendarClock, RefreshCw, Download, FileDown, ArrowUp, ArrowDown,
   ArrowUpRight, Loader2, Lock, TrendingUp, Building2, ListOrdered,
 } from 'lucide-react'
+import { reportRealtimeStatus } from '../lib/realtime'
 
 // Rate band → pill colour. Same map the Attendance tables use, so a centre that
 // reads amber there reads amber here.
@@ -190,7 +191,9 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
 
   // ─── Load. One Promise.allSettled over the five RPCs. ───
   const load = useCallback(async () => {
-    if (!scheduleId) return
+    // Clear the spinner on the no-schedule path too. Leaving `loading` true
+    // here latched the page on its spinner with no timeout and no error.
+    if (!scheduleId) { setLoading(false); return }
     const seq = ++seqRef.current
     setLoading(true)
     try {
@@ -256,7 +259,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
       // L-40: realtime membership is not guaranteed — a dead channel
       // used to fail silently. Name the state so it lands in devtools.
       .subscribe((status) => {
-        if (status !== 'SUBSCRIBED') console.warn('[dashboard] realtime ' + status + ' — data may be stale until refresh')
+        reportRealtimeStatus('dashboard', status, alive)
       })
     return () => { alive = false; if (timer) clearTimeout(timer); supabase.removeChannel(channel) }
   }, [scheduleId, load])

@@ -593,15 +593,29 @@ export function isUuid(value) {
 export const INVITE_ROLES = ['centre_user', 'centre_admin', 'aso', 'super_admin', 'dept_incharge', 'scanner', 'vss_operator']
 export const INVITE_CENTRE_ROLES = ['centre_user', 'centre_admin']
 export const INVITE_BADGE_ROLES = ['dept_incharge', 'scanner']
+// v51: a dept_incharge is scoped by DEPARTMENT (across every centre), so the
+// grant itself is required — a login with a badge but no department would come
+// up with an empty dashboard and an empty scan list, which reads as a broken
+// app rather than an unassigned one. Mirrored by claim_portal_invite's trigger
+// (trg_grant_incharge_on_claim) and by the Users-page picker.
+export const INVITE_DEPARTMENT_ROLES = ['dept_incharge']
 
-// Pure validation for superadmin-issued invites. Returns [] when valid.
-// The claim_portal_invite RPC enforces the same rules server-side.
-export function invitationErrors({ email = '', name = '', role = '', centre = '', badge = '' } = {}) {
+/**
+ * Pure validation for superadmin-issued invites. Returns [] when valid.
+ * The claim_portal_invite RPC enforces the same rules server-side.
+ *
+ * `deptIds` is the v51 department grant: a dept_incharge must name at least one
+ * department for the chosen schedule.
+ */
+export function invitationErrors({ email = '', name = '', role = '', centre = '', badge = '', deptIds = [] } = {}) {
   const errors = []
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email).trim())) errors.push('Enter a valid email address')
   if (!String(name).trim()) errors.push('Enter the person’s name')
   if (!INVITE_ROLES.includes(role)) errors.push('Pick a valid role')
   if (INVITE_CENTRE_ROLES.includes(role) && !String(centre).trim()) errors.push('Pick a centre for this role')
   if (INVITE_BADGE_ROLES.includes(role) && !String(badge).trim()) errors.push('Enter a badge number for this role')
+  if (INVITE_DEPARTMENT_ROLES.includes(role) && !(Array.isArray(deptIds) && deptIds.length)) {
+    errors.push('Pick at least one department for this role')
+  }
   return errors
 }

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { supabase, fetchAllRows } from '../lib/supabase'
 import { isVssBadge } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
@@ -9,10 +9,20 @@ import RecentScansTable from '../components/scanner/RecentScansTable'
 import { preloadDeployed, clearFailedQueue, clearOrphanedQueue } from '../lib/offlineQueue'
 import { todayStrIST } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
+import { exportWorkbook, fileSlug } from '../lib/excel'
 import { useScannerSession } from '../hooks/useScannerSession'
 import { ScanLine, Users, UserX, UserCheck, Search, Clock, AlertTriangle, Download, Wifi, WifiOff, RefreshCw, Loader2 } from 'lucide-react'
 
-export default function DeptInchargePage({ schedules, scheduleId }) {
+// DeptInchargePage — the SCANNING + lists page for a dept_incharge.
+//
+// SCOPE (v51): a dept_incharge is scoped by DEPARTMENT, across EVERY centre.
+// `get_my_dept_ids` now returns the departments granted to this login's badge
+// (new `department_incharge_assignments` UNION the legacy centre×dept
+// selections) with NO centre filter, and the `dp_attendance_sessions` read is
+// permitted by v51's widened `att_read`. The centre select below is therefore a
+// pure client-side FILTER over rows already in scope — it never widens or
+// narrows the boundary. Do NOT reintroduce a centre predicate here.
+export default function DeptInchargePage({ schedules = [], scheduleId }) {
   const { profile } = usePortalAuth()
   const toast = useToast()
   const selectedScheduleId = scheduleId
@@ -27,30 +37,63 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
   const [vss, setVss] = useState([])
   const [sessions, setSessions] = useState([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(null)
   const [manualBadge, setManualBadge] = useState('')
   const [search, setSearch] = useState('')
   const [offline, setOffline] = useState(false)
+  // A slow load for schedule A must never land after a fast one for schedule B
+  // and overwrite its rows — every sibling page sequences its loads.
+  const mountedRef = useRef(true)
+  const seqRef = useRef(0)
   // popup/outTime/queued/syncing + the scan entry points live in the shared
   // session hook (Phase B task 5) — this page owns loads, lists, tabs, and render.
 
   const load = useCallback(async () => {
-    if (!selectedScheduleId) return
+    if (!selectedScheduleId) { setLoading(false); return }
+    const seq = ++seqRef.current
     setLoading(true)
+    setLoadError(null)
     try {
-      const deptIds = await supabase.rpc('get_my_dept_ids', { p_schedule: selectedScheduleId }).then(r=>r.data||[]).catch(()=>[])
-      setMyDeptIds(deptIds)
+      // supabase-js RESOLVES with { data, error } — it never rejects — so a
+      // `.catch(() => [])` here is dead code, and a PGRST202, an RLS denial or
+      // a dropped connection all collapse into `[]`. The page then reads that
+      // as "this login has no department" and tells a correctly-provisioned
+      // incharge to ask the ASO to re-provision them. Unwrap the error.
+      const { data: deptIds, error: deptError } = await supabase.rpc('get_my_dept_ids', { p_schedule: selectedScheduleId })
+      if (deptError) throw new Error(`get_my_dept_ids: ${deptError.message || deptError.code || 'failed'}`)
+      setMyDeptIds(Array.isArray(deptIds) ? deptIds : [])
       // Supabase max-rows=1000 — paginate every table that can exceed it.
       // I4: sessions follow the v45 event-date law (IN *or* OUT today counts —
       // in_date-only reads miss overnight sessions and contradict the ASO's
       // Daily tab) and are paginated, not capped: a 200-row cap silently
       // listed everyone past it as Absent on busy days.
       const today = todayStrIST()
-      const [deptAll, depAll, vssAll, sewAll, sessAll] = await Promise.all([
+      // v53 perf, phase 1: the three tables every tab needs. `deployments` is
+      // the list itself, so it is what the other two are keyed off.
+      const [deptAll, depAll, sessAll] = await Promise.all([
         fetchAllRows('deployment_departments', '*', (q) => q.order('name'), 'id'),
         fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId), 'id'),
-        fetchAllRows('vss_sewadars', 'badge_number, sewadar_name, centre, is_initiated, gender, is_active', null, 'badge_number'),
-        fetchAllRows('dp_sewadars', 'badge_number, sewadar_name, centre, is_initiated, gender', null, ['centre', 'badge_number']),
         fetchAllRows('dp_attendance_sessions', '*', (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id'),
+      ])
+      // v53 perf, phase 2: fetch sewadar profiles for the DEPLOYED badges only.
+      // They are used solely to enrich the deployment rows (name / gender /
+      // initiated via `swMap`), but they were fetched unfiltered — so the server
+      // had to RLS-evaluate the department predicate across every sewadar in the
+      // portal, twice per table (`count: 'exact'` then the page), and shipped
+      // thousands of rows this page never renders. Chunked because an `in.()`
+      // list of every badge would blow the request-URL limit.
+      const badges = [...new Set((depAll || []).map(d => d.badge_number).filter(Boolean))]
+      const byBadge = (table, cols, key) => {
+        if (!badges.length) return Promise.resolve([])
+        const CHUNK = 100
+        const parts = []
+        for (let i = 0; i < badges.length; i += CHUNK) parts.push(badges.slice(i, i + CHUNK))
+        return Promise.all(parts.map(chunk => fetchAllRows(table, cols, (q) => q.in('badge_number', chunk), key)))
+          .then(lists => lists.flat())
+      }
+      const [vssAll, sewAll] = await Promise.all([
+        byBadge('vss_sewadars', 'badge_number, sewadar_name, centre, is_initiated, gender, is_active', 'badge_number'),
+        byBadge('dp_sewadars', 'badge_number, sewadar_name, centre, is_initiated, gender', ['centre', 'badge_number']),
       ])
       setDepts(deptAll||[])
       setDeployments(depAll||[])
@@ -62,7 +105,12 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
       // L-43: the amber "showing last data" pin (line ~289) used to be
       // unreachable from a failed load — success clears it, failure sets it.
       setOffline(false)
-    } catch(e){ toast.error(e.message); setOffline(true) } finally{ setLoading(false) }
+    } catch(e){
+      console.error('[DeptIncharge] load failed:', e)
+      setLoadError(e?.message || 'Could not load')
+      toast.error(e?.message || 'Could not load')
+      setOffline(true)
+    } finally { if (mountedRef.current && seq === seqRef.current) setLoading(false) }
   }, [selectedScheduleId, toast])
 
   // Separate effect for initial dept selection — defaults to ALL of the
@@ -74,7 +122,11 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
     }
   }, [myDeptIds, activeDept])
 
-  useEffect(()=>{ load() },[load])
+  useEffect(() => {
+    mountedRef.current = true
+    load()
+    return () => { mountedRef.current = false }
+  }, [load])
 
   // Light session poll (L-42): the scan tab used to refresh only on
   // mount/after-scan, going stale all day. Polls sessions only — never the
@@ -173,7 +225,6 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
 
   const exportList = async () => {
     const meta = EXPORT_TABS[tab] || EXPORT_TABS.list
-    const XLSX=await import('xlsx'); const wb=XLSX.utils.book_new()
     // Status + In/Out make the three tabs distinguishable in the sheet itself,
     // not just by which file it arrived in.
     const rows=filteredList.map((r,i)=>({
@@ -184,12 +235,24 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
       'In Time': sessionByBadge.get(r.badge_number)?.in_time || '—',
       'Out Time': sessionByBadge.get(r.badge_number)?.out_time || '—',
     }))
-    XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),meta.sheet)
-    XLSX.writeFile(wb, `${schedule?.name||'schedule'}_${meta.slug}.xlsx`)
+    // The shared driver, like every other export in the app: it slugs the
+    // filename, keeps the sheet name inside Excel's 31-char limit, and returns
+    // 0 when there is nothing to write.
+    const written = await exportWorkbook(fileSlug(`${schedule?.name||'schedule'}_${meta.slug}`), [
+      { name: meta.sheet, rows },
+    ])
+    if (written === 0) toast.warning('Nothing to export')
+    else toast.success('Exported')
   }
 
   if(!schedules.length) return <div className="page"><div className="card" style={{padding:'2rem', textAlign:'center'}}>No schedules</div></div>
-  if(!myDeptIds.length && !loading) return <div className="page"><div className="card" style={{padding:'2rem', textAlign:'center'}}><AlertTriangle size={22} style={{margin:'0 auto 8px', color:'#b45309'}}/><div style={{fontWeight:700}}>Not a Dept Incharge for this schedule</div><div style={{color:'#64748b', fontSize:'0.85rem'}}>Ask ASO to select you as incharge for a department.</div></div></div>
+
+  // A failed load is NOT an empty department. Without this guard the card below
+  // was reached on a PGRST202 / RLS denial / dropped connection and told a
+  // correctly-provisioned incharge to ask the ASO to re-provision them — the
+  // exact opposite of the truth. The error itself is surfaced inline, above,
+  // so the last-good lists and the L-43 "showing last data" pin still work.
+  if(!myDeptIds.length && !loading && !loadError) return <div className="page"><div className="card" style={{padding:'2rem', textAlign:'center'}}><AlertTriangle size={22} style={{margin:'0 auto 8px', color:'#b45309'}}/><div style={{fontWeight:700}}>No department assigned</div><div style={{color:'#64748b', fontSize:'0.85rem'}}>Your login is not a Dept Incharge for any department in this schedule. Ask ASO to assign your department from the Users page.</div></div></div>
 
   return (
     <div className="page" style={{maxWidth:1400}}>
@@ -197,7 +260,7 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
         <div style={{flex:'1 1 auto'}}>
           <h2 className="page-title"><ScanLine size={22}/> Dept Incharge{activeDept ? ` — ${deptLabel}` : ''}</h2>
           <div className="page-sub" style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
-            {profile?.centre} · {schedule?.name||''}
+            {deptLabel} · {schedule?.name||''}
             {queued.filter(q=>!q.synced&&!q.failed).length > 0 && (
               <span className="pill pill-amber" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
                 {syncing ? <RefreshCw size={10} className="spin"/> : <WifiOff size={10}/>}
@@ -216,7 +279,11 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
             {myDeptIds.map(id=> <option key={id} value={id}>{deptMap.get(id)?.name||id}</option>)}
           </select>}
         </div>
-        <button onClick={exportList} className="btn btn-primary" style={{height:36}}><Download size={14}/> Export</button>
+        {/* No Export on the Scanning tab: `exportList` reads `filteredList`, so
+            the button used to sit there silently shipping the COMPLETE LIST
+            workbook while the operator believed they were exporting the scans
+            they were looking at. */}
+        {tab !== 'scan' && <button onClick={exportList} className="btn btn-primary" style={{height:36}}><Download size={14}/> Export</button>}
       </div>
 
       <div style={{display:'flex', gap:6, marginBottom:12, flexWrap:'wrap'}}>
@@ -260,6 +327,38 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
             <span style={{fontSize:'0.8rem', color:'#64748b'}}>{filteredList.length} {TAB_LABEL[tab]||'total'}</span>
           </div>
           {centreFilter && <div style={{fontSize:'0.75rem', color:'#b45309', marginBottom:8}}>Centre: <strong>{centreFilter}</strong> · {(tab==='absent'?absentees:tab==='present'?present:myDeployedEnriched).filter(r=>r.centre===centreFilter).length} {TAB_LABEL[tab]||'total'} before search</div>}
+          {/* A load failure is a load failure, not a missing assignment. Kept
+              inline (not a full-page return) so the last-good lists and the
+              L-43 "showing last data" pin still render — the operator can see
+              what is stale instead of losing the page. */}
+          {loadError && !loading && (
+            <div role="alert" style={{display:'flex', gap:8, alignItems:'center', flexWrap:'wrap', background:'#fef2f2', border:'1px solid #fecaca', color:'#b91c1c', borderRadius:8, padding:'0.5rem 0.7rem', marginBottom:8, fontSize:'0.78rem'}}>
+              <AlertTriangle size={14}/>
+              <span>
+                Could not reload your departments: <strong>{loadError}</strong>. This is a load
+                failure, not a missing assignment — nothing has been provisioned incorrectly.
+              </span>
+            </div>
+          )}
+
+          {/* Defense in depth (v52). A dept_incharge whose grant RESOLVES but
+              whose `deployments` read returns nothing is the signature of an
+              un-migrated read policy, NOT of an empty department: `get_my_dept_ids`
+              is SECURITY DEFINER and would report the grant fine, while the RLS
+              `centre = ANY(get_my_subtree_centres())` arm silently denies every
+              row because a dept_incharge has no centre. Say so, instead of
+              rendering a calm "No sewadars in this dept". */}
+          {myDeptIds.length > 0 && deployments.length === 0 && !loading && !loadError && (
+            <div role="status" style={{display:'flex', gap:8, alignItems:'center', flexWrap:'wrap', background:'#fffbeb', border:'1px solid #fde68a', color:'#92400e', borderRadius:8, padding:'0.5rem 0.7rem', marginBottom:8, fontSize:'0.78rem'}}>
+              <AlertTriangle size={14}/>
+              <span>
+                You are assigned to <strong>{myDeptIds.length}</strong> department{myDeptIds.length===1?'':'s'} for this schedule, but
+                <strong> no deployments are visible</strong>. Either this department genuinely has nobody deployed to it yet, or the
+                database read policy for Dept Incharge has not been updated — ask the ASO office to run
+                <code style={{marginLeft:4}}> sql/v52_dept_incharge_read_access.sql</code>.
+              </span>
+            </div>
+          )}
           <div className="table-wrap">
             <table className="table">
               <thead><tr><th>#</th><th>Centre</th><th>Badge</th><th>Name</th><th>Type</th><th>Gender</th><th>Initiated</th><th>Dept</th><th>Today</th></tr></thead>

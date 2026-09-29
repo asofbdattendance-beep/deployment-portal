@@ -1290,6 +1290,15 @@ describe('invitationErrors', () => {
     expect(invitationErrors({ ...base, role: 'dept_incharge', centre: '', badge: '' }).length).toBeGreaterThan(0)
     expect(invitationErrors({ ...base, role: 'scanner', centre: '', badge: 'SC01' })).toEqual([])
   })
+  it('requires at least one department for dept_incharge (v51 department grant)', () => {
+    // badge but no department → error
+    expect(invitationErrors({ ...base, role: 'dept_incharge', centre: '', badge: 'FB01', deptIds: [] }).length).toBeGreaterThan(0)
+    // with a department → valid
+    expect(invitationErrors({ ...base, role: 'dept_incharge', centre: '', badge: 'FB01', deptIds: ['d1'] })).toEqual([])
+  })
+  it('does not require a department for scanner (v51 is dept_incharge-only)', () => {
+    expect(invitationErrors({ ...base, role: 'scanner', centre: '', badge: 'SC01', deptIds: [] })).toEqual([])
+  })
 })
 
 describe('isUuid', () => {

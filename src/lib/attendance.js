@@ -716,3 +716,102 @@ export function timeAgo(tsMs, nowMs = Date.now()) {
   if (h < 48) return `${h}h ago`
   return `${Math.floor(h / 24)}d ago`
 }
+
+/**
+ * Headline counts for a department incharge's dashboard (v51).
+ *
+ * The server already resolved the caller's scope (their departments, across
+ * every centre), so these rows are the department's own — this only folds them
+ * into the tile numbers. The two inputs come from two DIFFERENT shapes and the
+ * asymmetry is the whole reason this function exists:
+ *
+ *   dailyRaw — `attendance_daily_summary`: per centre × department, columns
+ *              expected / present / absent / open_now. "Today" is a point in
+ *              time, and the denominator is deployed sewadars, so this is the
+ *              tile set that matches the ask ("total count present absent").
+ *   visitRaw — `attendance_visit_summary`: per centre × department, columns
+ *              deployed / ever_present / never_present / open_now. Present
+ *              means "scanned at least once in the visit", which is NOT the
+ *              same as present today — keeping the two labelled apart stops
+ *              "47 present on the visit" being read as "present right now".
+ *
+ * Rows are summed across centres, and a NULL department is skipped rather than
+ * counted into a department nobody is named for.
+ *
+ * @param {Array<object>} dailyRaw attendance_daily_summary rows
+ * @param {Array<object>} visitRaw attendance_visit_summary rows
+ * @returns {{today: object, visit: object, byDepartment: Array<object>}}
+ */
+export function deptInchargeKpis(dailyRaw, visitRaw) {
+  const pct = (n, d) => (d > 0 ? Math.round((n / d) * 100) : 0)
+
+  const daily = (Array.isArray(dailyRaw) ? dailyRaw : []).filter((r) => r && r.department_id)
+  const today = daily.reduce(
+    (t, r) => ({
+      deployed: t.deployed + (Number(r.expected) || 0),
+      present: t.present + (Number(r.present) || 0),
+      absent: t.absent + (Number(r.absent) || 0),
+      openNow: t.openNow + (Number(r.open_now) || 0),
+    }),
+    { deployed: 0, present: 0, absent: 0, openNow: 0 }
+  )
+  today.rate = pct(today.present, today.deployed)
+  today.band = rateBand(today.rate)
+
+  const visit = (Array.isArray(visitRaw) ? visitRaw : []).filter((r) => r && r.department_id)
+  const whole = visit.reduce(
+    (t, r) => ({
+      deployed: t.deployed + (Number(r.deployed) || 0),
+      present: t.present + (Number(r.ever_present) || 0),
+      absent: t.absent + (Number(r.never_present) || 0),
+      openNow: t.openNow + (Number(r.open_now) || 0),
+    }),
+    { deployed: 0, present: 0, absent: 0, openNow: 0 }
+  )
+  whole.rate = pct(whole.present, whole.deployed)
+  whole.band = rateBand(whole.rate)
+
+  // Per-department breakdown. The two sources are keyed by department_id, so a
+  // missing counterpart leaves that side at zero rather than dropping the
+  // department — the tiles must always add up to the visible breakdown.
+  const byId = new Map()
+  const slot = (r) => {
+    const id = r.department_id
+    if (!byId.has(id)) {
+      byId.set(id, { department_id: id, deptName: r.dept_name || '—', today: null, visit: null })
+    }
+    return byId.get(id)
+  }
+  for (const r of daily) {
+    const row = slot(r)
+    row.deptName = r.dept_name || row.deptName
+    row.today = {
+      deployed: (Number(r.expected) || 0),
+      present: (Number(r.present) || 0),
+      absent: (Number(r.absent) || 0),
+    }
+  }
+  for (const r of visit) {
+    const row = slot(r)
+    row.deptName = r.dept_name || row.deptName
+    row.visit = {
+      deployed: (Number(r.deployed) || 0),
+      present: (Number(r.ever_present) || 0),
+      absent: (Number(r.never_present) || 0),
+    }
+  }
+  const byDepartment = [...byId.values()]
+    .map((row) => {
+      const t = row.today || { deployed: 0, present: 0, absent: 0 }
+      const v = row.visit || { deployed: 0, present: 0, absent: 0 }
+      return {
+        department_id: row.department_id,
+        deptName: row.deptName,
+        today: { ...t, rate: pct(t.present, t.deployed), band: rateBand(pct(t.present, t.deployed)) },
+        visit: { ...v, rate: pct(v.present, v.deployed), band: rateBand(pct(v.present, v.deployed)) },
+      }
+    })
+    .sort((a, b) => a.deptName.localeCompare(b.deptName))
+
+  return { today, visit: whole, byDepartment }
+}

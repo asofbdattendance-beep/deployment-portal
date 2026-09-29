@@ -5,8 +5,9 @@ import { anomalyCounts, UNASSIGNED_CENTRE } from '../lib/attendance'
 import { todayStrIST } from '../lib/scannerUtils'
 import { exportWorkbook, fileSlug } from '../lib/excel'
 import {
-  ShieldAlert, Download, Lock, RefreshCw, Loader2, Search,
+  ShieldAlert, Download, Lock, RefreshCw, Loader2, Search, ArrowUpRight,
 } from 'lucide-react'
+import { reportRealtimeStatus } from '../lib/realtime'
 
 /**
  * The five v1 anomaly rules, in one place. `label` is what the operator reads,
@@ -73,7 +74,7 @@ const centreOf = (r) => r?.sewadar_centre || UNASSIGNED_CENTRE
  * it)". So the default is deliberately the whole visit, and a real empty
  * result is a statement about the visit, not about one day.
  */
-export default function AnomaliesPage({ schedules, scheduleId, onNavigate: _onNavigate }) {
+export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }) {
   const toast = useToast()
   const schedule = schedules.find((s) => s.id === scheduleId)
 
@@ -96,7 +97,9 @@ export default function AnomaliesPage({ schedules, scheduleId, onNavigate: _onNa
 
   // ─── Load ───
   const load = useCallback(async () => {
-    if (!scheduleId) return
+    // Clear the spinner on the no-schedule path too. Leaving `loading` true
+    // here latched the page on its spinner with no timeout and no error.
+    if (!scheduleId) { setLoading(false); return }
     const seq = ++seqRef.current
     setLoading(true)
     try {
@@ -159,7 +162,7 @@ export default function AnomaliesPage({ schedules, scheduleId, onNavigate: _onNa
       // L-40: realtime membership is not guaranteed — a dead channel
       // used to fail silently. Name the state so it lands in devtools.
       .subscribe((status) => {
-        if (status !== 'SUBSCRIBED') console.warn('[anomalies] realtime ' + status + ' — data may be stale until refresh')
+        reportRealtimeStatus('anomalies', status, alive)
       })
     return () => { alive = false; if (timer) clearTimeout(timer); supabase.removeChannel(channel) }
   }, [scheduleId, load])
@@ -298,6 +301,8 @@ export default function AnomaliesPage({ schedules, scheduleId, onNavigate: _onNa
     )
   }
 
+  const go = (target, payload) => onNavigate?.(target, payload)
+
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
       <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
@@ -313,6 +318,11 @@ export default function AnomaliesPage({ schedules, scheduleId, onNavigate: _onNa
             </button>
             <button onClick={exportExcel} disabled={exporting || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export Excel
+            </button>
+            {/* The dashboard deep-links here for a rule; the jump used to be
+                one-way because this page discarded the onNavigate prop. */}
+            <button onClick={() => go('dashboard')} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
+              <ArrowUpRight size={12} /> Back to dashboard
             </button>
             {filtering && (
               <span className="pill pill-indigo" title="The table and the Excel export show this filtered set">

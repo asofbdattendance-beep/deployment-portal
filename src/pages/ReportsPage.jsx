@@ -23,6 +23,7 @@ import {
   BarChart3, Users, Radio, Download, Search,
   RefreshCw, Loader2, AlertTriangle, Lock, ChevronRight, ChevronDown,
 } from 'lucide-react'
+import { reportRealtimeStatus } from '../lib/realtime'
 
 // Rate band → pill colour. One place, copied verbatim from AttendancePage so the
 // two dashboards read the same number the same way.
@@ -115,7 +116,7 @@ function centreMatches(value, filterCentre) {
  * single physical scan venue — it is the only centre value that may be grouped
  * or filtered on here. `dp_attendance_sessions.centre` (the venue) is never read.
  */
-export default function ReportsPage({ schedules, scheduleId, onNavigate, initialCentre }) {
+export default function ReportsPage({ schedules = [], scheduleId, onNavigate, initialCentre }) {
   const toast = useToast()
   const schedule = schedules.find((s) => s.id === scheduleId)
 
@@ -162,7 +163,9 @@ export default function ReportsPage({ schedules, scheduleId, onNavigate, initial
 
   // ─── Load. The two RPCs are independent, so fire them together. ───
   const load = useCallback(async () => {
-    if (!scheduleId) return
+    // Clear the spinner on the no-schedule path too. Leaving `loading` true
+    // here latched the page on its spinner with no timeout and no error.
+    if (!scheduleId) { setLoading(false); return }
     const seq = ++seqRef.current
     setLoading(true)
     try {
@@ -254,7 +257,7 @@ export default function ReportsPage({ schedules, scheduleId, onNavigate, initial
       // L-40: realtime membership is not guaranteed — a dead channel
       // used to fail silently. Name the state so it lands in devtools.
       .subscribe((status) => {
-        if (status !== 'SUBSCRIBED') console.warn('[reports] realtime ' + status + ' — data may be stale until refresh')
+        reportRealtimeStatus('reports', status, alive)
       })
     return () => { alive = false; if (timer) clearTimeout(timer); supabase.removeChannel(channel) }
   }, [scheduleId, load])

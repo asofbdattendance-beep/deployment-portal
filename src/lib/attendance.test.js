@@ -30,6 +30,7 @@ import {
   anomalyCounts,
   scannerStatus,
   timeAgo,
+  deptInchargeKpis,
 } from './attendance'
 
 /* ─── sessionMinutes ─── */
@@ -888,8 +889,97 @@ describe('sparse and empty inputs (robustness + branch coverage)', () => {
     expect(flat[0].isParent).toBe(false)
     expect(flat[0].total.deployed).toBe(4)
   })
+  it('buildCentreTree tolerates non-array rows as well as a missing list', () => {
+    // The rows guard and the centres guard are independent: a caller that
+    // hands over `null` rows must get an empty tree, not a throw.
+    expect(buildCentreTree(null, TREE_CENTRES)).toEqual([])
+    expect(buildCentreTree(undefined, undefined)).toEqual([])
+  })
   it('rootCentreOf tolerates a missing centres list', () => {
     expect(rootCentreOf(null, 'DELHI-1')).toBe('DELHI-1')
     expect(rootCentreOf(undefined, null)).toBe(UNASSIGNED_CENTRE)
+  })
+})
+
+/* ─── v51 dept-incharge dashboard ─── */
+describe('deptInchargeKpis', () => {
+  it('sums today + visit across centres and computes rates', () => {
+    const k = deptInchargeKpis(
+      [
+        { centre: 'DELHI', department_id: 'd1', dept_name: 'Traffic', expected: 10, present: 8, absent: 2, open_now: 1 },
+        { centre: 'NOIDA', department_id: 'd1', dept_name: 'Traffic', expected: 6, present: 4, absent: 2, open_now: 0 },
+      ],
+      [
+        { centre: 'DELHI', department_id: 'd1', dept_name: 'Traffic', deployed: 16, ever_present: 15, never_present: 1, open_now: 1 },
+      ]
+    )
+    expect(k.today).toMatchObject({ deployed: 16, present: 12, absent: 4, openNow: 1, rate: 75, band: 'partial' })
+    expect(k.visit).toMatchObject({ deployed: 16, present: 15, absent: 1, rate: 94, band: 'partial' })
+  })
+
+  it('keeps visit present (ever_present) distinct from today present', () => {
+    const k = deptInchargeKpis(
+      [{ centre: 'C', department_id: 'd1', dept_name: 'X', expected: 10, present: 1, absent: 9, open_now: 0 }],
+      [{ centre: 'C', department_id: 'd1', dept_name: 'X', deployed: 10, ever_present: 10, never_present: 0, open_now: 0 }]
+    )
+    expect(k.today.present).toBe(1)
+    expect(k.visit.present).toBe(10)
+  })
+
+  it('returns zeroed tiles (rate 0) for empty input rather than NaN', () => {
+    const k = deptInchargeKpis([], [])
+    expect(k.today).toMatchObject({ deployed: 0, present: 0, absent: 0, openNow: 0, rate: 0, band: 'none' })
+    expect(k.visit).toMatchObject({ deployed: 0, present: 0, absent: 0, rate: 0 })
+    expect(k.byDepartment).toEqual([])
+  })
+
+  it('tolerates non-array / null input', () => {
+    expect(() => deptInchargeKpis(null, undefined)).not.toThrow()
+    expect(deptInchargeKpis(null, undefined).today.deployed).toBe(0)
+  })
+
+  it('builds a per-department breakdown sorted by name', () => {
+    const k = deptInchargeKpis(
+      [
+        { centre: 'C', department_id: 'd2', dept_name: 'Zoom', expected: 4, present: 2, absent: 2, open_now: 0 },
+        { centre: 'C', department_id: 'd1', dept_name: 'Anmol', expected: 6, present: 6, absent: 0, open_now: 0 },
+      ],
+      [
+        { centre: 'C', department_id: 'd1', dept_name: 'Anmol', deployed: 6, ever_present: 6, never_present: 0, open_now: 0 },
+      ]
+    )
+    expect(k.byDepartment.map((d) => d.deptName)).toEqual(['Anmol', 'Zoom'])
+    expect(k.byDepartment[0].today).toMatchObject({ deployed: 6, present: 6, rate: 100, band: 'full' })
+    // a department with no visit row still appears, zeroed on that side
+    expect(k.byDepartment[1].visit).toMatchObject({ deployed: 0, present: 0, rate: 0 })
+  })
+
+  it('skips rows with no department_id instead of counting them into a phantom bucket', () => {
+    const k = deptInchargeKpis(
+      [{ centre: 'C', department_id: null, dept_name: null, expected: 99, present: 99, absent: 0, open_now: 0 }],
+      []
+    )
+    expect(k.today.deployed).toBe(0)
+    expect(k.byDepartment).toEqual([])
+  })
+
+  // Every `|| 0` and `|| '—'` fallback in the aggregator, in BOTH the total
+  // tiles and the per-department breakdown. Reachable for real: a DB still on
+  // an older RPC signature returns a narrower row, and Postgres hands back
+  // NULL rather than 0 for a bigint count column. The failure this pins is
+  // NaN in a KPI tile and a department labelled "undefined" — not a crash.
+  it('renders null counters and a null department name without NaN or "undefined"', () => {
+    const k = deptInchargeKpis(
+      [{ centre: 'C', department_id: 'd9', dept_name: null, expected: null, present: null, absent: 0, open_now: 0 }],
+      [{ centre: 'C', department_id: 'd9', dept_name: null, deployed: null, ever_present: null, never_present: 0, open_now: 0 }]
+    )
+    expect(k.today).toMatchObject({ deployed: 0, present: 0, absent: 0, openNow: 0, rate: 0, band: 'none' })
+    expect(k.visit).toMatchObject({ deployed: 0, present: 0, absent: 0, rate: 0, band: 'none' })
+    expect(k.byDepartment).toHaveLength(1)
+    expect(k.byDepartment[0].deptName).toBe('—')
+    expect(k.byDepartment[0].today).toMatchObject({ deployed: 0, present: 0, absent: 0, rate: 0 })
+    expect(k.byDepartment[0].visit).toMatchObject({ deployed: 0, present: 0, absent: 0, rate: 0 })
+    // Nothing anywhere may read "NaN" or "undefined".
+    expect(JSON.stringify(k)).not.toMatch(/NaN|undefined/)
   })
 })

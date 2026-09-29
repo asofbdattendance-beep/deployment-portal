@@ -8,7 +8,11 @@
 // Deploy once (see bottom), then Users → "Create login directly" just works.
 //
 // Request body: { email, name, role, custom_role_id?, centre?, badge_number?,
-//   password? } — when the superadmin sets a password it is used as-is
+//   password?, dept_schedule_id?, dept_ids? }
+//   v51: a `dept_incharge` also carries `dept_schedule_id` + `dept_ids` — the
+//   DEPARTMENT grant it oversees, applied in the same privileged step (the anon
+//   client cannot write it; see 5b).
+//   When the superadmin sets a password it is used as-is
 //   (min 8 chars); otherwise a one-time temporary password is generated.
 // Success:      { ok, user_id, tempPassword? } (present only when generated)
 // Errors:       { error } with 400/401/403/404/409 status.
@@ -146,13 +150,50 @@ async function handler(req) {
       return json({ error: rowErr.message }, 400)
     }
 
+    // 5b. v51 department grant. A dept_incharge is scoped by DEPARTMENT for a
+    // schedule (across every centre), so the grant is part of provisioning, not
+    // a later edit. It must be written HERE: the anon client cannot insert
+    // `department_incharge_assignments` (its RLS allows aso/super_admin only),
+    // and this function already holds the service role. A failure rolls the
+    // whole login back — a dept_incharge with no department would come up with
+    // an empty dashboard and an empty scan list.
+    const deptSchedule = String(body.dept_schedule_id || '').trim() || null
+    const deptIds = Array.isArray(body.dept_ids) ? body.dept_ids.filter(Boolean) : []
+    if (role === 'dept_incharge') {
+      if (!deptSchedule) {
+        await admin.auth.admin.deleteUser(created.user.id).catch(() => {})
+        await admin.from('portal_users').delete().eq('auth_id', created.user.id).catch(() => {})
+        return json({ error: 'Pick the schedule this department applies to' }, 400)
+      }
+      if (deptIds.length === 0) {
+        await admin.auth.admin.deleteUser(created.user.id).catch(() => {})
+        await admin.from('portal_users').delete().eq('auth_id', created.user.id).catch(() => {})
+        return json({ error: 'Pick at least one department for this role' }, 400)
+      }
+      const { error: assignErr } = await admin.from('department_incharge_assignments').upsert(
+        deptIds.map((department_id) => ({
+          schedule_id: deptSchedule,
+          department_id,
+          badge_number: badge,
+          assigned_by: 'create-login',
+        })),
+        { onConflict: 'schedule_id,department_id,badge_number' }
+      )
+      if (assignErr) {
+        await admin.from('department_incharge_assignments').delete().eq('schedule_id', deptSchedule).eq('badge_number', badge).catch(() => {})
+        await admin.auth.admin.deleteUser(created.user.id).catch(() => {})
+        await admin.from('portal_users').delete().eq('auth_id', created.user.id).catch(() => {})
+        return json({ error: assignErr.message }, 400)
+      }
+    }
+
     // 6. Audit (best-effort).
     await admin.from('audit_log').insert({
       action: 'CREATE_LOGIN',
       table_name: 'portal_users',
       record_id: null,
       schedule_id: null,
-      payload: { email, role, centre, via: 'edge-function' },
+      payload: { email, role, centre, departments: deptIds.length, via: 'edge-function' },
       acted_by: me.name || null,
     }).then(() => {}, () => {})
 

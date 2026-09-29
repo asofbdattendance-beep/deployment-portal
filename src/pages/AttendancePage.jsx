@@ -25,6 +25,7 @@ import {
   ScanLine, Users, Clock, Download, Search, RefreshCw, Loader2,
   AlertTriangle, CheckCircle2, Radio, Lock,
 } from 'lucide-react'
+import { reportRealtimeStatus } from '../lib/realtime'
 
 // Rate band → pill colour. One place, used by both the sewadar and daily tables.
 const BAND_PILL = { full: 'pill-green', partial: 'pill-blue', low: 'pill-amber', none: 'pill-gray' }
@@ -80,7 +81,7 @@ function sessionDuration(r) {
  * receives zero rows (fail-closed). Do NOT add a client-side role filter —
  * it would only mask a DB scope bug.
  */
-export default function AttendancePage({ schedules, scheduleId }) {
+export default function AttendancePage({ schedules = [], scheduleId }) {
   const toast = useToast()
   const schedule = schedules.find((s) => s.id === scheduleId)
 
@@ -124,7 +125,9 @@ export default function AttendancePage({ schedules, scheduleId }) {
 
   // ─── Load. The three RPCs are independent, so fire them together. ───
   const load = useCallback(async () => {
-    if (!scheduleId) return
+    // Clear the spinner on the no-schedule path too. Leaving `loading` true
+    // here latched the page on its spinner with no timeout and no error.
+    if (!scheduleId) { setLoading(false); return }
     const seq = ++seqRef.current
     setLoading(true)
     try {
@@ -218,7 +221,7 @@ export default function AttendancePage({ schedules, scheduleId }) {
       // L-40: realtime membership is not guaranteed — a dead channel
       // used to fail silently. Name the state so it lands in devtools.
       .subscribe((status) => {
-        if (status !== 'SUBSCRIBED') console.warn('[attendance] realtime ' + status + ' — data may be stale until refresh')
+        reportRealtimeStatus('attendance', status, alive)
       })
     return () => { alive = false; if (timer) clearTimeout(timer); supabase.removeChannel(channel) }
   }, [scheduleId, load])
@@ -312,8 +315,13 @@ export default function AttendancePage({ schedules, scheduleId }) {
     const parts = []
     if (filterCentre !== 'all') parts.push(filterCentre)
     if (search.trim()) parts.push(`"${search.trim()}"`)
+    // Scanners carry no department, so a department filter CANNOT narrow this
+    // sheet — the old comment claimed it did, which meant a dept-filtered
+    // Scanner Ops export was byte-identical to an unfiltered one. Say so
+    // rather than let a filtered export pass for a full one (A4).
+    if (filterDept !== 'all') parts.push('dept filter does not apply to scanners')
     return parts.length ? ` · ${parts.join(' · ')}` : ''
-  }, [filterCentre, search])
+  }, [filterCentre, search, filterDept])
 
   // ─── Export — one sheet per tab, ALL honouring the same active filters,
   // built through the shared excel.js driver (L-24/L-25) so filenames are

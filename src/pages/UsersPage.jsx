@@ -35,6 +35,54 @@ function newCode() {
   }
 }
 
+// v51 dept-incharge department grant (department-scoped, per schedule). A single
+// reusable field pair so the invite, direct-create and edit forms cannot drift.
+// Renders nothing unless the role is dept_incharge.
+function DeptAssignFields({ role, schedules, departments, schedule, deptIds, onSchedule, onDepts, labelStyle, required }) {
+  if (role !== 'dept_incharge') return null
+  const toggle = (id) => {
+    const list = Array.isArray(deptIds) ? deptIds : []
+    onDepts(list.includes(id) ? list.filter(x => x !== id) : [...list, id])
+  }
+  const openSchedules = schedules.filter(s => s.status !== 'done')
+  return (
+    <>
+      <div>
+        <label style={labelStyle}>Schedule{required ? ' *' : ''}</label>
+        <select value={schedule || ''} onChange={e => { onSchedule(e.target.value); onDepts([]) }} className="select" style={{ width: '100%' }}>
+          <option value="">— select schedule —</option>
+          {openSchedules.map(s => <option key={s.id} value={s.id}>{s.name}{s.status === 'done' ? ' (done)' : ''}</option>)}
+        </select>
+      </div>
+      <div style={{ gridColumn: '1 / -1' }}>
+        <label style={labelStyle}>Departments{required ? ' *' : ''} <span style={{ fontWeight: 400, color: '#94a3b8' }}>(they oversee this department across all centres)</span></label>
+        {!schedule ? (
+          <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Pick a schedule first.</div>
+        ) : (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', maxHeight: 130, overflowY: 'auto', padding: '0.4rem', border: '1px solid #e2e8f0', borderRadius: 8 }}>
+            {departments.map(d => {
+              const on = (deptIds || []).includes(d.id)
+              return (
+                <button
+                  type="button"
+                  key={d.id}
+                  onClick={() => toggle(d.id)}
+                  className={`pill ${on ? 'pill-green' : 'pill-gray'}`}
+                  style={{ cursor: 'pointer', border: 'none', fontSize: '0.72rem' }}
+                  aria-pressed={on}
+                >
+                  {on ? '✓ ' : ''}{d.name}
+                </button>
+              )
+            })}
+            {departments.length === 0 && <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>No departments exist yet.</div>}
+          </div>
+        )}
+      </div>
+    </>
+  )
+}
+
 function PanelCard({ title, icon: Icon, sub, children, action }) {
   return (
     <section className="card">
@@ -79,6 +127,12 @@ export default function UsersPage() {
   const [customRoles, setCustomRoles] = useState([])
   const [invites, setInvites] = useState([])
   const [centres, setCentres] = useState([])
+  // v51 dept-incharge department grant — the reference lists the picker needs
+  // and the assignments already written, so the edit form can show the current
+  // grant and diff it.
+  const [schedules, setSchedules] = useState([])
+  const [departments, setDepartments] = useState([])
+  const [assignments, setAssignments] = useState([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(null)
 
@@ -91,7 +145,7 @@ export default function UsersPage() {
   const [saving, setSaving] = useState(false)
   const [confirm, setConfirm] = useState(null) // { title, body, confirmLabel, danger, onConfirm }
 
-  const [inviteForm, setInviteForm] = useState({ name: '', email: '', role: 'centre_user', customId: '', centre: '', badge: '', days: '7', code: newCode() })
+  const [inviteForm, setInviteForm] = useState({ name: '', email: '', role: 'centre_user', customId: '', centre: '', badge: '', deptSchedule: '', deptIds: [], days: '7', code: newCode() })
   const [creating, setCreating] = useState(false)
   // Direct provisioning: search a badge from the database, pick the sewadar,
   // set role + password, create. Name/centre/badge come from the picked
@@ -100,7 +154,7 @@ export default function UsersPage() {
   const [badgeHits, setBadgeHits] = useState([])
   const [badgeSearching, setBadgeSearching] = useState(false)
   const [picked, setPicked] = useState(null) // { badge_number, sewadar_name, centre, is_vss }
-  const [directForm, setDirectForm] = useState({ email: '', role: 'centre_user', customId: '', password: '', showPw: false })
+  const [directForm, setDirectForm] = useState({ email: '', role: 'centre_user', customId: '', password: '', showPw: false, deptSchedule: '', deptIds: [] })
   const [directBusy, setDirectBusy] = useState(false)
   const [createdCred, setCreatedCred] = useState(null) // { email, tempPassword } — shown once
 
@@ -181,16 +235,24 @@ export default function UsersPage() {
   const load = useCallback(async () => {
     setLoadError(null)
     try {
-      const [u, r, inv, c] = await Promise.all([
+      const [u, r, inv, c, scheds, depts, assigns] = await Promise.all([
         fetchAllRows('portal_users', '*', null, 'id'),
         fetchAllRows('custom_roles', '*', null, 'id'),
         fetchAllRows('portal_invitations', '*', null, 'id'),
         fetchCentres().catch(() => []),
+        // v51: a dept_incharge is scoped by department for a schedule, so the
+        // Users page needs both reference lists to render the picker.
+        fetchAllRows('deployment_schedules', 'id, name, status', null, 'created_at').catch(() => []),
+        fetchAllRows('deployment_departments', 'id, name', null, 'name').catch(() => []),
+        fetchAllRows('department_incharge_assignments', '*', null, 'created_at').catch(() => []),
       ])
       setUsers(u || [])
       setCustomRoles(r || [])
       setInvites((inv || []).slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at)))
       setCentres((c || []).map(x => x.name || x).filter(Boolean).sort())
+      setSchedules(scheds || [])
+      setDepartments(depts || [])
+      setAssignments(assigns || [])
     } catch (e) {
       setLoadError(e?.message || 'Could not load users')
     } finally {
@@ -207,6 +269,7 @@ export default function UsersPage() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, () => load().catch(() => {}))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'custom_roles' }, () => load().catch(() => {}))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_invitations' }, () => load().catch(() => {}))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'department_incharge_assignments' }, () => load().catch(() => {}))
       .subscribe()
     return () => { supabase.removeChannel(channel) }
   }, [load])
@@ -220,6 +283,33 @@ export default function UsersPage() {
     const custom = u.custom_role_id ? customById[u.custom_role_id] : null
     return custom ? custom.name : roleLabel(u.role)
   }, [customById])
+
+  // v51: department id → name for the picker and the read-only summary.
+  const deptName = useCallback((id) => departments.find(d => d.id === id)?.name || id || '—', [departments])
+
+  // The departments a badge currently holds for a schedule — the existing grant
+  // a create/edit form is editing, so the picker opens on the truth.
+  const deptsForBadge = useCallback((badge, schedule) => {
+    if (!badge || !schedule) return []
+    return assignments.filter(a => a.badge_number === badge && a.schedule_id === schedule).map(a => a.department_id)
+  }, [assignments])
+
+  // Replace a badge's whole department grant for one schedule. Written as a
+  // delete-then-insert rather than an upsert so REMOVING a department actually
+  // sticks — the point of the picker is to be able to take one away.
+  const saveAssignments = useCallback(async (schedule, badge, deptIds) => {
+    const list = Array.isArray(deptIds) ? deptIds.filter(Boolean) : []
+    if (!schedule || !badge) return
+    const del = await supabase.from('department_incharge_assignments')
+      .delete().eq('schedule_id', schedule).eq('badge_number', badge)
+    if (del.error) throw del.error
+    if (list.length === 0) return
+    const { error } = await supabase.from('department_incharge_assignments').upsert(
+      list.map(department_id => ({ schedule_id: schedule, department_id, badge_number: badge, assigned_by: 'users-page' })),
+      { onConflict: 'schedule_id,department_id,badge_number' }
+    )
+    if (error) throw error
+  }, [])
   const activeSupers = useMemo(
     () => users.filter(u => u.role === 'super_admin' && u.is_active !== false),
     [users]
@@ -249,12 +339,21 @@ export default function UsersPage() {
 
   const openEdit = (u) => {
     setEditUser(u)
+    // v51: seed the department grant from what is actually written, so the
+    // picker opens on the truth and removing a department is possible. Badge is
+    // the join key, so a change of badge must NOT keep the old departments.
+    const badge = u.badge_number || ''
+    const seeded = u.role === 'dept_incharge' && badge
+      ? deptsForBadge(badge, schedules[0]?.id)
+      : []
     setEditForm({
       name: u.name || '',
       role: u.role,
       customId: u.custom_role_id || '',
       centre: u.centre || '',
-      badge: u.badge_number || '',
+      badge,
+      deptSchedule: u.role === 'dept_incharge' ? (assignments.find(a => a.badge_number === badge)?.schedule_id || schedules[0]?.id || '') : '',
+      deptIds: seeded,
     })
   }
 
@@ -265,6 +364,12 @@ export default function UsersPage() {
     if (!SYSTEM_ROLES.includes(editForm.role)) { toast.error('Pick a valid role'); return }
     if (CENTRE_ROLES.includes(editForm.role) && !editForm.centre.trim()) { toast.error('Pick a centre for this role'); return }
     if (BADGE_ROLES.includes(editForm.role) && !editForm.badge.trim()) { toast.error('Enter a badge number for this role'); return }
+    // v51: a dept_incharge with no department grant comes up with an empty
+    // dashboard and an empty scan list, which reads as a broken app.
+    if (editForm.role === 'dept_incharge') {
+      if (!editForm.deptSchedule) { toast.error('Pick the schedule this department applies to'); return }
+      if (!editForm.deptIds.length) { toast.error('Pick at least one department for this role'); return }
+    }
     const custom = editForm.customId ? customById[editForm.customId] : null
     if (editForm.customId && (!custom || custom.base_role !== editForm.role)) { toast.error('That custom role belongs to a different base role'); return }
     // Last-super-admin guard: no change may leave zero active super_admins,
@@ -301,6 +406,17 @@ export default function UsersPage() {
       }
       const { error } = await supabase.from('portal_users').update(payload).eq('id', editUser.id)
       if (error) { toast.error(error.message); return }
+      // v51: replace the department grant for this badge + schedule. A role
+      // change away from dept_incharge clears the grant entirely, otherwise a
+      // promoted-to-something-else login would keep inheriting a dashboard.
+      if (payload.role === 'dept_incharge' && editForm.deptSchedule && payload.badge_number) {
+        await saveAssignments(editForm.deptSchedule, payload.badge_number, editForm.deptIds)
+      } else if (editUser.role === 'dept_incharge' && editUser.badge_number) {
+        // Leaving the role: drop the grant for every schedule it held.
+        for (const s of schedules) {
+          await saveAssignments(s.id, editUser.badge_number, [])
+        }
+      }
       await audit('UPDATE_USER', 'portal_users', editUser.id, { email: editUser.email, ...payload })
       toast.success('Login updated')
       setEditUser(null)
@@ -362,9 +478,16 @@ export default function UsersPage() {
       role: inviteForm.role,
       centre: inviteForm.centre.trim(),
       badge: inviteForm.badge.trim(),
+      deptIds: inviteForm.deptIds,
     }
     const errs = invitationErrors(form)
     if (errs.length > 0) { toast.error(errs[0]); return }
+    // v51: the department grant is per-schedule, so an invite for a dept_incharge
+    // must also name WHICH schedule it is for — otherwise the claim trigger has
+    // no schedule to write the assignment against.
+    if (form.role === 'dept_incharge' && !inviteForm.deptSchedule) {
+      toast.error('Pick the schedule this department applies to'); return
+    }
     const custom = inviteForm.customId ? customById[inviteForm.customId] : null
     if (inviteForm.customId && (!custom || custom.base_role !== form.role)) { toast.error('That custom role belongs to a different base role'); return }
     if (invites.some(i => !i.claimed_at && String(i.email || '').toLowerCase() === form.email.toLowerCase())) {
@@ -381,6 +504,10 @@ export default function UsersPage() {
         custom_role_id: custom ? custom.id : null,
         centre: form.centre || null,
         badge_number: form.badge || null,
+        // v51: the grant travels WITH the invite; trg_grant_incharge_on_claim
+        // turns it into department_incharge_assignments rows at claim time.
+        schedule_id: form.role === 'dept_incharge' ? (inviteForm.deptSchedule || null) : null,
+        dept_ids: form.role === 'dept_incharge' ? (form.deptIds.length ? form.deptIds : null) : null,
         code: inviteForm.code.trim().toUpperCase(),
         expires_at: new Date(Date.now() + days * 86400000).toISOString(),
         created_by: profile?.name || null,
@@ -396,7 +523,7 @@ export default function UsersPage() {
       if (error) { toast.error(error.message); return }
       await audit('CREATE_INVITE', 'portal_invitations', null, { email: payload.email, role: payload.role, centre: payload.centre })
       toast.success(`Invite created — share the code ${payload.code} with ${payload.name}`)
-      setInviteForm({ name: '', email: '', role: 'centre_user', customId: '', centre: '', badge: '', days: '7', code: newCode() })
+      setInviteForm({ name: '', email: '', role: 'centre_user', customId: '', centre: '', badge: '', deptSchedule: '', deptIds: [], days: '7', code: newCode() })
       load().catch(() => {})
     } finally {
       setCreating(false)
@@ -445,6 +572,13 @@ export default function UsersPage() {
     if (users.some(u => String(u.email || '').toLowerCase() === email.toLowerCase() && u.is_active !== false)) {
       toast.error('An active login already exists for this email'); return
     }
+    // v51: a dept_incharge needs a department grant, or the login comes up
+    // with an empty dashboard and an empty scan list. The Edge Function writes
+    // the assignment rows (it holds the service role, which RLS requires).
+    if (directForm.role === 'dept_incharge') {
+      if (!directForm.deptSchedule) { toast.error('Pick the schedule this department applies to'); return }
+      if (!directForm.deptIds.length) { toast.error('Pick at least one department for this role'); return }
+    }
     setDirectBusy(true)
     try {
       const { data, error } = await supabase.functions.invoke('create-login', {
@@ -456,6 +590,12 @@ export default function UsersPage() {
           centre: INVITE_CENTRE_ROLES.includes(directForm.role) ? picked.centre : null,
           badge_number: picked.badge_number,
           password,
+          // v51: the department grant, applied by the function in one
+          // privileged transaction. The OLD deployed function ignores these two
+          // fields, so the same write is ALSO attempted client-side below and
+          // verified — a redeploy must never be a silent prerequisite.
+          dept_schedule_id: directForm.role === 'dept_incharge' ? (directForm.deptSchedule || null) : null,
+          dept_ids: directForm.role === 'dept_incharge' ? (directForm.deptIds.length ? directForm.deptIds : null) : null,
         },
       })
       if (error) {
@@ -468,15 +608,41 @@ export default function UsersPage() {
         return
       }
       if (data?.error) { toast.error(data.error); return }
+      // v51: the grant must exist, whichever function build is deployed. Write it
+      // here too (a super_admin session passes the RLS write policy) and then
+      // VERIFY, because an undeployed-or-older function silently ignores the
+      // field and would otherwise leave a dept_incharge with an empty dashboard
+      // and an empty scan list that reads as a broken app.
+      let grantOk = true
+      if (directForm.role === 'dept_incharge') {
+        try {
+          await saveAssignments(directForm.deptSchedule, picked.badge_number, directForm.deptIds)
+          const { data: check, error: checkErr } = await supabase
+            .from('department_incharge_assignments')
+            .select('department_id')
+            .eq('schedule_id', directForm.deptSchedule)
+            .eq('badge_number', picked.badge_number)
+          if (checkErr) throw new Error(checkErr.message)
+          grantOk = Array.isArray(check) && check.length > 0
+        } catch (e) {
+          console.warn('[create-login] department grant failed:', e?.message)
+          grantOk = false
+        }
+      }
       await audit('CREATE_LOGIN', 'portal_users', null, { email, role: directForm.role, badge: picked.badge_number })
-      if (data?.tempPassword) {
+      if (!grantOk) {
+        // The login EXISTS — do not imply otherwise. Say exactly what is broken.
+        toast.error(
+          'Login created, but the department grant did not apply — that login will see an empty dashboard. Check that sql/v51_dept_incharge_department_scope.sql has been run, then re-apply the department from this page’s Edit dialog.'
+        )
+      } else if (data?.tempPassword) {
         // Older deployed function that ignored our password and generated one.
         setCreatedCred({ email, tempPassword: data.tempPassword })
       } else {
         toast.success(`Login created for ${picked.sewadar_name} — they can sign in now`)
       }
       clearPicked()
-      setDirectForm({ email: '', role: 'centre_user', customId: '', password: '', showPw: false })
+      setDirectForm({ email: '', role: 'centre_user', customId: '', password: '', showPw: false, deptSchedule: '', deptIds: [] })
       load().catch(() => {})
     } catch (e) {
       toast.error(e?.message || 'Could not create login')
@@ -608,6 +774,7 @@ export default function UsersPage() {
                   <th style={{ textAlign: 'center' }}>Role</th>
                   <th>Centre</th>
                   <th style={{ textAlign: 'center' }}>Badge</th>
+                  <th>Departments (v51)</th>
                   <th style={{ textAlign: 'center' }}>Status</th>
                   <th style={{ textAlign: 'right' }}>Actions</th>
                 </tr>
@@ -632,6 +799,19 @@ export default function UsersPage() {
                       </td>
                       <td data-label="Centre">{u.centre || '—'}</td>
                       <td data-label="Badge" style={{ textAlign: 'center', fontFamily: 'monospace', fontSize: '0.8rem' }}>{u.badge_number || '—'}</td>
+                      <td data-label="Departments" style={{ fontSize: '0.75rem' }}>
+                        {u.role === 'dept_incharge'
+                          ? (() => {
+                              const held = assignments.filter(a => a.badge_number === u.badge_number)
+                              if (!held.length) return <span style={{ color: '#b45309', fontWeight: 600 }}>none assigned</span>
+                              return held.map(a => (
+                                <span key={a.id} className="pill pill-indigo" style={{ marginRight: '0.25rem', fontSize: '0.66rem' }}>
+                                  {deptName(a.department_id)}
+                                </span>
+                              ))
+                            })()
+                          : <span style={{ color: '#94a3b8' }}>—</span>}
+                      </td>
                       <td data-label="Status" style={{ textAlign: 'center' }}>
                         <span className={`pill ${active ? 'pill-green' : 'pill-red'}`}>{active ? 'Active' : 'Suspended'}</span>
                       </td>
@@ -726,10 +906,17 @@ export default function UsersPage() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.6rem', marginTop: '0.75rem' }}>
           <div><label style={labelStyle}>Login email</label><input value={directForm.email} onChange={e => setDirectForm(f => ({ ...f, email: e.target.value }))} placeholder="login@example.com" autoComplete="off" style={inputStyle} /></div>
           <div><label style={labelStyle}>Role (permissions)</label>
-            <select value={directForm.role} onChange={e => setDirectForm(f => ({ ...f, role: e.target.value, customId: '' }))} className="select" style={{ width: '100%' }}>
+            <select value={directForm.role} onChange={e => setDirectForm(f => ({ ...f, role: e.target.value, customId: '', deptSchedule: '', deptIds: [] }))} className="select" style={{ width: '100%' }}>
               {INVITE_ROLES.map(r => <option key={r} value={r}>{roleLabel(r)}</option>)}
             </select>
           </div>
+          <DeptAssignFields
+            role={directForm.role} schedules={schedules} departments={departments}
+            schedule={directForm.deptSchedule} deptIds={directForm.deptIds}
+            onSchedule={v => setDirectForm(f => ({ ...f, deptSchedule: v }))}
+            onDepts={v => setDirectForm(f => ({ ...f, deptIds: v }))}
+            required
+          />
           <div><label style={labelStyle}>Custom role (optional)</label>
             <select value={directForm.customId} onChange={e => setDirectForm(f => ({ ...f, customId: e.target.value }))} className="select" style={{ width: '100%' }}>
               <option value="">— system role as-is —</option>
@@ -785,6 +972,13 @@ export default function UsersPage() {
             </select>
           </div>
           <div><label style={labelStyle}>Badge{['dept_incharge', 'scanner'].includes(inviteForm.role) ? ' *' : ''}</label><input value={inviteForm.badge} onChange={e => setInviteForm(f => ({ ...f, badge: e.target.value }))} placeholder="FB… / SC…" style={{ ...inputStyle, fontFamily: 'monospace' }} /></div>
+          <DeptAssignFields
+            role={inviteForm.role} schedules={schedules} departments={departments}
+            schedule={inviteForm.deptSchedule} deptIds={inviteForm.deptIds}
+            onSchedule={v => setInviteForm(f => ({ ...f, deptSchedule: v }))}
+            onDepts={v => setInviteForm(f => ({ ...f, deptIds: v }))}
+            required
+          />
           <div><label style={labelStyle}>Valid for</label>
             <select value={inviteForm.days} onChange={e => setInviteForm(f => ({ ...f, days: e.target.value }))} className="select" style={{ width: '100%' }}>
               {[['1', '1 day'], ['3', '3 days'], ['7', '7 days'], ['14', '14 days'], ['30', '30 days']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
@@ -916,13 +1110,16 @@ export default function UsersPage() {
         sub="Derived live from the app's page registry — the same list that draws the navbar. Server enforcement (RLS) mirrors it; custom roles inherit their base row."
       >
         <div className="table-wrap"><table className="table">
-          <thead><tr><th style={{ position: 'sticky', left: 0, background: '#fff', zIndex: 1 }}>Role</th>{Object.values(PAGES).map(p => <th key={p.label} style={{ textAlign: 'center', fontSize: '0.68rem' }}>{p.label}</th>)}</tr></thead>
+          <thead><tr><th style={{ position: 'sticky', left: 0, background: '#fff', zIndex: 1 }}>Role</th>{Object.entries(PAGES).map(([pk, p]) => <th key={pk} style={{ textAlign: 'center', fontSize: '0.68rem' }}>{p.label}</th>)}</tr></thead>
           <tbody>
             {SYSTEM_ROLES.map(r => (
               <tr key={r}>
                 <td data-label="Role" style={{ position: 'sticky', left: 0, background: '#fff', zIndex: 1, fontWeight: 700, fontSize: '0.8rem' }}>{roleLabel(r)}</td>
-                {Object.values(PAGES).map(p => (
-                  <td key={p.label} data-label={p.label} style={{ textAlign: 'center', color: p.roles.includes(r) ? '#15803d' : '#e2e8f0', fontWeight: 700 }}>
+                {/* Keyed by the page KEY, not its label: v51 added a second page
+                    labelled "Dashboard" (the dept_incharge landing), and two
+                    PAGES sharing a label collided as React children. */}
+                {Object.entries(PAGES).map(([pk, p]) => (
+                  <td key={pk} data-label={p.label} style={{ textAlign: 'center', color: p.roles.includes(r) ? '#15803d' : '#e2e8f0', fontWeight: 700 }}>
                     {p.roles.includes(r) ? '●' : '·'}
                   </td>
                 ))}
@@ -978,7 +1175,29 @@ export default function UsersPage() {
                     {centres.map(c => <option key={c} value={c}>{c}</option>)}
                   </select>
                 </div>
-                <div><label style={labelStyle}>Badge</label><input value={editForm.badge} onChange={e => setEditForm(f => ({ ...f, badge: e.target.value }))} style={{ ...inputStyle, fontFamily: 'monospace' }} /></div>
+                <div><label style={labelStyle}>Badge</label><input value={editForm.badge} onChange={e => setEditForm(f => ({ ...f, badge: e.target.value, deptIds: [] }))} style={{ ...inputStyle, fontFamily: 'monospace' }} /></div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '0.7rem' }}>
+                <DeptAssignFields
+                  role={editForm.role} schedules={schedules} departments={departments}
+                  schedule={editForm.deptSchedule} deptIds={editForm.deptIds}
+                  onSchedule={v => setEditForm(f => ({ ...f, deptSchedule: v, deptIds: [] }))}
+                  onDepts={v => setEditForm(f => ({ ...f, deptIds: v }))}
+                  required
+                />
+                {editForm.role === 'dept_incharge' && editUser?.badge_number && (
+                  <div style={{ fontSize: '0.72rem', color: '#64748b' }}>
+                    Currently held: {(() => {
+                      const held = assignments.filter(a => a.badge_number === editUser.badge_number)
+                      if (!held.length) return <em>none</em>
+                      return held.map(a => (
+                        <span key={a.id} style={{ marginRight: '0.4rem' }}>
+                          {schedules.find(s => s.id === a.schedule_id)?.name || a.schedule_id} → <strong>{deptName(a.department_id)}</strong>
+                        </span>
+                      ))
+                    })()}
+                  </div>
+                )}
               </div>
             </div>
             <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', marginTop: '1.25rem' }}>

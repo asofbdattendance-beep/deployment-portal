@@ -43,10 +43,14 @@ export default function ScannerPage({ schedules, scheduleId }){
       let q = supabase.from('dp_attendance_sessions').select('*')
         .eq('schedule_id',scheduleId).or(`in_date.eq.${today},out_date.eq.${today}`)
       if(myBadge) q = q.eq('in_scanner_badge',myBadge)
-      const sess = await q
+      // supabase-js RESOLVES with { data, error } — it never rejects — so a
+      // `.then(r => r.data || [])` here turned a denied/failed read into a
+      // calm "No scans by you yet today", and the amber offline pin below
+      // could only ever fire on a thrown network error.
+      const { data: sess, error: sessError } = await q
         .order('created_at',{ascending:false}).limit(10)
-        .then(r=>r.data||[])
-      setSessions(sess)
+      if (sessError) throw new Error(`Recent scans: ${sessError.message || sessError.code || 'failed'}`)
+      setSessions(Array.isArray(sess) ? sess : [])
       setOffline(false)
     } catch(e){ console.warn('[Scanner] session refresh failed — keeping last data:', e?.message); setOffline(true) }
   },[scheduleId,myBadge])

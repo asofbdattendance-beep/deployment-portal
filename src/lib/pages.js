@@ -10,6 +10,10 @@ export const PAGES = {
   alloc: { label: 'Finalize Deployment', icon: Tags, roles: ['aso', 'super_admin'] },
   deployment: { label: 'Overview', icon: Users, roles: ['aso', 'super_admin'] },
   centreLists: { label: 'Centre Lists', icon: Building2, roles: ['aso', 'super_admin'] },
+  // v51: a dept_incharge oversees a DEPARTMENT (all centres), so their landing
+  // page is a present/absent dashboard over that department. Placed BEFORE
+  // deptIncharge so it becomes the default tab for the role.
+  inchargeDashboard: { label: 'Dashboard', icon: LayoutDashboard, roles: ['dept_incharge'] },
   deptIncharge: { label: 'Dept Incharge', icon: ShieldCheck2, roles: ['dept_incharge'] },
   scanner: { label: 'Scanner', icon: ScanLine, roles: ['scanner'] },
   // attendance analytics — read-only; the DB resolves each role's own scope.

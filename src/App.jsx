@@ -38,6 +38,7 @@ const VssPage = lazy(() => import('./pages/VssPage'))
 const DeploymentAllocationPage = lazy(() => import('./pages/DeploymentAllocationPage'))
 const CentreListsPage = lazy(() => import('./pages/CentreListsPage'))
 const DeptInchargePage = lazy(() => import('./pages/DeptInchargePage'))
+const DeptInchargeDashboardPage = lazy(() => import('./pages/DeptInchargeDashboardPage'))
 const ScannerPage = lazy(() => import('./pages/ScannerPage'))
 const AttendancePage = lazy(() => import('./pages/AttendancePage'))
 const ControlPanelPage = lazy(() => import('./pages/ControlPanelPage'))
@@ -257,6 +258,7 @@ function Dashboard() {
           {currentPage === 'alloc' && <DeploymentAllocationPage schedules={schedules} scheduleId={scheduleId} />}
           {currentPage === 'centreLists' && <CentreListsPage schedules={schedules} scheduleId={scheduleId} />}
           {currentPage === 'deptIncharge' && <DeptInchargePage schedules={schedules} scheduleId={scheduleId} />}
+          {currentPage === 'inchargeDashboard' && <DeptInchargeDashboardPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} />}
           {currentPage === 'scanner' && <ScannerPage schedules={schedules} scheduleId={scheduleId} />}
           {currentPage === 'attendance' && <AttendancePage schedules={schedules} scheduleId={scheduleId} />}
           {currentPage === 'dashboard' && <DashboardPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} />}

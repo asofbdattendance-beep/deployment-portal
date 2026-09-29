@@ -8,6 +8,7 @@ import {
   Radio, Users, ScanLine, Clock, Download, Search, RefreshCw, Loader2,
   AlertTriangle, Lock, ChevronRight, ChevronDown, ArrowLeft,
 } from 'lucide-react'
+import { reportRealtimeStatus } from '../lib/realtime'
 
 // Live-scanner verdict → pill colour. One place, used by the table and the
 // export so the sheet can never disagree with the screen.
@@ -145,7 +146,9 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
 
   // ─── Load ───
   const load = useCallback(async () => {
-    if (!scheduleId) return
+    // Clear the spinner on the no-schedule path too. Leaving `loading` true
+    // here latched the page on its spinner with no timeout and no error.
+    if (!scheduleId) { setLoading(false); return }
     const seq = ++seqRef.current
     setLoading(true)
     try {
@@ -241,7 +244,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
       // L-40: realtime membership is not guaranteed — a dead channel
       // used to fail silently. Name the state so it lands in devtools.
       .subscribe((status) => {
-        if (status !== 'SUBSCRIBED') console.warn('[live-scanners] realtime ' + status + ' — data may be stale until refresh')
+        reportRealtimeStatus('live-scanners', status, alive)
       })
     return () => { alive = false; if (timer) clearTimeout(timer); supabase.removeChannel(channel) }
   }, [scheduleId, load])
