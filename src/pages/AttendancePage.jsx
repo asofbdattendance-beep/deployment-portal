@@ -20,6 +20,7 @@ import {
   VISIT_DAYS,
 } from '../lib/attendance'
 import { todayStrIST } from '../lib/scannerUtils'
+import { exportWorkbook, fileSlug } from '../lib/excel'
 import {
   ScanLine, Users, Clock, Download, Search, RefreshCw, Loader2,
   AlertTriangle, CheckCircle2, Radio, Lock,
@@ -28,9 +29,6 @@ import {
 // Rate band → pill colour. One place, used by both the sewadar and daily tables.
 const BAND_PILL = { full: 'pill-green', partial: 'pill-blue', low: 'pill-amber', none: 'pill-gray' }
 const bandPill = (band) => BAND_PILL[band] || BAND_PILL.none
-
-// Excel sheet names: ≤31 chars and none of \ / * ? : [ ]
-const sheetName = (raw) => raw.replace(/[\\/*?:[\]]/g, '-').slice(0, 31)
 
 /**
  * Unwrap a supabase-js PostgREST result.
@@ -304,74 +302,67 @@ export default function AttendancePage({ schedules, scheduleId }) {
     return parts.length ? ` · ${parts.join(' · ')}` : ''
   }, [filterCentre, search])
 
-  // ─── Export — one sheet per tab, ALL honouring the same active filters. ───
+  // ─── Export — one sheet per tab, ALL honouring the same active filters,
+  // built through the shared excel.js driver (L-24/L-25) so filenames are
+  // slugged and sheet names null-safe like every other reports surface. ───
   const exportExcel = async () => {
-    if (!visible.length && !visibleDaily.length && !visibleScanner.length) {
-      toast.warning('Nothing to export')
-      return
-    }
     setExporting(true)
     try {
-      const XLSX = await import('xlsx')
-      const wb = XLSX.utils.book_new()
-      const stamp = `${schedule?.name || 'schedule'}_${date || 'no-date'}`
-
       // A9: the two "Attendance %" columns measure different things — this one
       // is the whole-visit rate (days_present / expected_days), the Daily one
       // is a single day's rate. Distinct names, so nobody reads them as one.
-      XLSX.utils.book_append_sheet(
-        wb,
-        XLSX.utils.json_to_sheet(visible.map((r, i) => ({
-          'S.No.': i + 1,
-          Centre: r.sewadar_centre || UNASSIGNED_CENTRE,
-          Badge: r.badge_number,
-          Name: r.sewadar_name,
-          Type: r.is_vss ? 'VSS' : 'Regular',
-          Department: r.dept_name || '—',
-          'Days Present': r.days_present,
-          'Expected Days': hasExpectedDays(r) ? r.expected_days : '—',
-          // A6: no department means no denominator — never a 0% rate.
-          'Visit Attendance %': hasExpectedDays(r) ? r.rate : '—',
-          'First In': r.first_in_date ? `${r.first_in_date} ${(r.first_in_time || '').slice(0, 5)}` : '—',
-          'Last Out': r.last_out_date ? `${r.last_out_date} ${(r.last_out_time || '').slice(0, 5)}` : '—',
-          Duration: sessionDuration(r),
-          'Open Now': r.still_open ? 'Yes' : 'No',
-          'Undeployed Scan': r.undeployed_scan ? 'Yes' : 'No',
-        }))),
-        sheetName(`Sewadars${filterLabel}`)
+      const written = await exportWorkbook(
+        `${fileSlug(schedule?.name)}_${date || 'no-date'}_attendance.xlsx`,
+        [
+          {
+            name: `Sewadars${filterLabel}`,
+            rows: visible.map((r, i) => ({
+              'S.No.': i + 1,
+              Centre: r.sewadar_centre || UNASSIGNED_CENTRE,
+              Badge: r.badge_number,
+              Name: r.sewadar_name,
+              Type: r.is_vss ? 'VSS' : 'Regular',
+              Department: r.dept_name || '—',
+              'Days Present': r.days_present,
+              'Expected Days': hasExpectedDays(r) ? r.expected_days : '—',
+              // A6: no department means no denominator — never a 0% rate.
+              'Visit Attendance %': hasExpectedDays(r) ? r.rate : '—',
+              'First In': r.first_in_date ? `${r.first_in_date} ${(r.first_in_time || '').slice(0, 5)}` : '—',
+              'Last Out': r.last_out_date ? `${r.last_out_date} ${(r.last_out_time || '').slice(0, 5)}` : '—',
+              Duration: sessionDuration(r),
+              'Open Now': r.still_open ? 'Yes' : 'No',
+              'Undeployed Scan': r.undeployed_scan ? 'Yes' : 'No',
+            })),
+          },
+          {
+            name: `Daily ${date || 'no date'}${filterLabel}`,
+            rows: [
+              ...visibleDaily.map((r) => ({
+                Centre: r.centre || UNASSIGNED_CENTRE,
+                Department: r.dept_name || '—',
+                Expected: r.expected,
+                Present: r.present,
+                Absent: r.absent,
+                'Open Now': r.open_now,
+                'Day Attendance %': r.expected > 0 ? r.rate : '—',
+              })),
+              { Centre: 'TOTAL', Department: '', Expected: visibleTotals.expected, Present: visibleTotals.present, Absent: visibleTotals.absent, 'Open Now': visibleTotals.open_now, 'Day Attendance %': visibleTotals.expected > 0 ? visibleTotals.rate : '—' },
+            ],
+          },
+          {
+            name: `Scanner Ops${centreSearchLabel}`,
+            rows: visibleScanner.map((r) => ({
+              Scanner: r.scanner_name || r.scanner_badge, Badge: r.scanner_badge, Centre: r.scanner_centre || UNASSIGNED_CENTRE,
+              'Scans In': r.scans_in, 'Scans Out': r.scans_out, 'Open Now': r.open_now,
+              'Manual Scans': r.manual_scans, 'First Scan': (r.first_in_time || '').slice(0, 5), 'Last Scan': (r.last_scan_time || '').slice(0, 5),
+            })),
+          },
+        ]
       )
-
-      XLSX.utils.book_append_sheet(
-        wb,
-        XLSX.utils.json_to_sheet([
-          ...visibleDaily.map((r) => ({
-            Centre: r.centre || UNASSIGNED_CENTRE,
-            Department: r.dept_name || '—',
-            Expected: r.expected,
-            Present: r.present,
-            Absent: r.absent,
-            'Open Now': r.open_now,
-            'Day Attendance %': r.expected > 0 ? r.rate : '—',
-          })),
-          { Centre: 'TOTAL', Department: '', Expected: visibleTotals.expected, Present: visibleTotals.present, Absent: visibleTotals.absent, 'Open Now': visibleTotals.open_now, 'Day Attendance %': visibleTotals.expected > 0 ? visibleTotals.rate : '—' },
-        ]),
-        sheetName(`Daily ${date || 'no date'}${filterLabel}`)
-      )
-
-      if (visibleScanner.length) {
-        XLSX.utils.book_append_sheet(
-          wb,
-          XLSX.utils.json_to_sheet(visibleScanner.map((r) => ({
-            Scanner: r.scanner_name || r.scanner_badge, Badge: r.scanner_badge, Centre: r.scanner_centre || UNASSIGNED_CENTRE,
-            'Scans In': r.scans_in, 'Scans Out': r.scans_out, 'Open Now': r.open_now,
-            'Manual Scans': r.manual_scans, 'First Scan': (r.first_in_time || '').slice(0, 5), 'Last Scan': (r.last_scan_time || '').slice(0, 5),
-          }))),
-          sheetName(`Scanner Ops${centreSearchLabel}`)
-        )
-      }
-
-      XLSX.writeFile(wb, `${stamp}.xlsx`)
-      toast.success('Attendance exported')
+      // The driver skips empty sheets and writes nothing when all of them
+      // are empty, returning 0 — which is the "nothing to export" case.
+      if (written === 0) toast.warning('Nothing to export')
+      else toast.success('Attendance exported')
     } catch (e) {
       toast.error(e?.message || 'Export failed')
     } finally {

@@ -15,6 +15,7 @@
 // The mock setup mirrors src/hooks/useScanHandler.test.jsx.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react'
+import { todayStrIST } from '../lib/scannerUtils'
 import AttendancePage from './AttendancePage'
 
 const rpc = vi.fn()
@@ -358,5 +359,42 @@ describe('A4 — all three tables honour the one filter set', () => {
     const body = document.querySelectorAll('table tbody tr')
     expect(body).toHaveLength(1)
     expect(body[0].textContent).toContain('COOKING')
+  })
+})
+
+vi.mock('xlsx', () => ({
+  utils: {
+    book_new: vi.fn(() => ({})),
+    json_to_sheet: vi.fn((rows) => ({ rows })),
+    book_append_sheet: vi.fn(),
+  },
+  writeFile: vi.fn(),
+}))
+
+describe('C2 — exports use the shared driver naming (L-24/L-25)', () => {
+  it('writes a slugged {schedule}_{date}_attendance.xlsx filename', async () => {
+    await renderPage()
+    fireEvent.click(screen.getByText(/Export Excel/))
+    const { writeFile } = await import('xlsx')
+    await waitFor(() => expect(writeFile).toHaveBeenCalled())
+    // Schedule "October 2026 Visit" must not land in the filename with raw
+    // spaces, and the kind suffix marks what the workbook holds.
+    expect(writeFile).toHaveBeenCalledWith(
+      expect.anything(),
+      `October_2026_Visit_${todayStrIST()}_attendance.xlsx`
+    )
+  })
+
+  it('names sheets through the null-safe shared helper', async () => {
+    await renderPage()
+    fireEvent.click(screen.getByText(/Export Excel/))
+    const { utils } = await import('xlsx')
+    await waitFor(() => expect(utils.book_append_sheet).toHaveBeenCalled())
+    const names = utils.book_append_sheet.mock.calls.map(c => c[2])
+    expect(names[0]).toMatch(/^Sewadars/)
+    for (const n of names) {
+      expect(typeof n).toBe('string')
+      expect(n.length).toBeLessThanOrEqual(31)
+    }
   })
 })

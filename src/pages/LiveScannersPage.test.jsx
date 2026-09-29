@@ -217,3 +217,24 @@ describe('I5 — an expanded drill-down refreshes with the list', () => {
     await waitFor(() => expect(openCalls()).toBe(2))
   })
 })
+
+vi.mock('xlsx', () => ({
+  utils: {
+    book_new: vi.fn(() => ({})),
+    json_to_sheet: vi.fn((rows) => ({ rows })),
+    book_append_sheet: vi.fn(),
+  },
+  writeFile: vi.fn(),
+}))
+
+describe('C2 — exports use the shared driver naming (L-24/L-25)', () => {
+  it('writes a slugged {schedule}_{date}_scanners.xlsx filename', async () => {
+    await renderPage()
+    fireEvent.click(screen.getByText(/Export Excel/))
+    const { writeFile } = await import('xlsx')
+    await waitFor(() => expect(writeFile).toHaveBeenCalled())
+    // Schedule "October 2026 Visit" must not land in the filename with raw
+    // spaces. Date is clock-pinned to 2026-09-23 in this file.
+    expect(writeFile).toHaveBeenCalledWith(expect.anything(), 'October_2026_Visit_2026-09-23_scanners.xlsx')
+  })
+})

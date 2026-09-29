@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase'
 import { useToast } from '../components/Toast'
 import { scannerStatus, timeAgo, UNASSIGNED_CENTRE } from '../lib/attendance'
 import { todayStrIST } from '../lib/scannerUtils'
+import { exportWorkbook, fileSlug } from '../lib/excel'
 import {
   Radio, Users, ScanLine, Clock, Download, Search, RefreshCw, Loader2,
   AlertTriangle, Lock, ChevronRight, ChevronDown, ArrowLeft,
@@ -15,9 +16,6 @@ const STATUS_LABEL = { active: 'Active', idle: 'Idle', offline: 'Offline' }
 const STATUS_RANK = { active: 0, idle: 1, offline: 2 }
 const statusPill = (s) => STATUS_PILL[s] || STATUS_PILL.offline
 const statusLabel = (s) => STATUS_LABEL[s] || STATUS_LABEL.offline
-
-// Excel sheet names: ≤31 chars and none of \ / * ? : [ ]
-const sheetName = (raw) => raw.replace(/[\\/*?:[\]]/g, '-').slice(0, 31)
 
 /**
  * Unwrap a supabase-js PostgREST result.
@@ -291,34 +289,33 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
     open: all.reduce((n, r) => n + (r.open_now || 0), 0),
   }), [all])
 
-  // ─── Export — one sheet, honouring the active search. ───
+  // ─── Export — one sheet, honouring the active search, built through the
+  // shared excel.js driver (L-24/L-25) like every other reports surface. ───
   const exportExcel = async () => {
-    if (!visible.length) {
-      toast.warning('Nothing to export')
-      return
-    }
     setExporting(true)
     try {
-      const XLSX = await import('xlsx')
-      const wb = XLSX.utils.book_new()
-      XLSX.utils.book_append_sheet(
-        wb,
-        XLSX.utils.json_to_sheet(visible.map((r) => ({
-          Scanner: scannerName(r),
-          Badge: r.scanner_badge,
-          Centre: r.scanner_centre || UNASSIGNED_CENTRE,
-          Status: statusLabel(r.status),
-          'Scans In': r.scans_in || 0,
-          'Scans Out': r.scans_out || 0,
-          'Manual Scans': r.manual_scans || 0,
-          'Open Now': r.open_now || 0,
-          'First Scan': clock(r.first_in_time),
-          'Last Scan': clock(r.last_scan_time),
-        }))),
-        sheetName(`Scanners ${date || 'no date'}`)
+      const written = await exportWorkbook(
+        `${fileSlug(schedule?.name)}_${date || 'no-date'}_scanners.xlsx`,
+        [
+          {
+            name: `Scanners ${date || 'no date'}`,
+            rows: visible.map((r) => ({
+              Scanner: scannerName(r),
+              Badge: r.scanner_badge,
+              Centre: r.scanner_centre || UNASSIGNED_CENTRE,
+              Status: statusLabel(r.status),
+              'Scans In': r.scans_in || 0,
+              'Scans Out': r.scans_out || 0,
+              'Manual Scans': r.manual_scans || 0,
+              'Open Now': r.open_now || 0,
+              'First Scan': clock(r.first_in_time),
+              'Last Scan': clock(r.last_scan_time),
+            })),
+          },
+        ]
       )
-      XLSX.writeFile(wb, `${schedule?.name || 'schedule'}_${date || 'no-date'}_scanners.xlsx`)
-      toast.success('Scanner activity exported')
+      if (written === 0) toast.warning('Nothing to export')
+      else toast.success('Scanner activity exported')
     } catch (e) {
       toast.error(e?.message || 'Export failed')
     } finally {
