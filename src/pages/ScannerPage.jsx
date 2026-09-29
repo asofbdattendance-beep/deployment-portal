@@ -4,10 +4,10 @@ import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import BarcodeScanner from '../components/scanner/BarcodeScanner'
 import ScanResultPopup from '../components/scanner/ScanResultPopup'
-import { getQueuedScans, installDrainListeners, preloadDeployed, clearFailedQueue } from '../lib/offlineQueue'
+import { getQueuedScans, installDrainListeners, preloadDeployed, clearFailedQueue, clearOrphanedQueue } from '../lib/offlineQueue'
 import { ScanLine, Clock, Wifi, WifiOff, RefreshCw, Loader2 } from 'lucide-react'
 import { useScanHandler } from '../hooks/useScanHandler'
-import { friendly, todayStrIST, withTimeout, isDecisionPopup } from '../lib/scannerUtils'
+import { friendly, todayStrIST, withTimeout, isDecisionPopup, resolveForgotOutTime } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import RecentScansTable from '../components/scanner/RecentScansTable'
 
@@ -158,8 +158,18 @@ export default function ScannerPage({ schedules, scheduleId }){
 
   const confirmForgot=async()=>{
     if(!popup || popup.status!=='forgot') return
-    if(!outTime.match(/^\d{2}:\d{2}$/)){ toast.error('Pick a valid OUT time'); return }
-    const ts=new Date(`${popup.in_date}T${outTime}:00+05:30`).toISOString()
+    // Format, then range/order vs IN. The regex alone let a future or pre-IN
+    // time through to a scan_out that raises ('OUT time must be after IN time',
+    // v41) or writes a session that can never be closed.
+    const out = resolveForgotOutTime({ inDate: popup.in_date, inTime: popup.in_time, value: outTime })
+    if (out.invalid) { toast.error('Pick a valid OUT time'); return }
+    if (out.clamped) {
+      setOutTime(out.value)
+      toast.warning(out.clamped === 'future'
+        ? `OUT time was ahead of the scanner clock — using ${out.value} IST`
+        : `OUT time was before the IN — using ${out.value} IST`)
+    }
+    const ts=new Date(out.ts).toISOString()
     try{
       const { error: forgotError } = await withTimeout(
         supabase.rpc('scan_out', { p_badge: popup.badge, p_schedule: scheduleId, p_ts: ts, p_open_id: popup.openId }),
@@ -203,7 +213,7 @@ export default function ScannerPage({ schedules, scheduleId }){
           <Clock size={14}/> My last 10 scans (today, any dept incl. VSS)
           <span style={{fontWeight:400, fontSize:'0.75rem', color:'#64748b'}}>by you{myBadge?` · ${myBadge}`:''}</span>
           {/* E1: failed queue rows are otherwise invisible AND unremovable from this page */}
-          {queued.some(q=>q.failed) && <button onClick={async ()=>{ await clearFailedQueue(); getQueuedScans().then(setQueued).catch(e=>console.warn('[Scanner] queue refresh failed:', e?.message)) }} style={{marginLeft:'auto', fontSize:'0.7rem', color:'#b45309', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear failed scans</button>}
+          {queued.some(q=>q.failed) && <button onClick={async ()=>{ await clearFailedQueue(); await clearOrphanedQueue(); getQueuedScans().then(setQueued).catch(e=>console.warn('[Scanner] queue refresh failed:', e?.message)) }} style={{marginLeft:'auto', fontSize:'0.7rem', color:'#b45309', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear failed scans</button>}
         </div>
         {!myBadge && <div style={{fontSize:'0.75rem', color:'#b45309', marginTop:4}}>Your profile has no badge number, so these cannot be filtered to your own scans — showing today&apos;s sessions.</div>}
         <div style={{maxHeight:380, overflow:'auto', marginTop:8}}>

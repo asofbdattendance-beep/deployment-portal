@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { withTimeout, friendly, todayStrIST, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, withinToggleGuard, minutesSince, SCAN_TOGGLE_GUARD_MS, isDecisionPopup } from './scannerUtils'
+import { withTimeout, friendly, todayStrIST, hhmmIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, withinToggleGuard, minutesSince, SCAN_TOGGLE_GUARD_MS, isDecisionPopup } from './scannerUtils'
 
 afterEach(() => { vi.useRealTimers() })
 
@@ -108,6 +108,73 @@ describe('todayStrIST', () => {
   })
   it('defaults to now', () => {
     expect(todayStrIST()).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+  })
+})
+
+/* ─── hhmmIST (A4 / L-05) ─── */
+describe('hhmmIST', () => {
+  it('formats in IST regardless of the device zone', () => {
+    // 18:30Z = 00:00 IST next day. A device set to UTC would have said "18:30".
+    expect(hhmmIST(new Date('2026-09-24T18:30:00Z'))).toBe('00:00')
+    expect(hhmmIST(new Date('2026-09-24T04:05:00Z'))).toBe('09:35')  // UTC+5:30
+    expect(hhmmIST(new Date('2026-09-24T12:00:00Z'))).toBe('17:30')
+  })
+  it('never emits the h24 "24:00" midnight form', () => {
+    expect(hhmmIST(new Date('2026-09-24T18:05:00Z'))).toBe('23:35')  // 00:05 IST
+  })
+})
+
+/* ─── resolveForgotOutTime (A4 / L-05 + L-37) ─── */
+describe('resolveForgotOutTime', () => {
+  const NOW = new Date('2026-09-24T10:00:00Z')  // 15:30 IST
+  it('pre-fills with IST now, not the device clock', () => {
+    const r = resolveForgotOutTime({ inDate: '2026-09-24', inTime: '08:00:00', nowMs: NOW.getTime() })
+    expect(r.value).toBe('15:30')
+    expect(r.clamped).toBeNull()
+    expect(r.invalid).toBe(false)
+  })
+  it('clamps a future value to now (device clock ahead)', () => {
+    const r = resolveForgotOutTime({ inDate: '2026-09-24', inTime: '08:00:00', value: '23:45', nowMs: NOW.getTime() })
+    expect(r.value).toBe('15:30')
+    expect(r.clamped).toBe('future')
+    expect(r.ts).toBeLessThanOrEqual(NOW.getTime())
+  })
+  it('clamps a pre-IN value to in_time + 1 minute (v41 would raise)', () => {
+    const r = resolveForgotOutTime({ inDate: '2026-09-24', inTime: '14:00:00', value: '09:00', nowMs: NOW.getTime() })
+    expect(r.value).toBe('14:01')
+    expect(r.clamped).toBe('before_in')
+  })
+  it('never returns the same minute as the IN (server rejects out <= in)', () => {
+    const r = resolveForgotOutTime({ inDate: '2026-09-24', inTime: '15:30:00', value: '15:30', nowMs: NOW.getTime() })
+    expect(r.value).toBe('15:31')   // same minute as IN → floored to in_time + 1
+    expect(r.clamped).toBe('before_in')
+    const floor = resolveForgotOutTime({ inDate: '2026-09-24', inTime: '15:31:00', value: '15:29', nowMs: NOW.getTime() })
+    expect(floor.value).toBe('15:32')
+    expect(FORGOT_OUT_MIN_GAP_MIN).toBe(1)
+  })
+  it('flags malformed values instead of throwing', () => {
+    for (const v of ['', 'ab:cd', '25:00', '12:70', '9:5', null, undefined]) {
+      expect(() => resolveForgotOutTime({ inDate: '2026-09-24', inTime: '08:00:00', value: v, nowMs: NOW.getTime() })).not.toThrow()
+    }
+    expect(resolveForgotOutTime({ inDate: '2026-09-24', inTime: '08:00:00', value: '25:00', nowMs: NOW.getTime() }).invalid).toBe(true)
+    expect(resolveForgotOutTime({ inDate: '2026-09-24', inTime: '08:00:00', value: '09:00', nowMs: NOW.getTime() }).invalid).toBe(false)
+  })
+  it('degrades to future-only clamping when in_time is unknown (pre-v44 popup)', () => {
+    const r = resolveForgotOutTime({ inDate: '2026-09-24', inTime: null, value: '09:00', nowMs: NOW.getTime() })
+    expect(r.value).toBe('09:00'); expect(r.clamped).toBeNull(); expect(r.invalid).toBe(false)
+  })
+  it('prefers the IN floor when the window is empty (IN ahead of this clock)', () => {
+    const r = resolveForgotOutTime({ inDate: '2026-09-24', inTime: '23:00:00', nowMs: NOW.getTime() })
+    expect(r.value).toBe('23:01')
+    expect(r.clamped).toBe('before_in')
+  })
+  it('round-trips: every returned ts is strictly after inTs', () => {
+    const inTs = Date.parse('2026-09-24T08:00:00+05:30')
+    for (const v of ['08:00', '08:01', '12:00', '15:30', '15:31', '23:59', null]) {
+      const r = resolveForgotOutTime({ inDate: '2026-09-24', inTime: '08:00:00', value: v, nowMs: NOW.getTime() })
+      expect(r.ts).toBeGreaterThan(inTs)
+      expect(r.ts).toBeLessThanOrEqual(NOW.getTime())
+    }
   })
 })
 

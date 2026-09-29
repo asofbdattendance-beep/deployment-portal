@@ -21,7 +21,7 @@ vi.mock('./supabase', () => ({
   },
 }))
 
-const { enqueueScan, getQueuedScans, removeQueued, markFailed, clearFailedQueue, drainQueue, classifyScanError, getDrainTiming, __resetDrainState } = await import('./offlineQueue')
+const { enqueueScan, getQueuedScans, removeQueued, markFailed, clearFailedQueue, clearOrphanedQueue, drainQueue, classifyScanError, getDrainTiming, __resetDrainState, cacheSet, getCachedDeployed, preloadDeployed, installDrainListeners } = await import('./offlineQueue')
 
 /** Read EVERY row in the store, bypassing the owner filter — test-only helper. */
 function allRows() {
@@ -60,16 +60,26 @@ function putRaw(row) {
 
 beforeEach(async () => {
   currentUserId = 'user-A'
+  // Warm the schema through the module FIRST: a raw indexedDB.open() on a
+  // missing DB creates an empty v2 with NO stores (onupgradeneeded never
+  // fires), which makes every later transaction throw NotFoundError.
+  // The warm result is ignored — a leftover-full queue reports 'full' here
+  // and the clear below makes room before the asserted init.
+  await enqueueScan({ id: '__warm__', badge: 'FB5971GA0000', schedule_id: 's', action: 'IN' })
+  // Clear SECOND: cap-filling tests leave 200 rows behind, and the init below
+  // would hit 'full' if it ran before the clear (A1 contract).
+  for (const r of await allRows()) await removeQueued(r.id)
   // Initialise the schema through the module's own safeOpenDB path first, so
   // the `scan_queue` object store actually exists before any raw access.
-  await enqueueScan({ id: '__init__', badge: 'FB5971GA0000', schedule_id: 's', action: 'IN' })
+  // Asserted: a silently-failed init would make every later test vacuous.
+  expect((await enqueueScan({ id: '__init__', badge: 'FB5971GA0000', schedule_id: 's', action: 'IN' })).ok).toBe(true)
   for (const r of await allRows()) await removeQueued(r.id)
 })
 
 describe('enqueueScan', () => {
   it('stores a scan and tags it with the signed-in user', async () => {
-    const id = await enqueueScan({ badge: 'FB5971GA0001', schedule_id: 'sched-1', action: 'IN', ts: '2026-09-24T09:00:00Z' })
-    expect(id).toBeTruthy()
+    const res = await enqueueScan({ badge: 'FB5971GA0001', schedule_id: 'sched-1', action: 'IN', ts: '2026-09-24T09:00:00Z' })
+    expect(res).toEqual({ ok: true, id: expect.any(String) })
     const rows = await getQueuedScans()
     expect(rows).toHaveLength(1)
     expect(rows[0].badge).toBe('FB5971GA0001')
@@ -77,8 +87,8 @@ describe('enqueueScan', () => {
   })
 
   it('honours a caller-supplied id (the offline nonce used for idempotency)', async () => {
-    const id = await enqueueScan({ id: 'nonce-123', badge: 'VS001', schedule_id: 'sched-1', action: 'IN' })
-    expect(id).toBe('nonce-123')
+    const res = await enqueueScan({ id: 'nonce-123', badge: 'VS001', schedule_id: 'sched-1', action: 'IN' })
+    expect(res).toEqual({ ok: true, id: 'nonce-123' })
     expect((await getQueuedScans())[0].id).toBe('nonce-123')
   })
 
@@ -87,6 +97,117 @@ describe('enqueueScan', () => {
     await enqueueScan({ badge: 'FB5971GA0002', schedule_id: 'sched-1', action: 'IN' })
     const rows = await allRows()
     expect(rows[0].owner).toBeNull()
+  })
+})
+
+/** Insert N rows in ONE transaction — 200 single-row opens is needlessly slow. */
+function putMany(rows) {
+  return new Promise((resolve) => {
+    const req = indexedDB.open('sewadar_offline_q', 2)
+    req.onsuccess = () => {
+      const db = req.result
+      if (!db.objectStoreNames.contains('scan_queue')) { db.close(); return resolve(false) }
+      const tx = db.transaction('scan_queue', 'readwrite')
+      const store = tx.objectStore('scan_queue')
+      for (const r of rows) store.put(r)
+      tx.oncomplete = () => { db.close(); resolve(true) }
+      tx.onerror = () => { db.close(); resolve(false) }
+    }
+    req.onerror = () => resolve(false)
+  })
+}
+
+/** A live, owned, non-failed queue row. */
+const liveRow = (i, extra = {}) => ({
+  id: `fill-${i}`, badge: `VS${String(i).padStart(4, '0')}`, schedule_id: 's',
+  action: 'IN', createdAt: 1, attempts: 0, synced: false, owner: 'user-A', ...extra,
+})
+
+describe('enqueueScan result contract (Task A1: L-01 / L-02)', () => {
+  const CAP = 200 // MAX_QUEUE_SIZE — module-private, mirrored deliberately.
+
+  it('never rejects: resolves a result object on the happy path', async () => {
+    await expect(
+      enqueueScan({ badge: 'VS7200', schedule_id: 's', action: 'IN' })
+    ).resolves.toEqual({ ok: true, id: expect.any(String) })
+  })
+
+  it('resolves { ok:false, reason:"unavailable" } when IndexedDB is missing', async () => {
+    // The top-level module instance is memoised with a live connection, so the
+    // unavailable path needs a fresh import. safeOpenDB reads window.indexedDB
+    // (=== globalThis under jsdom) and resolves null.
+    vi.resetModules()
+    vi.stubGlobal('indexedDB', undefined)
+    try {
+      const fresh = await import('./offlineQueue')
+      await expect(
+        fresh.enqueueScan({ badge: 'VS0100', schedule_id: 's', action: 'IN' })
+      ).resolves.toEqual({ ok: false, reason: 'unavailable' })
+    } finally {
+      vi.unstubAllGlobals()
+      vi.resetModules()
+    }
+  })
+
+  it('resolves { ok:false, reason:"full" } at the live-row cap, and writes nothing', async () => {
+    await putMany(Array.from({ length: CAP }, (_, i) => liveRow(i)))
+    const res = await enqueueScan({ id: 'overflow', badge: 'VS9999', schedule_id: 's', action: 'IN' })
+    expect(res).toEqual({ ok: false, reason: 'full' })
+    expect((await allRows()).map(r => r.id)).not.toContain('overflow')
+  })
+
+  it('counts only LIVE rows — terminally failed rows do not fill the cap (D1b)', async () => {
+    await putMany([
+      ...Array.from({ length: CAP - 1 }, (_, i) => liveRow(i)),
+      ...Array.from({ length: 50 }, (_, i) => liveRow(`dead-${i}`, { failed: true, status: 'failed' })),
+    ])
+    const res = await enqueueScan({ id: 'survivor', badge: 'VS8888', schedule_id: 's', action: 'IN' })
+    expect(res.ok).toBe(true)
+    expect((await allRows()).map(r => r.id)).toContain('survivor')
+  })
+
+  it('resolves write-failed (never rejects) when the write transaction errors', async () => {
+    const orig = IDBDatabase.prototype.transaction
+    const spy = vi.spyOn(IDBDatabase.prototype, 'transaction').mockImplementation(function (stores, mode) {
+      if (mode === 'readwrite' && stores === 'scan_queue') {
+        const fake = { error: new Error('quota exceeded'), objectStore: () => ({ put: () => {} }) }
+        // Only onerror fires — oncomplete/onabort stay plain no-op props, so
+        // only the error path can settle the promise.
+        Object.defineProperty(fake, 'onerror', { set: (f) => { setTimeout(() => f({ target: fake }), 0) } })
+        return fake
+      }
+      return orig.call(this, stores, mode) // readiness read still real
+    })
+    try {
+      await expect(
+        enqueueScan({ badge: 'VS7300', schedule_id: 's', action: 'IN' })
+      ).resolves.toMatchObject({ ok: false, reason: 'write-failed' })
+    } finally { spy.mockRestore() }
+  })
+
+  it('resolves write-failed (never rejects) when the put throws synchronously', async () => {
+    // A non-cloneable field makes the structured clone fail inside the
+    // transaction. Passes whether the impl throws at put() or errors the request.
+    const res = await enqueueScan({ badge: 'VS7000', schedule_id: 's', action: 'IN', nope: () => {} })
+    expect(res).toMatchObject({ ok: false, reason: 'write-failed' })
+    expect(await allRows()).toHaveLength(0)
+  })
+
+  it('resolves write-failed (never rejects) when the readiness read itself errors', async () => {
+    const orig = IDBDatabase.prototype.transaction
+    const spy = vi.spyOn(IDBDatabase.prototype, 'transaction').mockImplementation(function (stores, mode) {
+      if (mode === 'readonly' && stores === 'scan_queue') {
+        const req = { error: new Error('read failed') }
+        Object.defineProperty(req, 'onerror', { set: (f) => { setTimeout(() => f({ target: req }), 0) } })
+        return { objectStore: () => ({ getAll: () => req }) }
+      }
+      return orig.call(this, stores, mode)
+    })
+    try {
+      const res = await enqueueScan({ badge: 'VS7100', schedule_id: 's', action: 'IN' })
+      expect(res).toMatchObject({ ok: false, reason: 'write-failed' })
+      expect(res.error).toBeTruthy()
+    } finally { spy.mockRestore() }
   })
 })
 
@@ -137,8 +258,36 @@ describe('markFailed', () => {
   })
 })
 
-describe('clearFailedQueue', () => {
-  it('removes only terminally failed rows belonging to the current user', async () => {
+describe('orphan sweep (A3 / L-03)', () => {
+  const orphan = (i) => ({ id: `orphan-${i}`, badge: `VS${String(i).padStart(4, '0')}`, schedule_id: 's', action: 'IN', createdAt: 1, attempts: 0, synced: false, owner: null })
+
+  it('null-owner orphans do not consume the logged-in cap (no wedge)', async () => {
+    await putMany(Array.from({ length: 200 }, (_, i) => orphan(i)))
+    const res = await enqueueScan({ id: 'after-orphans', badge: 'VS9999', schedule_id: 's', action: 'IN' })
+    expect(res.ok).toBe(true)
+  })
+
+  it('logged-out queueing is still capped at 200 own rows', async () => {
+    currentUserId = null
+    await putMany(Array.from({ length: 200 }, (_, i) => orphan(i)))
+    const res = await enqueueScan({ id: 'overflow-anon', badge: 'VS9999', schedule_id: 's', action: 'IN' })
+    expect(res).toEqual({ ok: false, reason: 'full' })
+  })
+
+  it('clearOrphanedQueue removes null-owner rows only while logged out', async () => {
+    await putMany([orphan(1), orphan(2)])
+    await enqueueScan({ id: 'mine', badge: 'VS0001', schedule_id: 's', action: 'IN' })
+    // Logged in: no-op, orphans intact.
+    await expect(clearOrphanedQueue()).resolves.toBe(0)
+    expect((await allRows()).map(r => r.id).sort()).toEqual(['mine', 'orphan-1', 'orphan-2'])
+    // Logged out: removes exactly the orphans.
+    currentUserId = null
+    await expect(clearOrphanedQueue()).resolves.toBe(2)
+    expect((await allRows()).map(r => r.id)).toEqual(['mine'])
+  })
+})
+
+describe('clearFailedQueue', () => {  it('removes only terminally failed rows belonging to the current user', async () => {
     await putRaw({ id: 'ok', badge: 'VS001', schedule_id: 's', action: 'IN', owner: 'user-A' })
     await putRaw({ id: 'bad-mine', badge: 'VS002', schedule_id: 's', action: 'IN', owner: 'user-A', failed: true, status: 'failed' })
     await putRaw({ id: 'bad-theirs', badge: 'VS003', schedule_id: 's', action: 'IN', owner: 'user-B', failed: true, status: 'failed' })
@@ -218,8 +367,7 @@ describe('classifyScanError (Task 1: L-04 + L-08)', () => {
   })
 })
 
-describe('drainQueue poison-row behaviour (L-04)', () => {
-  function fakeSupabase(calls, impl) {
+describe('drainQueue poison-row behaviour (L-04)', () => {  function fakeSupabase(calls, impl) {
     return {
       auth: { getSession: async () => ({ data: { session: { user: { id: 'user-A' } } } }) },
       rpc: async (name, params) => {
@@ -259,5 +407,68 @@ describe('drainQueue poison-row behaviour (L-04)', () => {
     expect(drained).toBe(2)
     expect(calls).toHaveLength(2)
     expect(await getQueuedScans()).toHaveLength(0)
+  })
+})
+
+describe('drain quarantine + listeners + cache TTL (A5 / L-13)', () => {
+  function fakeSupabase(calls, impl) {
+    return {
+      auth: { getSession: async () => ({ data: { session: { user: { id: 'user-A' } } } }) },
+      rpc: async (name, params) => {
+        calls.push([name, params])
+        return impl ? impl(name, params) : { data: { ok: true }, error: null }
+      },
+    }
+  }
+
+  it('quarantines an unparseable-timestamp row and keeps draining past it', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw({ id: 'bad-ts', badge: 'VS0001', schedule_id: 's', action: 'IN', ts: 'not-a-date', createdAt: 1, attempts: 0, synced: false, owner: 'user-A' })
+    await enqueueScan({ id: 'good-ts', badge: 'VS0002', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:00:00Z' })
+    const drained = await drainQueue(fakeSupabase(calls))
+    expect(drained).toBe(1)
+    expect(calls).toHaveLength(1)
+    const rows = await allRows()
+    const bad = rows.find(r => r.id === 'bad-ts')
+    expect(bad.failed).toBe(true)
+    expect(bad.status).toBe('failed')
+    expect(bad.failReason).toBe('bad-timestamp')
+  })
+
+  it('installDrainListeners fires on the injectable interval and cleanup stops it', async () => {
+    __resetDrainState()
+    // Real timers: fake timers wedge fake-indexeddb's internals (operations
+    // started under fake time never settle after restore). Short real
+    // intervals keep this under a second.
+    globalThis.__OFFLINEQ_BASE_INTERVAL__ = 40
+    globalThis.__OFFLINEQ_MAX_INTERVAL__ = 50
+    try {
+      const calls = []
+      const sb = fakeSupabase(calls)
+      // A row to sync: an empty queue drains silently with zero RPCs, which
+      // would make "the listener fired" unobservable.
+      await enqueueScan({ id: 'live-row', badge: 'VS0009', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:00:00Z' })
+      Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+      const cleanup = installDrainListeners(sb)
+      await new Promise(r => setTimeout(r, 400))
+      expect(calls.length).toBeGreaterThan(0)
+      expect(await getQueuedScans()).toHaveLength(0)
+      const frozen = calls.length
+      cleanup()
+      await new Promise(r => setTimeout(r, 300))
+      expect(calls.length).toBe(frozen)
+    } finally {
+      delete globalThis.__OFFLINEQ_BASE_INTERVAL__
+      delete globalThis.__OFFLINEQ_MAX_INTERVAL__
+    }
+  }, 10000)
+
+  it('getCachedDeployed honours the cache TTL', async () => {
+    await preloadDeployed('sched-ttl', [{ badge_number: 'VS0001', deptId: 'd1', is_vss: false }])
+    expect(await getCachedDeployed('sched-ttl')).toHaveLength(1)
+    // Backdate past the 10-minute TTL: the cache must read as empty.
+    await cacheSet('deployed_at:sched-ttl', Date.now() - 11 * 60 * 1000)
+    expect(await getCachedDeployed('sched-ttl')).toEqual([])
   })
 })

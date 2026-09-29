@@ -175,6 +175,80 @@ export function todayStrIST(d = new Date()) {
   return IST_DATE_FMT.format(d)
 }
 
+// ─── hhmmIST ───────────────────────────────────────────────────────────────────
+const IST_TIME_FMT = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+})
+
+/**
+ * Wall-clock HH:MM in IST, independent of the DEVICE's timezone.
+ *
+ * `Date#getHours()` reads the scanner's local zone, but every stamp this app
+ * writes or reads is IST: `out_time` is a bare `time` column
+ * (`(p_ts AT TIME ZONE 'Asia/Kolkata')::time`, v41:102) and the client
+ * re-interprets it as +05:30 (useScanHandler.js:382,387). A device set to
+ * anything but IST therefore pre-filled the forgot-OUT with a time off by its
+ * own UTC offset. `formatToParts` + explicit padding sidesteps both the h24
+ * "24:00" midnight quirk and any locale-dependent zero padding.
+ *
+ * @param {Date} [d]
+ * @returns {string} "HH:MM", 00:00–23:59
+ */
+export function hhmmIST(d = new Date()) {
+  const parts = IST_TIME_FMT.formatToParts(d)
+  const part = (type) => parts.find((p) => p.type === type)?.value ?? '00'
+  return `${String(part('hour')).padStart(2, '0')}:${String(part('minute')).padStart(2, '0')}`
+}
+
+// ─── resolveForgotOutTime ──────────────────────────────────────────────────────
+/**
+ * Smallest legal gap between IN and OUT. `in_time`/`out_time` are `time`
+ * columns and the UI edits HH:MM, so an OUT in the same minute as the IN is
+ * stored as the identical minute — which v41:103-105 rejects with 'OUT time
+ * must be after IN time'. One minute is the exact threshold, not a buffer.
+ */
+export const FORGOT_OUT_MIN_GAP_MIN = 1
+const HHMM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/
+
+/**
+ * The ONE place a forgot-OUT wall-clock is chosen, validated and clamped.
+ *
+ * Clamps into `[in_time + FORGOT_OUT_MIN_GAP_MIN, now]`, so the returned
+ * value is always a timestamp `scan_out` will accept:
+ *  - `value` null/''  → pre-fill with now, pulled into the legal window
+ *  - future value     → clamped to now ('future'); v46 would otherwise doom the
+ *                       follow-up re-IN with 'Timestamp cannot be in the future'
+ *  - pre-IN value     → clamped to in_time + 1 min ('before_in')
+ *  - malformed value  → `invalid: true`; callers keep their own "Pick a valid
+ *                       OUT time" rejection and MUST check it before using `ts`
+ *
+ * When the window is empty (`in_time + 1min > now` — the IN is itself ahead of
+ * this device's clock) the floor wins: order-validity is the hard server
+ * constraint, while recency only trips the 5-minute DB guard this device is
+ * already failing to keep.
+ *
+ * @param {object} o
+ * @param {string} o.inDate — YYYY-MM-DD, the open session's `in_date`
+ * @param {string} [o.inTime] — HH:MM[:SS], the open session's `in_time`
+ * @param {string|null} [o.value] — operator-entered "HH:MM"; null = pre-fill
+ * @param {number} [o.nowMs]
+ * @returns {{value: string, ts: number, clamped: 'future'|'before_in'|null, invalid: boolean}}
+ */
+export function resolveForgotOutTime({ inDate, inTime = null, value = null, nowMs = Date.now() } = {}) {
+  const inTs = inDate && inTime ? Date.parse(`${inDate}T${inTime}+05:30`) : NaN
+  const lo = Number.isFinite(inTs) ? inTs + FORGOT_OUT_MIN_GAP_MIN * 60000 : -Infinity
+  const hi = nowMs
+  const bound = (x) => (lo > hi ? [lo, 'before_in']
+    : x < lo ? [lo, 'before_in']
+    : x > hi ? [hi, 'future']
+    : [x, null])
+
+  const m = HHMM_RE.exec(String(value ?? '').trim())
+  const invalid = value != null && value !== '' && !m
+  const [ts, clamped] = bound(m && inDate ? Date.parse(`${inDate}T${m[1]}:${m[2]}:00+05:30`) : hi)
+  return { value: hhmmIST(new Date(ts)), ts, clamped, invalid }
+}
+
 // ─── isSecureCameraContext ─────────────────────────────────────────────────────
 /**
  * True only when the page can actually acquire a camera. `navigator.mediaDevices`

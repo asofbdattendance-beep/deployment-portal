@@ -107,29 +107,71 @@ function getDB() {
   return _dbPromise
 }
 
+// ─── enqueueScan result contract (Task A1: L-01 / L-02) ─────────────────────
+// enqueueScan NEVER rejects. Every path resolves a result object:
+//   { ok: true,  id }                        row durably written
+//   { ok: false, reason: 'unavailable' }     no IndexedDB (private mode, blocked)
+//   { ok: false, reason: 'full' }            MAX_QUEUE_SIZE LIVE rows reached
+//   { ok: false, reason: 'write-failed', error }
+//                                          the readiness read or the store
+//                                          write errored/threw
+// The old contract (bare id string on success, undefined/null on failure, and
+// a REJECTED promise from tx.onerror) let an IndexedDB write error escape as an
+// exception out of `handleScan`, breaking its "every exit resolves {ok}"
+// guarantee, and made the three failure modes indistinguishable at every
+// call site — an unavailable DB and a full queue both read as "storage
+// unavailable".
 export async function enqueueScan(scan) {
   const db = await getDB()
-  if (!db) return undefined
+  if (!db) return { ok: false, reason: 'unavailable' }
   // D1b: fullness check counts only live rows — terminally `failed` rows are
   // never evicted, so counting them lets poison rows wedge the queue full.
-  const existing = await new Promise((resolve, reject) => {
-    const req = db.transaction(STORE, 'readonly').objectStore(STORE).getAll()
-    req.onsuccess = () => resolve(req.result || [])
-    req.onerror = () => reject(req.error)
-  })
-  if (existing.filter(r => !isFailedRow(r)).length >= MAX_QUEUE_SIZE) {
-    console.warn('[OfflineQueue] Queue full, rejecting scan')
-    return null
+  let existing
+  try {
+    existing = await new Promise((resolve, reject) => {
+      const req = db.transaction(STORE, 'readonly').objectStore(STORE).getAll()
+      req.onsuccess = () => resolve(req.result || [])
+      req.onerror = () => reject(req.error)
+    })
+  } catch (e) {
+    // The readiness read is a best-effort precondition, NOT the enqueue. It used
+    // to reject the whole call, turning a transient read error into a thrown
+    // exception in the scan flow; now it is a reported write failure.
+    console.warn('[OfflineQueue] Readiness read failed:', e)
+    return { ok: false, reason: 'write-failed', error: e }
   }
   // D1a: tag the row with the current user id (null when logged out /
   // unresolvable — enqueue still works, drain skips null-owner rows).
   const owner = await resolveOwnerId(null)
+  // A3 (L-03): the cap counts LIVE rows owned by THIS user only. Null-owner
+  // orphans (a getSession() blip while logged in) previously consumed the
+  // shared cap yet could never drain, wedging the queue at 200 with no UI
+  // remedy. A per-owner cap keeps logged-out queueing bounded too. Failed
+  // rows stay excluded (D1b).
+  if (existing.filter(r => !isFailedRow(r) && (r.owner ?? null) === (owner ?? null)).length >= MAX_QUEUE_SIZE) {
+    console.warn('[OfflineQueue] Queue full, refusing scan')
+    return { ok: false, reason: 'full' }
+  }
   const id = scan.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  return new Promise((resolve, reject) => {
-    const tx2 = db.transaction(STORE, 'readwrite')
-    tx2.objectStore(STORE).put({ ...scan, id, createdAt: Date.now(), attempts: 0, synced: false, owner: owner ?? null })
-    tx2.oncomplete = () => resolve(id)
-    tx2.onerror = () => reject(tx2.error)
+  return new Promise((resolve) => {
+    let tx2 = null
+    // `IDBTransaction.error` THROWS (InvalidStateError) unless the transaction
+    // finished with an error — an exception inside a handler would surface as
+    // an unhandled error and leave this promise PENDING. Never let that escape.
+    const txError = () => { try { return tx2 ? tx2.error : null } catch { return null } }
+    try {
+      tx2 = db.transaction(STORE, 'readwrite')
+      tx2.objectStore(STORE).put({ ...scan, id, createdAt: Date.now(), attempts: 0, synced: false, owner: owner ?? null })
+    } catch (e) {
+      // A closing connection or a non-cloneable value throws synchronously.
+      resolve({ ok: false, reason: 'write-failed', error: e })
+      return
+    }
+    tx2.oncomplete = () => resolve({ ok: true, id })
+    tx2.onerror = () => resolve({ ok: false, reason: 'write-failed', error: txError() })
+    // A quota breach fires `abort`, not `error`. Without this the promise never
+    // settles and the operator's scan hangs on `await enqueueScan(...)` forever.
+    tx2.onabort = () => resolve({ ok: false, reason: 'write-failed', error: txError() })
   })
 }
 
@@ -193,6 +235,33 @@ export async function clearFailedQueue() {
     req.onerror = () => res([])
   })
   const doomed = rows.filter(r => isFailedRow(r) && (r.owner ?? null) === uid)
+  if (doomed.length === 0) return 0
+  return new Promise((resolve) => {
+    const tx = db.transaction(STORE, 'readwrite')
+    const store = tx.objectStore(STORE)
+    for (const r of doomed) store.delete(r.id)
+    tx.oncomplete = () => resolve(doomed.length)
+    tx.onerror = () => resolve(0)
+  })
+}
+
+// A3 (L-03): orphan recovery. Null-owner NON-failed rows can never drain
+// (D1a: drain requires a logged-in user and only touches own rows), so a
+// getSession() blip leaves rows no flow will ever consume. They are removed
+// ONLY while logged out — when (r.owner ?? null) === uid === null, the
+// caller sees exactly these rows in getQueuedScans, so nothing belonging to
+// a logged-in user (or another user) is ever touched. Returns removed count.
+export async function clearOrphanedQueue() {
+  const db = await getDB()
+  if (!db) return 0
+  const uid = await resolveOwnerId(null)
+  if (uid !== null) return 0
+  const rows = await new Promise((res) => {
+    const req = db.transaction(STORE, 'readonly').objectStore(STORE).getAll()
+    req.onsuccess = () => res(req.result || [])
+    req.onerror = () => res([])
+  })
+  const doomed = rows.filter(r => !isFailedRow(r) && (r.owner ?? null) === null)
   if (doomed.length === 0) return 0
   return new Promise((resolve) => {
     const tx = db.transaction(STORE, 'readwrite')

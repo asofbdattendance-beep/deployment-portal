@@ -51,6 +51,10 @@ beforeEach(() => {
   enqueueScan.mockReset()
   getQueuedScans.mockReset()
   getQueuedScans.mockResolvedValue([])
+  // Default: a successful enqueue under the A1 result contract. Tests that
+  // need failure override with { ok:false, reason }. An unstubbed mock
+  // resolves undefined, and `res.ok` on undefined would TypeError.
+  enqueueScan.mockResolvedValue({ ok: true, id: 'q-default' })
   // default: online
   Object.defineProperty(navigator, 'onLine', { value: true, configurable: true })
 })
@@ -145,7 +149,7 @@ describe('error classification', () => {
   it('queues when the browser is offline', async () => {
     Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
     rpc.mockRejectedValue(new Error('Failed to fetch'))
-    enqueueScan.mockResolvedValue('q-1')
+    enqueueScan.mockResolvedValue({ ok: true, id: 'q-1' })
     const { result, showPopup, onQueued } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
     expect(enqueueScan).toHaveBeenCalledWith(expect.objectContaining({ badge: BADGE, action: 'IN' }))
@@ -156,10 +160,60 @@ describe('error classification', () => {
   it('surfaces an error when offline storage is unavailable', async () => {
     Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
     rpc.mockRejectedValue(new Error('Failed to fetch'))
-    enqueueScan.mockResolvedValue(undefined)
+    enqueueScan.mockResolvedValue({ ok: false, reason: 'unavailable' })
     const { result, toast } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
     expect(toast.error).toHaveBeenCalledWith('Offline storage unavailable')
+  })
+
+  // A2 (L-02): a full queue reports itself distinctly from missing storage.
+  it('reports a full queue distinctly from unavailable storage', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    rpc.mockRejectedValue(new Error('Failed to fetch'))
+    enqueueScan.mockResolvedValue({ ok: false, reason: 'full' })
+    const { result, showPopup, toast } = setup()
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(out).toEqual({ ok: false, reason: 'offline_queue_full' })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error', message: expect.stringContaining('full') }))
+    expect(toast.error).toHaveBeenCalledWith('Offline queue is full')
+  })
+
+  it('reports a queue write failure distinctly', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    rpc.mockRejectedValue(new Error('Failed to fetch'))
+    enqueueScan.mockResolvedValue({ ok: false, reason: 'write-failed', error: new Error('quota') })
+    const { result, toast } = setup()
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(out).toEqual({ ok: false, reason: 'offline_queue_write_failed' })
+    expect(toast.error).toHaveBeenCalledWith('Offline queue write failed')
+  })
+
+  // A2 (L-01): an enqueueScan THROW (old contract) must not escape handleScan.
+  it('never lets an enqueue rejection escape handleScan', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    rpc.mockRejectedValue(new Error('Failed to fetch'))
+    enqueueScan.mockRejectedValue(new Error('IDB exploded'))
+    const { result } = setup()
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(typeof out.ok).toBe('boolean')
+  })
+
+  // A2 (L-09): same badge+action within 2s offline queues exactly once.
+  it('suppresses a duplicate offline enqueue for the same badge+action', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    rpc.mockRejectedValue(new Error('Failed to fetch'))
+    enqueueScan.mockResolvedValue({ ok: true, id: 'q-1' })
+    const { result, toast } = setup()
+    let first, second
+    await act(async () => { first = await result.current.handleScan(BADGE) })
+    await act(async () => { second = await result.current.handleScan(BADGE) })
+    expect(first.ok).toBe(true)
+    expect(second).toEqual({ ok: false, reason: 'duplicate_queued' })
+    expect(enqueueScan).toHaveBeenCalledTimes(1)
+    expect(toast.warning).toHaveBeenCalledWith('Already queued — ignoring duplicate scan')
   })
 
   it('queues an OUT — not a second IN — when offline with a pending queued IN', async () => {
@@ -170,7 +224,7 @@ describe('error classification', () => {
     Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
     rpc.mockRejectedValue(new Error('Failed to fetch'))
     getQueuedScans.mockResolvedValue([{ id: 'q-in', badge: BADGE, schedule_id: 'sched-1', action: 'IN', synced: false }])
-    enqueueScan.mockResolvedValue('q-out')
+    enqueueScan.mockResolvedValue({ ok: true, id: 'q-out' })
     const { result, showPopup, onQueued } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
     expect(enqueueScan).toHaveBeenCalledWith(expect.objectContaining({ badge: BADGE, action: 'OUT' }))
@@ -182,7 +236,7 @@ describe('error classification', () => {
     Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
     rpc.mockRejectedValue(new Error('Failed to fetch'))
     getQueuedScans.mockResolvedValue([])
-    enqueueScan.mockResolvedValue('q-1')
+    enqueueScan.mockResolvedValue({ ok: true, id: 'q-1' })
     const { result } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
     expect(enqueueScan).toHaveBeenCalledWith(expect.objectContaining({ badge: BADGE, action: 'IN' }))
@@ -239,7 +293,7 @@ describe('session lookup timeout (D-1)', () => {
     Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
     rpc.mockRejectedValueOnce(new Error('Session lookup timed out after 5000ms'))
     rpc.mockRejectedValueOnce(new Error('Failed to fetch'))
-    enqueueScan.mockResolvedValue('q-1')
+    enqueueScan.mockResolvedValue({ ok: true, id: 'q-1' })
     const { result, showPopup } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
     expect(enqueueScan).toHaveBeenCalledWith(expect.objectContaining({ badge: BADGE, action: 'IN' }))
@@ -321,7 +375,7 @@ describe('idempotency nonce (D-3)', () => {
     // enqueues. The drain sends p_nonce: q.id — that id must be the online nonce.
     rpc.mockResolvedValueOnce({ data: null })
     rpc.mockRejectedValueOnce(new Error('Failed to fetch'))
-    enqueueScan.mockResolvedValue('q-1')
+    enqueueScan.mockResolvedValue({ ok: true, id: 'q-1' })
     const { result } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
     const scanInArgs = rpc.mock.calls.find(([name]) => name === 'scan_in')[1]
@@ -385,7 +439,7 @@ describe('return contract (D-4)', () => {
         OFFLINE()
         rpc.mockResolvedValueOnce({ data: null })
         rpc.mockRejectedValueOnce(new Error('Failed to fetch'))
-        enqueueScan.mockResolvedValue(undefined)
+        enqueueScan.mockResolvedValue({ ok: false, reason: 'unavailable' })
         return { out: await result.current.handleScan(BADGE) }
       },
     },
@@ -398,7 +452,7 @@ describe('return contract (D-4)', () => {
         // (which resolves ok:true) and never reaches scan_out.
         rpc.mockResolvedValueOnce({ data: { open: { id: 'open-1', status: 'OPEN', ...recentIn() }, last_out: null } })
         rpc.mockRejectedValueOnce(new Error('Failed to fetch'))
-        enqueueScan.mockResolvedValue(undefined)
+        enqueueScan.mockResolvedValue({ ok: false, reason: 'unavailable' })
         return { out: await result.current.handleScan(BADGE) }
       },
     },
@@ -417,6 +471,10 @@ describe('return contract (D-4)', () => {
     for (const c of CASES) {
       const ctx = setup()
       rpc.mockReset(); enqueueScan.mockReset(); OFFLINE()
+      // The wipe above leaves the mock returning undefined; re-establish the
+      // failure default so drives that never enqueue (busy/empty/invalid)
+      // still exercise a defined contract. Drives that enqueue override this.
+      enqueueScan.mockResolvedValue({ ok: false, reason: 'unavailable' })
       let out
       await act(async () => { out = (await c.drive({ result: ctx.result, first: null })).out })
       expect(out.ok, `${c.name} should not report success`).toBe(false)
@@ -441,6 +499,41 @@ describe('return contract (D-4)', () => {
     await act(async () => { out = await ctx.result.current.handleScan(BADGE) })
     expect(out.ok).toBe(true)
     expect(out.outTimeDefault).toMatch(/^\d{2}:\d{2}$/)
+  })
+
+  // A4 / L-05 — the prefill must be IST, and must survive a device whose zone
+  // OR clock is wrong. FIXED_NOW = 2026-09-27T12:00:00Z = 17:30 IST.
+  it('prefills the forgot-OUT in IST (17:30), not the device-local hour', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(FIXED_NOW)
+    rpc.mockResolvedValueOnce({ data: { open: { id: 'open-1', status: 'OPEN', ...istStamp(20, 'in') }, last_out: null } })
+    const ctx = setup()
+    let out
+    await act(async () => { out = await ctx.result.current.handleScan(BADGE) })
+    expect(out.outTimeDefault).toBe('17:30')
+  })
+
+  it('carries in_time on the forgot popup so the page can enforce order vs IN', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(FIXED_NOW)
+    rpc.mockResolvedValueOnce({ data: { open: { id: 'open-1', status: 'OPEN', ...istStamp(20, 'in') }, last_out: null } })
+    const { result, showPopup } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'forgot', in_time: expect.stringMatching(/^\d{2}:\d{2}:\d{2}$/),
+    }))
+  })
+
+  it('clamps a future prefill to now when the device clock runs fast (no doomed write)', async () => {
+    // Device clock 6h AHEAD of FIXED_NOW: skewed now = 18:00Z = 23:30 IST.
+    // IN is 26h before the skewed now, so the forgot path still triggers and
+    // the prefill must be the (skewed) now, strictly after the IN.
+    vi.useFakeTimers(); vi.setSystemTime(new Date(FIXED_NOW.getTime() + 6 * 3600000))
+    rpc.mockResolvedValueOnce({ data: { open: { id: 'open-1', status: 'OPEN', in_date: '2026-09-26', in_time: '21:30:00' }, last_out: null } })
+    const ctx = setup()
+    let out
+    await act(async () => { out = await ctx.result.current.handleScan(BADGE) })
+    expect(out.outTimeDefault).toBe('23:30')
+    const inTs = Date.parse('2026-09-26T21:30:00+05:30')
+    expect(Date.parse(`2026-09-27T${out.outTimeDefault}:00+05:30`)).toBeGreaterThan(inTs)
   })
 })
 
@@ -766,7 +859,7 @@ describe('v44 toggle guard (1h)', () => {
     it('queues the confirmed OUT offline, carrying the pinned open_id', async () => {
       Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
       rpc.mockRejectedValueOnce(new Error('Failed to fetch'))
-      enqueueScan.mockResolvedValue('q-9')
+      enqueueScan.mockResolvedValue({ ok: true, id: 'q-9' })
       const { result, showPopup, onQueued } = setup()
       const out = await act(async () => result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: 'open-1' }))
       expect(enqueueScan).toHaveBeenCalledWith(expect.objectContaining({
@@ -780,7 +873,7 @@ describe('v44 toggle guard (1h)', () => {
     it('surfaces offline storage being unavailable on the confirmed OUT', async () => {
       Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
       rpc.mockRejectedValueOnce(new Error('Failed to fetch'))
-      enqueueScan.mockResolvedValue(undefined)
+      enqueueScan.mockResolvedValue({ ok: false, reason: 'unavailable' })
       const { result, toast } = setup()
       const out = await act(async () => result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: 'open-1' }))
       expect(toast.error).toHaveBeenCalledWith('Offline storage unavailable')
@@ -836,6 +929,17 @@ describe('v44 toggle guard (1h)', () => {
       }))
       expect(out.ok).toBe(true)
       expect(out.outTimeDefault).toMatch(/^\d{2}:\d{2}$/)
+    })
+
+    it('A4: the post-Already-IN forgot prefill is IST too (both sites, not one)', async () => {
+      vi.useFakeTimers(); vi.setSystemTime(FIXED_NOW)
+      rpc.mockResolvedValueOnce({ data: { open: null, last_out: null } })
+      rpc.mockRejectedValueOnce(new Error('Already IN — OUT first'))
+      rpc.mockResolvedValueOnce({ data: { open: { id: 'open-2', status: 'OPEN', ...istStamp(20, 'in') }, last_out: null } })
+      const { result } = setup()
+      let out
+      await act(async () => { out = await result.current.handleScan(BADGE) })
+      expect(out.outTimeDefault).toBe('17:30')
     })
   })
 

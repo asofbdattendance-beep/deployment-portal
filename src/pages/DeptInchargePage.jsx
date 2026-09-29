@@ -6,8 +6,8 @@ import { useToast } from '../components/Toast'
 import BarcodeScanner from '../components/scanner/BarcodeScanner'
 import ScanResultPopup from '../components/scanner/ScanResultPopup'
 import RecentScansTable from '../components/scanner/RecentScansTable'
-import { getQueuedScans, installDrainListeners, preloadDeployed, clearFailedQueue } from '../lib/offlineQueue'
-import { friendly, todayStrIST, withTimeout, isDecisionPopup } from '../lib/scannerUtils'
+import { getQueuedScans, installDrainListeners, preloadDeployed, clearFailedQueue, clearOrphanedQueue } from '../lib/offlineQueue'
+import { friendly, todayStrIST, withTimeout, isDecisionPopup, resolveForgotOutTime } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import { useScanHandler } from '../hooks/useScanHandler'
 import { ScanLine, Users, UserX, UserCheck, Search, Clock, AlertTriangle, Download, Wifi, WifiOff, RefreshCw, Loader2 } from 'lucide-react'
@@ -213,8 +213,15 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
 
   const confirmForgotOut = async () => {
     if (!popup || popup.status !== 'forgot') return
-    if (!outTime.match(/^\d{2}:\d{2}$/)) { toast.error('Pick a valid OUT time'); return }
-    const ts = new Date(`${popup.in_date}T${outTime}:00+05:30`).toISOString()
+    const out = resolveForgotOutTime({ inDate: popup.in_date, inTime: popup.in_time, value: outTime })
+    if (out.invalid) { toast.error('Pick a valid OUT time'); return }
+    if (out.clamped) {
+      setOutTime(out.value)
+      toast.warning(out.clamped === 'future'
+        ? `OUT time was ahead of the scanner clock — using ${out.value} IST`
+        : `OUT time was before the IN — using ${out.value} IST`)
+    }
+    const ts = new Date(out.ts).toISOString()
     try {
       const { error: forgotError } = await withTimeout(
         supabase.rpc('scan_out', { p_badge: popup.badge, p_schedule: selectedScheduleId, p_ts: ts, p_open_id: popup.openId }),
@@ -273,7 +280,7 @@ export default function DeptInchargePage({ schedules, scheduleId }) {
               {navigator.onLine ? 'Online' : 'Offline'}
             </span>
             {offline && <span style={{fontSize:'0.7rem', color:'#b45309'}}>· refresh failed — showing last data</span>}
-            {queued.some(q=>q.failed) && <button onClick={async ()=>{ await clearFailedQueue(); getQueuedScans().then(setQueued).catch(()=>{}) }} style={{fontSize:'0.7rem', color:'#b45309', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear failed scans</button>}
+            {queued.some(q=>q.failed) && <button onClick={async ()=>{ await clearFailedQueue(); await clearOrphanedQueue(); getQueuedScans().then(setQueued).catch(()=>{}) }} style={{fontSize:'0.7rem', color:'#b45309', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear failed scans</button>}
           </div>
           {myDeptIds.length>1 && <select value={activeDept} onChange={e=>{ setActiveDept(e.target.value); setCentreFilter('') }} className="select" style={{marginTop:6}} aria-label="Filter by department">
             <option value="">All my departments ({myDeptIds.length})</option>

@@ -16,6 +16,7 @@ import {
   getBusySafetyTimeout,
   withinToggleGuard,
   minutesSince,
+  resolveForgotOutTime,
 } from '../lib/scannerUtils'
 
 /**
@@ -190,6 +191,46 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
   const [busy, setBusy] = useState(false)
   const busyRef = useRef(false)
   const safetyTimerRef = useRef(null)
+  // A2 (L-09): last successful OFFLINE enqueue per badge+action. A double tap,
+  // a badge held in front of the lens, or a manual double-submit while
+  // offline would otherwise queue duplicate rows — the camera's 2s suppressor
+  // does not cover the manual path or cross-path (C4 OUT then IN) races.
+  const lastQueuedAtRef = useRef(new Map())
+  const OFFLINE_DUPE_MS = 2000
+  const noteQueuedOffline = (badge, action) => {
+    lastQueuedAtRef.current.set(`${badge}:${action}`, Date.now())
+  }
+  const isOfflineDupe = (badge, action) => {
+    const at = lastQueuedAtRef.current.get(`${badge}:${action}`)
+    return at !== undefined && Date.now() - at < OFFLINE_DUPE_MS
+  }
+  // A2 (L-01): belt-and-braces. A1 made the real enqueueScan never reject,
+  // but if any future change (or a test double) throws, the rejection must
+  // still surface as a write-failed outcome — never escape handleScan, whose
+  // outer try has only a finally and would turn it into silent data loss.
+  const tryEnqueue = async (args) => {
+    try {
+      return await enqueueScan(args)
+    } catch (e) {
+      return { ok: false, reason: 'write-failed', error: e }
+    }
+  }
+  const offlineEnqueueFailed = useCallback((res, badge) => {
+    const time = new Date().toLocaleTimeString()
+    if (res.reason === 'full') {
+      showPopup({ status: 'error', badge, message: 'Offline queue is full (200 scans) — sync when online, or clear failed scans', time })
+      toast.error('Offline queue is full')
+      return { ok: false, reason: 'offline_queue_full' }
+    }
+    if (res.reason === 'write-failed') {
+      showPopup({ status: 'error', badge, message: 'Offline queue write failed — please retry the scan', time })
+      toast.error('Offline queue write failed')
+      return { ok: false, reason: 'offline_queue_write_failed' }
+    }
+    showPopup({ status: 'error', badge, message: 'Offline storage unavailable — please enter manually when online', time })
+    toast.error('Offline storage unavailable')
+    return { ok: false, reason: 'offline_storage_unavailable' }
+  }, [showPopup, toast])
 
   /**
    * The ONE resolver for popup identity fields. Since v40 a session row's
@@ -302,12 +343,13 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
           // session. This mirrors the normal OUT path on purpose; do not
           // "fix" the fast-path alone or the two paths diverge.
           if (!navigator.onLine || msg.includes('Failed to fetch') || msg.includes('timed out')) {
-            const queued = await enqueueScan({ badge: b, schedule_id: scheduleId, action: 'OUT', ts: tsFast, open_id: openId, centre: profile?.centre })
-            if (!queued) {
-              showPopup({ status: 'error', badge: b, message: 'Offline storage unavailable — please enter manually when online', time: new Date().toLocaleTimeString() })
-              toast.error('Offline storage unavailable')
-              return { ok: false, reason: 'offline_storage_unavailable' }
+            if (isOfflineDupe(b, 'OUT')) {
+              toast.warning('Already queued — ignoring duplicate scan')
+              return { ok: false, reason: 'duplicate_queued' }
             }
+            const queuedRes = await tryEnqueue({ badge: b, schedule_id: scheduleId, action: 'OUT', ts: tsFast, open_id: openId, centre: profile?.centre })
+            if (!queuedRes.ok) return offlineEnqueueFailed(queuedRes, b)
+            noteQueuedOffline(b, 'OUT')
             showPopup({ status: 'queued', badge: b, time: new Date().toLocaleTimeString(), message: 'Queued offline — will sync when online' })
             toast.success(`OUT queued (offline) ${b}`)
             scanOk = true
@@ -349,8 +391,13 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
                 q && q.synced !== true && q.failed !== true && q.status !== 'failed'
                 && q.action === 'IN' && q.badge === b && q.schedule_id === scheduleId)
               if (pendingIn) {
-                const outId = await enqueueScan({ badge: b, schedule_id: scheduleId, action: 'OUT', ts: new Date().toISOString(), open_id: null, centre: profile?.centre })
-                if (outId) {
+                if (isOfflineDupe(b, 'OUT')) {
+                  toast.warning('Already queued — ignoring duplicate scan')
+                  return { ok: false, reason: 'duplicate_queued' }
+                }
+                const outRes = await tryEnqueue({ badge: b, schedule_id: scheduleId, action: 'OUT', ts: new Date().toISOString(), open_id: null, centre: profile?.centre })
+                if (outRes.ok) {
+                  noteQueuedOffline(b, 'OUT')
                   showPopup({ status: 'queued', badge: b, time: new Date().toLocaleTimeString(), message: 'Queued offline — will sync when online' })
                   toast.success(`OUT queued (offline) ${b}`)
                   scanOk = true
@@ -388,16 +435,20 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
         const hrs = (Date.now() - inTs) / 3600000
         if (hrs > 12) {
           const dispOpen = displayOf(open)
+          // Pre-fill in IST, clamped into the window scan_out actually accepts.
+          // `getHours()` read the DEVICE's zone, so any scanner not set to IST
+          // pre-filled a time off by its own UTC offset; and a device whose
+          // clock runs fast pre-filled a FUTURE out_time, writing a session
+          // that can never be closed and dooming the follow-up re-IN (v46
+          // raises 'Timestamp cannot be in the future' at scan_in).
+          const forgot = resolveForgotOutTime({ inDate: open.in_date, inTime: open.in_time })
           showPopup({
             status: 'forgot', badge: b, name: dispOpen.name, centre: dispOpen.centre,
-            openSince: `${open.in_date} ${open.in_time}`, openId: open.id, in_date: open.in_date,
+            openSince: `${open.in_date} ${open.in_time}`, openId: open.id,
+            in_date: open.in_date, in_time: open.in_time,
             deptName: dispOpen.deptName,
           })
-          // Pre-fill with current time (HH:MM IST)
-          const now = new Date()
-          const hh = String(now.getHours()).padStart(2, '0')
-          const mm = String(now.getMinutes()).padStart(2, '0')
-          return { outTimeDefault: `${hh}:${mm}`, ok: true }
+          return { outTimeDefault: forgot.value, ok: true }
         }
 
         // ── v44 confirm gate ───────────────────────────────────────
@@ -433,12 +484,13 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
         } catch (e) {
           const msg = String(e.message || '')
           if (!navigator.onLine || msg.includes('Failed to fetch') || msg.includes('timed out')) {
-            const queued = await enqueueScan({ badge: b, schedule_id: scheduleId, action: 'OUT', ts, open_id: open.id, centre: profile?.centre })
-            if (!queued) {
-              showPopup({ status: 'error', badge: b, message: 'Offline storage unavailable — please enter manually when online', time: new Date().toLocaleTimeString() })
-              toast.error('Offline storage unavailable')
-              return { ok: false, reason: 'offline_storage_unavailable' }
+            if (isOfflineDupe(b, 'OUT')) {
+              toast.warning('Already queued — ignoring duplicate scan')
+              return { ok: false, reason: 'duplicate_queued' }
             }
+            const queuedRes = await tryEnqueue({ badge: b, schedule_id: scheduleId, action: 'OUT', ts, open_id: open.id, centre: profile?.centre })
+            if (!queuedRes.ok) return offlineEnqueueFailed(queuedRes, b)
+            noteQueuedOffline(b, 'OUT')
             showPopup({ status: 'queued', badge: b, time: new Date().toLocaleTimeString(), message: 'Queued offline — will sync when online' })
             toast.success(`OUT queued (offline) ${b}`)
             scanOk = true
@@ -501,14 +553,13 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
             const fresh = await lookupScanState(b, scheduleId)
             if (fresh.kind === 'ok' && fresh.open) {
               const dispFresh = displayOf(fresh.open)
+              const forgot = resolveForgotOutTime({ inDate: fresh.open.in_date, inTime: fresh.open.in_time })
               showPopup({
                 status: 'forgot', badge: b, name: dispFresh.name, centre: dispFresh.centre, deptName: dispFresh.deptName,
-                openSince: `${fresh.open.in_date} ${fresh.open.in_time}`, openId: fresh.open.id, in_date: fresh.open.in_date,
+                openSince: `${fresh.open.in_date} ${fresh.open.in_time}`, openId: fresh.open.id,
+                in_date: fresh.open.in_date, in_time: fresh.open.in_time,
               })
-              const now = new Date()
-              const hh = String(now.getHours()).padStart(2, '0')
-              const mm = String(now.getMinutes()).padStart(2, '0')
-              return { outTimeDefault: `${hh}:${mm}`, ok: true }
+              return { outTimeDefault: forgot.value, ok: true }
             }
             // The sewadar IS checked in, but we could not read the session:
             // say which failure it was instead of a bare dead end, so the
@@ -529,12 +580,13 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
             showPopup({ status: 'error', badge: b, message: 'Already checked IN — please OUT first', time: new Date().toLocaleTimeString() })
             toast.error('Already IN — OUT first')
           } else if (!navigator.onLine || msg.includes('Failed to fetch') || msg.includes('timed out')) {
-            const queued = await enqueueScan({ badge: b, schedule_id: scheduleId, action: 'IN', ts, centre: profile?.centre, dept: deptName, id: nonce, is_manual: manual })
-            if (!queued) {
-              showPopup({ status: 'error', badge: b, message: 'Offline storage unavailable — please enter manually when online', time: new Date().toLocaleTimeString() })
-              toast.error('Offline storage unavailable')
-              return { ok: false, reason: 'offline_storage_unavailable' }
+            if (isOfflineDupe(b, 'IN')) {
+              toast.warning('Already queued — ignoring duplicate scan')
+              return { ok: false, reason: 'duplicate_queued' }
             }
+            const queuedRes = await tryEnqueue({ badge: b, schedule_id: scheduleId, action: 'IN', ts, centre: profile?.centre, dept: deptName, id: nonce, is_manual: manual })
+            if (!queuedRes.ok) return offlineEnqueueFailed(queuedRes, b)
+            noteQueuedOffline(b, 'IN')
             showPopup({ status: 'queued', badge: b, time: new Date().toLocaleTimeString(), message: 'Queued offline — will sync when online' })
             toast.success(`IN queued (offline) ${b}`)
             scanOk = true
@@ -550,7 +602,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
     } finally {
       resetBusy()
     }
-  }, [scheduleId, profile, deptName, displayOf, showPopup, toast, onQueued, onAfterScan, setBusySafe, resetBusy])
+  }, [scheduleId, profile, deptName, displayOf, showPopup, toast, onQueued, onAfterScan, setBusySafe, resetBusy, offlineEnqueueFailed])
 
   return { handleScan, busy, getBusy, resetBusy }
 }
