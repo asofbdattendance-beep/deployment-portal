@@ -197,24 +197,24 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
   // does not cover the manual path or cross-path (C4 OUT then IN) races.
   const lastQueuedAtRef = useRef(new Map())
   const OFFLINE_DUPE_MS = 2000
-  const noteQueuedOffline = (badge, action) => {
+  const noteQueuedOffline = useCallback((badge, action) => {
     lastQueuedAtRef.current.set(`${badge}:${action}`, Date.now())
-  }
-  const isOfflineDupe = (badge, action) => {
+  }, [])
+  const isOfflineDupe = useCallback((badge, action) => {
     const at = lastQueuedAtRef.current.get(`${badge}:${action}`)
     return at !== undefined && Date.now() - at < OFFLINE_DUPE_MS
-  }
+  }, [])
   // A2 (L-01): belt-and-braces. A1 made the real enqueueScan never reject,
   // but if any future change (or a test double) throws, the rejection must
   // still surface as a write-failed outcome — never escape handleScan, whose
   // outer try has only a finally and would turn it into silent data loss.
-  const tryEnqueue = async (args) => {
+  const tryEnqueue = useCallback(async (args) => {
     try {
       return await enqueueScan(args)
     } catch (e) {
       return { ok: false, reason: 'write-failed', error: e }
     }
-  }
+  }, [])
   const offlineEnqueueFailed = useCallback((res, badge) => {
     const time = new Date().toLocaleTimeString()
     if (res.reason === 'full') {
@@ -231,6 +231,51 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
     toast.error('Offline storage unavailable')
     return { ok: false, reason: 'offline_storage_unavailable' }
   }, [showPopup, toast])
+
+  // Network/timeout failures are the ONLY ones that may fall through to an
+  // offline enqueue — auth/RLS/validation errors must surface (the file's
+  // header contract). Shared by the main OUT flow and submitForgotOut.
+  const isOfflineLike = (msg) => !navigator.onLine || msg.includes('Failed to fetch') || msg.includes('timed out')
+
+  // L-36 core: attempt an OUT write, falling back to the offline queue.
+  // Returns { handled, outcome } so each caller keeps its own success UX:
+  // the main flow celebrates inline, the forgot flow stays silent for the
+  // page to celebrate (it must keep its form on error).
+  const enqueueOutFallback = useCallback(async ({ b, ts, openId }, msg) => {
+    if (!isOfflineLike(msg)) return { handled: false }
+    if (isOfflineDupe(b, 'OUT')) {
+      toast.warning('Already queued — ignoring duplicate scan')
+      return { handled: true, outcome: { ok: false, reason: 'duplicate_queued' } }
+    }
+    const queuedRes = await tryEnqueue({ badge: b, schedule_id: scheduleId, action: 'OUT', ts, open_id: openId, centre: profile?.centre })
+    if (!queuedRes.ok) return { handled: true, outcome: offlineEnqueueFailed(queuedRes, b) }
+    noteQueuedOffline(b, 'OUT')
+    showPopup({ status: 'queued', badge: b, time: new Date().toLocaleTimeString(), message: 'Queued offline — will sync when online' })
+    toast.success(`OUT queued (offline) ${b}`)
+    onQueued?.()
+    return { handled: true, outcome: { ok: false, reason: 'queued' } }
+  }, [scheduleId, profile, showPopup, toast, onQueued, isOfflineDupe, tryEnqueue, noteQueuedOffline, offlineEnqueueFailed])
+
+  // L-36: the forgot-OUT confirm path with the same offline parity as the
+  // main OUT flow. Silent on online paths — the page keeps its form on
+  // error and celebrates + follows up on success. Loud only on the offline
+  // paths the page cannot produce itself (queued UI + distinct queue errors).
+  const submitForgotOut = useCallback(async ({ badge, openId, ts }) => {
+    try {
+      const { error } = await withTimeout(
+        supabase.rpc('scan_out', { p_badge: badge, p_schedule: scheduleId, p_ts: ts, p_open_id: openId }),
+        SCAN_RPC_TIMEOUT,
+        'Close OUT'
+      )
+      if (error) throw error
+      return { ok: true }
+    } catch (e) {
+      const msg = String(e.message || '')
+      const fb = await enqueueOutFallback({ b: badge, ts, openId }, msg)
+      if (fb.handled) return fb.outcome
+      return { ok: false, reason: 'server', message: friendly(msg) }
+    }
+  }, [enqueueOutFallback, scheduleId])
 
   /**
    * The ONE resolver for popup identity fields. Since v40 a session row's
@@ -483,18 +528,12 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
           scanOk = true
         } catch (e) {
           const msg = String(e.message || '')
-          if (!navigator.onLine || msg.includes('Failed to fetch') || msg.includes('timed out')) {
-            if (isOfflineDupe(b, 'OUT')) {
-              toast.warning('Already queued — ignoring duplicate scan')
-              return { ok: false, reason: 'duplicate_queued' }
-            }
-            const queuedRes = await tryEnqueue({ badge: b, schedule_id: scheduleId, action: 'OUT', ts, open_id: open.id, centre: profile?.centre })
-            if (!queuedRes.ok) return offlineEnqueueFailed(queuedRes, b)
-            noteQueuedOffline(b, 'OUT')
-            showPopup({ status: 'queued', badge: b, time: new Date().toLocaleTimeString(), message: 'Queued offline — will sync when online' })
-            toast.success(`OUT queued (offline) ${b}`)
-            scanOk = true
-            onQueued?.()
+          const fb = await enqueueOutFallback({ b, ts, openId: open.id }, msg)
+          if (fb.handled) {
+            // A queued OUT resolves like today (handled, falls through to the
+            // refresh); every other offline outcome resolves ok:false.
+            if (fb.outcome.reason === 'queued') { scanOk = true }
+            else return fb.outcome
           } else {
             showPopup({ status: 'error', badge: b, message: friendly(msg), time: new Date().toLocaleTimeString() })
             toast.error(friendly(msg))
@@ -612,7 +651,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
     } finally {
       resetBusy()
     }
-  }, [scheduleId, profile, deptName, displayOf, showPopup, toast, onQueued, onAfterScan, setBusySafe, resetBusy, offlineEnqueueFailed])
+  }, [scheduleId, profile, deptName, displayOf, showPopup, toast, onQueued, onAfterScan, setBusySafe, resetBusy, offlineEnqueueFailed, enqueueOutFallback, isOfflineDupe, noteQueuedOffline, tryEnqueue])
 
-  return { handleScan, busy, getBusy, resetBusy }
+  return { handleScan, busy, getBusy, resetBusy, submitForgotOut }
 }

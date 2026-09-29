@@ -7,7 +7,7 @@ import ScanResultPopup from '../components/scanner/ScanResultPopup'
 import { getQueuedScans, installDrainListeners, preloadDeployed, clearFailedQueue, clearOrphanedQueue } from '../lib/offlineQueue'
 import { ScanLine, Clock, Wifi, WifiOff, RefreshCw, Loader2 } from 'lucide-react'
 import { useScanHandler } from '../hooks/useScanHandler'
-import { friendly, todayStrIST, withTimeout, isDecisionPopup, resolveForgotOutTime } from '../lib/scannerUtils'
+import { todayStrIST, isDecisionPopup, resolveForgotOutTime } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import RecentScansTable from '../components/scanner/RecentScansTable'
 
@@ -26,6 +26,9 @@ export default function ScannerPage({ schedules, scheduleId }){
   const [syncing, setSyncing]=useState(false)
   const [offline, setOffline]=useState(false)
   const dismissTimerRef = useRef(null)
+  // L-47: the forgot follow-up re-scan timer. Stored (not bare) so unmount
+  // or a second confirm cannot leak it into a dead component.
+  const followUpRef = useRef(null)
 
   // The badge that the server stamps onto every IN as `in_scanner_badge`
   // (populated from portal_users.badge_number for auth.uid()).
@@ -85,7 +88,7 @@ export default function ScannerPage({ schedules, scheduleId }){
 
   useEffect(()=>{
     const off=installDrainListeners(supabase, onDrainProgress)
-    return ()=> { off(); if(dismissTimerRef.current) clearTimeout(dismissTimerRef.current) }
+    return ()=> { off(); if(dismissTimerRef.current) clearTimeout(dismissTimerRef.current); if(followUpRef.current) clearTimeout(followUpRef.current) }
   },[onDrainProgress])
   useEffect(()=>{ const id=setInterval(()=>refresh(),15000); return()=>clearInterval(id) },[refresh])
 
@@ -93,12 +96,15 @@ export default function ScannerPage({ schedules, scheduleId }){
   const showPopup=(data)=>{
     if(dismissTimerRef.current) clearTimeout(dismissTimerRef.current)
     setPopup(data)
-    if (data.status === 'in' || data.status === 'out' || data.status === 'flagged') {
+    // L-48: `queued` is a transient ack like in/out/flagged — it dismisses
+    // itself instead of hanging until the next scan replaces it. `error`
+    // deliberately stays: those paths ask the operator to retry the scan.
+    if (data.status === 'in' || data.status === 'out' || data.status === 'flagged' || data.status === 'queued') {
       dismissTimerRef.current=setTimeout(()=> setPopup(null), 2500)
     }
   }
 
-  const { handleScan: rawHandleScan, busy, resetBusy } = useScanHandler({
+  const { handleScan: rawHandleScan, busy, resetBusy, submitForgotOut } = useScanHandler({
     scheduleId,
     profile,
     deptName: null,
@@ -170,20 +176,21 @@ export default function ScannerPage({ schedules, scheduleId }){
         : `OUT time was before the IN — using ${out.value} IST`)
     }
     const ts=new Date(out.ts).toISOString()
-    try{
-      const { error: forgotError } = await withTimeout(
-        supabase.rpc('scan_out', { p_badge: popup.badge, p_schedule: scheduleId, p_ts: ts, p_open_id: popup.openId }),
-        8000, 'Close OUT'
-      )
-      if (forgotError) throw forgotError
-      toast.success('OUT closed')
-      setPopup(null)
-      setOutTime('')
-      // `confirmFor: 'IN'` — the operator already decided this OUT, and the next
-      // entry is the fresh IN. Scoped to 'IN' so the approval cannot also
-      // authorise closing a session that appeared in the 200ms window.
-      setTimeout(()=> handleScan(popup.badge, { confirmed: true, confirmFor: 'IN' }), 200)
-    }catch(e){ toast.error(friendly(e.message)) }
+    // L-36: the OUT write goes through the hook's submitForgotOut — the same
+    // RPC attempt + offline enqueue as the main OUT flow — instead of a bare
+    // scan_out with a toast-only catch that lost the write offline.
+    const r = await submitForgotOut({ badge: popup.badge, openId: popup.openId, ts })
+    if (!r.ok && r.reason === 'server') { toast.error(r.message); return }
+    if (!r.ok) return // queued/duplicate/queue errors already surfaced by the hook; no follow-up while the OUT hasn't synced
+    toast.success('OUT closed')
+    setPopup(null)
+    setOutTime('')
+    // `confirmFor: 'IN'` — the operator already decided this OUT, and the next
+    // entry is the fresh IN. Scoped to 'IN' so the approval cannot also
+    // authorise closing a session that appeared in the 200ms window.
+    if (followUpRef.current) clearTimeout(followUpRef.current)
+    const badge = popup.badge
+    followUpRef.current = setTimeout(()=> handleScan(badge, { confirmed: true, confirmFor: 'IN' }), 200)
   }
 
   if(!schedules.length) return <div className="page"><div className="card" style={{padding:'2rem', textAlign:'center'}}>No schedules</div></div>

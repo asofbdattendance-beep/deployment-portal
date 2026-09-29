@@ -10,13 +10,23 @@ L-14/15/20/21/22. `enginePool.js` (extracted from `BarcodeScanner.jsx`): `armFal
 ## Task 2: camera-a11y — L-16/17/18
 `BarcodeScanner.jsx` + `computeRoi`: tap-to-focus role/label/tabIndex/keyboard; torch keeps a subject label + aria-hidden icon; reconcile guide-box (margin 24) with ROI (0.92×0.62). Depends: 1. Verify: `BarcodeScanner.test.jsx` + manual SR pass.
 
-## Task 3: forgot-out-parity — L-36/47/48
-Route both pages' forgot-OUT through `handleScan` (offline enqueue); store+cancel the 200ms follow-up timer; auto-dismiss queued/error; add queued+error to `isDecisionPopup`. **Extract `useScannerSession`** (popup state, auto-dismiss, offline flags, drain progress) shared by `ScannerPage`/`DeptInchargePage` — minimal: session/popup/queue state only, not page layout. Rationale: 8 defects hit both pages; they already drifted once (`in_date` vs event-date `or()`). Depends: 1, 2. Verify: `scannerUtils.test.js`, `useScanHandler.test.jsx`, new hook tests.
+## Task 3: forgot-out-parity — L-36/47/48 — DONE (core; extraction deferred, see task 5)
+
+Hook exports `submitForgotOut` (same RPC attempt + offline enqueue as the
+main OUT flow, via shared `enqueueOutFallback`); both pages route their
+forgot confirm through it. Follow-up re-scan timer stored in a ref and
+cleared on unmount (L-47). `queued` joins the auto-dismiss list (L-48).
+
+Deliberate deviations: `isDecisionPopup` left UNTOUCHED — `error` exclusion
+is v44 design (those paths ask for a re-scan; gating would block it) and
+gating `queued` would drop rapid offline scans for 2.5s each. Extraction of
+`useScannerSession` deferred to ride with task 5 (same regions, one
+restructure instead of two).
 
 ## Task 4: popup-contract — L-39/12
 Gate the ">12h open" pill + destructive action on the Already-IN refetch path (`useScanHandler.js:553-562`); stop `queued` rendering two identical "Done" buttons (`ScanResultPopup.jsx`). Depends: —. Verify: `useScanHandler.test.jsx`, `ScanResultPopup.test.jsx`.
 
-## Task 5: page-state — L-41/42/43/44/46
+## Task 5: page-state — L-41/42/43/44/46 (+ useScannerSession extraction)
 Overnight filter parity (event-date `or()` both pages); poll on Incharge; real `setOffline(false)`; call `setSyncing(true)`; make "Camera paused" actually pause (imperative handle + ref — `BarcodeScanner` already exposes restart/stop; extend or reuse). Files: both pages. Depends: 3. Verify: new page tests.
 
 ## Task 6: page-tests — L-23

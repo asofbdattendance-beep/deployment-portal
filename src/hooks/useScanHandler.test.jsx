@@ -373,6 +373,49 @@ describe('get_scan_state PostgREST error (D-2)', () => {
   })
 })
 
+// ─── submitForgotOut offline parity (L-36) ───────────────────────────────
+// The pages' forgot-OUT confirm used to call scan_out directly with a
+// toast-only catch — the only scan path with no offline fallback. It now
+// goes through the same RPC attempt + offline enqueue as the main OUT flow.
+describe('submitForgotOut (L-36)', () => {
+  const TS = '2026-09-24T09:05:00.000Z'
+
+  it('closes online silently — the page owns the celebration + follow-up', async () => {
+    rpc.mockResolvedValueOnce({ data: { ok: true }, error: null })
+    const { result, showPopup, toast } = setup()
+    let out
+    await act(async () => { out = await result.current.submitForgotOut({ badge: BADGE, openId: 'open-1', ts: TS }) })
+    expect(rpc).toHaveBeenCalledWith('scan_out', expect.objectContaining({ p_badge: BADGE, p_open_id: 'open-1', p_ts: TS }))
+    expect(out).toEqual({ ok: true })
+    expect(showPopup).not.toHaveBeenCalled()
+    expect(toast.success).not.toHaveBeenCalled()
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('reports server errors silently with a friendly message — the page keeps the form', async () => {
+    rpc.mockResolvedValueOnce({ data: null, error: new Error('OUT time must be after IN time') })
+    const { result, showPopup, toast } = setup()
+    let out
+    await act(async () => { out = await result.current.submitForgotOut({ badge: BADGE, openId: 'open-1', ts: TS }) })
+    expect(out).toEqual({ ok: false, reason: 'server', message: expect.any(String) })
+    expect(showPopup).not.toHaveBeenCalled()
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('queues offline with the chosen ts + open_id and surfaces the queued UI', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    rpc.mockRejectedValueOnce(new Error('Failed to fetch'))
+    enqueueScan.mockResolvedValue({ ok: true, id: 'q-f' })
+    const { result, showPopup, onQueued } = setup()
+    let out
+    await act(async () => { out = await result.current.submitForgotOut({ badge: BADGE, openId: 'open-1', ts: TS }) })
+    expect(enqueueScan).toHaveBeenCalledWith(expect.objectContaining({ badge: BADGE, action: 'OUT', ts: TS, open_id: 'open-1' }))
+    expect(out).toEqual({ ok: false, reason: 'queued' })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'queued' }))
+    expect(onQueued).toHaveBeenCalled()
+  })
+})
+
 // ─── D-3: the online scan_in carries the same nonce the drain will replay ──────
 describe('idempotency nonce (D-3)', () => {
   it('passes a p_nonce on the ONLINE scan_in', async () => {
