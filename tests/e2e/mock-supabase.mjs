@@ -90,7 +90,22 @@ function rpcResult(name, params) {
   // NOTE: PostgREST returns the function's value directly as the body;
   // supabase-js maps HTTP 4xx + { message, code } to `error`.
   if (seed === 'error') return { __status: 400, __body: { message: 'seeded error', code: 'SEED' } }
-  if (seed && typeof seed === 'object') return { __status: 200, __body: seed }
+  // Per-badge failures: { scan_in_error_for: { BADGE: { message, code } } }.
+  // Lets one queued row poison while its neighbours drain (or drop).
+  const perBadge = state.seed[`${name}_error_for`]
+  const failure = perBadge && params && perBadge[params.p_badge]
+  if (failure) return { __status: 400, __body: failure }
+  // A seed object is the success body — unless it carries __status/__body,
+  // which simulate an exact server failure (poison rows, stale open_ids).
+  // A seed holding ONLY *_error_for control keys falls through to the
+  // default behaviour below so unlisted badges still succeed.
+  const onlyControl = seed && typeof seed === 'object'
+    && Object.keys(seed).length > 0
+    && Object.keys(seed).every((k) => k.endsWith('_error_for'))
+  if (seed && typeof seed === 'object' && !onlyControl) {
+    if (typeof seed.__status === 'number') return { __status: seed.__status, __body: seed.__body ?? null }
+    return { __status: 200, __body: seed }
+  }
   switch (name) {
     case 'get_portal_profile':
       return { __status: 200, __body: PROFILE }
@@ -140,7 +155,9 @@ const server = http.createServer(async (req, res) => {
   }
   if (pathname === '/__test/seed' && req.method === 'POST') {
     const body = await readBody(req)
-    state.seed = body?.rpc || {}
+    // Merge: specs layer seeds (an old open session AND a poison badge).
+    // Reset wipes everything between specs.
+    state.seed = { ...state.seed, ...(body?.rpc || {}) }
     json(res, 200, { ok: true })
     return
   }

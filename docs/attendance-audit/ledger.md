@@ -120,10 +120,21 @@ override points supabase-js at the mock. Single worker (mock state shared).
   and zero lost rows.
 - Side proof: the L-07 banner fires against the mock (no
   `portal_app_version` → "Couldn't confirm") — the handshake behaves.
+- Matrix (`tests/e2e/queue-matrix.spec.js`, 12 rows — the ledger's "20"
+  was aspirational; this is the encodable set, the rest stays unit-owned):
+  M1 full-queue distinct popup + cap intact (L-02); M2 3-tap IN→OUT→dupe
+  (L-09, incl. the C4 reality that tap 2 queues OUT, not a dupe); M3/M4
+  forgot-OUT offline queue + drain with open_id/ts (L-36); M5 poison
+  quarantines with reason while neighbours drain (L-04); M6 bad-timestamp
+  quarantine (L-04); M7 stale open_id drops, drain continues (L-08); M8
+  manual flag end to end; M9 clear-failed-scans; M10 reload persistence;
+  M11 connectivity pill; M12 Already-IN replay dedupes (L-04).
+  E2E lesson recorded: offline tap 2 is C4-OUT by design; the busy flag
+  (not the dupe guard) swallows taps landing mid-flow — matrix timing
+  accounts for both.
 - Limitation: mocked RPC ≠ real RLS — RLS proven separately on PG 15
   stub + `verify_test_logins.sql`. Camera absent headless (manual-entry
-  path only). 20-row offline-queue matrix (ledger Expected column) NOT
-  yet encoded — next slice.
+  path only; Enter key == button path).
 
 ## Verification (task 0 gate)
 

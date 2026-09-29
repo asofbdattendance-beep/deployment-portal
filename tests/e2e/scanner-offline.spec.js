@@ -9,52 +9,14 @@
  *   queued with a reason — never silently dropped).
  */
 import { test, expect } from '@playwright/test'
-
-const API = 'http://127.0.0.1:54321'
-
-async function resetMock(request) {
-  await request.post(`${API}/__test/reset`)
-}
-
-async function mockCalls(request) {
-  return (await request.get(`${API}/__test/calls`)).json()
-}
-
-/** All rows in the app's real IndexedDB offline queue. */
-async function queueRows(page) {
-  return page.evaluate(
-    () =>
-      new Promise((resolve, reject) => {
-        const open = indexedDB.open('sewadar_offline_q')
-        open.onerror = () => reject(open.error)
-        open.onsuccess = () => {
-          const db = open.result
-          if (!db.objectStoreNames.contains('scan_queue')) {
-            resolve([])
-            return
-          }
-          const req = db.transaction('scan_queue', 'readonly').objectStore('scan_queue').getAll()
-          req.onsuccess = () => resolve(req.result)
-          req.onerror = () => reject(req.error)
-        }
-      }),
-  )
-}
-
-async function loginAsScanner(page) {
-  await page.goto('/')
-  await page.getByPlaceholder('your@email.com').fill('scanner@example.com')
-  await page.getByPlaceholder('Enter password').fill('secret')
-  await page.getByRole('button', { name: 'Sign In' }).click()
-  // Role `scanner` sees only the Scanner tab, so a successful login lands
-  // directly on the scan surface with its manual entry.
-  await expect(page.getByPlaceholder('Manual FB/BH/VS badge')).toBeVisible()
-}
-
-async function manualScan(page, badge) {
-  await page.getByPlaceholder('Manual FB/BH/VS badge').fill(badge)
-  await page.getByRole('button', { name: 'Mark In/Out' }).click()
-}
+import {
+  resetMock,
+  mockCalls,
+  collectPageErrors,
+  loginAsScanner,
+  manualScan,
+  queueRows,
+} from './helpers.mjs'
 
 test.describe('scanner offline round trip', () => {
   test.beforeEach(async ({ request }) => {
@@ -62,8 +24,7 @@ test.describe('scanner offline round trip', () => {
   })
 
   test('boots through login to the scanner with a live RPC path', async ({ page, request }) => {
-    const pageErrors = []
-    page.on('pageerror', (e) => pageErrors.push(String(e)))
+    const guard = collectPageErrors(page)
 
     await loginAsScanner(page)
     await manualScan(page, 'FB5971GA0001')
@@ -71,7 +32,7 @@ test.describe('scanner offline round trip', () => {
 
     const calls = await mockCalls(request)
     expect(calls.some((c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA0001')).toBe(true)
-    expect(pageErrors).toEqual([])
+    guard.assertEmpty()
   })
 
   test('offline scans queue in IndexedDB and drain on reconnect with the queued nonce', async ({
@@ -79,8 +40,7 @@ test.describe('scanner offline round trip', () => {
     context,
     request,
   }) => {
-    const pageErrors = []
-    page.on('pageerror', (e) => pageErrors.push(String(e)))
+    const guard = collectPageErrors(page)
 
     await loginAsScanner(page)
 
@@ -114,6 +74,6 @@ test.describe('scanner offline round trip', () => {
       })
       .toBe(0)
 
-    expect(pageErrors).toEqual([])
+    guard.assertEmpty()
   })
 })
