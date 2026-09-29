@@ -123,3 +123,45 @@ Task 1 (err-taxonomy) is unblocked. Tasks 15–16 need your OK for `@playwright/
 - L-35 REFUTED: `addCounts` (daily rows) vs `buildVisitRows` (visit RPC) use deliberately different vocabularies — not a bug.
 - L-51 restated: there is no `pct()` helper. `attendanceRate` is clamped; only `buildTrendRows` is unclamped (safe today via v47, undefended against server over-count).
 - ROI helper lives at `scannerUtils.js:311-312` (`computeRoi`), not `:228-246`. New: `isEdgeDetection` (edge guard shared by both engines).
+
+## Adjudications (Phase C, verified against source 2026-09-29)
+
+Stale = the defect as stated has no referent in current source (fixed by
+an earlier rework, renamed away, or never true). Each carries its evidence
+so nobody re-opens it without new facts.
+
+- L-26 STALE: no `wrap(req)` exists anywhere; no visit-list workbook exists;
+  both day workbooks (DashboardPage:405-415, ReportsPage:484-493) already
+  emit full 6-column tuples for present AND absent.
+- L-27 STALE: `listedPresent` exists nowhere; `buildVisitRows`
+  (attendance.js:632) emits centre×dept aggregates with no badge field.
+- L-28 STALE-AS-CLAIMED: DashboardPage has zero filters (nothing to
+  honour); ReportsPage honours centre/dept/search on detail sheets
+  (`filterBadges`, ReportsPage:428) with summary-intentionally-full as
+  documented design (ReportsPage:436-438). The "year/schedule/qr/dept"
+  filter set exists nowhere.
+- L-29 STALE: `attendance_day_badges` RETURNS full tuples
+  (v45:612-619); both workbooks map names. Fixed pre-ledger.
+- L-30 STALE: no `listedPresent` dependency exists; workbooks read the
+  RPC rows directly (DashboardPage:407-414).
+- L-33 STALE (all three): `filterByCentre` handles UNASSIGNED explicitly
+  (attendance.js:458) and subtree matching (463-465); dept+centre compose
+  on the same row shape; `searchRows` (438-446) is shared, documented,
+  and centre-matching is intended (find a centre's sewadars).
+- L-54 CLIENT-CLEAN: `scannerStatus` documents its contract
+  (attendance.js:688-689: wall-clock FOR the queried date) and honors it;
+  the staleness lived server-side and is fixed by v49 (L-53).
+- L-56 STALE: AnomaliesPage labels count rows/records/rules, never
+  "sewadars" (AnomaliesPage:340-365); row-grain counting is by design
+  (documented on `anomalyCounts`).
+- L-38 NO-REFERENT for attendance: no attendance/reports surface calls
+  `fetchCentres` (only VSS/consent components do); centres here resolve
+  server-side. Out of Phase C scope.
+- L-10 SCOPE NOTE: the missing dept gate was `attendance_day_badges'`
+  absent-mode present-subtraction ONLY — `daily_summary` always had it
+  (v45:112). Fixed where it was missing (v49 §3).
+- L-49 SPANS TWO FUNCTIONS: the snapshot-vs-effective mismatch lived in
+  `attendance_daily_summary` (v45:101-113) AND `attendance_visit_summary`
+  (v45:301-319). v49 §1-2 fixes both via `badge_eff`.
+- L-07 CLOSED by v50 (`portal_version` + `portal_app_version()`) and the
+  client handshake (`src/lib/version.js` + `DbVersionBanner`, App shell).

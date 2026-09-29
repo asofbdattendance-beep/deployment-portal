@@ -5,6 +5,7 @@ import { useToast } from './components/Toast'
 import LoginPage from './pages/LoginPage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
 import { ROLE_LABELS, ROLE_COLORS } from './lib/supabase'
+import DbVersionBanner from './components/DbVersionBanner'
 import { ShieldCheck, ScanLine, RefreshCw, AlertTriangle, Wrench, ChevronDown, Check } from 'lucide-react'
 import { PAGES } from './lib/pages'
 
@@ -198,6 +199,9 @@ function Dashboard() {
           </button>
         </div>
       </header>
+
+      {/* L-07 handshake: warn when the database predates this frontend. */}
+      <DbVersionBanner />
 
       {/* ── separate tab navbar ── */}
       <nav className="tab-nav" aria-label="Primary">
