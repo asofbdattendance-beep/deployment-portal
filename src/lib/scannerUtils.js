@@ -275,14 +275,21 @@ export function isSecureCameraContext() {
  * Uses luma weights (0.299/0.587/0.114) rather than a flat channel average so
  * binarization sees the contrast that actually matters for a dark badge.
  *
+ * One decode runs per frame, so one module-level scratch buffer is shared
+ * across calls (L-21: allocating per frame stalls low-end phones in GC). The
+ * buffer is only valid until the next call — the sole caller (the ZXing
+ * decode path) consumes it synchronously inside the same detect() pass.
+ *
  * @param {{data: Uint8ClampedArray|Uint8Array, width: number, height: number}} imageData
  * @returns {Uint8ClampedArray} length = width * height
  */
+let _grayScratch = null
 export function rgbaToGray(imageData) {
   const { data, width, height } = imageData || {}
   if (!data || !width || !height) return new Uint8ClampedArray(0)
   const n = width * height
-  const out = new Uint8ClampedArray(n)
+  if (!_grayScratch || _grayScratch.length !== n) _grayScratch = new Uint8ClampedArray(n)
+  const out = _grayScratch
   for (let i = 0, p = 0; i < n; i++, p += 4) {
     out[i] = (data[p] * 299 + data[p + 1] * 587 + data[p + 2] * 114) / 1000
   }
@@ -322,6 +329,38 @@ export function computeRoi(vw, vh, opts = {}) {
   const dh = Math.max(1, Math.round(sh * scale))
 
   return { sx, sy, sw, sh, dw, dh, scale }
+}
+
+// ─── isEdgeDetection ─────────────────────────────────────────────────────────
+/**
+ * True when a detection's centroid hugs the frame edge (< 2% margin).
+ *
+ * Points arrive in detect-canvas coordinates, so they are mapped back to
+ * video pixels first (divide by the downscaled size, multiply by the crop,
+ * add the crop offset) — the same mapping the inline guard in
+ * BarcodeScanner.handleBarcodes used.
+ *
+ * L-15: the old guard required `cornerPoints.length >= 4`, which the ZXing
+ * path can never satisfy (a 1D barcode yields 2 result points), so edge
+ * rejection silently differed by browser/engine. Two points centroid just as
+ * well as four for a centre-within-margin test, so the threshold is >= 2.
+ * Fewer than 2 points (or no video size) never blocks: degenerate data must
+ * not suppress a read.
+ *
+ * @param {Array<{x:number,y:number}>} points
+ * @param {{sx:number,sy:number,sw:number,sh:number,dw:number,dh:number}} roi
+ * @param {number} vw — video intrinsic width
+ * @param {number} vh — video intrinsic height
+ * @returns {boolean}
+ */
+export function isEdgeDetection(points, roi, vw, vh) {
+  if (!points || points.length < 2 || !roi || !vw || !vh || !roi.dw || !roi.dh) return false
+  let sx = 0, sy = 0
+  for (const p of points) { sx += p.x; sy += p.y }
+  const cx = (sx / points.length / roi.dw) * roi.sw + roi.sx
+  const cy = (sy / points.length / roi.dh) * roi.sh + roi.sy
+  const mx = vw * 0.02, my = vh * 0.02
+  return cx < mx || cx > vw - mx || cy < my || cy > vh - my
 }
 
 // ─── waitForVideoReady ─────────────────────────────────────────────────────────

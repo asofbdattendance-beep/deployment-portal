@@ -190,4 +190,67 @@ describe('BarcodeScanner camera session lifecycle', () => {
     // The only assertion that matters here: the track was reclaimed, not leaked.
     expect(stream.track.stop).toHaveBeenCalled()
   })
+
+  // L-20: a Retry/restart must not inherit the previous run's 2s duplicate
+  // suppressor — otherwise the first post-restart scan of the same badge is
+  // silently dropped and the operator taps a dead button.
+  it('accepts the same badge immediately after restart (no inherited suppressor)', async () => {
+    vi.useFakeTimers()
+    try {
+      const stream = makeStream()
+      mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+      window.BarcodeDetector = class {
+        static getSupportedFormats = () => Promise.resolve(['code_39'])
+        detect = () => Promise.resolve([{ rawValue: 'FB5971GA0001', cornerPoints: [] }])
+      }
+      const onScan = vi.fn()
+      let ref = null
+      const { container } = render(<BarcodeScanner ref={(r) => { ref = r }} onScan={onScan} />)
+      const video = container.querySelector('video')
+      Object.defineProperty(video, 'videoWidth', { value: 1280, configurable: true })
+      Object.defineProperty(video, 'videoHeight', { value: 720, configurable: true })
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(800) })
+      expect(onScan).toHaveBeenCalledTimes(1)
+
+      await act(async () => { ref.restart(); await vi.advanceTimersByTimeAsync(800) })
+      expect(onScan).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // L-22: the watchdog error unmounts <video>, so a Retry that reads the ref
+  // synchronously dies at "Video element missing" and the error is permanent.
+  it('recovers on Retry after the watchdog errors (no dead Video-element-missing)', async () => {
+    // React 18 schedules commits over MessageChannel (a REAL macrotask), which
+    // never runs while only the fake clock advances — so the test yields to
+    // the real event loop once to let the loading state commit, exactly as a
+    // real browser's event loop would interleave it.
+    const realSetTimeout = setTimeout
+    const realYield = () => new Promise(r => realSetTimeout(r, 0))
+    vi.useFakeTimers()
+    try {
+      const stream = makeStream()
+      mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+      const { container, getByRole } = render(<BarcodeScanner onScan={vi.fn()} />)
+      const video = container.querySelector('video')
+      Object.defineProperty(video, 'videoWidth', { value: 1280, configurable: true })
+      Object.defineProperty(video, 'videoHeight', { value: 720, configurable: true })
+
+      // 20s of live preview with zero decodes trips the watchdog.
+      await act(async () => { await vi.advanceTimersByTimeAsync(21000) })
+      expect(getByRole('button', { name: /retry/i })).toBeTruthy()
+
+      await act(async () => {
+        getByRole('button', { name: /retry/i }).click()
+        await realYield()
+      })
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+      expect(mocks.openCamera).toHaveBeenCalledTimes(2)
+      expect(container.querySelector('video')).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

@@ -113,3 +113,13 @@ Bug-hunt 2026-09-28 found 6 Critical (OUT drain p_nonce mismatch; grouped PATCH 
 ## Next
 
 Task 1 (err-taxonomy) is unblocked. Tasks 15–16 need your OK for `@playwright/test` + injectable drain/timeout seam (risk #2). L-07/L-13/L-25 need a v39-parked DB to prove red.
+
+## Corrections (Phase B task 1, verified against source 2026-09-29)
+
+- Every `src/components/BarcodeScanner.jsx` path in this ledger is wrong: the file lives at `src/components/scanner/BarcodeScanner.jsx` (940 lines). The engine pool has since moved to `src/components/scanner/enginePool.js`.
+- L-14 "iOS 3-strike breaker": no such breaker exists in source — dropped from scope. The real defect was fallback onto the never-loaded engine (fixed: `armFallback` + ready-only landing).
+- L-19 headline ("dead-end Already IN") is already mitigated (`useScanHandler.js` refetch path). Residual: orphaned sessions/lost writes — deferred to its own task.
+- L-22 reframed: the watchdog return itself is correct (error screen replaces the UI); the defect was Retry dying at "Video element missing" + the stale watchdog clock re-erroring instantly (both fixed).
+- L-35 REFUTED: `addCounts` (daily rows) vs `buildVisitRows` (visit RPC) use deliberately different vocabularies — not a bug.
+- L-51 restated: there is no `pct()` helper. `attendanceRate` is clamped; only `buildTrendRows` is unclamped (safe today via v47, undefended against server over-count).
+- ROI helper lives at `scannerUtils.js:311-312` (`computeRoi`), not `:228-246`. New: `isEdgeDetection` (edge guard shared by both engines).

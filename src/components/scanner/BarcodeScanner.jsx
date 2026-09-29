@@ -29,7 +29,7 @@
  */
 import { useState, useRef, useEffect, forwardRef, useImperativeHandle, useCallback } from 'react'
 import { CameraOff, RefreshCw, Zap, Focus } from 'lucide-react'
-import { withTimeout, CAMERA_INIT_TIMEOUT, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext } from '../../lib/scannerUtils'
+import { withTimeout, CAMERA_INIT_TIMEOUT, computeRoi, waitForVideoReady, isSecureCameraContext, isEdgeDetection } from '../../lib/scannerUtils'
 import {
   openCamera,
   stopStream,
@@ -43,7 +43,6 @@ import {
 } from './cameraManager'
 import { BADGE_REGEX } from '../../lib/logic'
 
-const FORMATS = ['code_39', 'code_128', 'codabar', 'code_93', 'ean_13', 'ean_8']
 
 // ─── Device Profiles ──────────────────────────────────────────────────────────
 const DEVICE_PROFILES = {
@@ -108,142 +107,8 @@ function guidanceFor(reason, elapsed, hasEverDetected, consecutiveFails) {
   return null
 }
 
-// ─── Engine Pool ──────────────────────────────────────────────────────────────
-// Native BarcodeDetector (Chrome / Edge / Android) → @zxing/library (universal,
-// fully offline).
-//
-// The undecaf WASM polyfill was removed on purpose: its module does an absolute
-// CDN import of zbar-wasm, so behind a bundler it can never resolve, and even
-// if it did it would need the network — fatal for a scanner that must work in
-// a hall with no signal. ZXing is pure JS, offline, and covers the same formats.
+import { createEnginePool } from './enginePool'
 
-function createEnginePool(debug) {
-  const engines = [
-    { id: 'Native', ready: false, detector: null, failures: 0, maxFailures: 3 },
-    { id: 'ZXing', ready: false, detector: null, failures: 0, maxFailures: 3 },
-  ]
-  let activeIndex = 0
-  let zxingReader = null
-
-  const getActive = () => engines[activeIndex]
-
-  const initNative = async () => {
-    if (!('BarcodeDetector' in window)) return false
-    try {
-      const fmts = await window.BarcodeDetector.getSupportedFormats()
-      const usable = FORMATS.filter(f => fmts.includes(f))
-      if (!usable.length) return false
-      engines[0].detector = new window.BarcodeDetector({ formats: usable })
-      engines[0].ready = true
-      if (debug) console.log('[Engine] Native BarcodeDetector ready:', usable.join(','))
-      return true
-    } catch { return false }
-  }
-
-  const initZXing = async () => {
-    try {
-      // Drive the core reader directly on our cropped canvas. The higher-level
-      // BrowserMultiFormatReader assumes a video/img element (it reads
-      // naturalWidth/videoWidth and replays a capture pipeline), which is wrong
-      // for a canvas ROI and is much heavier per frame. MultiFormatReader +
-      // HybridBinarizer over the ROI's ImageData is the fast path we want.
-      const zx = await import('@zxing/library')
-      const hints = new Map()
-      hints.set(zx.DecodeHintType.TRY_HARDER, true)
-      hints.set(zx.DecodeHintType.POSSIBLE_FORMATS, [
-        zx.BarcodeFormat.CODE_39,
-        zx.BarcodeFormat.CODE_128,
-        zx.BarcodeFormat.CODABAR,
-        zx.BarcodeFormat.CODE_93,
-        zx.BarcodeFormat.EAN_13,
-        zx.BarcodeFormat.EAN_8,
-      ])
-      const reader = new zx.MultiFormatReader()
-      reader.setHints(hints)
-      zxingReader = {
-        reader,
-        ZX: zx,
-        decode: (imageData) => {
-          // MUST be 1 byte/px — see rgbaToGray for why raw RGBA silently
-          // produces a frame the binarizer can never read.
-          const gray = rgbaToGray(imageData)
-          const lum = new zx.RGBLuminanceSource(gray, imageData.width, imageData.height)
-          return reader.decode(new zx.BinaryBitmap(new zx.HybridBinarizer(lum)))
-        },
-      }
-      engines[1].ready = true
-      if (debug) console.log('[Engine] ZXing ready')
-      return true
-    } catch (e) {
-      if (debug) console.warn('[Engine] ZXing load failed:', e?.message)
-      return false
-    }
-  }
-
-  const init = async () => {
-    if (await initNative()) { activeIndex = 0; return }
-    if (await initZXing()) { activeIndex = 1; return }
-  }
-
-  /**
-   * @param {{canvas: HTMLCanvasElement, read: () => ImageData|null}} surface
-   *   the cropped detection surface.
-   */
-  const detect = async (surface) => {
-    const engine = getActive()
-    if (!engine.ready) { fallback(); return { barcodes: [], engine: engine.id } }
-    const source = surface?.canvas || null
-    if (!source) { engine.failures = 0; return { barcodes: [], engine: engine.id } }
-
-    try {
-      if (engine.id === 'ZXing') {
-        if (!zxingReader) { fallback(); return { barcodes: [], engine: engine.id } }
-        const imageData = surface.read()
-        if (!imageData) { engine.failures = 0; return { barcodes: [], engine: engine.id } }
-        try {
-          const result = zxingReader.decode(imageData)
-          engine.failures = 0
-          return { barcodes: [{ rawValue: result.getText(), cornerPoints: [] }], engine: engine.id }
-        } catch (e) {
-          // An empty frame is the normal case, not an engine failure — counting
-          // it would make the pool thrash and flap the engine label.
-          if (e?.name === 'NotFoundException' || e?.name === 'FormatException' || e?.name === 'ChecksumException') {
-            engine.failures = 0
-            return { barcodes: [], engine: engine.id }
-          }
-          throw e
-        }
-      }
-      const barcodes = await engine.detector.detect(source)
-      engine.failures = 0
-      return { barcodes: barcodes || [], engine: engine.id }
-    } catch (e) {
-      engine.failures++
-      if (debug) console.warn(`[Engine] ${engine.id} detect error (${engine.failures}/${engine.maxFailures}):`, e?.message)
-      if (engine.failures >= engine.maxFailures) fallback()
-      return { barcodes: [], engine: engine.id }
-    }
-  }
-
-  const fallback = () => {
-    const prev = getActive().id
-    if (activeIndex < engines.length - 1) {
-      activeIndex++
-      engines[activeIndex].failures = 0
-      if (debug) console.log(`[Engine] Fallback: ${prev} → ${getActive().id}`)
-      return
-    }
-    // Every engine has failed: reset the counters and start over from the top.
-    engines.forEach(e => { e.failures = 0 })
-    activeIndex = 0
-    if (debug) console.log('[Engine] All engines failed — reset to Native')
-  }
-
-  const getActiveId = () => getActive().id
-  const isReady = () => engines.some(e => e.ready)
-
-  return { init, detect, getActiveId, isReady, fallback }
-}
 
 // ─── Detection surface ────────────────────────────────────────────────────────
 
@@ -373,15 +238,12 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       // detect-canvas coordinates, so map them back to video pixels first.
       // This is NOT debug-gated: a debug build must accept exactly what
       // production accepts, otherwise a badge that scans locally fails for users.
-      if (b.cornerPoints?.length >= 4 && videoRef.current?.videoWidth) {
-        const cx = b.cornerPoints.reduce((s, p) => s + (p.x / roi.dw) * roi.sw, 0) / 4 + roi.sx
-        const cy = b.cornerPoints.reduce((s, p) => s + (p.y / roi.dh) * roi.sh, 0) / 4 + roi.sy
-        const vw = videoRef.current.videoWidth, vh = videoRef.current.videoHeight
-        const mx = vw * 0.02, my = vh * 0.02
-        if (cx < mx || cx > vw - mx || cy < my || cy > vh - my) {
-          if (debugOn) pushDebug(`edge reject: ${raw} at (${Math.round(cx)},${Math.round(cy)})`)
-          continue
-        }
+      // L-15: judged through isEdgeDetection so ZXing's 2-point reads get the
+      // same verdict as native 4-point quads (the old >= 4 inline test could
+      // never fire on the ZXing path).
+      if (videoRef.current?.videoWidth && isEdgeDetection(b.cornerPoints, roi, videoRef.current.videoWidth, videoRef.current.videoHeight)) {
+        if (debugOn) pushDebug(`edge reject: ${raw}`)
+        continue
       }
 
       hasEverDetectedRef.current = true
@@ -575,7 +437,17 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
    * starts from stacking duplicate imports.
    */
   const ensureEngines = useCallback(async (session) => {
-    if (engineRef.current?.isReady() || engineLoadingRef.current) return
+    if (engineRef.current?.isReady()) {
+      // Re-arm the watchdog clock for the live session (L-22): the pool
+      // survives a restart, so without this a Retry inherits the previous
+      // run's timestamp and the watchdog re-errors on the first pass.
+      if (isCurrent(session) && mountedRef.current) {
+        engineReadyAtRef.current = Date.now()
+        anyDecodeRef.current = false
+      }
+      return
+    }
+    if (engineLoadingRef.current) return
     engineLoadingRef.current = true
     try {
       const pool = createEnginePool(debugOn)
@@ -593,6 +465,11 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         anyDecodeRef.current = false
         pushDebug(`engine ready: ${pool.getActiveId()}`)
       }
+
+      // Arm the engine we didn't pick (L-14) — fire-and-forget. The loader
+      // never rejects and touches no session state, so a stale session may
+      // safely arm it for the session that is actually live.
+      pool.armFallback()
 
       if (!isCurrent(session) || !mountedRef.current) return
       if (!pool.isReady() && !engineRef.current?.isReady()) {
@@ -654,6 +531,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     roiModeRef.current = 'band'
     engineReadyAtRef.current = 0
     anyDecodeRef.current = false
+    // Same fresh-scan reset as startScanner (L-20): a stop() followed by an
+    // external restart must not inherit the suppressor either.
+    lastScanRef.current = { badge: null, time: 0 }
+    lastRawRef.current = null
   }, [cancelFrame])
 
   // ─── Start ──────────────────────────────────────────────────────────
@@ -666,6 +547,20 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     const session = ++sessionRef.current   // any previous run is now stale
     cancelFrame()                          // reclaim the old chain's frame slot
     pausedRef.current = false
+    // Fresh detection state (L-20): a Retry/restart must not inherit the
+    // previous run's 2s duplicate-suppressor, its last-raw pill, its sliding
+    // window, or its watchdog clock — otherwise the first post-restart scan
+    // of the same badge is silently dropped, and a restart after the
+    // watchdog error re-errors instantly on the stale timestamp (L-22).
+    lastScanRef.current = { badge: null, time: 0 }
+    lastRawRef.current = null
+    slidingWindowRef.current = []
+    frameCountRef.current = 0
+    hasEverDetectedRef.current = false
+    consecutiveFailsRef.current = 0
+    roiModeRef.current = 'band'
+    engineReadyAtRef.current = 0
+    anyDecodeRef.current = false
 
     if (!isSecureCameraContext()) {
       setStatus('error')
@@ -700,6 +595,18 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     setLastRaw(null)
     setEngineLabel('')
     startTimeRef.current = Date.now()
+
+    // L-22: the error screen unmounts <video>, so on Retry this ref is null
+    // until React commits the loading state. Reading it synchronously killed
+    // every Retry at "Video element missing". Wait for the element (bounded,
+    // session-checked) — it resolves immediately when already mounted.
+    if (!videoRef.current) {
+      const deadline = Date.now() + 2000
+      while (!videoRef.current && Date.now() < deadline) {
+        if (!isCurrent(session) || !mountedRef.current) return
+        await new Promise(r => setTimeout(r, 50))
+      }
+    }
 
     if (debugOn) {
       pushDebug(`start session #${session} · secure=${window.isSecureContext} · ${platform.isIOS ? 'iOS' : 'other'}`)

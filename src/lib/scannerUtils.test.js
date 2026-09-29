@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { withTimeout, friendly, todayStrIST, hhmmIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, withinToggleGuard, minutesSince, SCAN_TOGGLE_GUARD_MS, isDecisionPopup } from './scannerUtils'
+import { withTimeout, friendly, todayStrIST, hhmmIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, withinToggleGuard, minutesSince, SCAN_TOGGLE_GUARD_MS, isDecisionPopup, isEdgeDetection } from './scannerUtils'
 
 afterEach(() => { vi.useRealTimers() })
 
@@ -237,10 +237,25 @@ describe('rgbaToGray', () => {
     imageData.data[3] = 0
     expect(rgbaToGray(imageData)[0]).toBe(255)
   })
+
+  // L-21: one decode per frame means one allocation per frame stalls low-end
+  // phones in GC. Same-size frames must share a single scratch buffer.
+  it('reuses one scratch buffer across same-size frames', () => {
+    const a = rgbaToGray(img(2, 1, () => [255, 0, 0]))
+    const b = rgbaToGray(img(2, 1, () => [0, 0, 0]))
+    expect(b).toBe(a)
+    expect([...b]).toEqual([0, 0])
+  })
+
+  it('reallocates when the frame size changes, values still correct', () => {
+    rgbaToGray(img(2, 1, () => [255, 255, 255]))
+    const out = rgbaToGray(img(3, 1, () => [0, 0, 0]))
+    expect(out.length).toBe(3)
+    expect([...out]).toEqual([0, 0, 0])
+  })
 })
 
-/* ─── computeRoi ─── */
-describe('computeRoi', () => {
+/* ─── computeRoi ─── */describe('computeRoi', () => {
   it('crops a centred horizontal band and downscales it to maxWidth', () => {
     const roi = computeRoi(1280, 720, { mode: 'band', maxWidth: 720 })
     expect(roi.sx).toBe(51)            // (1280 - 1178) / 2
@@ -401,5 +416,37 @@ describe('isDecisionPopup', () => {
     for (const s of ['in', 'out', 'flagged', 'queued', 'offline', 'error', undefined, null, '']) {
       expect(isDecisionPopup(s)).toBe(false)
     }
+  })
+})
+
+/* ─── isEdgeDetection (L-15: ZXing must be judged like Native) ─── */
+describe('isEdgeDetection', () => {
+  // Points arrive in detect-canvas coordinates; the helper maps them back to
+  // video pixels exactly as the old inline guard did.
+  const full = computeRoi(1280, 720, { mode: 'full', maxWidth: 720 })
+
+  it('accepts a centred 4-point native quad (legacy behaviour unchanged)', () => {
+    const quad = [{ x: 300, y: 150 }, { x: 420, y: 150 }, { x: 420, y: 250 }, { x: 300, y: 250 }]
+    expect(isEdgeDetection(quad, full, 1280, 720)).toBe(false)
+  })
+
+  it('rejects a 4-point quad hugging the left edge', () => {
+    const quad = [{ x: 0, y: 200 }, { x: 8, y: 200 }, { x: 8, y: 220 }, { x: 0, y: 220 }]
+    expect(isEdgeDetection(quad, full, 1280, 720)).toBe(true)
+  })
+
+  it('judges a 2-point ZXing pair — centred pairs pass', () => {
+    expect(isEdgeDetection([{ x: 300, y: 200 }, { x: 420, y: 200 }], full, 1280, 720)).toBe(false)
+  })
+
+  it('judges a 2-point ZXing pair — edge pairs are rejected', () => {
+    expect(isEdgeDetection([{ x: 0, y: 200 }, { x: 8, y: 200 }], full, 1280, 720)).toBe(true)
+  })
+
+  it('never blocks on degenerate input: empty, short, missing, or video-less', () => {
+    expect(isEdgeDetection([], full, 1280, 720)).toBe(false)
+    expect(isEdgeDetection(undefined, full, 1280, 720)).toBe(false)
+    expect(isEdgeDetection([{ x: 0, y: 0 }], full, 1280, 720)).toBe(false)
+    expect(isEdgeDetection([{ x: 0, y: 200 }, { x: 8, y: 200 }], full, 0, 720)).toBe(false)
   })
 })
