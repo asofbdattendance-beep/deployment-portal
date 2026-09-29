@@ -15,5 +15,7 @@ public/mkcert-ca.pem
 backups/
 scripts/__pycache__/
 .playwright-mcp/
+test-results/
+playwright-report/
 supabase/.temp/
 Mmemory bank - dumo/

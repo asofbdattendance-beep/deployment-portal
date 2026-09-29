@@ -98,11 +98,32 @@ Bug-hunt 2026-09-28 found 6 Critical (OUT drain p_nonce mismatch; grouped PATCH 
 | L-55 | `sql/v45:594-595` | Global `LIMIT 1000 ORDER BY 1` (rule name) | BAD_STATUS fills all slots, 4 rules vanish |
 | L-56 | `sql/v45:518-527,566-578` + `attendance.js:647` | UNDEPLOYED/STALE per-session, BAD_STATUS per-badge; counts raw rows | 1 person 6 scans = 6 anomalies |
 
-## T2 rig README (tasks 15–16, pending your playwright OK)
+## T2 rig (tasks 15–16) — BUILT 2026-09-29, matrix pending
 
-- Mock: `tests/e2e/mock-supabase.mjs` — `/auth/v1`, `/rest/v1/*`, `/rpc/*`, `/__test` (seed, 500/hang/permanent-error, clock). Faithful to v46/v47/v48.
-- Reset: `/__test/reset` + `clearCookies`/`deleteDatabase` per test. Observable: IDB `sewadar_offline_q`, popup text, toasts, mock rows, unhandled-rejection listener.
-- Matrix: 20 offline-queue rows (see plan) each asserting post-fix Expected. Limitation: mocked RPC ≠ real RLS — RLS proven separately on PG 15 stub + `verify_test_logins.sql`.
+Run: `npm run test:e2e` (chromium, headless). Config `playwright.config.js`:
+mock on :54321 (`tests/e2e/mock-supabase.mjs`), app on `https://localhost:5173`
+(TLS — repo serves certs/, so baseURL is https + ignoreHTTPSErrors), env
+override points supabase-js at the mock. Single worker (mock state shared).
+
+- Mock: in-memory auth (`/auth/v1/token` any credentials, `/auth/v1/user`),
+  canned REST tables (schedules, empty deployments/sessions, one MEDICAL
+  dept), RPCs (`get_portal_profile` scanner, `get_scan_state` null,
+  `scan_in/out` ok with v43 display fields). CORS echoes preflighted
+  headers (supabase-js sends `x-supabase-api-version` — a static list
+  rotted on first contact). Realtime upgrade destroyed (client retries
+  quietly; no spec depends on delivery). `POST /__test/reset|seed`,
+  `GET /__test/calls` (seed supports error/hang/object per RPC).
+- Specs (`tests/e2e/scanner-offline.spec.js`): UI login → scanner boot
+  with live RPC path; offline manual scan → 'Queued offline' + real IDB
+  row (`sewadar_offline_q`/`scan_queue`); reconnect → drain replays with
+  `p_nonce` = queue id; row removed. Every spec asserts zero pageerrors
+  and zero lost rows.
+- Side proof: the L-07 banner fires against the mock (no
+  `portal_app_version` → "Couldn't confirm") — the handshake behaves.
+- Limitation: mocked RPC ≠ real RLS — RLS proven separately on PG 15
+  stub + `verify_test_logins.sql`. Camera absent headless (manual-entry
+  path only). 20-row offline-queue matrix (ledger Expected column) NOT
+  yet encoded — next slice.
 
 ## Verification (task 0 gate)
 
