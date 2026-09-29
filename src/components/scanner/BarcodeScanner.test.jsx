@@ -15,12 +15,17 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import React from 'react'
 import { render, act, cleanup } from '@testing-library/react'
 
-const mocks = vi.hoisted(() => ({ openCamera: vi.fn() }))
+const mocks = vi.hoisted(() => ({ openCamera: vi.fn(), applyTapFocus: vi.fn() }))
 
-// Override only openCamera; keep the real ownership/teardown semantics.
+// Override openCamera + spy on applyTapFocus; keep the real ownership,
+// teardown, and focus semantics.
 vi.mock('./cameraManager', async (importOriginal) => {
   const actual = await importOriginal()
-  return { ...actual, openCamera: (...args) => mocks.openCamera(...args) }
+  return {
+    ...actual,
+    openCamera: (...args) => mocks.openCamera(...args),
+    applyTapFocus: (...args) => { mocks.applyTapFocus(...args); return actual.applyTapFocus(...args) },
+  }
 })
 
 const BarcodeScanner = (await import('./BarcodeScanner')).default
@@ -50,6 +55,7 @@ const flush = () => act(async () => { await Promise.resolve(); await Promise.res
 
 beforeEach(() => {
   mocks.openCamera.mockReset()
+  mocks.applyTapFocus.mockReset()
 
   // jsdom ships no camera API; the component's secure-context guard needs one.
   Object.defineProperty(window.navigator, 'mediaDevices', {
@@ -222,8 +228,7 @@ describe('BarcodeScanner camera session lifecycle', () => {
 
   // L-22: the watchdog error unmounts <video>, so a Retry that reads the ref
   // synchronously dies at "Video element missing" and the error is permanent.
-  it('recovers on Retry after the watchdog errors (no dead Video-element-missing)', async () => {
-    // React 18 schedules commits over MessageChannel (a REAL macrotask), which
+  it('recovers on Retry after the watchdog errors (no dead Video-element-missing)', async () => {    // React 18 schedules commits over MessageChannel (a REAL macrotask), which
     // never runs while only the fake clock advances — so the test yields to
     // the real event loop once to let the loading state commit, exactly as a
     // real browser's event loop would interleave it.
@@ -252,5 +257,68 @@ describe('BarcodeScanner camera session lifecycle', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // L-17: tap-to-focus was a bare <video onClick> — unreachable by keyboard
+  // and announced with no purpose. It must be a labelled, focusable control.
+  it('exposes tap-to-focus as a keyboard-operable labelled control', async () => {
+    const stream = makeStream()
+    mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+
+    const { getByRole } = render(<BarcodeScanner onScan={vi.fn()} />)
+    await flush()
+
+    const video = getByRole('button', { name: /focus/i })
+    expect(video.tagName).toBe('VIDEO')
+    expect(video.tabIndex).toBe(0)
+  })
+
+  it('keyboard Enter focuses the frame centre (no pointer coordinates needed)', async () => {
+    const stream = makeStream()
+    mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+
+    const { getByRole } = render(<BarcodeScanner onScan={vi.fn()} />)
+    await flush()
+
+    const video = getByRole('button', { name: /focus/i })
+    await act(async () => {
+      video.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      await flush()
+    })
+    expect(mocks.applyTapFocus).toHaveBeenCalledWith(stream.track, 0.5, 0.5)
+  })
+
+  // L-18: the torch label flipped to a bare "ON" (AT: "ON pressed", no
+  // subject) and the icon was exposed to AT. The label must keep its subject.
+  it('torch button keeps its subject label and hides the icon from AT', async () => {
+    const stream = makeStream()
+    mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: true, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+
+    const { container, getByRole } = render(<BarcodeScanner onScan={vi.fn()} />)
+    await flush()
+
+    const btn = getByRole('button', { name: /torch/i })
+    expect(btn.textContent).toMatch(/torch/i)
+    await act(async () => { btn.click(); await flush() })
+    const on = getByRole('button', { name: 'Torch on' })
+    expect(on.getAttribute('aria-pressed')).toBe('true')
+    expect(container.querySelector('svg[aria-hidden="true"]')).toBeTruthy()
+  })
+
+  // L-16: the guide box (full-frame inset) did not match the decode ROI
+  // (centred 92%x62% band), so operators aimed at a box the decoder never
+  // read. The guide must mirror the band geometry.
+  it('guide box mirrors the decode ROI band (92% x 62%, centred)', async () => {
+    const stream = makeStream()
+    mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+
+    const { getByTestId } = render(<BarcodeScanner onScan={vi.fn()} />)
+    await flush()
+
+    const guide = getByTestId('roi-guide')
+    expect(guide.style.left).toBe('4%')
+    expect(guide.style.right).toBe('4%')
+    expect(guide.style.top).toBe('19%')
+    expect(guide.style.bottom).toBe('19%')
   })
 })

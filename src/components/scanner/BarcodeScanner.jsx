@@ -394,14 +394,9 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
 
   // ─── Tap to Focus ───────────────────────────────────────────────────
 
-  const handleVideoTap = useCallback(async (e) => {
-    const video = videoRef.current
-    if (!trackRef.current || !video) return
-    const rect = video.getBoundingClientRect()
-    if (!rect.width || !rect.height) return
-    const x = (e.clientX - rect.left) / rect.width
-    const y = (e.clientY - rect.top) / rect.height
-
+  // Core focus action at normalised (0-1) frame coordinates. Split out so
+  // keyboard activation can focus the frame centre without pointer data.
+  const focusAt = useCallback(async (x, y) => {
     if (tapFocusCleanupRef.current) { try { tapFocusCleanupRef.current() } catch {} tapFocusCleanupRef.current = null }
 
     setTapFocusActive(true)
@@ -413,6 +408,26 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     applyFocusConstraints(trackRef.current, { point: { x, y }, applyZoom: false }).catch(() => {})
     setTimeout(() => { if (mountedRef.current) setTapFocusActive(false) }, 1500)
   }, [pushDebug])
+
+  const handleVideoTap = useCallback(async (e) => {
+    const video = videoRef.current
+    if (!trackRef.current || !video) return
+    const rect = video.getBoundingClientRect()
+    if (!rect.width || !rect.height) return
+    await focusAt(
+      (e.clientX - rect.left) / rect.width,
+      (e.clientY - rect.top) / rect.height,
+    )
+  }, [focusAt])
+
+  // L-17: the video is an operable control, so it must answer the keyboard.
+  // Pointer position is meaningless here — focus the frame centre.
+  const handleVideoKey = useCallback((e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return
+    e.preventDefault()
+    if (!trackRef.current || !videoRef.current) return
+    focusAt(0.5, 0.5)
+  }, [focusAt])
 
   // ─── Torch ──────────────────────────────────────────────────────────
 
@@ -758,6 +773,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         autoPlay
         webkit-playsinline="true"
         onClick={handleVideoTap}
+        role="button"
+        tabIndex={0}
+        aria-label="Tap to focus camera"
+        onKeyDown={handleVideoKey}
         style={{ width: '100%', height: 'clamp(220px, 52vh, 420px)', objectFit: 'cover', display: 'block', cursor: 'crosshair' }}
       />
 
@@ -796,7 +815,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
           background: torchOn ? '#f59e0b' : 'rgba(0,0,0,0.6)',
           color: '#fff', border: 'none', borderRadius: 8,
           padding: '0.35rem 0.6rem', fontWeight: 700, fontSize: '0.75rem',
-        }}><Zap size={12} /> {torchOn ? 'ON' : 'Torch'}</button>
+        }}><Zap size={12} aria-hidden="true" /> {torchOn ? 'Torch on' : 'Torch'}</button>
       ) : null}
 
       {status === 'ready' && !hasEverDetectedRef.current && (
@@ -818,9 +837,15 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         }}>{guidanceMsg}</div>
       )}
 
-      <div style={{
-        position: 'absolute', inset: 0, pointerEvents: 'none',
-        border: '2px solid rgba(255,255,255,0.35)', borderRadius: 12, margin: 24,
+      {/* Guide box mirrors the decode ROI: a centred band covering 92% of the
+          width and 62% of the height (see computeRoi wFrac/hFrac) — NOT the
+          full frame. An inset full-frame box tells the operator to aim where
+          the decoder never reads (L-16). objectFit: cover crops symmetric
+          overflow, so the centred CSS band stays aligned with the crop. */}
+      <div data-testid="roi-guide" style={{
+        position: 'absolute', left: '4%', right: '4%', top: '19%', bottom: '19%',
+        pointerEvents: 'none',
+        border: '2px solid rgba(255,255,255,0.35)', borderRadius: 12,
       }} />
 
       {debugOn && (
