@@ -28,6 +28,18 @@ export default defineConfig(({ command, mode }) => {
   },
   test: {
     environment: 'node',
+    // The Playwright specs under tests/e2e are run by `npm run test:e2e`.
+    // Vitest's default exclude does not cover them, so a bare `vitest run`
+    // (and therefore CI's `npm run test:coverage`) loaded them and died on
+    // "Playwright Test did not expect test.describe() to be called here" —
+    // a red suite on a clean checkout, with the real unit results buried
+    // under it. The two defaults are restated because supplying `exclude`
+    // replaces them rather than extending them.
+    exclude: [
+      '**/node_modules/**',
+      '**/dist/**',
+      'tests/e2e/**',
+    ],
     coverage: {
       provider: 'v8',
       include: [

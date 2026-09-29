@@ -131,3 +131,87 @@ jobs:
             exit 1
           fi
           echo "migration-parity check passed"
+
+  # The parity job proves sql/ and supabase/migrations/ mirror each other. It
+  # cannot prove a file PARSES: v53 shipped with `dp_s ewadars` — a space inside
+  # the identifier — inside its BEGIN/COMMIT block, so the whole transaction
+  # rolled back, `is_my_incharge_dept_badge` never existed, and a
+  # `supabase db push` chain halted before v54. CI was green the entire time.
+  #
+  # This job applies the chain to a real Postgres instead, which catches both
+  # syntax errors and the semantic kind (a policy that references a function
+  # the previous migration never created).
+  migration-apply:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply the migration chain to a scratch database
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -eu
+          for i in $(seq 1 30); do pg_isready -h localhost -U postgres >/dev/null && break; sleep 1; done
+          psql -h localhost -U postgres -q -c 'drop database if exists gate' -c 'create database gate'
+
+          # Minimal Supabase-shaped scaffolding. These migrations were written
+          # against Supabase, which provides the auth/storage schemas, the
+          # anon/authenticated/service_role roles and the realtime publication
+          # before any of them run. Without this the chain fails for reasons
+          # that have nothing to do with the migrations themselves.
+          psql -h localhost -U postgres -d gate -v ON_ERROR_STOP=1 -q <<'SQL'
+          create schema if not exists auth;
+          create schema if not exists storage;
+          create schema if not exists extensions;
+          do $$ begin
+            if not exists (select 1 from pg_roles where rolname='anon') then create role anon nologin; end if;
+            if not exists (select 1 from pg_roles where rolname='authenticated') then create role authenticated nologin; end if;
+            if not exists (select 1 from pg_roles where rolname='service_role') then create role service_role nologin; end if;
+            if not exists (select 1 from pg_publication where pubname='supabase_realtime') then create publication supabase_realtime; end if;
+          end $$;
+          create or replace function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('request.jwt.claims', true),'')::uuid $$;
+          create or replace function auth.role() returns text language sql stable as $$ select nullif(current_setting('request.jwt.claims', true),'') $$;
+          create or replace function auth.jwt() returns jsonb language sql stable as $$ select nullif(current_setting('request.jwt.claims', true),'')::jsonb $$;
+          create table if not exists auth.users (id uuid primary key default gen_random_uuid(), email text, encrypted_password text, instance_id uuid);
+          create table if not exists auth.identities (id uuid primary key default gen_random_uuid(), user_id uuid, provider text, identity_data jsonb);
+          create table if not exists storage.buckets (id text primary key, name text, public boolean);
+          create table if not exists storage.objects (id uuid primary key default gen_random_uuid(), bucket_id text, name text, owner uuid, owner_id uuid, size bigint, mime_type text, created_at timestamptz, updated_at timestamptz, last_accessed_at timestamptz, metadata jsonb);
+          create table if not exists public.sewadars (badge_number text primary key, sewadar_name text, centre text, department text, badge_status text, is_initiated boolean, gender text);
+          create table if not exists public.centres (id uuid primary key default gen_random_uuid(), name text, parent_centre text);
+          SQL
+
+          # Applied in slot order — the same order `supabase db push` uses, and
+          # the order the files are named for.
+          #
+          # TWO FILES ARE SKIPPED, because they are one-off DATA SYNCs against a
+          # legacy public.users table that does not exist on a fresh database,
+          # not re-runnable DDL:
+          #   0024_v23_sync_portal_users_centre_admins.sql
+          #   0025_v24_fix_jaipal_bhatia_aso.sql  (carries a redacted placeholder)
+          for f in $(ls supabase/migrations/*.sql | sort); do
+            case "$f" in
+              *0024_v23_*|*0025_v24_*) echo "skip (one-off data sync): $f"; continue ;;
+            esac
+            echo "apply: $f"
+            psql -h localhost -U postgres -d gate -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+
+          # The two checks that matter. The first is v53's whole reason to exist;
+          # the second is v54's — a silent miss there is a page that never
+          # updates live, with nothing in the UI to say so.
+          psql -h localhost -U postgres -d gate -v ON_ERROR_STOP=1 -tAc \
+            "select 'is_my_incharge_dept_badge: '||count(*) from pg_proc where proname='is_my_incharge_dept_badge'"
+          psql -h localhost -U postgres -d gate -v ON_ERROR_STOP=1 -tAc \
+            "select 'realtime members: '||count(*) from pg_publication_tables where pubname='supabase_realtime'"
