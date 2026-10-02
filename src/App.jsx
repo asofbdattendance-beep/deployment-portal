@@ -8,6 +8,9 @@ import { ROLE_LABELS, ROLE_COLORS } from './lib/supabase'
 import DbVersionBanner from './components/DbVersionBanner'
 import { ShieldCheck, ScanLine, RefreshCw, AlertTriangle, Wrench, ChevronDown, Check } from 'lucide-react'
 import { PAGES } from './lib/pages'
+import { useIsMobile } from './hooks/useMediaQuery'
+import MobileTabBar, { flattenNavItems, splitBarItems } from './components/mobile/MobileTabBar'
+import MoreSheet from './components/mobile/MoreSheet'
 import { SEWA_MODE_VISIT, SEWA_MODE_PREVISIT, canUsePrevisitMode, scheduleWindow, resolveSewaMode, isTestLogin } from './lib/sewaMode'
 import { todayStrIST } from './lib/scannerUtils'
 
@@ -211,6 +214,20 @@ function Dashboard() {
 
   const currentPage = visiblePages.some(([k]) => k === activePage) ? activePage : (visiblePages[0]?.[0] || 'consent')
 
+  // ── Mobile shell (≤768px): bottom tab bar + More sheet replace the
+  // wrapping desktop pill navbar. Desktop renders neither (useIsMobile is
+  // false at ≥769px) so the laptop DOM is untouched. PAGES stays the
+  // single source — the bar flattens the same visiblePages the navbar uses.
+  const isMobile = useIsMobile()
+  const [moreOpen, setMoreOpen] = useState(false)
+  const mobileItems = useMemo(() => flattenNavItems(visiblePages), [visiblePages])
+  const mobileOverflow = useMemo(() => splitBarItems(mobileItems).overflow, [mobileItems])
+  const handleMobileSelect = useCallback((key) => {
+    setNavFilter(null)
+    setMoreOpen(false)
+    setActivePage(key)
+  }, [])
+
   // keep the browser tab title in sync with the visible page
   useEffect(() => {
     document.title = `${PAGES[currentPage]?.label || 'Deployment Portal'} · Deployment Portal`
@@ -244,7 +261,7 @@ function Dashboard() {
   }, [profile, scheduleId])
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: '#f6f7fb' }}>
+    <div className="app-shell" style={{ display: 'flex', flexDirection: 'column', background: '#f6f7fb' }}>
       {/* ── top bar: brand + schedule dropdown + user ── */}
       <header className="app-header">
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', flexShrink: 0, flexWrap: 'wrap' }}>
@@ -339,7 +356,7 @@ function Dashboard() {
         })()}
       </nav>
 
-      <main style={{ flex: 1 }}>
+      <main style={{ flex: 1, paddingBottom: isMobile ? 'calc(84px + env(safe-area-inset-bottom, 0px))' : undefined }}>
         <Suspense fallback={<PageFallback />}>
           {currentPage === 'schedule' && <ScheduleMakerPage refreshSchedules={loadSchedules} />}
           {currentPage === 'consent' && <ConsentPage schedules={schedules} scheduleId={scheduleId} />}
@@ -357,6 +374,23 @@ function Dashboard() {
           {currentPage === 'users' && <UsersPage />}
         </Suspense>
       </main>
+
+      {/* Mobile-only bottom navigation (see MobileTabBar). Desktop keeps .tab-nav. */}
+      {isMobile && (
+        <MobileTabBar
+          items={mobileItems}
+          currentPage={currentPage}
+          onSelect={handleMobileSelect}
+          onMore={() => setMoreOpen(true)}
+        />
+      )}
+      <MoreSheet
+        open={isMobile && moreOpen}
+        items={mobileOverflow}
+        currentPage={currentPage}
+        onSelect={handleMobileSelect}
+        onClose={() => setMoreOpen(false)}
+      />
     </div>
   )
 }
