@@ -16,7 +16,33 @@ export default defineConfig({
     ignoreHTTPSErrors: true,
     trace: 'retain-on-failure',
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [
+    {
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'] },
+      // Mobile specs assert phone-width behaviour — they fail by design at
+      // 1280px, so desktop never runs them.
+      testIgnore: /mobile-.*\.spec\.js/,
+    },
+    // Mobile-first attendance gate: touch + small viewport emulation.
+    // Only mobile-*.spec.js runs here; the desktop suite stays on chromium.
+    {
+      name: 'mobile-chrome',
+      use: { ...devices['Pixel 5'] },
+      testMatch: /mobile-.*\.spec\.js/,
+    },
+    {
+      name: 'mobile-safari',
+      use: {
+        ...devices['iPhone 13'],
+        // WebKit blocks the plain-HTTP mock API from an HTTPS page (mixed
+        // content), so this project runs against a plain-HTTP vite on 5174
+        // (DISABLE_TLS=1) — same app, same mock, no mixed content.
+        baseURL: 'http://localhost:5174',
+      },
+      testMatch: /mobile-.*\.spec\.js/,
+    },
+  ],
   webServer: [
     {
       command: 'node tests/e2e/mock-supabase.mjs',
@@ -30,6 +56,16 @@ export default defineConfig({
       env: {
         VITE_SUPABASE_URL: 'http://127.0.0.1:54321',
         VITE_SUPABASE_ANON_KEY: 'e2e-anon-key',
+      },
+    },
+    {
+      command: 'npx vite --port 5174 --strictPort',
+      port: 5174,
+      reuseExistingServer: true,
+      env: {
+        VITE_SUPABASE_URL: 'http://127.0.0.1:54321',
+        VITE_SUPABASE_ANON_KEY: 'e2e-anon-key',
+        DISABLE_TLS: '1',
       },
     },
   ],

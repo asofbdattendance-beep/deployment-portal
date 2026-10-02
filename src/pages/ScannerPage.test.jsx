@@ -163,6 +163,31 @@ describe('ScannerPage render', () => {
     expect(mocks.openCamera).toHaveBeenCalled()
     expect(container.querySelector('video')).toBeTruthy()
   })
+
+  // Mobile shell: at phone widths the page renders the immersive shell (same
+  // state machine, same slots) instead of the desktop cards.
+  it('renders the immersive scan shell on phone viewports', async () => {
+    const realMatchMedia = window.matchMedia
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true, writable: true,
+      value: vi.fn((query) => ({
+        matches: String(query).includes('768'),
+        media: query,
+        addEventListener: vi.fn(), removeEventListener: vi.fn(),
+        addListener: vi.fn(), removeListener: vi.fn(),
+      })),
+    })
+    try {
+      const { container } = render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+      await settle()
+      expect(container.querySelector('.scan-shell')).toBeTruthy()
+      expect(container.querySelector('.scan-shell-go')).toBeTruthy()
+      expect(container.querySelector('video')).toBeTruthy()
+    } finally {
+      if (realMatchMedia) Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: realMatchMedia })
+      else delete window.matchMedia
+    }
+  })
 })
 
 describe('ScannerPage queue pills (V16)', () => {

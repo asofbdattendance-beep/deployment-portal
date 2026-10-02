@@ -6,7 +6,7 @@
 // deliver() routes through the share/download helper. The sheet renders
 // nothing when closed and exposes Share/Save/Close when a file is ready.
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { renderHook, act } from '@testing-library/react'
 import { useExport } from '../../hooks/useExport'
 import ExportSheet from './ExportSheet'

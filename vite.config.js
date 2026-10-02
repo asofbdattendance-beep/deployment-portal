@@ -21,7 +21,11 @@ export default defineConfig(({ command, mode }) => {
   server: {
     host: true,
     port: 5174,
-    https: useHttps ? {
+    // E2E rig escape hatch: WebKit blocks http:// API calls from an https://
+    // page (mixed content), but the mock Supabase backend is plain HTTP.
+    // DISABLE_TLS=1 serves plain HTTP for the mobile-safari project only —
+    // every other command keeps the local-TLS default.
+    https: useHttps && env.DISABLE_TLS !== '1' ? {
       key: fs.readFileSync(path.join(certDir, 'local-key.pem')),
       cert: fs.readFileSync(path.join(certDir, 'local-cert.pem')),
     } : undefined,
