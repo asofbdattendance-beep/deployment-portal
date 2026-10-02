@@ -8,6 +8,9 @@ import RecentScansTable from '../components/scanner/RecentScansTable'
 import { todayStrIST } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import { useScannerSession } from '../hooks/useScannerSession'
+import { useIsMobile } from '../hooks/useMediaQuery'
+import ScanModeShell from '../components/mobile/ScanModeShell'
+import MobileScanFeed from '../components/mobile/MobileScanFeed'
 import { ScanLine, Clock, Wifi, WifiOff, RefreshCw, Loader2 } from 'lucide-react'
 
 // Narrow session columns — this is all RecentScansTable reads. Same list as
@@ -144,8 +147,69 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
   useEffect(() => { refreshQueue() }, [refreshQueue])
 
   const pendingCount = queued.filter(q => !q.synced && !q.failed).length
+  // Mobile capture renders the immersive ScanModeShell below; desktop keeps
+  // the cards. The scan state machine above is shared by both.
+  const isMobile = useIsMobile()
 
   if (!schedules.length) return <div className="page"><div className="card" style={{ padding: '2rem', textAlign: 'center' }}>No schedules</div></div>
+
+  const pillsNode = (<>
+    {schedule?.name || ''}
+    {sewaMode && (
+      <span className={`pill ${sewaMode === 'previsit' ? 'pill-amber' : 'pill-blue'}`} style={{ fontSize: '0.7rem' }} title="Recording mode is automatic — the scan date decides whether this counts as Previsit sewa or the Bhati visit">
+        {sewaMode === 'previsit' ? 'Previsit sewa' : 'Bhati visit'}
+      </span>
+    )}
+    {pendingCount > 0 && (
+      <span className="pill pill-amber" style={{ fontSize: '0.7rem', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        {syncing ? <RefreshCw size={10} className="spin" /> : <WifiOff size={10} />}
+        {pendingCount} queued
+      </span>
+    )}
+    <span className={`pill ${isOnline ? 'pill-green' : 'pill-red'}`} style={{ fontSize: '0.7rem', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+      {isOnline ? <Wifi size={10} /> : <WifiOff size={10} />}
+      {isOnline ? 'Online' : 'Offline'}
+    </span>
+    {offline && <span style={{ fontSize: '0.7rem', color: '#b45309' }}>· refresh failed — showing last data</span>}
+  </>)
+  const manualSubmit = () => { handleScan(manualBadge, { manual: true }) }
+  const popupNode = (
+    <ScanResultPopup
+      open={!!popup}
+      status={popup?.status}
+      action={popup?.action}
+      badge={popup?.badge}
+      name={popup?.name}
+      centre={popup?.centre}
+      deptName={popup?.deptName}
+      time={popup?.time}
+      message={popup?.message}
+      flag={popup?.flag}
+      openSince={popup?.openSince}
+      outTime={outTime}
+      onOutTimeChange={setOutTime}
+      onClose={closePopup}
+      onConfirm={popup?.status === 'forgot' ? confirmForgot : popup?.status === 'choose' ? commitScan : closePopup}
+    />
+  )
+
+  // Mobile: immersive full-screen capture. Same state machine, same slots.
+  if (isMobile) {
+    return (
+      <div className="page" style={{ maxWidth: 900 }}>
+        <ScanModeShell
+          title={<><ScanLine size={22} /> Attendance</>}
+          pills={pillsNode}
+          camera={<BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />}
+          action={<button onClick={manualSubmit} className="btn btn-primary scan-shell-go" disabled={busy || !manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark</button>}
+          manual={<input value={manualBadge} onChange={e => setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input scan-shell-input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} onKeyDown={e => { if (e.key === 'Enter') { manualSubmit() } }} />}
+          feedTitle={<div className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Clock size={14} /> Recent scans (today) {pendingCount ? <span className="pill pill-amber">{pendingCount} queued</span> : null}</div>}
+          feed={<MobileScanFeed rows={recentSessions} deptNameById={deptNameById} limit={5} emptyMessage="No scans today" />}
+          popup={popupNode}
+        />
+      </div>
+    )
+  }
 
   return (
     <div className="page" style={{ maxWidth: 900, margin: '0 auto' }}>
@@ -153,23 +217,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
         <div style={{ flex: '1 1 auto' }}>
           <h2 className="page-title"><ScanLine size={22} /> Attendance</h2>
           <div className="page-sub" style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-            {schedule?.name || ''}
-            {sewaMode && (
-              <span className={`pill ${sewaMode === 'previsit' ? 'pill-amber' : 'pill-blue'}`} style={{ fontSize: '0.7rem' }} title="Recording mode is automatic — the scan date decides whether this counts as Previsit sewa or the Bhati visit">
-                {sewaMode === 'previsit' ? 'Previsit sewa' : 'Bhati visit'}
-              </span>
-            )}
-            {pendingCount > 0 && (
-              <span className="pill pill-amber" style={{ fontSize: '0.7rem', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                {syncing ? <RefreshCw size={10} className="spin" /> : <WifiOff size={10} />}
-                {pendingCount} queued
-              </span>
-            )}
-            <span className={`pill ${isOnline ? 'pill-green' : 'pill-red'}`} style={{ fontSize: '0.7rem', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              {isOnline ? <Wifi size={10} /> : <WifiOff size={10} />}
-              {isOnline ? 'Online' : 'Offline'}
-            </span>
-            {offline && <span style={{ fontSize: '0.7rem', color: '#b45309' }}>· refresh failed — showing last data</span>}
+            {pillsNode}
           </div>
         </div>
       </div>
@@ -178,8 +226,8 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
         <div className="card" style={{ padding: '1rem' }}>
           <BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />
           <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-            <input value={manualBadge} onChange={e => setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input" style={{ flex: 1 }} onKeyDown={e => { if (e.key === 'Enter') { handleScan(manualBadge, { manual: true }) } }} />
-            <button onClick={() => { handleScan(manualBadge, { manual: true }) }} className="btn btn-primary" disabled={busy || !manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark</button>
+            <input value={manualBadge} onChange={e => setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} style={{ flex: 1 }} onKeyDown={e => { if (e.key === 'Enter') { manualSubmit() } }} />
+            <button onClick={manualSubmit} className="btn btn-primary" disabled={busy || !manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark</button>
           </div>
         </div>
         <div className="card" style={{ padding: '1rem' }}>
@@ -195,23 +243,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
         </div>
       </div>
 
-      <ScanResultPopup
-        open={!!popup}
-        status={popup?.status}
-        action={popup?.action}
-        badge={popup?.badge}
-        name={popup?.name}
-        centre={popup?.centre}
-        deptName={popup?.deptName}
-        time={popup?.time}
-        message={popup?.message}
-        flag={popup?.flag}
-        openSince={popup?.openSince}
-        outTime={outTime}
-        onOutTimeChange={setOutTime}
-        onClose={closePopup}
-        onConfirm={popup?.status === 'forgot' ? confirmForgot : popup?.status === 'choose' ? commitScan : closePopup}
-      />
+      {popupNode}
     </div>
   )
 }

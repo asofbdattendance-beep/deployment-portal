@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { CheckCircle2, LogOut, AlertTriangle, Clock, XCircle, X, WifiOff } from 'lucide-react'
+import { useIsMobile } from '../../hooks/useMediaQuery'
 
 const VARIANT = {
   in: {
@@ -171,6 +172,9 @@ export default function ScanResultPopup({
   const prevFocusRef = useRef(null)
   const [visible, setVisible] = useState(false)
   const [mounted, setMounted] = useState(false)
+  // Phones render the dialog as a bottom sheet (thumb-reachable actions,
+  // 44px close, drag-handle affordance). Desktop keeps the centred modal.
+  const isMobileScan = useIsMobile()
 
   // mount / unmount with exit transition
   useEffect(() => {
@@ -268,9 +272,9 @@ export default function ScanResultPopup({
         inset: 0,
         zIndex: 60,
         display: 'flex',
-        alignItems: 'center',
+        alignItems: isMobileScan ? 'flex-end' : 'center',
         justifyContent: 'center',
-        padding: '1rem',
+        padding: isMobileScan ? 0 : '1rem',
         // Safe-area aware bottom padding: on phones with a soft keyboard /
         // gesture bar the action row must never sit under the system UI.
         paddingBottom: 'max(1rem, env(safe-area-inset-bottom))',
@@ -289,7 +293,7 @@ export default function ScanResultPopup({
         onClick={(e) => e.stopPropagation()}
         style={{
           width: '100%',
-          maxWidth: 380,
+          maxWidth: isMobileScan ? '100%' : 380,
           // Foldable / small-phone focus fix: when the soft keyboard opens for
           // the OUT-time field the layout viewport shrinks but a centred fixed
           // dialog would be pushed half off-screen. Cap to the dynamic viewport
@@ -299,8 +303,9 @@ export default function ScanResultPopup({
           WebkitOverflowScrolling: 'touch',
           overscrollBehavior: 'contain',
           background: '#fff',
-          borderRadius: 16,
+          borderRadius: isMobileScan ? '16px 16px 0 0' : 16,
           border: '1px solid var(--border)',
+          borderBottom: isMobileScan ? 'none' : '1px solid var(--border)',
           boxShadow: visible
             ? '0 20px 60px rgba(15,23,42,0.18), 0 1px 3px rgba(15,23,42,0.08)'
             : '0 8px 24px rgba(15,23,42,0.08)',
@@ -313,6 +318,9 @@ export default function ScanResultPopup({
       >
         {/* accent hairline */}
         <div style={{ height: 3, background: cfg.accent }} />
+        {isMobileScan && (
+          <div style={{ width: 40, height: 4, borderRadius: 999, background: '#cbd5e1', margin: '0.5rem auto 0' }} aria-hidden="true" />
+        )}
 
         {/* close X — hidden for forgot unless dismissible explicitly */}
         {canBackdropClose && (
@@ -323,8 +331,8 @@ export default function ScanResultPopup({
               position: 'absolute',
               top: 12,
               right: 12,
-              width: 30,
-              height: 30,
+              width: isMobileScan ? 44 : 30,
+              height: isMobileScan ? 44 : 30,
               borderRadius: 999,
               border: '1px solid var(--border)',
               background: '#fff',
@@ -333,9 +341,10 @@ export default function ScanResultPopup({
               justifyContent: 'center',
               cursor: 'pointer',
               color: 'var(--text-muted)',
+              touchAction: 'manipulation',
             }}
           >
-            <X size={14} />
+            <X size={isMobileScan ? 18 : 14} />
           </button>
         )}
 

@@ -781,12 +781,25 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
 
   // Safari pauses <video> while backgrounded and never resumes it, and the
   // camera can die entirely — so resume by *condition*, not by restarting.
+  // Mobile: the hidden branch also RELEASES the camera hardware (tracks
+  // stopped, refs cleared). A backgrounded tab holding the stream keeps the
+  // privacy LED on and the battery draining for the whole hidden period;
+  // the visible branch below already re-acquires when the stream is not
+  // live, so this only trades a fast resume for a clean one.
   useEffect(() => {
     const onVisibility = async () => {
       if (document.visibilityState === 'hidden') {
         visibilityPausedRef.current = true
         loopGenRef.current++
         cancelFrame()
+        try {
+          const stream = streamRef.current
+          if (stream) {
+            for (const t of stream.getTracks()) { try { t.stop() } catch {} }
+          }
+        } catch {}
+        streamRef.current = null
+        trackRef.current = null
         return
       }
       if (!mountedRef.current) return
@@ -871,13 +884,16 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         tabIndex={0}
         aria-label="Tap to focus camera"
         onKeyDown={handleVideoKey}
+        className="scanner-video"
         style={{ width: '100%', height: 'clamp(220px, 52vh, 420px)', objectFit: 'cover', display: 'block', cursor: 'crosshair' }}
       />
 
       {/* Loading overlay — also covers 'starting' so a stall is never a silent
-          black rectangle. */}
+          black rectangle. The spinner reuses .spin so a slow cold start reads
+          as working, not frozen. */}
       {(status === 'loading' || status === 'starting') && (
-        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.55)', color: '#fff', fontWeight: 600 }}>
+        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.6rem', background: 'rgba(0,0,0,0.55)', color: '#fff', fontWeight: 600 }}>
+          <span className="spin scanner-init-spinner" aria-hidden="true" />
           Starting camera… {engineLabel}
         </div>
       )}
@@ -904,11 +920,12 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       </div>
 
       {torchSupported ? (
-        <button onClick={handleTorchToggle} aria-pressed={torchOn} style={{
+        <button onClick={handleTorchToggle} aria-pressed={torchOn} className="scanner-torch" style={{
           position: 'absolute', top: 8, right: 8,
           background: torchOn ? '#f59e0b' : 'rgba(0,0,0,0.6)',
           color: '#fff', border: 'none', borderRadius: 8,
           padding: '0.35rem 0.6rem', fontWeight: 700, fontSize: '0.75rem',
+          touchAction: 'manipulation',
         }}><Zap size={12} aria-hidden="true" /> {torchOn ? 'Torch on' : 'Torch'}</button>
       ) : null}
 
@@ -927,7 +944,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
           position: 'absolute', bottom: 10, left: '50%', transform: 'translateX(-50%)',
           background: 'rgba(0,0,0,0.7)', color: '#fff',
           padding: '0.35rem 0.7rem', borderRadius: 999,
-          fontSize: '0.78rem', fontWeight: 600, whiteSpace: 'nowrap',
+          fontSize: '0.78rem', fontWeight: 600,
+          // Wraps instead of overflowing narrow phones; on desktop the copy
+          // still fits one line, so wide screens render unchanged.
+          whiteSpace: 'normal', maxWidth: 'calc(100% - 20px)', textAlign: 'center',
         }}>{guidanceMsg}</div>
       )}
 

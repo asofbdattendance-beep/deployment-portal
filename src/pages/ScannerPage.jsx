@@ -7,6 +7,9 @@ import ScanResultPopup from '../components/scanner/ScanResultPopup'
 import { clearFailedQueue, clearLiveQueue, clearOrphanedQueue, listStrandedQueue, removeQueued } from '../lib/offlineQueue'
 import { ScanLine, Clock, Wifi, WifiOff, RefreshCw, Loader2 } from 'lucide-react'
 import { useScannerSession } from '../hooks/useScannerSession'
+import { useIsMobile } from '../hooks/useMediaQuery'
+import ScanModeShell from '../components/mobile/ScanModeShell'
+import MobileScanFeed from '../components/mobile/MobileScanFeed'
 import { todayStrIST } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import RecentScansTable from '../components/scanner/RecentScansTable'
@@ -46,6 +49,9 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
   // The badge that the server stamps onto every IN as `in_scanner_badge`
   // (populated from portal_users.badge_number for auth.uid()).
   const myBadge = profile?.badge_number || null
+  // Mobile capture renders the immersive ScanModeShell below; desktop keeps
+  // the cards. The scan state machine above is shared by both.
+  const isMobile = useIsMobile()
 
   const refresh=useCallback(async()=>{
     if(!scheduleId) return
@@ -151,45 +157,109 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
 
   if(!schedules.length) return <div className="page"><div className="card" style={{padding:'2rem', textAlign:'center'}}>No schedules</div></div>
 
+  // Shared slots — identical nodes feed the desktop cards and the mobile
+  // shell, so both layouts can never disagree about state.
+  const pillsNode = (<>
+    {sewaMode && (
+      <span className={`pill ${sewaMode === 'previsit' ? 'pill-amber' : 'pill-blue'}`} style={{ fontSize: '0.7rem' }} title="Recording mode is automatic — the scan date decides whether this counts as Previsit sewa or the Bhati visit">
+        {sewaMode === 'previsit' ? 'Previsit sewa' : 'Bhati visit'}
+      </span>
+    )}
+    {pendingCount > 0 && (
+      <span className="pill pill-amber" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
+        {syncing ? <RefreshCw size={10} className="spin"/> : <WifiOff size={10}/>}
+        {pendingCount} queued
+      </span>
+    )}
+    {failedCount > 0 && (
+      <span className="pill pill-red" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
+        {failedCount} failed
+      </span>
+    )}
+    {orphanedCount > 0 && (
+      <span className="pill pill-gray" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
+        {orphanedCount} orphaned
+      </span>
+    )}
+    {stranded.length > 0 && (
+      <span className="pill pill-red" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
+        {stranded.length} stranded
+      </span>
+    )}
+    <span className={`pill ${isOnline?'pill-green':'pill-red'}`} style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
+      {isOnline ? <Wifi size={10}/> : <WifiOff size={10}/>}
+      {isOnline ? 'Online' : 'Offline'}
+    </span>
+    {offline && <span style={{fontSize:'0.7rem', color:'#b45309'}}>· refresh failed — showing last data</span>}
+  </>)
+  const queueBarNode = (<>
+    <div style={{display:'flex', alignItems:'center', gap:8, flexWrap:'wrap', marginTop:6}}>
+      {failedCount > 0 && <button onClick={clearFailed} style={{fontSize:'0.7rem', color:'#b91c1c', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear failed ({failedCount})</button>}
+      {pendingCount > 0 && <button onClick={clearLive} style={{marginLeft: failedCount > 0 ? 0 : 'auto', fontSize:'0.7rem', color:'#b45309', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear live queued ({pendingCount})</button>}
+      {orphanedCount > 0 && <button onClick={clearOrphaned} style={{marginLeft: (failedCount > 0 || pendingCount > 0) ? 0 : 'auto', fontSize:'0.7rem', color:'#64748b', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear orphaned ({orphanedCount})</button>}
+    </div>
+    {stranded.length > 0 && (
+      <div style={{marginTop:8, padding:'8px 10px', border:'1px solid #fecaca', borderRadius:8, background:'#fef2f2'}}>
+        <div style={{fontSize:'0.75rem', fontWeight:700, color:'#b91c1c'}}>Stranded scans ({stranded.length}) — queued with no owner, never auto-sync</div>
+        {stranded.map(r => (
+          <div key={r.id} style={{display:'flex', alignItems:'center', gap:6, fontSize:'0.75rem', color:'#7f1d1d', marginTop:4}}>
+            <span>{r.badge || '?'} · {r.action || 'IN'}</span>
+            <button onClick={() => clearOneStranded(r.id)} style={{marginLeft:'auto', fontSize:'0.7rem', color:'#b91c1c', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear</button>
+          </div>
+        ))}
+      </div>
+    )}
+    {!myBadge && <div style={{fontSize:'0.75rem', color:'#b45309', marginTop:4}}>Your profile has no badge number, so these cannot be filtered to your own scans — showing today&apos;s sessions.</div>}
+  </>)
+  const popupNode = (
+    <ScanResultPopup
+      open={!!popup}
+      status={popup?.status}
+      action={popup?.action}
+      badge={popup?.badge}
+      name={popup?.name}
+      centre={popup?.centre}
+      deptName={popup?.deptName}
+      time={popup?.time}
+      message={popup?.message}
+      flag={popup?.flag}
+      openSince={popup?.openSince}
+      outTime={outTime}
+      onOutTimeChange={setOutTime}
+      onClose={closePopup}
+      onConfirm={popup?.status==='forgot' ? confirmForgot : popup?.status==='choose' ? commitScan : closePopup}
+    />
+  )
+  const manualSubmit = () => { handleScan(manualBadge, { manual: true }) }
+
+  // Mobile: immersive full-screen capture. Same state machine, same slots.
+  if (isMobile) {
+    return (
+      <div className="page" style={{ maxWidth: 900, margin: '0 auto' }}>
+        <ScanModeShell
+          title={<><ScanLine size={22} /> Scanner</>}
+          pills={<>{profile?.centre} · {schedule?.name || ''} {pillsNode}</>}
+          camera={<BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />}
+          action={<button onClick={manualSubmit} className="btn btn-primary scan-shell-go" disabled={busy || !manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark In/Out</button>}
+          manual={<input value={manualBadge} onChange={e => setManualBadge(e.target.value)} placeholder="Manual FB/BH/VS badge" className="input scan-shell-input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} onKeyDown={e => { if (e.key === 'Enter') { manualSubmit() } }} />}
+          queueBar={queueBarNode}
+          feedTitle={<div style={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}><Clock size={14} /> My last 10 scans (today)</div>}
+          feed={<MobileScanFeed rows={sessions} deptNameById={deptNameById} limit={10} emptyMessage={myBadge ? 'No scans by you yet today' : 'No scans yet'} />}
+          popup={popupNode}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="page" style={{maxWidth:900, margin:'0 auto'}}>
       <div className="page-header"><div><h2 className="page-title"><ScanLine size={22}/> Scanner</h2><div className="page-sub" style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
         {profile?.centre} · {schedule?.name||''}
-        {sewaMode && (
-          <span className={`pill ${sewaMode === 'previsit' ? 'pill-amber' : 'pill-blue'}`} style={{ fontSize: '0.7rem' }} title="Recording mode is automatic — the scan date decides whether this counts as Previsit sewa or the Bhati visit">
-            {sewaMode === 'previsit' ? 'Previsit sewa' : 'Bhati visit'}
-          </span>
-        )}
-        {pendingCount > 0 && (
-          <span className="pill pill-amber" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
-            {syncing ? <RefreshCw size={10} className="spin"/> : <WifiOff size={10}/>}
-            {pendingCount} queued
-          </span>
-        )}
-        {failedCount > 0 && (
-          <span className="pill pill-red" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
-            {failedCount} failed
-          </span>
-        )}
-        {orphanedCount > 0 && (
-          <span className="pill pill-gray" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
-            {orphanedCount} orphaned
-          </span>
-        )}
-        {stranded.length > 0 && (
-          <span className="pill pill-red" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
-            {stranded.length} stranded
-          </span>
-        )}
-        <span className={`pill ${isOnline?'pill-green':'pill-red'}`} style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
-          {isOnline ? <Wifi size={10}/> : <WifiOff size={10}/>}
-          {isOnline ? 'Online' : 'Offline'}
-        </span>
-        {offline && <span style={{fontSize:'0.7rem', color:'#b45309'}}>· refresh failed — showing last data</span>}
+        {pillsNode}
       </div></div></div>
       <div className="card" style={{padding:'1rem', marginBottom:12}}>
         <BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />
-        <div style={{display:'flex', gap:8, marginTop:10}}><input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Manual FB/BH/VS badge" className="input" style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ handleScan(manualBadge, { manual: true }) }}}/><button onClick={()=>{ handleScan(manualBadge, { manual: true }) }} className="btn btn-primary" disabled={busy||!manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark In/Out</button></div>
+        <div style={{display:'flex', gap:8, marginTop:10}}><input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Manual FB/BH/VS badge" className="input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ manualSubmit() }}}/><button onClick={manualSubmit} className="btn btn-primary" disabled={busy||!manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark In/Out</button></div>
       </div>
       <div className="card" style={{padding:'1rem'}}>
         <div style={{fontWeight:700, display:'flex', alignItems:'center', gap:6, flexWrap:'wrap'}}>
@@ -197,24 +267,8 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
           <span style={{fontWeight:400, fontSize:'0.75rem', color:'#64748b'}}>by you{myBadge?` · ${myBadge}`:''}</span>
           {/* V16: failed/orphaned rows get their own counted clear actions —
               previously only a single uncounted "Clear failed scans" link. */}
-          {failedCount > 0 && <button onClick={clearFailed} style={{marginLeft:'auto', fontSize:'0.7rem', color:'#b91c1c', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear failed ({failedCount})</button>}
-          {pendingCount > 0 && <button onClick={clearLive} style={{marginLeft: failedCount > 0 ? 0 : 'auto', fontSize:'0.7rem', color:'#b45309', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear live queued ({pendingCount})</button>}
-          {orphanedCount > 0 && <button onClick={clearOrphaned} style={{marginLeft: (failedCount > 0 || pendingCount > 0) ? 0 : 'auto', fontSize:'0.7rem', color:'#64748b', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear orphaned ({orphanedCount})</button>}
         </div>
-        {/* T10: stranded scans — queued while logged out / session-blip, never
-            auto-synced. Each row is cleared manually; nothing here deletes. */}
-        {stranded.length > 0 && (
-          <div style={{marginTop:8, padding:'8px 10px', border:'1px solid #fecaca', borderRadius:8, background:'#fef2f2'}}>
-            <div style={{fontSize:'0.75rem', fontWeight:700, color:'#b91c1c'}}>Stranded scans ({stranded.length}) — queued with no owner, never auto-sync</div>
-            {stranded.map(r => (
-              <div key={r.id} style={{display:'flex', alignItems:'center', gap:6, fontSize:'0.75rem', color:'#7f1d1d', marginTop:4}}>
-                <span>{r.badge || '?'} · {r.action || 'IN'}</span>
-                <button onClick={() => clearOneStranded(r.id)} style={{marginLeft:'auto', fontSize:'0.7rem', color:'#b91c1c', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear</button>
-              </div>
-            ))}
-          </div>
-        )}
-        {!myBadge && <div style={{fontSize:'0.75rem', color:'#b45309', marginTop:4}}>Your profile has no badge number, so these cannot be filtered to your own scans — showing today&apos;s sessions.</div>}
+        {queueBarNode}
         <div style={{maxHeight:380, overflow:'auto', marginTop:8}}>
           <RecentScansTable
             rows={sessions}
@@ -225,23 +279,7 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
         </div>
       </div>
 
-      <ScanResultPopup
-        open={!!popup}
-        status={popup?.status}
-        action={popup?.action}
-        badge={popup?.badge}
-        name={popup?.name}
-        centre={popup?.centre}
-        deptName={popup?.deptName}
-        time={popup?.time}
-        message={popup?.message}
-        flag={popup?.flag}
-        openSince={popup?.openSince}
-        outTime={outTime}
-        onOutTimeChange={setOutTime}
-        onClose={closePopup}
-        onConfirm={popup?.status==='forgot' ? confirmForgot : popup?.status==='choose' ? commitScan : closePopup}
-      />
+      {popupNode}
     </div>
   )
 }
