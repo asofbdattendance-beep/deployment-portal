@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, fetchAllRpc } from '../lib/supabase'
 import { useToast } from '../components/Toast'
 import {
   buildSewadarRows,
@@ -156,7 +156,9 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
           ]
         : [Promise.resolve([]), Promise.resolve([])]
       const [sewR, dayR, opsR] = await Promise.allSettled([
-        withTimeout(rpcRows('attendance_sewadar_summary', { p_schedule: scheduleId }), 15000, 'attendance_sewadar_summary'),
+        // one row PER BADGE across ~3597 sewadars — must paginate, or the
+        // KPI tiles and the Excel export silently read only the first 1000.
+        withTimeout(fetchAllRpc('attendance_sewadar_summary', { p_schedule: scheduleId }), 15000, 'attendance_sewadar_summary'),
         dayCalls[0],
         dayCalls[1],
       ])

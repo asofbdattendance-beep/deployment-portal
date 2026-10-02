@@ -32,9 +32,10 @@ jobs:
         run: npm run build
 
   # Mobile-first attendance gate (Pixel 5 + iPhone 13): bottom tab bar,
-  # immersive scan shell, PWA contract. Desktop e2e stays out of CI by
-  # design (14-test offline matrix is a manual pre-release check); the
-  # mobile smoke is fast (~30s) and guards the phone layer on every push.
+  # immersive scan shell, PWA contract. Desktop e2e used to stay out of CI by
+  # design ("manual pre-release check"); since the 2026-10-03 queue-matrix
+  # repair it runs as e2e-desktop below, gated to the release branch until
+  # the matrix has soaked. The mobile smoke (~30s) still guards every push.
   e2e-mobile:
     runs-on: ubuntu-latest
     steps:
@@ -50,6 +51,28 @@ jobs:
       - run: npx playwright install --with-deps chromium webkit
 
       - run: npx playwright test --project=mobile-chrome --project=mobile-safari
+
+  # Desktop e2e gate (chromium): the offline queue matrix — MAX_QUEUE_SIZE
+  # overflow, session-mismatch quarantine, recovery-bar buttons, replay drains.
+  # Gated to the go-live release branch (or a manual dispatch) so ordinary
+  # pushes keep the fast mobile-only smoke while the repaired matrix proves
+  # itself in CI before un-gating.
+  e2e-desktop:
+    if: github.ref == 'refs/heads/release/attendance-go-live-2026-10-03' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx playwright install --with-deps chromium
+
+      - run: npx playwright test --project=chromium
 
   # PWA app-shell gate. Runs against a PRODUCTION build (vite preview), since
   # the service worker only exists in `vite build` output — an installability

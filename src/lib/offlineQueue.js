@@ -126,7 +126,7 @@ export function __getConsecutiveFailures() {
   return _consecutiveFailures
 }
 
-const MAX_QUEUE_SIZE = 2000
+export const MAX_QUEUE_SIZE = 2000
 
 const DB_NAME = 'sewadar_offline_q'
 const DB_VERSION = 2

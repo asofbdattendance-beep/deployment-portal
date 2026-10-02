@@ -33,12 +33,17 @@ test.describe('queue matrix', () => {
   test('M1 full queue reports itself distinctly (L-02)', async ({ page, context }) => {
     const guard = collectPageErrors(page)
     await loginAsScanner(page)
+    // The REAL cap, imported through the app's own module graph — the fixture
+    // can never drift from offlineQueue.js (hardcoding it is how M1 rotted).
+    const MAX = await page.evaluate(() =>
+      import('/src/lib/offlineQueue.js').then((m) => m.MAX_QUEUE_SIZE),
+    )
     // Freeze the scheduled drain so the fixture survives setup: a hanging
     // RPC never mutates rows, it only burns the attempt's timeout.
     await seedMock(page.request, { scan_in: 'hang' })
     await putRawRows(
       page,
-      Array.from({ length: 200 }, (_, i) => liveRow({ id: `fill-${i}`, badge: 'FB5971GA1001' })),
+      Array.from({ length: MAX + 1 }, (_, i) => liveRow({ id: `fill-${i}`, badge: 'FB5971GA1001' })),
     )
     await context.setOffline(true)
     await manualScan(page, 'FB5971GA1002')
@@ -48,7 +53,7 @@ test.describe('queue matrix', () => {
     await page.getByRole('dialog').getByRole('button', { name: 'Mark IN', exact: true }).click()
     // Exact: the popup message contains the toast text as a substring.
     await expect(page.getByText('Offline queue is full', { exact: true })).toBeVisible()
-    expect((await queueRows(page)).length).toBe(200)
+    expect((await queueRows(page)).length).toBe(MAX + 1)
     guard.assertEmpty()
   })
 
@@ -189,7 +194,7 @@ test.describe('queue matrix', () => {
     guard.assertEmpty()
   })
 
-  test('M7 stale open_id drops while the drain continues (L-08)', async ({
+  test('M7 stale open_id quarantines while the drain continues (L-08)', async ({
     page,
     context,
     request,
@@ -214,7 +219,18 @@ test.describe('queue matrix', () => {
     await context.setOffline(false)
     // The IN behind it still syncs — one dead row never wedges the queue.
     await waitForRpc(request, (c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA1702')
-    await expect.poll(async () => (await queueRows(page)).length, { timeout: 25000 }).toBe(0)
+    await expect
+      .poll(async () => (await queueRows(page)).filter((r) => r.badge === 'FB5971GA1702').length, {
+        timeout: 25000,
+      })
+      .toBe(0)
+    // T9/C3: an OUT orphaned by a stale p_open_id is QUARANTINED with a
+    // reason — visible for manual recovery — never silently dropped.
+    const rows = await queueRows(page)
+    const orphan = rows.find((r) => r.badge === 'FB5971GA1701')
+    expect(orphan).toBeTruthy()
+    expect(orphan.failed).toBe(true)
+    expect(orphan.failReason).toContain('Session does not match')
     guard.assertEmpty()
   })
 
@@ -248,7 +264,7 @@ test.describe('queue matrix', () => {
     ])
     await page.reload()
     await expect(page.getByPlaceholder('Manual FB/BH/VS badge')).toBeVisible()
-    await page.getByRole('button', { name: 'Clear failed scans' }).click()
+    await page.getByRole('button', { name: /^Clear failed \(/ }).click()
     await expect.poll(async () => (await queueRows(page)).length, { timeout: 15000 }).toBe(0)
     guard.assertEmpty()
   })
@@ -306,6 +322,10 @@ test.describe('queue matrix', () => {
     // replay answers Already IN, and the row must drop, not stick.
     await seedMock(request, {
       scan_in_error_for: { FB5971GA1301: { message: 'Already IN — session open', code: 'DUP' } },
+      // C6 (offlineQueue.js:546-581): an uncertain IN answered 'Already IN'
+      // first resolves the real open session and replays the OUT — which is
+      // what a real server (that already applied the IN) would return.
+      get_open_session: { id: 'sess-m12', badge: 'FB5971GA1301' },
     })
     await context.setOffline(false)
     await waitForRpc(request, (c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA1301')

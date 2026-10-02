@@ -7,6 +7,13 @@ import { render, screen, waitFor, cleanup, fireEvent } from '@testing-library/re
 import PrevisitDashboard from './PrevisitDashboard'
 
 const rpc = vi.fn()
+// Delegates to `rpc` fixtures, upholding the real fetchAllRpc contract:
+// a resolved `{ error }` THROWS instead of returning rows.
+const fetchAllRpc = vi.fn(async (name, params) => {
+  const res = await rpc(name, params)
+  if (res?.error) throw res.error
+  return Array.isArray(res?.data) ? res.data : []
+})
 
 const noopChannel = () => {
   const ch = {
@@ -23,6 +30,7 @@ vi.mock('../lib/supabase', () => ({
     channel: () => noopChannel(),
     removeChannel: () => {},
   },
+  fetchAllRpc: (...args) => fetchAllRpc(...args),
 }))
 
 vi.mock('../lib/realtime', () => ({
@@ -61,6 +69,10 @@ describe('PrevisitDashboard', () => {
   it('renders KPI tiles from the summary', async () => {
     render(<PrevisitDashboard schedules={SCHEDULES} scheduleId="sched-1" />)
     await waitFor(() => expect(screen.getByText('Sewa days')).toBeTruthy())
+    // Per-badge feeds paginate (denominator completeness); summary doesn't.
+    const routed = fetchAllRpc.mock.calls.map(([n]) => n)
+    expect(routed).toEqual(expect.arrayContaining(['previsit_sewadars', 'previsit_deployed']))
+    expect(routed).not.toContain('previsit_summary')
     // 2 sewa days, 4 present, 1 open, 2 departments — tiles, not a table.
     expect(screen.getByText('Present by sewa day')).toBeTruthy()
     expect(screen.queryByPlaceholderText(/badge/i)).toBeNull()

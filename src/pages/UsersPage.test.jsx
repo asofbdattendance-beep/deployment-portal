@@ -6,6 +6,10 @@ import { render, screen, waitFor, cleanup, fireEvent, within } from '@testing-li
 import UsersPage from './UsersPage'
 
 const rpc = vi.fn()
+// Records every fetchAllRows request (table + stable key) so tests can pin
+// the R6/R7 contract: unique keys only — a non-unique created_at key lets
+// the Map dedupe collapse same-transaction rows (grants) into one.
+const fetchAllRowsCalls = []
 const toastError = vi.fn()
 const toastSuccess = vi.fn()
 const toastWarning = vi.fn()
@@ -39,7 +43,8 @@ vi.mock('../lib/supabase', async (importOriginal) => {
       auth: { resetPasswordForEmail: (...args) => resetPwMock(...args) },
       functions: { invoke: (...args) => invokeMock(...args) },
     },
-    fetchAllRows: (table) => {
+    fetchAllRows: (table, _select, _filters, stableKey) => {
+      fetchAllRowsCalls.push({ table, stableKey })
       if (table === 'portal_users') return Promise.resolve(USERS)
       if (table === 'custom_roles') return Promise.resolve([])
       if (table === 'portal_invitations') return Promise.resolve([])
@@ -110,6 +115,15 @@ describe('UsersPage — renders', () => {
     await renderPage()
     expect(screen.getByText('Old Scanner')).toBeTruthy()
     expect(screen.getAllByText('Suspended').length).toBeGreaterThan(0)
+  })
+
+  it('keys the grants + schedule lists on unique columns, never created_at (R6/R7)', async () => {
+    await renderPage()
+    const keyOf = (t) => fetchAllRowsCalls.find((c) => c.table === t)?.stableKey
+    // created_at is NOT unique (one transaction now() for a whole save) — a
+    // created_at key collapses N department grants to 1 in the dedupe Map.
+    expect(keyOf('department_incharge_assignments')).toBe('id')
+    expect(keyOf('deployment_schedules')).toBe('id')
   })
 })
 

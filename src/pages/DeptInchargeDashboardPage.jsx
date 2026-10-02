@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, fetchAllRpc } from '../lib/supabase'
 import { useToast } from '../components/Toast'
 import { deptInchargeKpis, timeAgo, VISIT_DAYS, UNASSIGNED_CENTRE, visitColumns, buildAttendanceMatrixFromDayBadges, shortDayLabel } from '../lib/attendance'
 import { scheduleWindow, expandDateRange, clampDateToWindow } from '../lib/sewaMode'
@@ -176,8 +176,9 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
       } else {
         const settled = await Promise.allSettled(
           cols.flatMap((col) => [
-            rpcRows('attendance_day_badges', { p_schedule: scheduleId, p_date: col, p_mode: 'present' }),
-            rpcRows('attendance_day_badges', { p_schedule: scheduleId, p_date: col, p_mode: 'absent' }),
+            // per-badge rows → paginated (complete matrix + Excel snapshot)
+            fetchAllRpc('attendance_day_badges', { p_schedule: scheduleId, p_date: col, p_mode: 'present' }),
+            fetchAllRpc('attendance_day_badges', { p_schedule: scheduleId, p_date: col, p_mode: 'absent' }),
           ])
         )
         if (!mountedRef.current || seq !== seqRef.current) return

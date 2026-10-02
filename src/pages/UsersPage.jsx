@@ -242,9 +242,11 @@ export default function UsersPage() {
         fetchCentres().catch(() => []),
         // v51: a dept_incharge is scoped by department for a schedule, so the
         // Users page needs both reference lists to render the picker.
-        fetchAllRows('deployment_schedules', 'id, name, status', null, 'created_at').catch(() => []),
+        // 'id' (unique), never created_at: upserted rows share one
+        // transaction now(), so a created_at key collapses N grants to 1.
+        fetchAllRows('deployment_schedules', 'id, name, status', null, 'id').catch(() => []),
         fetchAllRows('deployment_departments', 'id, name', null, 'name').catch(() => []),
-        fetchAllRows('department_incharge_assignments', '*', null, 'created_at').catch(() => []),
+        fetchAllRows('department_incharge_assignments', '*', null, 'id').catch(() => []),
       ])
       setUsers(u || [])
       setCustomRoles(r || [])

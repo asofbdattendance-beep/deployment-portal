@@ -83,7 +83,9 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
   const refreshDepts=useCallback(async()=>{
     if(!scheduleId) return
     try {
-      setDepts(await fetchAllRows('deployment_departments', 'id, name') || [])
+      // stableKey 'id': fetchAllRows' contract — keyless paging skips both
+      // dedupe and the count-mismatch guard (audit R8).
+      setDepts(await fetchAllRows('deployment_departments', 'id, name', null, 'id') || [])
     } catch(e){ console.warn('[Scanner] department load failed:', e?.message) }
   },[scheduleId])
 

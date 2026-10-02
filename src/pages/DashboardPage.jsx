@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, fetchAllRpc } from '../lib/supabase'
 import { useToast } from '../components/Toast'
 import {
   buildDailyRows,
@@ -442,8 +442,10 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   // delivers one file through the share sheet: the snapshot combines Present
   // + Absent into a single 4-sheet workbook instead of two downloads.
   const fetchDayRows = useCallback(async (mode) => {
+    // Per-badge rows: fetchAllRpc paginates so buildDaySheets' per-centre
+    // counts and TOTAL are complete, never a 1000-row prefix.
     const rows = await withTimeout(
-      rpcRows('attendance_day_badges', { p_schedule: scheduleId, p_date: date, p_mode: mode }),
+      fetchAllRpc('attendance_day_badges', { p_schedule: scheduleId, p_date: date, p_mode: mode }),
       15000,
       'attendance_day_badges'
     )

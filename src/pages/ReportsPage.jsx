@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { supabase } from '../lib/supabase'
+import { fetchAllRpc } from '../lib/supabase'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 // `exportWorkbook` runs every sheet name through `sheetName` internally (≤31
@@ -17,28 +17,6 @@ import {
   FileText, Download, Search,
   RefreshCw, Loader2, AlertTriangle, Lock, Users,
 } from 'lucide-react'
-
-/**
- * Unwrap a supabase-js PostgREST result.
- *
- * supabase-js RESOLVES with `{ error }` on a failed RPC — it does not reject —
- * so a `.catch(() => [])` chain silently turns "function does not exist"
- * (PGRST202), an RLS/permission denial or a dropped connection into an empty
- * array, and a broken database then looks exactly like a day nobody attended.
- * Throwing here is what makes the page render a real error panel instead.
- *
- * @param {string} name RPC name
- * @param {object} params RPC arguments
- * @returns {Promise<Array<object>>}
- */
-async function rpcRows(name, params) {
-  const { data, error } = await supabase.rpc(name, params)
-  if (error) {
-    const msg = error.message || error.code || 'Unknown error'
-    throw new Error(`${name}: ${msg}`)
-  }
-  return Array.isArray(data) ? data : []
-}
 
 /**
  * Normalize one `attendance_day_badges` row to the shape this page renders,
@@ -94,15 +72,16 @@ function matchesSearch(r, term) {
  * for a role it does not cover, so this page never filters by role. Do NOT
  * add a client-side role filter — it would only mask a DB scope bug.
  *
- * Read-only for every role (View-only pill): aso / super_admin get a
- * "Download Excel" export, every other role gets a "Print PDF" button that
- * prints the per-centre `.centre-page` sections.
+ * Read-only for every role (View-only pill): aso / super_admin /
+ * dept_incharge get a "Download Excel" export, and every role also gets a
+ * "Print PDF" button that prints the per-centre `.centre-page` sections.
  */
 export default function ReportsPage({ schedules = [], scheduleId, onNavigate, initialCentre }) {
   const toast = useToast()
   const { profile } = usePortalAuth()
   const schedule = schedules.find((s) => s.id === scheduleId)
-  const canExport = profile?.role === 'aso' || profile?.role === 'super_admin'
+  const canExport =
+    profile?.role === 'aso' || profile?.role === 'super_admin' || profile?.role === 'dept_incharge'
 
   const [tab, setTab] = useState('complete') // complete | present | absent
   const [date, setDate] = useState(() => clampDateToWindow(todayStrIST(), scheduleWindow(schedule)))
@@ -184,8 +163,11 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
       // Every RPC races a 15s timeout so a hung connection degrades to the
       // error panel instead of a permanent spinner.
       const [presentR, absentR] = await Promise.allSettled([
-        withTimeout(rpcRows('attendance_day_badges', { p_schedule: scheduleId, p_date: date, p_mode: 'present' }), 15000, 'attendance_day_badges:present'),
-        withTimeout(rpcRows('attendance_day_badges', { p_schedule: scheduleId, p_date: date, p_mode: 'absent' }), 15000, 'attendance_day_badges:absent'),
+        // day_badges is one row PER BADGE — paginated via fetchAllRpc so a
+        // >1000-badge day can never truncate "Showing N of M" or the workbook
+        // (it THROWS on { error } exactly like the old local rpcRows did).
+        withTimeout(fetchAllRpc('attendance_day_badges', { p_schedule: scheduleId, p_date: date, p_mode: 'present' }), 15000, 'attendance_day_badges:present'),
+        withTimeout(fetchAllRpc('attendance_day_badges', { p_schedule: scheduleId, p_date: date, p_mode: 'absent' }), 15000, 'attendance_day_badges:absent'),
       ])
       // Drop a stale response that landed after a newer one.
       if (!mountedRef.current || seq !== seqRef.current) return
@@ -476,8 +458,9 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
             {/* PDF sits BESIDE Excel, never instead of it: the same report
                 through the browser's Print-to-PDF (index.css `@media print`
                 strips the chrome and forces a real table, so a phone prints a
-                table — not a stack of cards). dept_incharge has no Excel
-                export, so this is its only export. */}
+                table — not a stack of cards). dept_incharge gets BOTH exports:
+                its rows come from the same role-scoped RPCs, so the workbook
+                is exactly what it can see. */}
             <PrintPdfButton className="btn" style={{ fontSize: '0.78rem' }} />
           </div>
         </div>

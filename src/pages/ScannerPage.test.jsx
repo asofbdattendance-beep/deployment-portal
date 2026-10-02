@@ -147,6 +147,14 @@ describe('ScannerPage session query (L-41)', () => {
     // today) and contradicts the Incharge page and the Daily tab.
     expect(mocks.fromCalls.filter(c => c[0] === 'eq' && c[1] === 'in_date')).toHaveLength(0)
   })
+
+  it('loads departments through fetchAllRows with a stable key (R8)', async () => {
+    render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+    await settle()
+    // Keyless paging skips BOTH the Map dedupe and the count-mismatch guard,
+    // so the helper's contract demands a unique stable key at every call site.
+    expect(mocks.fetchAllRows).toHaveBeenCalledWith('deployment_departments', 'id, name', null, 'id')
+  })
 })
 
 describe('ScannerPage render', () => {
