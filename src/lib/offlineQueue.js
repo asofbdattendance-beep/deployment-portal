@@ -58,6 +58,15 @@ function quarantineRow(id, reason) {
 export function classifyScanError(msg, err) {
   const s = String(msg || err?.message || '')
   if (s.includes('Already IN') || s.includes('No open session')) return 'dedup'
+  // V5: unique-constraint violation on the open-session index — a benign
+  // concurrent double-IN already recorded server-side → dedup (drop the row,
+  // keep draining, never head-of-line-block). Matched case-insensitively:
+  // PostgREST surfaces raw Postgres error text whose case is not contractual.
+  const lower = s.toLowerCase()
+  if (
+    lower.includes('duplicate key value') &&
+    (lower.includes('uq_dp_one_open') || lower.includes('dp_attendance_sessions'))
+  ) return 'dedup'
   if (s.includes('Invalid badge') || s.includes('Badge not found')) return 'drop'
   if (s.includes('Session does not match')) return 'drop' // L-08 stale p_open_id
   if (
@@ -82,6 +91,12 @@ export function getDrainTiming() {
 export function __resetDrainState() {
   _consecutiveFailures = 0
   _draining = false
+}
+
+// Test-only read of the sticky-backoff counter (V5/V12 drain tests assert
+// growth on retry and decay on forward progress). Mirrors __resetDrainState.
+export function __getConsecutiveFailures() {
+  return _consecutiveFailures
 }
 
 const MAX_QUEUE_SIZE = 200

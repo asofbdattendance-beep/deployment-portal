@@ -21,7 +21,7 @@ vi.mock('./supabase', () => ({
   },
 }))
 
-const { enqueueScan, getQueuedScans, removeQueued, markFailed, clearFailedQueue, clearOrphanedQueue, drainQueue, classifyScanError, getDrainTiming, __resetDrainState, cacheSet, getCachedDeployed, preloadDeployed, installDrainListeners } = await import('./offlineQueue')
+const { enqueueScan, getQueuedScans, removeQueued, markFailed, clearFailedQueue, clearOrphanedQueue, drainQueue, classifyScanError, getDrainTiming, __resetDrainState, __getConsecutiveFailures, cacheSet, getCachedDeployed, preloadDeployed, installDrainListeners } = await import('./offlineQueue')
 
 /** Read EVERY row in the store, bypassing the owner filter — test-only helper. */
 function allRows() {
@@ -357,6 +357,16 @@ describe('classifyScanError (Task 1: L-04 + L-08)', () => {
     expect(classifyScanError(msg)).toBe(expected)
   })
 
+  it('classifies unique-constraint open-session violations as dedup (V5)', () => {
+    // Benign concurrent double-IN: the open-session index fired, so the scan
+    // is already recorded server-side — drop the row, keep draining.
+    expect(classifyScanError('duplicate key value violates unique constraint "uq_dp_one_open_per_badge_schedule"')).toBe('dedup')
+    expect(classifyScanError('duplicate key value violates unique constraint "uq_dp_one_open_per_badge_schedule" for badge FB5971GA0001')).toBe('dedup')
+    expect(classifyScanError('duplicate key value violates unique constraint "dp_attendance_sessions_pkey" on table dp_attendance_sessions')).toBe('dedup')
+    // A duplicate-key error on an unrelated table is NOT this benign case.
+    expect(classifyScanError('duplicate key value violates unique constraint "portal_users_email_key"')).toBe('retry')
+  })
+
   it('exposes injectable drain timing for T2', () => {
     expect(getDrainTiming()).toEqual({ base: 7000, max: 60000 })
     globalThis.__OFFLINEQ_BASE_INTERVAL__ = 100
@@ -407,6 +417,104 @@ describe('drainQueue poison-row behaviour (L-04)', () => {  function fakeSupabas
     expect(drained).toBe(2)
     expect(calls).toHaveLength(2)
     expect(await getQueuedScans()).toHaveLength(0)
+  })
+})
+
+describe('unique-constraint dedup drain (V5)', () => {
+  function fakeSupabase(calls, impl) {
+    return {
+      auth: { getSession: async () => ({ data: { session: { user: { id: 'user-A' } } } }) },
+      rpc: async (name, params) => {
+        calls.push([name, params])
+        return impl ? impl(name, params) : { data: { ok: true }, error: null }
+      },
+    }
+  }
+
+  it('drain removes a unique-violation row and keeps draining without backoff climb (V5)', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw({ id: 'dbl-in', badge: 'VS0001', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:00:00Z', createdAt: 1, attempts: 0, synced: false, owner: 'user-A' })
+    await putRaw({ id: 'next-ok', badge: 'VS0002', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:01:00Z', createdAt: 2, attempts: 0, synced: false, owner: 'user-A' })
+    const drained = await drainQueue(fakeSupabase(calls, (name, params) => {
+      if (params.p_badge === 'VS0001') return { data: null, error: new Error('duplicate key value violates unique constraint "uq_dp_one_open_per_badge_schedule"') }
+      return { data: { ok: true }, error: null }
+    }))
+    // No break: both rows attempted, both gone, the dedup counts as drained.
+    expect(drained).toBe(2)
+    expect(calls).toHaveLength(2)
+    expect(await getQueuedScans()).toHaveLength(0)
+    // Benign dedup must not climb the sticky backoff.
+    expect(__getConsecutiveFailures()).toBe(0)
+  })
+})
+
+describe('drainQueue owner + retry semantics (V12)', () => {
+  function fakeSupabase(calls, impl, userId = 'user-A') {
+    return {
+      auth: { getSession: async () => ({ data: { session: userId ? { user: { id: userId } } : null } }) },
+      rpc: async (name, params) => {
+        calls.push([name, params])
+        return impl ? impl(name, params) : { data: { ok: true }, error: null }
+      },
+    }
+  }
+
+  it('logged-out drain is a no-op (V12)', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw({ id: 'mine', badge: 'VS0001', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:00:00Z', createdAt: 1, attempts: 0, synced: false, owner: 'user-A' })
+    const drained = await drainQueue(fakeSupabase(calls, null, null))
+    expect(drained).toBe(0)
+    expect(calls).toHaveLength(0)
+    // The row is untouched — it will drain under its owner's next login.
+    expect((await allRows()).map((r) => r.id)).toEqual(['mine'])
+  })
+
+  it('drain skips other-user and null-owner rows (V12)', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw({ id: 'mine', badge: 'VS0001', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:00:00Z', createdAt: 1, attempts: 0, synced: false, owner: 'user-A' })
+    await putRaw({ id: 'theirs', badge: 'VS0002', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:01:00Z', createdAt: 2, attempts: 0, synced: false, owner: 'user-B' })
+    await putRaw({ id: 'anon', badge: 'VS0003', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:02:00Z', createdAt: 3, attempts: 0, synced: false, owner: null })
+    const drained = await drainQueue(fakeSupabase(calls))
+    expect(drained).toBe(1)
+    expect(calls).toHaveLength(1)
+    expect(calls[0][1].p_badge).toBe('VS0001')
+    // Other users' rows (and null-owner orphans) are never synced or deleted.
+    expect((await allRows()).map((r) => r.id).sort()).toEqual(['anon', 'theirs'])
+  })
+
+  it('retry arm marks failed, breaks, and climbs backoff (V12)', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw({ id: 'flaky-1', badge: 'VS0001', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:00:00Z', createdAt: 1, attempts: 0, synced: false, owner: 'user-A' })
+    await putRaw({ id: 'flaky-2', badge: 'VS0002', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:01:00Z', createdAt: 2, attempts: 0, synced: false, owner: 'user-A' })
+    const drained = await drainQueue(fakeSupabase(calls, () => ({ data: null, error: new Error('Failed to fetch') })))
+    expect(drained).toBe(0)
+    // Head-of-line block: the drain stops at the first network error.
+    expect(calls).toHaveLength(1)
+    const rows = await allRows()
+    expect(rows.find((r) => r.id === 'flaky-1').attempts).toBe(1)
+    // The row behind the failure is never attempted.
+    expect(rows.find((r) => r.id === 'flaky-2').attempts).toBe(0)
+    expect(__getConsecutiveFailures()).toBe(1)
+  })
+
+  it('forward progress decays the backoff one step at a time (V12)', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw({ id: 'solo', badge: 'VS0001', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:00:00Z', createdAt: 1, attempts: 0, synced: false, owner: 'user-A' })
+    // Two failed drains climb the backoff 0 → 1 → 2.
+    await drainQueue(fakeSupabase(calls, () => ({ data: null, error: new Error('Failed to fetch') })))
+    expect(__getConsecutiveFailures()).toBe(1)
+    await drainQueue(fakeSupabase(calls, () => ({ data: null, error: new Error('Failed to fetch') })))
+    expect(__getConsecutiveFailures()).toBe(2)
+    expect((await allRows()).find((r) => r.id === 'solo').attempts).toBe(2)
+    // One successful drain decays exactly one step (2 → 1), not a reset.
+    const drained = await drainQueue(fakeSupabase(calls))
+    expect(drained).toBe(1)
+    expect(__getConsecutiveFailures()).toBe(1)
   })
 })
 
