@@ -87,35 +87,77 @@ describe('badge validation', () => {
   })
 })
 
-describe('scan_in on a fresh sewadar', () => {
-  it('scans IN when there is no open session', async () => {
-    // get_scan_state -> { open: null, last_out: null }, then scan_in -> ok
+// Explicit choice: a plain scan NEVER writes. It resolves state and shows a
+// `choose` popup; the write happens only on the committed callback.
+describe('explicit choice: a plain scan never writes', () => {
+  it('shows Mark IN (not an IN write) when there is no open session', async () => {
+    // get_scan_state -> { open: null, last_out: null }, then NOTHING.
+    rpc.mockResolvedValueOnce({ data: { open: null, last_out: null } })
+    const { result, showPopup, onAfterScan } = setup()
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(rpc).toHaveBeenCalledWith('get_scan_state', { p_badge: BADGE, p_schedule: 'sched-1' })
+    expect(rpc).not.toHaveBeenCalledWith('scan_in', expect.anything())
+    expect(rpc).not.toHaveBeenCalledWith('scan_out', expect.anything())
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'IN', badge: BADGE }))
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'IN' })
+    // Nothing was written, so nothing needs refreshing.
+    expect(onAfterScan).not.toHaveBeenCalled()
+    expect(enqueueScan).not.toHaveBeenCalled()
+  })
+
+  it('committing the IN choice writes scan_in and celebrates', async () => {
     rpc.mockResolvedValueOnce({ data: { open: null, last_out: null } })
     rpc.mockResolvedValueOnce({ data: { ok: true, undeployed: false } })
     const { result, showPopup, onAfterScan } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
-    expect(rpc).toHaveBeenCalledWith('get_scan_state', { p_badge: BADGE, p_schedule: 'sched-1' })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(rpc).toHaveBeenCalledWith('scan_in', expect.objectContaining({ p_badge: BADGE, p_centre: 'DELHI' }))
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'in' }))
     expect(onAfterScan).toHaveBeenCalled()
     expect(enqueueScan).not.toHaveBeenCalled()
   })
 
-  it('flags an undeployed scan', async () => {
+  it('shows Mark OUT (not an OUT write) when a session is open', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(FIXED_NOW)
+    rpc.mockResolvedValueOnce({ data: { open: { id: 'open-1', status: 'OPEN', ...istStamp(2, 'in') }, last_out: null } })
+    const { result, showPopup } = setup()
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(rpc).not.toHaveBeenCalledWith('scan_out', expect.anything())
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'OUT', badge: BADGE, openId: 'open-1' }))
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'OUT' })
+  })
+
+  it('committing the OUT choice closes the pinned session', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(FIXED_NOW)
+    rpc.mockResolvedValueOnce({ data: { open: { id: 'open-1', status: 'OPEN', ...istStamp(2, 'in') }, last_out: null } })
+    rpc.mockResolvedValueOnce({ data: { ok: true } })
+    const { result, showPopup, onAfterScan } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: 'open-1' }) })
+    expect(rpc).toHaveBeenCalledWith('scan_out', expect.objectContaining({ p_badge: BADGE, p_open_id: 'open-1' }))
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'out' }))
+    expect(onAfterScan).toHaveBeenCalled()
+  })
+
+  it('flags an undeployed scan on commit', async () => {
     rpc.mockResolvedValueOnce({ data: null })
     rpc.mockResolvedValueOnce({ data: { ok: true, undeployed: true } })
     const { result, showPopup } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'flagged' }))
   })
 
-  it('marks manual-entry scans with p_is_manual (camera scans send false)', async () => {
+  it('marks manual-entry commits with p_is_manual (camera commits send false)', async () => {
     // M3: the server stores is_manual and Scanner Ops reports it — a
     // hand-typed correction must not look like a camera scan.
     rpc.mockResolvedValueOnce({ data: { open: null, last_out: null } })
     rpc.mockResolvedValueOnce({ data: { ok: true } })
     const { result } = setup()
     await act(async () => { await result.current.handleScan(BADGE, { manual: true }) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN', manual: true }) })
     expect(rpc).toHaveBeenCalledWith('scan_in', expect.objectContaining({ p_badge: BADGE, p_is_manual: true }))
   })
 })
@@ -132,7 +174,6 @@ describe('scan_out when a session is open', () => {
 describe('error classification', () => {
   it('surfaces an RLS/auth error instead of queueing it', async () => {
     const err = Object.assign(new Error('row-level security violation'), { code: '42501' })
-    rpc.mockResolvedValueOnce({ data: null })
     rpc.mockRejectedValueOnce(err)
     const { result, toast, showPopup } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
@@ -141,31 +182,44 @@ describe('error classification', () => {
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error' }))
   })
 
-  it('surfaces a validation error (Invalid badge) from the server', async () => {
-    rpc.mockResolvedValueOnce({ data: null })
+  it('surfaces a validation error from the committed server write', async () => {
+    // Lookup is unreachable; the choice is offered; the commit hits the
+    // server rejection — which must surface, never queue.
+    rpc.mockRejectedValueOnce(new Error('Failed to fetch'))
     rpc.mockRejectedValueOnce(new Error('Invalid badge format'))
     const { result, toast } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
+    expect(enqueueScan).not.toHaveBeenCalled()
     expect(toast.error).toHaveBeenCalledWith('Invalid badge format')
   })
 
-  it('queues when the browser is offline', async () => {
+  it('offers the choice (no auto-write) when the lookup fails, then queues the commit offline', async () => {
     Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
     rpc.mockRejectedValue(new Error('Failed to fetch'))
     enqueueScan.mockResolvedValue({ ok: true, id: 'q-1' })
     const { result, showPopup, onQueued } = setup()
-    await act(async () => { await result.current.handleScan(BADGE) })
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    // The scan itself writes nothing — it only offers the choice.
+    expect(enqueueScan).not.toHaveBeenCalled()
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'IN' }))
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'IN' })
+    // The operator taps Mark IN: the write attempt fails offline and queues.
+    await act(async () => { out = await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(enqueueScan).toHaveBeenCalledWith(expect.objectContaining({ badge: BADGE, action: 'IN' }))
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'queued' }))
     expect(onQueued).toHaveBeenCalled()
+    expect(out.ok).toBe(true)
   })
 
-  it('surfaces an error when offline storage is unavailable', async () => {
+  it('surfaces an error when offline storage is unavailable on commit', async () => {
     Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
     rpc.mockRejectedValue(new Error('Failed to fetch'))
     enqueueScan.mockResolvedValue({ ok: false, reason: 'unavailable' })
     const { result, toast } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(toast.error).toHaveBeenCalledWith('Offline storage unavailable')
   })
 
@@ -175,8 +229,9 @@ describe('error classification', () => {
     rpc.mockRejectedValue(new Error('Failed to fetch'))
     enqueueScan.mockResolvedValue({ ok: false, reason: 'full' })
     const { result, showPopup, toast } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
     let out
-    await act(async () => { out = await result.current.handleScan(BADGE) })
+    await act(async () => { out = await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(out).toEqual({ ok: false, reason: 'offline_queue_full' })
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error', message: expect.stringContaining('full') }))
     expect(toast.error).toHaveBeenCalledWith('Offline queue is full')
@@ -187,8 +242,9 @@ describe('error classification', () => {
     rpc.mockRejectedValue(new Error('Failed to fetch'))
     enqueueScan.mockResolvedValue({ ok: false, reason: 'write-failed', error: new Error('quota') })
     const { result, toast } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
     let out
-    await act(async () => { out = await result.current.handleScan(BADGE) })
+    await act(async () => { out = await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(out).toEqual({ ok: false, reason: 'offline_queue_write_failed' })
     expect(toast.error).toHaveBeenCalledWith('Offline queue write failed')
   })
@@ -199,8 +255,9 @@ describe('error classification', () => {
     rpc.mockRejectedValue(new Error('Failed to fetch'))
     enqueueScan.mockRejectedValue(new Error('IDB exploded'))
     const { result } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
     let out
-    await act(async () => { out = await result.current.handleScan(BADGE) })
+    await act(async () => { out = await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(typeof out.ok).toBe('boolean')
   })
 
@@ -210,38 +267,47 @@ describe('error classification', () => {
     rpc.mockRejectedValue(new Error('Failed to fetch'))
     enqueueScan.mockResolvedValue({ ok: true, id: 'q-1' })
     const { result, toast } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
     let first, second
-    await act(async () => { first = await result.current.handleScan(BADGE) })
-    await act(async () => { second = await result.current.handleScan(BADGE) })
+    await act(async () => { first = await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
+    await act(async () => { second = await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(first.ok).toBe(true)
     expect(second).toEqual({ ok: false, reason: 'duplicate_queued' })
     expect(enqueueScan).toHaveBeenCalledTimes(1)
     expect(toast.warning).toHaveBeenCalledWith('Already queued — ignoring duplicate scan')
   })
 
-  it('queues an OUT — not a second IN — when offline with a pending queued IN', async () => {
+  it('offers Mark OUT — not Mark IN — when offline with a pending queued IN', async () => {
     // C4: the operator scanned IN offline (queued), then scans again to go
     // OUT while still offline. The lookup fails, so server state is unknown —
     // but this device already holds an unsynced IN for the badge, which means
-    // the intent is OUT. Queueing another IN would orphan the session.
+    // the intent is OUT. Offering Mark IN would orphan the session.
     Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
     rpc.mockRejectedValue(new Error('Failed to fetch'))
     getQueuedScans.mockResolvedValue([{ id: 'q-in', badge: BADGE, schedule_id: 'sched-1', action: 'IN', synced: false }])
     enqueueScan.mockResolvedValue({ ok: true, id: 'q-out' })
     const { result, showPopup, onQueued } = setup()
-    await act(async () => { await result.current.handleScan(BADGE) })
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'OUT' })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'OUT' }))
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: null }) })
     expect(enqueueScan).toHaveBeenCalledWith(expect.objectContaining({ badge: BADGE, action: 'OUT' }))
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'queued' }))
     expect(onQueued).toHaveBeenCalled()
   })
 
-  it('still queues an IN when offline with no pending IN for the badge', async () => {
+  it('still offers Mark IN when offline with no pending IN for the badge', async () => {
     Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
     rpc.mockRejectedValue(new Error('Failed to fetch'))
     getQueuedScans.mockResolvedValue([])
     enqueueScan.mockResolvedValue({ ok: true, id: 'q-1' })
-    const { result } = setup()
-    await act(async () => { await result.current.handleScan(BADGE) })
+    const { result, showPopup } = setup()
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'IN' })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'IN' }))
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(enqueueScan).toHaveBeenCalledWith(expect.objectContaining({ badge: BADGE, action: 'IN' }))
   })
 })
@@ -299,16 +365,21 @@ describe('session lookup timeout (D-1)', () => {
     enqueueScan.mockResolvedValue({ ok: true, id: 'q-1' })
     const { result, showPopup } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    // A timeout while offline is "unknown", not "no session" — offer the
+    // choice; the commit queues.
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'IN' }))
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(enqueueScan).toHaveBeenCalledWith(expect.objectContaining({ badge: BADGE, action: 'IN' }))
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'queued' }))
   })
 
   it('surfaces a timeout on the post-Already-IN re-fetch instead of the dead end', async () => {
     rpc.mockResolvedValueOnce({ data: null }) // no open session
-    rpc.mockRejectedValueOnce(new Error('Already IN')) // scan_in
+    rpc.mockRejectedValueOnce(new Error('Already IN')) // committed scan_in
     rpc.mockRejectedValueOnce(new Error('Session lookup timed out after 5000ms')) // re-fetch
     const { result, showPopup } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
       status: 'error',
       message: expect.stringContaining('timed out'),
@@ -341,8 +412,9 @@ describe('get_scan_state PostgREST error (D-2)', () => {
     rpc.mockRejectedValueOnce(new Error('Already IN'))
     rpc.mockResolvedValueOnce({ data: null, error: Object.assign(new Error('permission denied'), { code: '42501' }) })
     const { result, showPopup, toast } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
     let out
-    await act(async () => { out = await result.current.handleScan(BADGE) })
+    await act(async () => { out = await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error' }))
     expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('permission denied'))
     expect(out).toEqual({ ok: false, reason: 'session_lookup_failed' })
@@ -354,6 +426,7 @@ describe('get_scan_state PostgREST error (D-2)', () => {
     rpc.mockResolvedValueOnce({ data: null, error: null })
     const { result, showPopup, toast } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error', message: 'Already checked IN — please OUT first. If this repeats for every badge, ask the ASO to apply the pending database migrations.' }))
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error', message: expect.stringContaining('pending database migrations') }))
     expect(toast.error).toHaveBeenCalledWith('Already IN — OUT first')
@@ -365,11 +438,12 @@ describe('get_scan_state PostgREST error (D-2)', () => {
   it('refetches a young session as plain Already-IN, not a forgot prompt', async () => {
     vi.useFakeTimers(); vi.setSystemTime(FIXED_NOW)
     rpc.mockResolvedValueOnce({ data: null }) // first lookup: no open session
-    rpc.mockRejectedValueOnce(new Error('Already IN')) // scan_in
+    rpc.mockRejectedValueOnce(new Error('Already IN')) // committed scan_in
     rpc.mockResolvedValueOnce({ data: { open: { id: 'open-9', status: 'OPEN', ...istStamp(2, 'in') }, last_out: null } }) // refetch: 2h old
     const { result, showPopup } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
     let out
-    await act(async () => { out = await result.current.handleScan(BADGE) })
+    await act(async () => { out = await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(out.ok).toBe(false)
     expect(out.outTimeDefault).toBeUndefined()
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error', message: 'Already checked IN — please OUT first' }))
@@ -422,11 +496,12 @@ describe('submitForgotOut (L-36)', () => {
 
 // ─── D-3: the online scan_in carries the same nonce the drain will replay ──────
 describe('idempotency nonce (D-3)', () => {
-  it('passes a p_nonce on the ONLINE scan_in', async () => {
+  it('passes a p_nonce on the committed ONLINE scan_in', async () => {
     rpc.mockResolvedValueOnce({ data: null })
     rpc.mockResolvedValueOnce({ data: { ok: true } })
     const { result } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     const call = rpc.mock.calls.find(([name]) => name === 'scan_in')
     expect(call).toBeTruthy()
     expect(call[1].p_nonce).toEqual(expect.any(String))
@@ -437,25 +512,28 @@ describe('idempotency nonce (D-3)', () => {
     Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
     // Commit-then-lost-response: scan_in rejects at the network, so the client
     // enqueues. The drain sends p_nonce: q.id — that id must be the online nonce.
-    rpc.mockResolvedValueOnce({ data: null })
-    rpc.mockRejectedValueOnce(new Error('Failed to fetch'))
+    rpc.mockRejectedValueOnce(new Error('Failed to fetch')) // lookup
+    rpc.mockRejectedValueOnce(new Error('Failed to fetch')) // committed scan_in
     enqueueScan.mockResolvedValue({ ok: true, id: 'q-1' })
     const { result } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     const scanInArgs = rpc.mock.calls.find(([name]) => name === 'scan_in')[1]
     const queued = enqueueScan.mock.calls[0][0]
     expect(queued.id).toBe(scanInArgs.p_nonce)
   })
 
-  it('gives each attempt a fresh nonce', async () => {
-    // Two full IN flows: get_open_session -> null, then scan_in -> ok, twice.
+  it('gives each commit a fresh nonce', async () => {
+    // Two full committed IN flows, each with its own lookup + scan_in.
     rpc.mockResolvedValueOnce({ data: null })
     rpc.mockResolvedValueOnce({ data: { ok: true } })
     rpc.mockResolvedValueOnce({ data: null })
     rpc.mockResolvedValueOnce({ data: { ok: true } })
     const { result } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     const nonces = rpc.mock.calls.filter(([n]) => n === 'scan_in').map(([, a]) => a.p_nonce)
     expect(nonces).toHaveLength(2)
     expect(nonces[0]).not.toBe(nonces[1])
@@ -465,15 +543,6 @@ describe('idempotency nonce (D-3)', () => {
 // ─── D-4: every exit resolves to { ok: boolean } ───────────────────────────────
 describe('return contract (D-4)', () => {
   const OFFLINE = () => Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
-  // An open session 9h old — old enough to be a real session, young enough
-  // (<12h) to take the blind-OUT path instead of the forgot-OUT prompt.
-  const recentIn = () => {
-    const ist = new Date(Date.now() + (330 + Number(new Date().getTimezoneOffset())) * 60000)
-    const d = new Date(ist.getTime() - 9 * 3600000)
-    const p = (n) => String(n).padStart(2, '0')
-    return { in_date: `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`, in_time: `${p(d.getHours())}:${p(d.getMinutes())}:00` }
-  }
-
   // Each case drives one exit and asserts the resolved shape. A bare `return`
   // (undefined) makes `const { ok } = await handleScan(x)` throw a TypeError.
   const CASES = [
@@ -501,23 +570,22 @@ describe('return contract (D-4)', () => {
       name: 'IN offline storage unavailable',
       async drive({ result }) {
         OFFLINE()
-        rpc.mockResolvedValueOnce({ data: null })
-        rpc.mockRejectedValueOnce(new Error('Failed to fetch'))
+        rpc.mockRejectedValue(new Error('Failed to fetch'))
         enqueueScan.mockResolvedValue({ ok: false, reason: 'unavailable' })
-        return { out: await result.current.handleScan(BADGE) }
+        await result.current.handleScan(BADGE) // lookup fails -> choose
+        return { out: await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) }
       },
     },
     {
       name: 'OUT offline storage unavailable',
       async drive({ result }) {
         OFFLINE()
-        // An open session is found, so scan_out runs and then fails to queue.
-        // The IN must be <12h old or the flow diverts to the forgot-OUT prompt
-        // (which resolves ok:true) and never reaches scan_out.
-        rpc.mockResolvedValueOnce({ data: { open: { id: 'open-1', status: 'OPEN', ...recentIn() }, last_out: null } })
-        rpc.mockRejectedValueOnce(new Error('Failed to fetch'))
+        // The commit pins no openId (lookup was unreachable), so scan_out
+        // resolves the session itself — then fails to queue.
+        rpc.mockRejectedValue(new Error('Failed to fetch'))
         enqueueScan.mockResolvedValue({ ok: false, reason: 'unavailable' })
-        return { out: await result.current.handleScan(BADGE) }
+        await result.current.handleScan(BADGE) // lookup fails -> choose
+        return { out: await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: null }) }
       },
     },
   ]
@@ -546,14 +614,23 @@ describe('return contract (D-4)', () => {
     }
   })
 
-  it('successful scans resolve ok === true', async () => {
+  it('a committed IN scan resolves ok === true', async () => {
     const ctx = setup()
     Object.defineProperty(navigator, 'onLine', { value: true, configurable: true })
     rpc.mockResolvedValueOnce({ data: null })
     rpc.mockResolvedValueOnce({ data: { ok: true } })
+    await act(async () => { await ctx.result.current.handleScan(BADGE) })
+    let out
+    await act(async () => { out = await ctx.result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
+    expect(out).toEqual({ ok: true })
+  })
+
+  it('a plain scan never resolves ok === true — it only offers the choice', async () => {
+    const ctx = setup()
+    rpc.mockResolvedValueOnce({ data: null })
     let out
     await act(async () => { out = await ctx.result.current.handleScan(BADGE) })
-    expect(out).toEqual({ ok: true })
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'IN' })
   })
 
   it('the forgot-OUT prompt resolves ok === true with an outTimeDefault', async () => {
@@ -632,35 +709,45 @@ function istStamp(hoursAgo, prefix) {
 describe('scan-state "no session" payload shapes', () => {
   const NULL_ROW = { id: null, status: null, in_date: null, in_time: null, schedule_id: null, badge_number: null }
 
-  it('treats the legacy all-NULL row payload as NO session, and scans IN', async () => {
+  it('treats the legacy all-NULL row payload as NO session, and offers Mark IN', async () => {
     // PGRST202 -> the pre-v44 fallback -> get_open_session's real PostgREST shape
     rpc.mockResolvedValueOnce({ data: null, error: Object.assign(new Error('function get_scan_state does not exist'), { code: 'PGRST202' }) })
     rpc.mockResolvedValueOnce({ data: NULL_ROW })          // the real PostgREST shape
-    rpc.mockResolvedValueOnce({ data: { ok: true } })      // scan_in
+    rpc.mockResolvedValueOnce({ data: { ok: true } })      // committed scan_in
     const { result, showPopup } = setup()
-    await act(async () => { await result.current.handleScan(BADGE) })
-    expect(rpc).toHaveBeenCalledWith('scan_in', expect.objectContaining({ p_badge: BADGE }))
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'IN' })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'IN' }))
     expect(rpc).not.toHaveBeenCalledWith('scan_out', expect.anything())
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
+    expect(rpc).toHaveBeenCalledWith('scan_in', expect.objectContaining({ p_badge: BADGE }))
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'in' }))
   })
 
-  it('treats an empty array payload as NO session, and scans IN', async () => {
+  it('treats an empty array payload as NO session, and offers Mark IN', async () => {
     rpc.mockResolvedValueOnce({ data: [] })
     rpc.mockResolvedValueOnce({ data: { ok: true } })
-    const { result } = setup()
-    await act(async () => { await result.current.handleScan(BADGE) })
-    expect(rpc).toHaveBeenCalledWith('scan_in', expect.objectContaining({ p_badge: BADGE }))
-    expect(rpc).not.toHaveBeenCalledWith('scan_out', expect.anything())
-  })
-
-  it('still takes the OUT branch for a genuine open session', async () => {
-    // 2h old: outside the v44 1h confirm gate, inside the 12h forgot threshold,
-    // so this is the plain automatic-OUT band. Fixed clock so it cannot drift.
-    vi.useFakeTimers(); vi.setSystemTime(FIXED_NOW)
-    rpc.mockResolvedValueOnce({ data: { open: { id: 'open-1', status: 'OPEN', ...istStamp(2, 'in') }, last_out: null } })
-    rpc.mockResolvedValueOnce({ data: { ok: true } })      // scan_out
     const { result, showPopup } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'IN' }))
+    expect(rpc).not.toHaveBeenCalledWith('scan_out', expect.anything())
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
+    expect(rpc).toHaveBeenCalledWith('scan_in', expect.objectContaining({ p_badge: BADGE }))
+  })
+
+  it('still takes the OUT choice for a genuine open session', async () => {
+    // 2h old: inside the 12h forgot threshold, so this is the plain Mark-OUT
+    // choice. Fixed clock so it cannot drift.
+    vi.useFakeTimers(); vi.setSystemTime(FIXED_NOW)
+    rpc.mockResolvedValueOnce({ data: { open: { id: 'open-1', status: 'OPEN', ...istStamp(2, 'in') }, last_out: null } })
+    rpc.mockResolvedValueOnce({ data: { ok: true } })      // committed scan_out
+    const { result, showPopup } = setup()
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'OUT' })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'OUT', openId: 'open-1' }))
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: 'open-1' }) })
     expect(rpc).toHaveBeenCalledWith('scan_out', expect.objectContaining({ p_badge: BADGE, p_open_id: 'open-1' }))
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'out' }))
   })
@@ -670,8 +757,10 @@ describe('scan-state "no session" payload shapes', () => {
     vi.useFakeTimers(); vi.setSystemTime(FIXED_NOW)
     rpc.mockResolvedValueOnce({ data: [{ open: { id: 'open-9', status: 'OPEN', ...istStamp(2, 'in') }, last_out: null }] })
     rpc.mockResolvedValueOnce({ data: { ok: true } })
-    const { result } = setup()
+    const { result, showPopup } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'OUT', openId: 'open-9' }))
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: 'open-9' }) })
     expect(rpc).toHaveBeenCalledWith('scan_out', expect.objectContaining({ p_open_id: 'open-9' }))
   })
 })
@@ -694,6 +783,7 @@ describe('popup display fields', () => {
     })
     const { result, showPopup } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
       status: 'in',
       name: 'Ramesh Lal',
@@ -709,13 +799,14 @@ describe('popup display fields', () => {
     rpc.mockResolvedValueOnce({ data: { ok: true, undeployed: false, centre: 'Bhati - Delhi MC' } })
     const { result, showPopup } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
-    const payload = showPopup.mock.calls[0][0]
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
+    const payload = showPopup.mock.calls[showPopup.mock.calls.length - 1][0]
     expect(payload.centre).toBeNull()
     expect(payload.centre).not.toBe('Bhati - Delhi MC')
   })
 
-  it('resolves the OUT popup from the session row, not the venue', async () => {
-    // 2h old so it clears the v44 1h confirm gate and auto-OUTs.
+  it('resolves the OUT choice from the session row, not the venue', async () => {
+    // The choice popup carries the identity BEFORE anything is written.
     vi.useFakeTimers(); vi.setSystemTime(FIXED_NOW)
     rpc.mockResolvedValueOnce({
       data: {
@@ -728,12 +819,12 @@ describe('popup display fields', () => {
         last_out: null,
       },
     })
-    rpc.mockResolvedValueOnce({ data: { ok: true } }) // scan_out
     const { result, showPopup } = setup({ deptNameById: new Map([['uuid-1', 'Traffic']]) })
     await act(async () => { await result.current.handleScan(BADGE) })
     const payload = showPopup.mock.calls[0][0]
     expect(payload).toEqual(expect.objectContaining({
-      status: 'out',
+      status: 'choose',
+      action: 'OUT',
       name: 'Sita Devi',
       centre: 'DELHI-9',
       deptName: 'Traffic',
@@ -746,6 +837,7 @@ describe('popup display fields', () => {
     rpc.mockResolvedValueOnce({ data: { ok: true, undeployed: false } })
     const { result, showPopup } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     // The popup still fires with the right status — the display fields being
     // null is an acceptable degradation, a crash or a missing popup is not.
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'in' }))
@@ -761,7 +853,8 @@ describe('popup display fields', () => {
     })
     const { result, showPopup } = setup({ deptName: 'Traffic' })
     await act(async () => { await result.current.handleScan(BADGE) })
-    const payload = showPopup.mock.calls[0][0]
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
+    const payload = showPopup.mock.calls[showPopup.mock.calls.length - 1][0]
     expect(payload.status).toBe('flagged')
     // Identity fields come from the scan; the FLAG text still names the
     // operator's own department, which is what that sentence means.
@@ -770,14 +863,14 @@ describe('popup display fields', () => {
   })
 })
 
-// ═══ v44: the 1-hour confirm gate ═══════════════════════════════════════════
+// ═══ explicit choice (replaces the v44 1-hour confirm gate) ═══════════════
 //
-// The IN↔OUT ladder is right, but a toggle inside 1h of the opposite event is
-// almost never deliberate — a double tap, or a badge left in front of the lens.
-// The invariant worth protecting is the NEGATIVE one: a gated scan must write
-// NOTHING. Every test below asserts the write RPC was never called, because a
-// gate that still writes on the way to asking is worse than no gate at all.
-describe('v44 toggle guard (1h)', () => {
+// A scan NEVER writes: it resolves state and offers the ONE valid direction.
+// The invariant worth protecting is the NEGATIVE one: an uncommitted scan
+// must write NOTHING. Every test below asserts the write RPC was never called,
+// because a choice that still writes on the way to asking is worse than no
+// choice at all.
+describe('explicit IN/OUT choice', () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(FIXED_NOW) })
 
   const openSession = (hoursAgo, extra = {}) => ({
@@ -790,7 +883,7 @@ describe('v44 toggle guard (1h)', () => {
   })
 
   describe('IN → OUT direction', () => {
-    it('holds the write and asks when the OUT lands 10 min after the IN', async () => {
+    it('offers Mark OUT (no write) even 10 min after the IN', async () => {
       rpc.mockResolvedValueOnce({ data: openSession(10 / 60) })  // 10 minutes
       const { result, showPopup } = setup()
       let out
@@ -798,28 +891,20 @@ describe('v44 toggle guard (1h)', () => {
       expect(rpc).not.toHaveBeenCalledWith('scan_out', expect.anything())
       expect(rpc).not.toHaveBeenCalledWith('scan_in', expect.anything())
       expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
-        status: 'confirm_out', badge: BADGE, openId: 'open-1',
-        message: expect.stringContaining('mark OUT?'),
+        status: 'choose', action: 'OUT', badge: BADGE, openId: 'open-1',
       }))
       expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'OUT' })
     })
 
-    it('toggles automatically once the IN is older than 1h (2h)', async () => {
+    it('offers Mark OUT (no write) when the IN is 2h old — the tap commits', async () => {
       rpc.mockResolvedValueOnce({ data: openSession(2) })
       rpc.mockResolvedValueOnce({ data: { ok: true } })
       const { result, showPopup } = setup()
       await act(async () => { await result.current.handleScan(BADGE) })
+      expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'OUT' }))
+      await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: 'open-1' }) })
       expect(rpc).toHaveBeenCalledWith('scan_out', expect.objectContaining({ p_open_id: 'open-1' }))
       expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'out' }))
-    })
-
-    it('exactly 1h is outside the gate (strictly-less-than boundary)', async () => {
-      rpc.mockResolvedValueOnce({ data: openSession(1) })
-      rpc.mockResolvedValueOnce({ data: { ok: true } })
-      const { result, showPopup } = setup()
-      await act(async () => { await result.current.handleScan(BADGE) })
-      expect(rpc).toHaveBeenCalledWith('scan_out', expect.objectContaining({ p_open_id: 'open-1' }))
-      expect(showPopup).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'confirm_out' }))
     })
 
     it('Cancel is a no-op: nothing is written and the only popup is the question', async () => {
@@ -828,26 +913,26 @@ describe('v44 toggle guard (1h)', () => {
       await act(async () => { await result.current.handleScan(BADGE) })
       expect(rpc).toHaveBeenCalledTimes(1)          // the lookup only
       expect(showPopup).toHaveBeenCalledTimes(1)
-      expect(showPopup.mock.calls[0][0].status).toBe('confirm_out')
+      expect(showPopup.mock.calls[0][0].status).toBe('choose')
       // Nothing was written, so nothing needs refreshing.
       expect(onAfterScan).not.toHaveBeenCalled()
     })
   })
 
   describe('OUT → IN direction', () => {
-    it('holds the write and asks when the IN lands 15 min after the OUT', async () => {
+    it('offers Mark IN (no write) even 15 min after the OUT', async () => {
       rpc.mockResolvedValueOnce({ data: closedSession(0.25) })
       const { result, showPopup } = setup()
       let out
       await act(async () => { out = await result.current.handleScan(BADGE) })
       expect(rpc).not.toHaveBeenCalledWith('scan_in', expect.anything())
       expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
-        status: 'confirm_in', badge: BADGE, message: expect.stringContaining('mark IN?'),
+        status: 'choose', action: 'IN', badge: BADGE,
       }))
       expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'IN' })
     })
 
-    it('resolves the confirm_in popup identity from the last_out row', async () => {
+    it('resolves the choice identity from the last_out row', async () => {
       rpc.mockResolvedValueOnce({ data: closedSession(0.25, { sewadar_name: 'Sita Devi', sewadar_centre: 'DELHI-9', centre: 'Bhati - Delhi MC' }) })
       const { result, showPopup } = setup()
       await act(async () => { await result.current.handleScan(BADGE) })
@@ -857,20 +942,26 @@ describe('v44 toggle guard (1h)', () => {
       expect(p.centre).not.toBe('Bhati - Delhi MC')
     })
 
-    it('scans IN automatically when the last OUT was 3h ago', async () => {
+    it('commits the IN when the last OUT was 3h ago only after the tap', async () => {
       rpc.mockResolvedValueOnce({ data: closedSession(3) })
       rpc.mockResolvedValueOnce({ data: { ok: true } })
       const { result, showPopup } = setup()
       await act(async () => { await result.current.handleScan(BADGE) })
+      expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'IN' }))
+      await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
       expect(rpc).toHaveBeenCalledWith('scan_in', expect.objectContaining({ p_badge: BADGE }))
       expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'in' }))
     })
 
-    it('never prompts a sewadar who has never been scanned (last_out null)', async () => {
+    it('offers Mark IN (no write) for a sewadar who has never been scanned', async () => {
       rpc.mockResolvedValueOnce({ data: { open: null, last_out: null } })
       rpc.mockResolvedValueOnce({ data: { ok: true } })
       const { result, showPopup } = setup()
-      await act(async () => { await result.current.handleScan(BADGE) })
+      let out
+      await act(async () => { out = await result.current.handleScan(BADGE) })
+      expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'IN' })
+      expect(rpc).not.toHaveBeenCalledWith('scan_in', expect.anything())
+      await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
       expect(rpc).toHaveBeenCalledWith('scan_in', expect.objectContaining({ p_badge: BADGE }))
       expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'in' }))
     })
@@ -911,13 +1002,26 @@ describe('v44 toggle guard (1h)', () => {
       expect(out.ok).toBe(false)
     })
 
-    it('confirmed without an openId re-resolves state and writes the IN', async () => {
-      rpc.mockResolvedValueOnce({ data: { open: null, last_out: null } })
-      rpc.mockResolvedValueOnce({ data: { ok: true } })
+    it('a committed IN writes directly with NO second lookup', async () => {
+      rpc.mockResolvedValueOnce({ data: { ok: true } })  // only scan_in
       const { result, showPopup } = setup()
       await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
+      expect(rpc).toHaveBeenCalledTimes(1)
+      expect(rpc).not.toHaveBeenCalledWith('get_scan_state', expect.anything())
       expect(rpc).toHaveBeenCalledWith('scan_in', expect.objectContaining({ p_badge: BADGE }))
       expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'in' }))
+    })
+
+    it('a committed OUT with a null openId lets the server resolve the session', async () => {
+      // The choice was offered while the lookup was unreachable (offline), so
+      // no session id was pinned. scan_out resolves the open session itself.
+      rpc.mockResolvedValueOnce({ data: { ok: true } })  // only scan_out
+      const { result, showPopup } = setup()
+      await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: null }) })
+      expect(rpc).toHaveBeenCalledTimes(1)
+      expect(rpc).not.toHaveBeenCalledWith('get_scan_state', expect.anything())
+      expect(rpc).toHaveBeenCalledWith('scan_out', expect.objectContaining({ p_badge: BADGE, p_open_id: null }))
+      expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'out' }))
     })
 
     it('queues the confirmed OUT offline, carrying the pinned open_id', async () => {
@@ -944,32 +1048,30 @@ describe('v44 toggle guard (1h)', () => {
       expect(out).toEqual({ ok: false, reason: 'offline_storage_unavailable' })
     })
 
-    it('a confirm_in approval must NEVER write an OUT', async () => {
-      // The sewadar was OUT, so the operator was shown `confirm_in` and has no
-      // openId. Before they click Confirm, another operator (or this scanner's
-      // own 2s re-fire) marks that sewadar IN. The approval was minted for an
-      // IN — it must not authorise closing a session it never asked about,
-      // which is the exact 90-second session this feature exists to prevent.
-      rpc.mockResolvedValueOnce({ data: { open: { id: 'other-op', status: 'OPEN', ...istStamp(0.2, 'in') }, last_out: null } })
+    it('a committed IN can NEVER write an OUT', async () => {
+      // The operator tapped Mark IN. The commit authorises one fresh IN and
+      // nothing else — even if the sewadar's state changed meanwhile, the
+      // commit path cannot reach scan_out at all.
+      rpc.mockResolvedValueOnce({ data: { ok: true } })
       const { result, showPopup } = setup()
       await act(async () => {
         await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN', openId: null })
       })
       expect(rpc).not.toHaveBeenCalledWith('scan_out', expect.anything())
-      // It is re-prompted instead — the guard is intact, just re-asked.
-      expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'confirm_out' }))
+      expect(rpc).toHaveBeenCalledWith('scan_in', expect.objectContaining({ p_badge: BADGE }))
+      expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'in' }))
     })
 
-    it('a confirm_out approval is not carried across a direction change either', async () => {
-      // Minted for OUT; the session has since closed, so the next entry is an
-      // IN that is equally inside the guard window.
-      rpc.mockResolvedValueOnce({ data: { open: null, last_out: { id: 'x', status: 'CLOSED', ...istStamp(0.1, 'out') } } })
+    it('a committed OUT can NEVER write an IN', async () => {
+      // Symmetric: a Mark OUT tap authorises closing the session only. The
+      // server answers the write; no scan_in is reachable from this path.
+      rpc.mockResolvedValueOnce({ data: { ok: true } })
       const { result, showPopup } = setup()
       await act(async () => {
-        await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: null })
+        await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: 'open-1' })
       })
       expect(rpc).not.toHaveBeenCalledWith('scan_in', expect.anything())
-      expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'confirm_in' }))
+      expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'out' }))
     })
 
     it('an approval with no direction disarms nothing (fail-closed)', async () => {
@@ -977,7 +1079,8 @@ describe('v44 toggle guard (1h)', () => {
       const { result, showPopup } = setup()
       await act(async () => { await result.current.handleScan(BADGE, { confirmed: true }) })
       expect(rpc).not.toHaveBeenCalledWith('scan_out', expect.anything())
-      expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'confirm_out' }))
+      expect(rpc).not.toHaveBeenCalledWith('scan_in', expect.anything())
+      expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'OUT' }))
     })
 
     it('recovers to the forgot-OUT prompt when the post-Already-IN re-fetch finds the session', async () => {
@@ -987,7 +1090,8 @@ describe('v44 toggle guard (1h)', () => {
       rpc.mockRejectedValueOnce(new Error('Already IN'))
       rpc.mockResolvedValueOnce({ data: { open: { id: 'open-1', status: 'OPEN', ...istStamp(20, 'in') }, last_out: null } })
       const { result, showPopup } = setup()
-      const out = await act(async () => result.current.handleScan(BADGE))
+      await act(async () => { await result.current.handleScan(BADGE) })
+      const out = await act(async () => result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }))
       expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
         status: 'forgot', badge: BADGE, openId: 'open-1', in_date: expect.any(String),
       }))
@@ -1001,8 +1105,9 @@ describe('v44 toggle guard (1h)', () => {
       rpc.mockRejectedValueOnce(new Error('Already IN — OUT first'))
       rpc.mockResolvedValueOnce({ data: { open: { id: 'open-2', status: 'OPEN', ...istStamp(20, 'in') }, last_out: null } })
       const { result } = setup()
+      await act(async () => { await result.current.handleScan(BADGE) })
       let out
-      await act(async () => { out = await result.current.handleScan(BADGE) })
+      await act(async () => { out = await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
       expect(out.outTimeDefault).toBe('17:30')
     })
   })
@@ -1013,9 +1118,13 @@ describe('v44 toggle guard (1h)', () => {
       rpc.mockResolvedValueOnce({ data: { id: 'open-1', status: 'OPEN', ...istStamp(2, 'in') } })
       rpc.mockResolvedValueOnce({ data: { ok: true } })
       const { result, showPopup } = setup()
-      await act(async () => { await result.current.handleScan(BADGE) })
+      let out
+      await act(async () => { out = await result.current.handleScan(BADGE) })
       expect(rpc).toHaveBeenCalledWith('get_open_session', { p_badge: BADGE, p_schedule: 'sched-1' })
-      // The OUT ladder still works — this is the whole point of the fallback.
+      // The OUT choice still works — this is the whole point of the fallback.
+      expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'OUT' })
+      expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'OUT', openId: 'open-1' }))
+      await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: 'open-1' }) })
       expect(rpc).toHaveBeenCalledWith('scan_out', expect.objectContaining({ p_open_id: 'open-1' }))
       expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'out' }))
     })
@@ -1099,11 +1208,12 @@ describe('V11 resolved-error and real timeout format', () => {
 
   it('V11 scan_in: a resolved { error: Already IN } executes the throw arm and refetches', async () => {
     rpc.mockResolvedValueOnce({ data: { open: null, last_out: null } }) // lookup: no session
-    rpc.mockResolvedValueOnce({ data: null, error: new Error('Already IN') }) // scan_in RESOLVED error
+    rpc.mockResolvedValueOnce({ data: null, error: new Error('Already IN') }) // committed scan_in RESOLVED error
     rpc.mockResolvedValueOnce({ data: null, error: null }) // refetch: genuinely null
     const { result, showPopup, toast } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
     let out
-    await act(async () => { out = await result.current.handleScan(BADGE) })
+    await act(async () => { out = await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     // Without `if (error) throw error` this would celebrate as a success.
     expect(rpc).toHaveBeenCalledWith('scan_in', expect.objectContaining({ p_badge: BADGE }))
     expect(rpc).toHaveBeenCalledTimes(3) // lookup + scan_in + refetch
@@ -1115,14 +1225,12 @@ describe('V11 resolved-error and real timeout format', () => {
     expect(out).toEqual({ ok: false })
   })
 
-  it('V11 scan_out (main flow): a resolved { error } executes the throw arm', async () => {
-    // 2h-old session: past the 1h confirm gate, inside the 12h forgot
-    // threshold — the plain automatic-OUT band.
-    vi.useFakeTimers(); vi.setSystemTime(FIXED_NOW)
-    rpc.mockResolvedValueOnce({ data: { open: { id: 'open-1', status: 'OPEN', ...istStamp(2, 'in') }, last_out: null } })
+  it('V11 committed scan_out: a resolved { error } executes the throw arm', async () => {
+    // A Mark OUT tap against the pinned session whose write the server
+    // rejects — the throw arm must surface it, never celebrate 'OUT marked'.
     rpc.mockResolvedValueOnce({ data: null, error: new Error('boom') }) // scan_out RESOLVED error
     const { result, showPopup, toast } = setup()
-    await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: 'open-1' }) })
     expect(rpc).toHaveBeenCalledWith('scan_out', expect.objectContaining({ p_open_id: 'open-1' }))
     // Without `if (outError) throw outError` this would celebrate 'OUT marked'.
     expect(showPopup).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'out' }))
@@ -1154,6 +1262,7 @@ describe('V14 device-clock warning', () => {
     rpc.mockResolvedValueOnce({ data: null, error: new Error('Timestamp cannot be in the future') })
     const { result, showPopup, toast } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(rpc).toHaveBeenCalledWith('scan_in', expect.objectContaining({ p_badge: BADGE }))
     const payload = showPopup.mock.calls[showPopup.mock.calls.length - 1][0]
     expect(payload.status).toBe('error')
@@ -1163,11 +1272,9 @@ describe('V14 device-clock warning', () => {
   })
 
   it('V14 scan_out: a too-old-timestamp rejection warns about the device clock', async () => {
-    vi.useFakeTimers(); vi.setSystemTime(FIXED_NOW)
-    rpc.mockResolvedValueOnce({ data: { open: { id: 'open-1', status: 'OPEN', ...istStamp(2, 'in') }, last_out: null } })
     rpc.mockResolvedValueOnce({ data: null, error: new Error('Timestamp too old (more than 30 days)') })
     const { result, showPopup, toast } = setup()
-    await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: 'open-1' }) })
     expect(rpc).toHaveBeenCalledWith('scan_out', expect.objectContaining({ p_open_id: 'open-1' }))
     expect(showPopup).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'out' }))
     const payload = showPopup.mock.calls[showPopup.mock.calls.length - 1][0]
@@ -1177,12 +1284,13 @@ describe('V14 device-clock warning', () => {
   })
 
   it('V14 still sends the server-accepted ts unchanged (warn-only, no clamping)', async () => {
-    // A normal scan is unaffected: the ts goes out exactly as built, and a
+    // A normal commit is unaffected: the ts goes out exactly as built, and a
     // non-clock error keeps its raw friendly text.
     rpc.mockResolvedValueOnce({ data: { open: null, last_out: null } })
     rpc.mockResolvedValueOnce({ data: null, error: new Error('Department quota already exhausted') })
     const { result, showPopup, toast } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     const sent = rpc.mock.calls.find(([fn]) => fn === 'scan_in')[1]
     expect(typeof sent.p_ts).toBe('string')
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
@@ -1200,18 +1308,21 @@ describe('offline uncertainty flag + schedule-keyed dupe + full-queue banner (C6
     enqueueScan.mockResolvedValue({ ok: true, id: 'q-u' })
     const { result } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(enqueueScan).toHaveBeenCalledWith(expect.objectContaining({ badge: BADGE, action: 'IN', uncertain: true }))
   })
 
   it('does NOT flag uncertain when a pending local IN already exists', async () => {
     Object.defineProperty(navigator, 'onLine', { value: true, configurable: true })
-    // Online jammer: lookup fails, scan_in attempt fails as network — the IN
-    // path re-checks the local queue, which already holds this badge's IN.
+    // Online jammer: lookup fails, the committed scan_in attempt fails as
+    // network — the IN path re-checks the local queue, which already holds
+    // this badge's IN.
     rpc.mockRejectedValue(new Error('Failed to fetch'))
     getQueuedScans.mockResolvedValue([{ id: 'q-in', badge: BADGE, schedule_id: 'sched-1', action: 'IN', synced: false }])
     enqueueScan.mockResolvedValue({ ok: true, id: 'q-2' })
     const { result } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(enqueueScan).toHaveBeenCalledTimes(1)
     expect('uncertain' in enqueueScan.mock.calls[0][0]).toBe(false)
   })
@@ -1231,10 +1342,12 @@ describe('offline uncertainty flag + schedule-keyed dupe + full-queue banner (C6
       { initialProps: { scheduleId: 'sched-1' } },
     )
     await act(async () => { await view.result.current.handleScan(BADGE) })
+    await act(async () => { await view.result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(enqueueScan).toHaveBeenCalledTimes(1)
     view.rerender({ scheduleId: 'sched-2' })
+    await act(async () => { await view.result.current.handleScan(BADGE) })
     let second
-    await act(async () => { second = await view.result.current.handleScan(BADGE) })
+    await act(async () => { second = await view.result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     // A new schedule is a distinct intent — not a double tap.
     expect(second.ok).toBe(true)
     expect(enqueueScan).toHaveBeenCalledTimes(2)
@@ -1248,8 +1361,9 @@ describe('offline uncertainty flag + schedule-keyed dupe + full-queue banner (C6
     enqueueScan.mockResolvedValue({ ok: true, id: 'q-d' })
     const { result } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     let second
-    await act(async () => { second = await result.current.handleScan(BADGE) })
+    await act(async () => { second = await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(second).toEqual({ ok: false, reason: 'duplicate_queued' })
     expect(enqueueScan).toHaveBeenCalledTimes(1)
   })
@@ -1259,8 +1373,9 @@ describe('offline uncertainty flag + schedule-keyed dupe + full-queue banner (C6
     rpc.mockRejectedValue(new Error('Failed to fetch'))
     enqueueScan.mockResolvedValue({ ok: false, reason: 'full' })
     const { result, showPopup, toast } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
     let out
-    await act(async () => { out = await result.current.handleScan(BADGE) })
+    await act(async () => { out = await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(out).toEqual({ ok: false, reason: 'offline_queue_full' })
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error', message: expect.stringContaining('2000') }))
     expect(toast.error).toHaveBeenCalledWith('Offline queue is full')

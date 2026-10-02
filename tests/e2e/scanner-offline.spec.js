@@ -28,9 +28,15 @@ test.describe('scanner offline round trip', () => {
 
     await loginAsScanner(page)
     await manualScan(page, 'FB5971GA0001')
+    // Explicit choice: the scan only resolves state and offers Mark IN —
+    // nothing is written until the operator taps it.
+    await expect(page.getByRole('button', { name: 'Mark IN' })).toBeVisible()
+    let calls = await mockCalls(request)
+    expect(calls.some((c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA0001')).toBe(false)
+    await page.getByRole('button', { name: 'Mark IN' }).click()
     await expect(page.getByText('Checked In')).toBeVisible()
 
-    const calls = await mockCalls(request)
+    calls = await mockCalls(request)
     expect(calls.some((c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA0001')).toBe(true)
     guard.assertEmpty()
   })
@@ -46,6 +52,10 @@ test.describe('scanner offline round trip', () => {
 
     await context.setOffline(true)
     await manualScan(page, 'FB5971GA0002')
+    // Explicit choice first: the unreachable lookup offers Mark IN, and the
+    // tap queues it.
+    await expect(page.getByRole('button', { name: 'Mark IN' })).toBeVisible()
+    await page.getByRole('button', { name: 'Mark IN' }).click()
     // Exact: the popup message ("Queued offline — will sync when online")
     // contains the title as a substring, so a loose match is ambiguous.
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()

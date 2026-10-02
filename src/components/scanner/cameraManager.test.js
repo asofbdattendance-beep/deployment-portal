@@ -342,7 +342,23 @@ describe('applyFocusConstraints', () => {
     const track = makeTrack({ caps: { zoom: { min: 1, max: 4 } } })
     const res = await applyFocusConstraints(track, { applyZoom: true })
     expect(res.zoomApplied).toBe(true)
-    expect(track.applied[0].advanced).toContainEqual({ zoom: 1.5 })
+    // Zoom goes out in its OWN applyConstraints call so a firmware that
+    // rejects it cannot void the autofocus request alongside it.
+    const zoomCall = track.applied.find((c) => JSON.stringify(c.advanced).includes('"zoom"'))
+    expect(zoomCall).toBeTruthy()
+    expect(zoomCall.advanced).toContainEqual({ zoom: 1.25 })
+  })
+
+  it('a rejected zoom still leaves the focus request applied', async () => {
+    const track = makeTrack({
+      caps: { focusMode: ['continuous'], zoom: { min: 1, max: 4 } },
+      applyConstraints: vi.fn()
+        .mockResolvedValueOnce(undefined) // focus set: ok
+        .mockRejectedValueOnce(new Error('zoom unsupported')), // zoom set: rejected
+    })
+    const res = await applyFocusConstraints(track, { applyZoom: true })
+    expect(res.focusApplied).toBe(true)
+    expect(res.zoomApplied).toBe(false)
   })
 
   it('honours applyZoom:false', async () => {

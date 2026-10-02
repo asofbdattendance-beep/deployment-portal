@@ -14,8 +14,6 @@ import {
   SCAN_RPC_TIMEOUT,
   SESSION_RPC_TIMEOUT,
   getBusySafetyTimeout,
-  withinToggleGuard,
-  minutesSince,
   resolveForgotOutTime,
   isTimestampStale,
 } from '../lib/scannerUtils'
@@ -192,19 +190,28 @@ async function lookupOpenSessionLegacy(badge, scheduleId) {
  * @returns {{ handleScan: (badge: string, opts?: {confirmed?: boolean, confirmFor?: 'OUT'|'IN'|null, openId?: string|null, display?: object|null}) => Promise<{ok: boolean, reason?: string, outTimeDefault?: string}>, busy: boolean, getBusy: () => boolean, resetBusy: () => void }}
  *
  * `handleScan(badge, opts)`:
- *  - `opts.confirmed` + `opts.confirmFor` — the operator pressed Confirm on a
- *    confirm-gate popup. The approval is SCOPED to one direction: `confirmFor:
- *    'OUT'` disarms only the OUT gate, `'IN'` only the IN gate. An approval
- *    whose direction does not match the next entry re-asks instead of writing,
- *    because between the question and the click the sewadar's state can change.
- *    Omitting `confirmFor` disarms nothing (fail-closed).
- *  - `opts.openId` — the exact session a `confirm_out` prompt was raised for.
+ *  - Plain call (no `confirmed`): LOOKUP ONLY, never writes. Resolves the
+ *    sewadar's state and shows a `choose` popup — the details plus the ONE
+ *    valid direction (Mark IN when no session is open, Mark OUT when one is
+ *    open and ≤12h old) — and returns `{ ok: false, reason:
+ *    'confirm_required', action }`. The write happens only via a confirmed
+ *    callback below, i.e. after the operator taps the button.
+ *  - `opts.confirmed` + `opts.confirmFor` — the operator tapped Mark IN /
+ *    Mark OUT on a `choose` popup. The approval is SCOPED to one direction:
+ *    `confirmFor: 'OUT'` authorises closing the session, `'IN'` authorises
+ *    one fresh IN. An approval whose direction does not match the next entry
+ *    re-asks instead of writing, because between the question and the click
+ *    the sewadar's state can change. Omitting `confirmFor` disarms nothing
+ *    (fail-closed).
+ *  - `opts.openId` — the exact session a `choose`/OUT prompt was raised for.
  *    When set with `confirmed` + `confirmFor: 'OUT'`, `scan_out` is issued
  *    straight against that id with NO re-lookup, so a session closed by another
  *    operator in the meantime surfaces as v41's mismatch/no-session error
  *    instead of silently toggling whatever the sewadar's state has become.
+ *    Null `openId` (offline-chosen OUT) lets `scan_out` resolve the open
+ *    session itself.
  *  - `opts.display` — the identity already resolved for the prompt, reused to
- *    label the resulting OUT popup without a second lookup.
+ *    label the resulting popup without a second lookup.
  *
   * EVERY exit of handleScan resolves to an object carrying a boolean `ok` —
   * callers may destructure the result without a TypeError. `outTimeDefault` is
@@ -400,17 +407,18 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
     // One nonce per attempt: online p_nonce AND the queued row's id (D-3).
     const nonce = newNonce()
     try {
-      // ── Confirm fast-path (v44) ──────────────────────────────────
-      // The operator pressed Confirm on a `confirm_out` prompt raised against a
-      // SPECIFIC session. Act on that id directly and skip the lookup: a re-lookup
+      // ── Commit path: the operator tapped Mark OUT on a `choose` popup ──
+      // Act on the pinned session id directly and skip the lookup: a re-lookup
       // would read whatever the sewadar's state has become in the meantime, and
       // could mark a fresh IN against a different session. scan_out (v41) already
       // raises on a stale or mismatched p_open_id, so a race surfaces honestly.
-      if (isConfirmed('OUT') && openId) {
+      // A null openId (OUT chosen while the lookup was unreachable) lets
+      // scan_out resolve the open session itself.
+      if (isConfirmed('OUT')) {
         const tsFast = new Date().toISOString()
         try {
           const { data: outFastData, error: outFastError } = await withTimeout(
-            supabase.rpc('scan_out', { p_badge: b, p_schedule: scheduleId, p_ts: tsFast, p_open_id: openId }),
+            supabase.rpc('scan_out', { p_badge: b, p_schedule: scheduleId, p_ts: tsFast, p_open_id: openId || null }),
             SCAN_RPC_TIMEOUT,
             'Scan OUT'
           )
@@ -450,7 +458,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
               toast.warning('Already queued — ignoring duplicate scan')
               return { ok: false, reason: 'duplicate_queued' }
             }
-            const queuedRes = await tryEnqueue({ badge: b, schedule_id: scheduleId, action: 'OUT', ts: tsFast, open_id: openId, centre: profile?.centre })
+            const queuedRes = await tryEnqueue({ badge: b, schedule_id: scheduleId, action: 'OUT', ts: tsFast, open_id: openId || null, centre: profile?.centre })
             if (!queuedRes.ok) return offlineEnqueueFailed(queuedRes, b)
             noteQueuedOffline(b, 'OUT')
             showPopup({ status: 'queued', badge: b, time: new Date().toLocaleTimeString(), message: 'Queued offline — will sync when online' })
@@ -473,8 +481,11 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
 
       // Step 1: resolve the sewadar's scan state in one round trip, keeping a
       // timeout distinct from "no open session" (D-1) and surfacing PostgREST
-      // errors (D-2).
-      const lookup = await lookupScanState(b, scheduleId)
+      // errors (D-2). A committed IN (the operator tapped Mark IN) skips the
+      // re-lookup and writes directly — symmetric with the OUT fast-path
+      // above. The server is authoritative: a concurrent IN surfaces as
+      // Already IN in the write below, with the same refetch handling.
+      const lookup = isConfirmed('IN') ? { kind: 'committed' } : await lookupScanState(b, scheduleId)
       let open = null
       let lastOut = null
       if (lookup.kind === 'timeout' && navigator.onLine !== false) {
@@ -487,37 +498,28 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
         const e = lookup.error
         if (isNetworkOrTimeoutError(e) && !isAuthError(e)) {
           // Network/timeout only — server state is UNKNOWN, not "no open
-          // session". C4: when this device already holds an unsynced IN for
-          // the badge, this scan is almost certainly the OUT — queue it as
-          // OUT (open_id null: scan_out resolves the open session itself, and
-          // the drain replays the earlier IN first by createdAt). Assuming IN
-          // here used to orphan the session with a success popup.
-          if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-            try {
-              const queued = await getQueuedScans()
-              const pendingIn = (queued || []).some(q =>
-                q && q.synced !== true && q.failed !== true && q.status !== 'failed'
-                && q.action === 'IN' && q.badge === b && q.schedule_id === scheduleId)
-              if (pendingIn) {
-                if (isOfflineDupe(b, 'OUT')) {
-                  toast.warning('Already queued — ignoring duplicate scan')
-                  return { ok: false, reason: 'duplicate_queued' }
-                }
-                const outRes = await tryEnqueue({ badge: b, schedule_id: scheduleId, action: 'OUT', ts: new Date().toISOString(), open_id: null, centre: profile?.centre })
-                if (outRes.ok) {
-                  noteQueuedOffline(b, 'OUT')
-                  showPopup({ status: 'queued', badge: b, time: new Date().toLocaleTimeString(), message: 'Queued offline — will sync when online' })
-                  toast.success(`OUT queued (offline) ${b}`)
-                  scanOk = true
-                  onQueued?.()
-                  onAfterScan?.()
-                  return { ok: scanOk }
-                }
-              }
-            } catch { /* queue unreadable — fall through to the IN path below */ }
-          }
-          // Network/timeout only — treat as "no open session", try scan_in
-          console.warn('[Scanner] get_scan_state failed, proceeding with scan_in:', e.message)
+          // session", so nothing may be auto-written. Offer the explicit
+          // choice instead: C4 — when this device already holds an unsynced
+          // IN for the badge, this scan is almost certainly the OUT, so the
+          // single valid button is Mark OUT (open_id null: scan_out resolves
+          // the open session itself, and the drain replays the earlier IN
+          // first by createdAt). Otherwise the button is Mark IN. Tapping it
+          // queues when still offline, writes when back online.
+          let pendingIn = false
+          try {
+            const queued = await getQueuedScans()
+            pendingIn = (queued || []).some(q =>
+              q && q.synced !== true && q.failed !== true && q.status !== 'failed'
+              && q.action === 'IN' && q.badge === b && q.schedule_id === scheduleId)
+          } catch { /* queue unreadable — default to the IN choice below */ }
+          console.warn('[Scanner] get_scan_state failed, offering explicit choice:', e.message)
+          showPopup({
+            status: 'choose', action: pendingIn ? 'OUT' : 'IN', badge: b, manual,
+            message: pendingIn
+              ? 'Session lookup unreachable — a local IN is still queued, so this looks like the OUT. Tap to queue it.'
+              : 'Session lookup unreachable — tap to queue, it will sync when online.',
+          })
+          return { ok: false, reason: 'confirm_required', action: pendingIn ? 'OUT' : 'IN' }
         } else {
           // Auth/RLS (or anything else) — surface directly, no scan_in fall-through
           const msg = String(e.message || '')
@@ -529,14 +531,6 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
         open = lookup.open
         lastOut = lookup.lastOut
       }
-      // `out_date` + `out_time` are bare columns, so the client owns the
-      // +05:30 conversion — exactly as the IN branch already does. NaN when the
-      // sewadar has never been scanned, or under the pre-v44 fallback; the guard
-      // treats NaN as "not guarded" so a first-ever scan is never prompted.
-      const lastOutTs = lastOut?.out_date && lastOut?.out_time
-        ? Date.parse(`${lastOut.out_date}T${lastOut.out_time}+05:30`)
-        : NaN
-
       if (open) {
         // ── OUT flow ──────────────────────────────────────────────
         const inTs = new Date(`${open.in_date}T${open.in_time}+05:30`).getTime()
@@ -559,73 +553,41 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
           return { outTimeDefault: forgot.value, ok: true }
         }
 
-        // ── v44 confirm gate ───────────────────────────────────────
-        // The ladder is right, but an automatic OUT inside 1h of the IN is
-        // almost never deliberate: a double tap, a badge left in front of the
-        // lens, a re-scan to "check". It would write a 90-second session and
-        // skew the attendance rate. Hold the write and ask; Cancel writes
-        // nothing. (>12h already became the forgot-OUT prompt above, so this
-        // only ever sees 1h..12h.)
-        if (!isConfirmed('OUT') && withinToggleGuard(inTs)) {
-          const dispGuard = displayOf(open)
+        // ── Explicit choice ────────────────────────────────────────
+        // No auto-OUT: show the sewadar's details with the single valid
+        // action. Tapping Mark OUT commits via the pinned-session fast-path
+        // above; Cancel writes nothing. (>12h already became the forgot-OUT
+        // prompt above.)
+        if (!isConfirmed('OUT')) {
+          const dispChoose = displayOf(open)
           showPopup({
-            status: 'confirm_out', badge: b,
-            name: dispGuard.name, centre: dispGuard.centre, deptName: dispGuard.deptName,
-            openId: open.id, openSince: `${open.in_date} ${open.in_time}`,
-            message: `Only ${minutesSince(inTs)} min since IN at ${String(open.in_time).slice(0, 5)} — mark OUT?`,
+            status: 'choose', action: 'OUT', badge: b,
+            name: dispChoose.name, centre: dispChoose.centre, deptName: dispChoose.deptName,
+            openId: open.id, openSince: `${open.in_date} ${open.in_time}`, manual,
+            time: new Date().toLocaleTimeString(),
           })
           return { ok: false, reason: 'confirm_required', action: 'OUT' }
         }
-
-        const ts = new Date().toISOString()
-        try {
-          const { error: outError } = await withTimeout(
-            supabase.rpc('scan_out', { p_badge: b, p_schedule: scheduleId, p_ts: ts, p_open_id: open.id }),
-            SCAN_RPC_TIMEOUT,
-            'Scan OUT'
-          )
-          if (outError) throw outError
-          const dispOut = displayOf(open)
-          showPopup({ status: 'out', badge: b, name: dispOut.name, centre: dispOut.centre, deptName: dispOut.deptName, time: new Date().toLocaleTimeString(), message: 'OUT marked' })
-          toast.success(`OUT ${b}`)
-          scanOk = true
-        } catch (e) {
-          const msg = String(e.message || '')
-          const fb = await enqueueOutFallback({ b, ts, openId: open.id }, msg)
-          if (fb.handled) {
-            // A queued OUT resolves like today (handled, falls through to the
-            // refresh); every other offline outcome resolves ok:false.
-            if (fb.outcome.reason === 'queued') { scanOk = true }
-            else return fb.outcome
-          } else if (isClockSkewed(msg, ts)) {
-            // V14: device clock vs server clock — warn, do not queue (a clock
-            // rejection is authoritative, not a network blip) and send ts
-            // unchanged.
-            showPopup({ status: 'error', badge: b, message: CLOCK_SKEW_MESSAGE, time: new Date().toLocaleTimeString() })
-            toast.warning(CLOCK_SKEW_MESSAGE)
-          } else {
-            showPopup({ status: 'error', badge: b, message: friendly(msg), time: new Date().toLocaleTimeString() })
-            toast.error(friendly(msg))
-          }
-        }
+        // Confirmed OUT always returns via the fast-path above; reaching here
+        // means a caller bug — re-ask rather than writing blind.
+        showPopup({ status: 'error', badge: b, message: 'Session lookup timed out — nothing was changed. Please retry the scan.', time: new Date().toLocaleTimeString() })
+        return { ok: false, reason: 'session_lookup_timeout' }
       } else {
-        // ── v44 confirm gate (mirror) ──────────────────────────────
-        // A re-IN inside 1h of the last OUT is exactly as likely to be a double
-        // tap as the reverse. lastOutTs is NaN when the sewadar has never been
-        // scanned (or under the pre-v44 fallback), and withinToggleGuard(NaN)
-        // is false — so a sewadar's first ever scan is never prompted, and a
-        // re-scan days later is never prompted either.
-        if (!isConfirmed('IN') && withinToggleGuard(lastOutTs)) {
-          const dispGuard = displayOf(lastOut)
+        // ── Explicit choice ────────────────────────────────────────
+        // No auto-IN: show the sewadar's details (from their last OUT when
+        // known — null-safe for a first-ever scan) with the single valid
+        // action. Tapping Mark IN commits below; Cancel writes nothing.
+        if (!isConfirmed('IN')) {
+          const dispChoose = displayOf(lastOut)
           showPopup({
-            status: 'confirm_in', badge: b,
-            name: dispGuard.name, centre: dispGuard.centre, deptName: dispGuard.deptName,
-            message: `Only ${minutesSince(lastOutTs)} min since OUT at ${String(lastOut.out_time).slice(0, 5)} — mark IN?`,
+            status: 'choose', action: 'IN', badge: b,
+            name: dispChoose.name, centre: dispChoose.centre, deptName: dispChoose.deptName,
+            manual, time: new Date().toLocaleTimeString(),
           })
           return { ok: false, reason: 'confirm_required', action: 'IN' }
         }
 
-        // ── IN flow ───────────────────────────────────────────────
+        // ── IN flow (committed via the choice above) ───────────────
         const ts = new Date().toISOString()
         try {
           const { data, error } = await withTimeout(
@@ -740,7 +702,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
     } finally {
       resetBusy()
     }
-  }, [scheduleId, profile, deptName, displayOf, showPopup, toast, onQueued, onAfterScan, setBusySafe, resetBusy, offlineEnqueueFailed, enqueueOutFallback, isOfflineDupe, noteQueuedOffline, tryEnqueue])
+  }, [scheduleId, profile, deptName, displayOf, showPopup, toast, onQueued, onAfterScan, setBusySafe, resetBusy, offlineEnqueueFailed, isOfflineDupe, noteQueuedOffline, tryEnqueue])
 
   return { handleScan, busy, getBusy, resetBusy, submitForgotOut }
 }

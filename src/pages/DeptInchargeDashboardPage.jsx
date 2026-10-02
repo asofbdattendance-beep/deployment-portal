@@ -1,12 +1,15 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { useToast } from '../components/Toast'
-import { deptInchargeKpis, timeAgo, VISIT_DAYS, UNASSIGNED_CENTRE } from '../lib/attendance'
+import { deptInchargeKpis, timeAgo, VISIT_DAYS, UNASSIGNED_CENTRE, visitColumns, buildAttendanceMatrixFromDayBadges, shortDayLabel } from '../lib/attendance'
+import { scheduleWindow, expandDateRange, clampDateToWindow } from '../lib/sewaMode'
 import { todayStrIST } from '../lib/scannerUtils'
-import { exportWorkbook, fileSlug } from '../lib/excel'
+import { fileSlug } from '../lib/excel'
+import { exportAttendanceWorkbook } from '../lib/attendanceExcel'
+import AttendanceMatrix from '../components/AttendanceMatrix'
 import {
   LayoutDashboard, Users, UserX, Percent, Clock, RefreshCw, Download,
-  Loader2, Lock, Building2, ArrowUpRight,
+  Loader2, Lock, ArrowUpRight, Search,
 } from 'lucide-react'
 import { reportRealtimeStatus } from '../lib/realtime'
 
@@ -31,10 +34,8 @@ async function rpcRows(name, params) {
   return Array.isArray(data) ? data : []
 }
 
-// Rate band → pill / bar class. Same maps the ASO dashboard uses, so a
+// Rate band → bar class. Same map the ASO dashboard uses, so a
 // department that reads amber there reads amber here.
-const BAND_PILL = { full: 'pill-green', partial: 'pill-blue', low: 'pill-amber', none: 'pill-gray' }
-const bandPill = (band) => BAND_PILL[band] || BAND_PILL.none
 const BAND_BAR = { full: 'success', partial: '', low: 'warn', none: 'danger' }
 const bandBar = (band) => (BAND_BAR[band] === '' ? '' : ` ${BAND_BAR[band] || ''}`.trim())
 
@@ -96,9 +97,18 @@ function SectionError({ label, error, onRetry }) {
 export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, onNavigate }) {
   const toast = useToast()
   const schedule = schedules.find((s) => s.id === scheduleId)
-  const [date, setDate] = useState(() => todayStrIST())
+  const [date, setDate] = useState(() => clampDateToWindow(todayStrIST(), scheduleWindow(schedule)))
+  // Bhati Visit shows visit-days data only: pin the picker inside the
+  // window (windowless schedules pass through untouched).
+  const visitWin = useMemo(() => scheduleWindow(schedule), [schedule])
+  useEffect(() => { setDate((d) => clampDateToWindow(d, visitWin)) }, [visitWin])
   const [dailyRaw, setDailyRaw] = useState([])
   const [visitRaw, setVisitRaw] = useState([])
+  // Matrix arms: the per-date present/absent-badge lists behind the
+  // Badge × day grid. (The visit trend is still fetched so a failed trend
+  // keeps its explicit error state, but its rows never become columns —
+  // columns are the schedule window only.)
+  const [badgesByDate, setBadgesByDate] = useState({})
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(false)
   const [errs, setErrs] = useState({})
@@ -139,22 +149,58 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
     if (!scheduleId) { setLoading(false); return }
     const seq = ++seqRef.current
     setLoading(true)
-    const [daily, visit] = await Promise.allSettled([
+    const [daily, visit, trend] = await Promise.allSettled([
       rpcRows('attendance_daily_summary', { p_schedule: scheduleId, p_date: date }),
       rpcRows('attendance_visit_summary', { p_schedule: scheduleId }),
+      rpcRows('attendance_trend', { p_schedule: scheduleId }),
     ])
     if (!mountedRef.current || seq !== seqRef.current) return
     const next = {}
     if (daily.status === 'fulfilled') setDailyRaw(daily.value); else next.daily = daily.reason
     if (visit.status === 'fulfilled') setVisitRaw(visit.value); else next.visit = visit.reason
+    if (trend.status !== 'fulfilled') next.trend = trend.reason
+    // The present/absent-badge lists fan out over the visit columns, which
+    // are EXACTLY the schedule's visit window — trend rows never add one,
+    // so a previsit scan can never grow a Bhati Visit day. Without a window
+    // there are no visit days to fetch (Previsit owns every scan date).
+    if (trend.status === 'fulfilled') {
+      const win = scheduleWindow((schedules || []).find((s) => s.id === scheduleId))
+      const cols = visitColumns(expandDateRange(win.start, win.end))
+      if (cols.length === 0) {
+        setBadgesByDate({})
+      } else {
+        const settled = await Promise.allSettled(
+          cols.flatMap((col) => [
+            rpcRows('attendance_day_badges', { p_schedule: scheduleId, p_date: col, p_mode: 'present' }),
+            rpcRows('attendance_day_badges', { p_schedule: scheduleId, p_date: col, p_mode: 'absent' }),
+          ])
+        )
+        if (!mountedRef.current || seq !== seqRef.current) return
+        const failed = settled.find((s) => s.status === 'rejected')
+        if (failed) {
+          next.badges = failed.reason
+          setBadgesByDate({})
+        } else {
+          const map = {}
+          cols.forEach((col, i) => {
+            const present = settled[2 * i].status === 'fulfilled' ? settled[2 * i].value : []
+            const absent = settled[2 * i + 1].status === 'fulfilled' ? settled[2 * i + 1].value : []
+            map[col] = { present, absent }
+          })
+          setBadgesByDate(map)
+        }
+      }
+    } else {
+      setBadgesByDate({})
+    }
     setErrs(next)
-    if (daily.status === 'fulfilled' || visit.status === 'fulfilled') {
+    if (daily.status === 'fulfilled' || visit.status === 'fulfilled' || trend.status === 'fulfilled') {
       setRowsScheduleId(scheduleId)
       setRowsDate(date)
       setLastRefreshAt(Date.now())
     }
     setLoading(false)
-  }, [scheduleId, date])
+  }, [schedules, scheduleId, date])
 
   // A schedule or scan-day change invalidates the rows on screen until the new
   // load lands — the previous day's tiles must never read as this day's.
@@ -219,38 +265,88 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
     [dailyRaw, rowsAreCurrent]
   )
 
+  // ── Attendance matrix ──
+  // Identity is the union of badges across the per-date present + absent
+  // lists (see buildAttendanceMatrixFromDayBadges), so deployed-never-scanned
+  // sewadars are listed, and presence is keyed by badge only — centres are
+  // never compared. The columns are EXACTLY the schedule's visit window:
+  // trend rows never contribute a column (hard rule — a previsit scan must
+  // never appear in Bhati Visit). No window ⇒ no columns (see noWindow).
+  const windowDates = useMemo(() => expandDateRange(visitWin.start, visitWin.end), [visitWin])
+  const noWindow = windowDates.length === 0
+  const matrixColumns = useMemo(
+    () => visitColumns(windowDates),
+    [windowDates]
+  )
+  const dayBadges = useMemo(
+    () => (rowsAreCurrent ? badgesByDate : {}),
+    [badgesByDate, rowsAreCurrent]
+  )
+  const matrix = useMemo(
+    () => buildAttendanceMatrixFromDayBadges(dayBadges, matrixColumns),
+    [dayBadges, matrixColumns]
+  )
+  // The grid needs BOTH arms: columns without presence (or presence without
+  // columns) would print absences that are really a failed RPC.
+  const matrixReady = rowsAreCurrent && !errs.trend && !errs.badges
+
+  // ── Matrix view filters (search + centre) ──
+  // Lifted to the page (not inside AttendanceMatrix) so the Excel snapshot
+  // below exports exactly the rows on screen — the same contract the Dept
+  // Incharge list page keeps (`exportList` reads `filteredList`).
+  const [matrixQuery, setMatrixQuery] = useState('')
+  const [matrixCentre, setMatrixCentre] = useState('')
+  // A new schedule brings a new centre list — a stale selection would read
+  // as "no sewadars" for a reason that does not exist.
+  useEffect(() => {
+    setMatrixQuery('')
+    setMatrixCentre('')
+  }, [scheduleId])
+  const matrixCentreOptions = useMemo(
+    () => [...new Set(matrix.rows.map((r) => r?.centre).filter(Boolean))].sort((a, b) => a.localeCompare(b)),
+    [matrix]
+  )
+  useEffect(() => {
+    if (matrixCentre && !matrixCentreOptions.includes(matrixCentre)) setMatrixCentre('')
+  }, [matrixCentre, matrixCentreOptions])
+  const matrixForView = useMemo(() => {
+    const q = matrixQuery.trim().toLowerCase()
+    const rows = matrix.rows.filter((r) => {
+      if (matrixCentre && r.centre !== matrixCentre) return false
+      if (!q) return true
+      return [r.badge_number, r.sewadar_name, r.centre, r.dept_name]
+        .some((v) => String(v || '').toLowerCase().includes(q))
+    })
+    return { columns: matrix.columns, rows }
+  }, [matrix, matrixCentre, matrixQuery])
+  const matrixFiltersActive = matrixQuery.trim() !== '' || matrixCentre !== ''
+
   const exportSnapshot = useCallback(async () => {
     // A snapshot over a half-failed load would print one half's numbers as
-    // the whole truth — both arms must have landed.
-    if (errs.daily || errs.visit) {
+    // the whole truth — every arm must have landed.
+    if (errs.daily || errs.visit || errs.trend || errs.badges) {
       toast.warning('One half of the snapshot failed to load — retry before exporting')
       return
     }
     setExporting(true)
     try {
-      const n = await exportWorkbook(`${fileSlug(schedule?.name)}_incharge_${date}.xlsx`, [
-        { name: 'Today', rows: [{ Metric: 'Deployed', Value: kpis.today.deployed }, { Metric: 'Present', Value: kpis.today.present }, { Metric: 'Absent', Value: kpis.today.absent }, { Metric: 'Open now', Value: kpis.today.openNow }, { Metric: 'Rate %', Value: kpis.today.rate }] },
-        { name: 'Whole visit', rows: [{ Metric: 'Deployed', Value: kpis.visit.deployed }, { Metric: 'Ever present', Value: kpis.visit.present }, { Metric: 'Never present', Value: kpis.visit.absent }, { Metric: 'Rate %', Value: kpis.visit.rate }] },
-        {
-          name: 'By department',
-          rows: kpis.byDepartment.map((d) => ({
-            Department: d.deptName,
-            'Deployed (today)': d.today.deployed,
-            'Present (today)': d.today.present,
-            'Absent (today)': d.today.absent,
-            'Rate % (today)': d.today.rate,
-            'Ever present (visit)': d.visit.present,
-            'Never present (visit)': d.visit.absent,
-          })),
-        },
-      ])
+      // Styled workbook (lazy exceljs): same sheets and P/A contract as the
+      // old xlsx export, plus title row, frozen header, widths and green/red
+      // day cells on the Attd Matrix sheet — see src/lib/attendanceExcel.js.
+      const n = await exportAttendanceWorkbook({
+        filename: `${fileSlug(schedule?.name)}_incharge_${date}.xlsx`,
+        scheduleName: schedule?.name || '',
+        date,
+        kpis,
+        matrix: matrixForView,
+      })
       if (n === 0) toast.error('Nothing to export for this schedule yet')
     } catch (e) {
       toast.error(e?.message || 'Could not export the snapshot')
     } finally {
       setExporting(false)
     }
-  }, [schedule?.name, date, kpis, errs, toast])
+  }, [schedule?.name, date, kpis, matrixForView, errs, toast])
 
   if (loading && !rowsAreCurrent) {
     return (
@@ -288,8 +384,8 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
             <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
               {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
             </button>
-            <button onClick={exportSnapshot} disabled={exporting || !rowsAreCurrent || errs.daily || errs.visit} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-              {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export snapshot
+            <button onClick={exportSnapshot} disabled={exporting || !rowsAreCurrent || noWindow || errs.daily || errs.visit || errs.trend || errs.badges} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+              {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export Attd Matrix
             </button>
           </div>
         </div>
@@ -308,7 +404,9 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
             <input
               type="date"
               value={date}
-              onChange={(e) => { dateTouchedRef.current = true; setDate(e.target.value) }}
+              min={visitWin.start || undefined}
+              max={visitWin.end || undefined}
+              onChange={(e) => { dateTouchedRef.current = true; setDate(clampDateToWindow(e.target.value, visitWin)) }}
               className="input"
               style={{ fontSize: '0.82rem', padding: '0.25rem 0.4rem' }}
             />
@@ -327,29 +425,29 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
         <SectionError label="Today’s attendance" error={errs.daily} onRetry={load} />
       ) : (
         <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-          <button type="button" onClick={() => go('deptIncharge')} className="stat" style={TILE} title="Open the Dept Incharge lists">
+          <button type="button" onClick={() => go('reports')} className="stat" style={TILE} title="Open the Dept Incharge lists">
             <div className="stat-label">Total deployed</div>
             <div className="stat-value">{kpis.today.deployed}</div>
-            <div className="stat-sub">in your department{centreCount > 0 ? ` · ${centreCount} centre${centreCount === 1 ? '' : 's'}` : ''} · {date}</div>
+            <div className="stat-sub">in your department{centreCount > 0 ? ` · ${centreCount} centre${centreCount === 1 ? '' : 's'}` : ''} · {shortDayLabel(date)}</div>
           </button>
-          <button type="button" onClick={() => go('deptIncharge')} className="stat" style={TILE} title="Open the Dept Incharge lists">
+          <button type="button" onClick={() => go('reports')} className="stat" style={TILE} title="Open the Dept Incharge lists">
             <div className="stat-label">Present today</div>
             <div className="stat-value" style={{ color: '#047857' }}>{kpis.today.present}</div>
-            <div className="stat-sub">of {kpis.today.deployed} deployed · {date}</div>
+            <div className="stat-sub">of {kpis.today.deployed} deployed · {shortDayLabel(date)}</div>
           </button>
-          <button type="button" onClick={() => go('deptIncharge')} className="stat" style={TILE} title="Open the Dept Incharge lists">
+          <button type="button" onClick={() => go('reports')} className="stat" style={TILE} title="Open the Dept Incharge lists">
             <div className="stat-label">Absent today</div>
             <div className="stat-value" style={{ color: kpis.today.absent > 0 ? '#b91c1c' : undefined }}>{kpis.today.absent}</div>
-            <div className="stat-sub">expected but not scanned · {date}</div>
+            <div className="stat-sub">expected but not scanned · {shortDayLabel(date)}</div>
           </button>
-          <button type="button" onClick={() => go('deptIncharge')} className="stat" style={TILE} title="Open the Dept Incharge lists">
+          <button type="button" onClick={() => go('reports')} className="stat" style={TILE} title="Open the Dept Incharge lists">
             <div className="stat-label">Attendance %</div>
             <div className="stat-value" style={{ fontSize: '1.1rem', paddingTop: '0.35rem' }}>
               <div className="progress" style={{ height: 10 }}>
                 <div className={`progress-bar${bandBar(kpis.today.band)}`} style={{ width: `${kpis.today.rate}%` }} />
               </div>
             </div>
-            <div className="stat-sub">{kpis.today.rate}% present on {date}</div>
+            <div className="stat-sub">{kpis.today.rate}% present on {shortDayLabel(date)}</div>
           </button>
           <div className="stat" title="Sessions still open right now">
             <div className="stat-label">Open now</div>
@@ -386,50 +484,75 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
         </div>
       )}
 
-      {/* ── Per-department breakdown ── */}
-      {!errs.daily && !noScope && kpis.byDepartment.length > 0 && (
+      {/* ── Attendance matrix ── */}
+      {(errs.trend || errs.badges) ? (
+        <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          {errs.trend && <SectionError label="Attendance matrix (trend)" error={errs.trend} onRetry={load} />}
+          {errs.badges && <SectionError label="Attendance matrix (daily presence)" error={errs.badges} onRetry={load} />}
+        </div>
+      ) : (!noScope && matrixReady && noWindow) ? (
+        <div role="status" className="card" style={{ marginTop: '1rem', background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', fontSize: '0.85rem', fontWeight: 600, padding: '1rem 1.25rem' }}>
+          No visit dates are set for this schedule, so there is no Bhati Visit attendance to show. Ask the ASO office to set the visit window on Schedule Maker — every scan date shows under Previsit until then.
+        </div>
+      ) : (!noScope && matrixReady && (
         <div className="card" style={{ marginTop: '1rem' }}>
           <div className="section-header" style={{ padding: '1.1rem 1.25rem 0' }}>
             <div>
-              <div className="section-title"><Building2 size={15} style={{ marginRight: '0.35rem', verticalAlign: '-2px' }} /> By department</div>
-              <div className="card-sub">Totals across every centre where these sewadars are deployed</div>
+              <div className="section-title">Attendance matrix</div>
+              <div className="card-sub">Badge × day — green present, red absent</div>
             </div>
           </div>
-          <div className="table-wrap" style={{ padding: '0 1.25rem 1.25rem' }}>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Department</th>
-                  <th>Deployed</th>
-                  <th>Present today</th>
-                  <th>Absent today</th>
-                  <th>Today %</th>
-                  <th>Ever present (visit)</th>
-                  <th>Never present</th>
-                </tr>
-              </thead>
-              <tbody>
-                {kpis.byDepartment.map((d) => (
-                  <tr key={d.department_id}>
-                    <td><span className="pill pill-blue">{d.deptName}</span></td>
-                    <td style={{ fontVariantNumeric: 'tabular-nums' }}>{d.today.deployed}</td>
-                    <td style={{ fontVariantNumeric: 'tabular-nums' }}>{d.today.present}</td>
-                    <td style={{ fontVariantNumeric: 'tabular-nums', color: d.today.absent > 0 ? '#b91c1c' : undefined }}>{d.today.absent}</td>
-                    <td><span className={`pill ${bandPill(d.today.band)}`}>{d.today.rate}%</span></td>
-                    <td style={{ fontVariantNumeric: 'tabular-nums' }}>{d.visit.present}</td>
-                    <td style={{ fontVariantNumeric: 'tabular-nums' }}>{d.visit.absent}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', padding: '0.75rem 1.25rem 0' }}>
+            <div style={{ position: 'relative', flex: '1 1 200px', minWidth: 180 }}>
+              <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none' }} />
+              <input
+                value={matrixQuery}
+                onChange={(e) => setMatrixQuery(e.target.value)}
+                placeholder="Search badge / name / centre / dept..."
+                className="input"
+                style={{ width: '100%', paddingLeft: 30 }}
+                aria-label="Search attendance matrix"
+              />
+            </div>
+            <select
+              value={matrixCentre}
+              onChange={(e) => setMatrixCentre(e.target.value)}
+              className="select"
+              style={{ flex: '0 0 auto', minWidth: 160 }}
+              aria-label="Filter matrix by centre"
+            >
+              <option value="">All centres ({matrixCentreOptions.length})</option>
+              {matrixCentreOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <span role="status" style={{ fontSize: '0.78rem', color: '#64748b' }}>
+              {matrixForView.rows.length} of {matrix.rows.length} sewadars
+            </span>
+            {matrixFiltersActive && (
+              <button
+                onClick={() => { setMatrixQuery(''); setMatrixCentre('') }}
+                className="btn btn-ghost"
+                style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          <div style={{ padding: '0 1.25rem 1.25rem' }}>
+            {matrixForView.rows.length === 0 && matrix.rows.length > 0 ? (
+              <div className="att-matrix">
+                <div className="att-empty">No sewadars match this search or filter.</div>
+              </div>
+            ) : (
+              <AttendanceMatrix columns={matrixForView.columns} rows={matrixForView.rows} highlightDate={date} />
+            )}
           </div>
         </div>
-      )}
+      ))}
 
       <div style={{ marginTop: '1rem', fontSize: '0.78rem', color: '#64748b' }}>
         <Clock size={12} style={{ verticalAlign: '-1px', marginRight: '0.2rem' }} />
         Present/absent reflects scans for the selected day. &ldquo;Ever present&rdquo; covers the whole visit. Scans are recorded on the{' '}
-        <button onClick={() => go('deptIncharge')} className="btn btn-ghost" style={{ padding: '0 0.2rem', fontSize: '0.78rem' }}>Dept Incharge <ArrowUpRight size={11} /></button> page.
+        <button onClick={() => go('reports')} className="btn btn-ghost" style={{ padding: '0 0.2rem', fontSize: '0.78rem' }}>Reports <ArrowUpRight size={11} /></button> page.
       </div>
     </div>
   )

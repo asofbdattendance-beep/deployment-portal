@@ -111,6 +111,69 @@ describe('ScanResultPopup — confirm gates', () => {
   })
 })
 
+describe('ScanResultPopup — explicit choice (choose)', () => {
+  // A scan never writes: the popup shows the details and the ONE valid
+  // direction. The opposite direction is unrepresentable, so an invalid
+  // write cannot be tapped into existence.
+  it('choose IN shows details with a single Mark IN button', () => {
+    open('choose', { action: 'IN', onConfirm: vi.fn(), onClose: vi.fn(), name: 'Test Sewadar', centre: 'CENTRE-A', deptName: 'LANGAR' })
+    expect(screen.getByText('Mark IN?')).toBeTruthy()
+    expect(screen.getByText('MARK IN')).toBeTruthy()
+    expect(screen.getByText('Mark IN')).toBeTruthy()
+    expect(screen.getByText('Test Sewadar')).toBeTruthy()
+    expect(screen.getByText('CENTRE-A')).toBeTruthy()
+    expect(screen.getByText('LANGAR')).toBeTruthy()
+    // The invalid direction is not offered at all.
+    expect(screen.queryByText('Mark OUT')).toBeNull()
+    expect(screen.queryByText('MARK OUT')).toBeNull()
+  })
+
+  it('choose OUT shows details with a single Mark OUT button', () => {
+    open('choose', { action: 'OUT', onConfirm: vi.fn(), onClose: vi.fn(), openSince: '2026-09-26 09:02:00' })
+    expect(screen.getByText('Mark OUT?')).toBeTruthy()
+    expect(screen.getByText('MARK OUT')).toBeTruthy()
+    expect(screen.getByText('Mark OUT')).toBeTruthy()
+    expect(screen.getByText(/Currently IN since/)).toBeTruthy()
+    expect(screen.queryByText('Mark IN')).toBeNull()
+  })
+
+  it('labels the secondary button Cancel, never Done', () => {
+    open('choose', { action: 'IN', onConfirm: vi.fn(), onClose: vi.fn() })
+    expect(screen.getByText('Cancel')).toBeTruthy()
+    expect(screen.queryByText('Done')).toBeNull()
+  })
+
+  it('Mark IN calls onConfirm and Cancel calls onClose', () => {
+    const onConfirm = vi.fn()
+    const onClose = vi.fn()
+    open('choose', { action: 'IN', onConfirm, onClose })
+    fireEvent.click(screen.getByText('Cancel'))
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onConfirm).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByText('Mark IN'))
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+  })
+
+  it('backdrop and ESC are Cancel — declining must always be reachable', () => {
+    const onClose = vi.fn()
+    const { container } = open('choose', { action: 'OUT', onConfirm: vi.fn(), onClose })
+
+    const overlay = container.firstChild
+    fireEvent.click(overlay)                       // backdrop
+    expect(onClose).toHaveBeenCalledTimes(1)
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(2)
+  })
+
+  it('uses confirmLabel when the caller supplies one', () => {
+    open('choose', { action: 'IN', onConfirm: vi.fn(), onClose: vi.fn(), confirmLabel: 'Yes, mark IN' })
+    expect(screen.getByText('Yes, mark IN')).toBeTruthy()
+    expect(screen.queryByText('Mark IN')).toBeNull()
+  })
+})
+
 describe('ScanResultPopup — ack statuses render one button (L-12)', () => {
   // The pages pass onConfirm=closePopup as a fallback for every non-decision
   // status, so in/out/queued/flagged rendered TWO identical "Done" buttons

@@ -90,7 +90,7 @@ describe('useScannerSession bundle', () => {
     expect(result.current.busy).toBe(false)
     expect(result.current.queued).toEqual([])
     expect(result.current.syncing).toBe(false)
-    for (const k of ['showPopup', 'closePopup', 'handleScan', 'handleCameraScan', 'confirmScan', 'confirmForgot', 'refreshQueue']) {
+    for (const k of ['showPopup', 'closePopup', 'handleScan', 'handleCameraScan', 'commitScan', 'confirmForgot', 'refreshQueue']) {
       expect(typeof result.current[k]).toBe('function')
     }
     expect(installDrainListeners).toHaveBeenCalledTimes(1)
@@ -302,14 +302,14 @@ describe('useScannerSession V15 hardening', () => {
     unmount()
   })
 
-  it('confirm refuses a popup stamped with the previous schedule (V15 guard)', async () => {
+  it('commit refuses a popup stamped with the previous schedule (V15 guard)', async () => {
     rpc.mockResolvedValue({ data: { ok: true }, error: null })
     const { result, rerender, toast, unmount } = setupWithSchedule('sched-1')
-    act(() => { result.current.showPopup({ status: 'confirm_out', badge: 'FB5971GA0001', openId: 'o-1' }) })
+    act(() => { result.current.showPopup({ status: 'choose', action: 'OUT', badge: 'FB5971GA0001', openId: 'o-1' }) })
     // Simulate a popup that survived the switch (e.g. set just before it).
     rerender({ scheduleId: 'sched-2' })
-    act(() => { result.current.showPopup({ status: 'confirm_out', badge: 'FB5971GA0001', openId: 'o-1', scheduleId: 'sched-1' }) })
-    await act(async () => { await result.current.confirmScan() })
+    act(() => { result.current.showPopup({ status: 'choose', action: 'OUT', badge: 'FB5971GA0001', openId: 'o-1', scheduleId: 'sched-1' }) })
+    await act(async () => { await result.current.commitScan() })
     expect(rpc).not.toHaveBeenCalledWith('scan_in', expect.anything())
     expect(rpc).not.toHaveBeenCalledWith('scan_out', expect.anything())
     expect(toast.warning).toHaveBeenCalledWith(expect.stringMatching(/schedule changed/i))
@@ -335,10 +335,32 @@ describe('useScannerSession V15 hardening', () => {
   it('a confirmed follow-up bypasses the decision gate (V15)', async () => {
     rpc.mockResolvedValue({ data: { ok: true }, error: null })
     const { result, unmount } = setup()
-    act(() => { result.current.showPopup({ status: 'confirm_out', badge: 'FB5971GA0001', openId: 'o-1' }) })
-    await act(async () => { await result.current.confirmScan() })
-    // The confirm path reached the server (lookup for the OUT/IN flow).
-    expect(rpc).toHaveBeenCalled()
+    act(() => { result.current.showPopup({ status: 'choose', action: 'OUT', badge: 'FB5971GA0001', openId: 'o-1' }) })
+    await act(async () => { await result.current.commitScan() })
+    // The commit path reached the server (scan_out against the pinned id).
+    expect(rpc).toHaveBeenCalledWith('scan_out', expect.objectContaining({ p_open_id: 'o-1' }))
+    unmount()
+  })
+
+  it('a choose popup never auto-dismisses — it waits for the operator tap', async () => {
+    vi.useFakeTimers()
+    try {
+      const { result, unmount } = setup()
+      act(() => { result.current.showPopup({ status: 'choose', action: 'IN', badge: 'FB5971GA0001' }) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+      expect(result.current.popup).toMatchObject({ status: 'choose', action: 'IN' })
+      unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('commit carries the manual flag so a hand-typed correction keeps its audit mark', async () => {
+    rpc.mockResolvedValue({ data: { ok: true }, error: null })
+    const { result, unmount } = setup()
+    act(() => { result.current.showPopup({ status: 'choose', action: 'IN', badge: 'FB5971GA0001', manual: true }) })
+    await act(async () => { await result.current.commitScan() })
+    expect(rpc).toHaveBeenCalledWith('scan_in', expect.objectContaining({ p_badge: 'FB5971GA0001', p_is_manual: true }))
     unmount()
   })
 })

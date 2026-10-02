@@ -296,8 +296,8 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
 
   const {
     popup, outTime, setOutTime, closePopup,
-    handleScan, handleCameraScan, confirmScan, confirmForgot,
-    isConfirm, confirmLabel, busy, resetBusy,
+    handleScan, handleCameraScan, commitScan, confirmForgot,
+    busy, resetBusy,
     queued, syncing, refreshQueue, scannerRef,
   } = useScannerSession({
     scheduleId: selectedScheduleId,
@@ -534,6 +534,7 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
       <ScanResultPopup
         open={!!popup}
         status={popup?.status}
+        action={popup?.action}
         badge={popup?.badge}
         name={popup?.name}
         centre={popup?.centre}
@@ -545,8 +546,7 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
         outTime={outTime}
         onOutTimeChange={setOutTime}
         onClose={closePopup}
-        confirmLabel={confirmLabel}
-        onConfirm={popup?.status==='forgot' ? confirmForgot : isConfirm ? confirmScan : closePopup}
+        onConfirm={popup?.status==='forgot' ? confirmForgot : popup?.status==='choose' ? commitScan : closePopup}
       />
     </div>
   )

@@ -1,4 +1,4 @@
-import { useState, lazy, Suspense, useEffect, useCallback, useRef } from 'react'
+import { useState, lazy, Suspense, useEffect, useCallback, useMemo, useRef } from 'react'
 import { usePortalAuth } from './context/PortalAuthContext'
 import { supabase } from './lib/supabase'
 import { useToast } from './components/Toast'
@@ -8,6 +8,8 @@ import { ROLE_LABELS, ROLE_COLORS } from './lib/supabase'
 import DbVersionBanner from './components/DbVersionBanner'
 import { ShieldCheck, ScanLine, RefreshCw, AlertTriangle, Wrench, ChevronDown, Check } from 'lucide-react'
 import { PAGES } from './lib/pages'
+import { SEWA_MODE_VISIT, SEWA_MODE_PREVISIT, canUsePrevisitMode, scheduleWindow, resolveSewaMode, isTestLogin } from './lib/sewaMode'
+import { todayStrIST } from './lib/scannerUtils'
 
 // ── Maintenance mode — flip to false to restore portal ──
 const MAINTENANCE_MODE = false
@@ -37,16 +39,17 @@ const ConsentPage = lazy(() => import('./pages/ConsentPage'))
 const VssPage = lazy(() => import('./pages/VssPage'))
 const DeploymentAllocationPage = lazy(() => import('./pages/DeploymentAllocationPage'))
 const CentreListsPage = lazy(() => import('./pages/CentreListsPage'))
-const DeptInchargePage = lazy(() => import('./pages/DeptInchargePage'))
 const DeptInchargeDashboardPage = lazy(() => import('./pages/DeptInchargeDashboardPage'))
 const ScannerPage = lazy(() => import('./pages/ScannerPage'))
 const AttendancePage = lazy(() => import('./pages/AttendancePage'))
+const InchargeScannerPage = lazy(() => import('./pages/InchargeScannerPage'))
 const ControlPanelPage = lazy(() => import('./pages/ControlPanelPage'))
 const DashboardPage = lazy(() => import('./pages/DashboardPage'))
 const ReportsPage = lazy(() => import('./pages/ReportsPage'))
-const LiveScannersPage = lazy(() => import('./pages/LiveScannersPage'))
 const AnomaliesPage = lazy(() => import('./pages/AnomaliesPage'))
 const UsersPage = lazy(() => import('./pages/UsersPage'))
+const PrevisitView = lazy(() => import('./components/PrevisitView'))
+const PrevisitDashboard = lazy(() => import('./components/PrevisitDashboard'))
 
 // Exported for UsersPage's permission matrix (single source: page → roles).
 export { PAGES } from './lib/pages';
@@ -144,10 +147,63 @@ function Dashboard() {
   const [activePage, setActivePage] = useState(visiblePages[0]?.[0] || 'consent')
   const [schedules, setSchedules] = useState([])
   const [scheduleId, setScheduleId] = useState('')
+  // ── Global sewa mode: Previsit vs Bhati Visit. Calendar auto-view for
+  // REAL accounts, derived from the selected schedule's visit window +
+  // today (IST); a schedule with no window reads as previsit-only. The
+  // manual toggle is a TEST-login DEMO privilege only (email contains
+  // "test", on a previsit-capable role): demo accounts open on the
+  // calendar-correct side but the toggle is theirs and sticks — auto
+  // never takes the view back. Real operators never see the switch, so
+  // the view can never claim "Bhati Visit" while showing previsit-date
+  // data. The override is VIEW-ONLY and resets on schedule change —
+  // scanning writes the same session row in both modes and the scan date
+  // classifies it, so the switch can never misfile a record. Roles without
+  // previsit access (centre roles, vss_operator) are pinned to the visit
+  // view they already have.
+  const [sewaModeOverride, setSewaModeOverride] = useState(null)
+  // A schedule change clears any manual lens synchronously (in the select
+  // handler below) and here for programmatic changes — schedule B must
+  // never paint under schedule A's override, even for one frame.
+  useEffect(() => { setSewaModeOverride(null) }, [scheduleId])
+  // The auto lens follows the wall clock: a tab left open across midnight
+  // (or a laptop waking from sleep) recomputes on visibility/focus instead
+  // of keeping yesterday's mode and pill.
+  const [modeTick, setModeTick] = useState(0)
+  useEffect(() => {
+    const bump = () => setModeTick((t) => t + 1)
+    document.addEventListener('visibilitychange', bump)
+    window.addEventListener('focus', bump)
+    return () => {
+      document.removeEventListener('visibilitychange', bump)
+      window.removeEventListener('focus', bump)
+    }
+  }, [])
+  const schedule = schedules.find((s) => s.id === scheduleId)
+  const win = scheduleWindow(schedule)
+  const autoSewaMode = useMemo(
+    () => resolveSewaMode(win.start, win.end, todayStrIST()),
+    // modeTick/scheduleId are invalidation-only deps: the wall clock has
+    // no reactive source, so the tick re-reads it on visibility/focus and
+    // the schedule id re-reads it on switch (win.* cover date edits).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [win.start, win.end, modeTick, scheduleId]
+  )
+  const canOverrideSewaMode = canUsePrevisitMode(profile?.role) && isTestLogin(profile)
+  // Hard rule: a manual Bhati Visit pin is meaningless without visit dates —
+  // the schedule window is the only source of visit days, so the pin falls
+  // back to auto (previsit) instead of rendering a visit view with no dates.
+  const windowUsable = Boolean(win.start && win.end)
+  const effectiveOverride = sewaModeOverride === SEWA_MODE_VISIT && !windowUsable ? null : sewaModeOverride
+  const sewaMode = canUsePrevisitMode(profile?.role)
+    ? (canOverrideSewaMode ? (effectiveOverride || autoSewaMode) : autoSewaMode)
+    : SEWA_MODE_VISIT
   // Deep-link payload for cross-page jumps (dashboard tiles/rows → a page
   // with a filter pre-applied). Tab switches remount pages, so a prop is
   // enough — no router, no context. Cleared on manual tab clicks.
   const [navFilter, setNavFilter] = useState(null)
+  // dept_incharge identity: assigned department names shown next to the role
+  // badge. Fail-silent — the badge hides on any error or empty grant.
+  const [deptNames, setDeptNames] = useState([])
   const handleNavigate = useCallback((page, filter) => {
     setNavFilter({ page, ...(filter || {}) })
     setActivePage(page)
@@ -164,13 +220,28 @@ function Dashboard() {
   // mutates schedules (create/status/deadline/delete), so it reports back via
   // refreshSchedules to keep this list (and the Consent page's deadline pill) fresh.
   const loadSchedules = useCallback(async () => {
-    const { data, error } = await supabase.from('deployment_schedules').select('id, name, status, deadline').order('created_at', { ascending: false })
+    const { data, error } = await supabase.from('deployment_schedules').select('id, name, status, deadline, visit_start_date, visit_end_date').order('created_at', { ascending: false })
     if (error) { toast.error(error.message); return }
     setSchedules(data || [])
     setScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
   }, [toast])
 
   useEffect(() => { loadSchedules() }, [loadSchedules])
+
+  useEffect(() => {
+    if (profile?.role !== 'dept_incharge' || !scheduleId) { setDeptNames([]); return }
+    let alive = true
+    supabase.rpc('get_my_dept_ids', { p_schedule: scheduleId }).then(async ({ data, error }) => {
+      if (!alive || error || !Array.isArray(data) || data.length === 0) {
+        if (alive) setDeptNames([])
+        return
+      }
+      const { data: depts, error: deptError } = await supabase.from('deployment_departments').select('name').in('id', data)
+      if (!alive || deptError) return
+      setDeptNames((depts || []).map(d => d.name).filter(Boolean))
+    }).catch(() => {})
+    return () => { alive = false }
+  }, [profile, scheduleId])
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: '#f6f7fb' }}>
@@ -181,20 +252,39 @@ function Dashboard() {
             <ShieldCheck size={18} />
           </div>
           <h1 className="brand-title">Deployment Portal</h1>
-          <select value={scheduleId} onChange={e => setScheduleId(e.target.value)} className="select" aria-label="Select schedule" style={{ marginLeft: '0.35rem', maxWidth: 260 }}>
+          <select value={scheduleId} onChange={e => { setSewaModeOverride(null); setScheduleId(e.target.value) }} className="select" aria-label="Select schedule" style={{ marginLeft: '0.35rem', maxWidth: 260 }}>
             {schedules.map(s => (
               <option key={s.id} value={s.id}>{s.name}</option>
             ))}
           </select>
+          {canOverrideSewaMode && (
+            <div role="group" aria-label="Sewa mode" title={sewaModeOverride ? 'Manual view — scanning is unaffected (the scan date decides)' : (sewaMode === SEWA_MODE_VISIT ? 'Auto: today is a visit day' : ((!win.start || !win.end) ? 'Auto: no visit dates set' : 'Auto: today is outside the visit window'))} style={{ display: 'inline-flex', marginLeft: '0.35rem' }}>
+              <button
+                type="button"
+                onClick={() => setSewaModeOverride(SEWA_MODE_VISIT)}
+                className={`seg-btn ${sewaMode === SEWA_MODE_VISIT ? 'seg-active' : ''}`}
+                aria-pressed={sewaMode === SEWA_MODE_VISIT}
+              >
+                Bhati Visit
+              </button>
+              <button
+                type="button"
+                onClick={() => setSewaModeOverride(SEWA_MODE_PREVISIT)}
+                className={`seg-btn ${sewaMode === SEWA_MODE_PREVISIT ? 'seg-active' : ''}`}
+                aria-pressed={sewaMode === SEWA_MODE_PREVISIT}
+              >
+                Previsit
+              </button>
+            </div>
+          )}
         </div>
         <div className="header-actions">
           <span className="header-user">{profile?.name}</span>
+          {profile?.badge_number && <span className="header-centre">{profile.badge_number}</span>}
           <span className="role-badge" style={{ background: ROLE_COLORS[profile?.role] || '#888' }}>
             {ROLE_LABELS[profile?.role] || profile?.role}
           </span>
-          {profile?.role === 'vss_operator'
-            ? <span className="header-centre">(All centres)</span>
-            : profile?.centre && <span className="header-centre">({profile.centre})</span>}
+          {deptNames.length > 0 && <span className="header-centre">{deptNames.join(', ')}</span>}
           <button onClick={signOut} className="btn btn-ghost signout-btn">
             Sign out
           </button>
@@ -257,14 +347,12 @@ function Dashboard() {
           {currentPage === 'deployment' && <DeploymentPage schedules={schedules} scheduleId={scheduleId} />}
           {currentPage === 'alloc' && <DeploymentAllocationPage schedules={schedules} scheduleId={scheduleId} />}
           {currentPage === 'centreLists' && <CentreListsPage schedules={schedules} scheduleId={scheduleId} />}
-          {currentPage === 'deptIncharge' && <DeptInchargePage schedules={schedules} scheduleId={scheduleId} />}
-          {currentPage === 'inchargeDashboard' && <DeptInchargeDashboardPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} />}
-          {currentPage === 'scanner' && <ScannerPage schedules={schedules} scheduleId={scheduleId} />}
-          {currentPage === 'attendance' && <AttendancePage schedules={schedules} scheduleId={scheduleId} />}
-          {currentPage === 'dashboard' && <DashboardPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} />}
-          {currentPage === 'reports' && <ReportsPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} initialCentre={navFilter?.page === 'reports' ? navFilter?.centre : undefined} />}
-          {currentPage === 'liveScanners' && <LiveScannersPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} />}
-          {currentPage === 'anomalies' && <AnomaliesPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} />}
+          {currentPage === 'inchargeDashboard' && (sewaMode === SEWA_MODE_PREVISIT ? <PrevisitDashboard schedules={schedules} scheduleId={scheduleId} /> : <DeptInchargeDashboardPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} />)}
+          {currentPage === 'scanner' && <ScannerPage schedules={schedules} scheduleId={scheduleId} sewaMode={autoSewaMode} />}
+          {currentPage === 'attendance' && (profile?.role === 'dept_incharge' ? <InchargeScannerPage schedules={schedules} scheduleId={scheduleId} sewaMode={autoSewaMode} /> : sewaMode === SEWA_MODE_PREVISIT ? <PrevisitView schedules={schedules} scheduleId={scheduleId} initialTab="present" /> : <AttendancePage schedules={schedules} scheduleId={scheduleId} />)}
+          {currentPage === 'dashboard' && (sewaMode === SEWA_MODE_PREVISIT ? <PrevisitDashboard schedules={schedules} scheduleId={scheduleId} /> : <DashboardPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} />)}
+          {currentPage === 'reports' && (sewaMode === SEWA_MODE_PREVISIT ? <PrevisitView schedules={schedules} scheduleId={scheduleId} initialTab="total" /> : <ReportsPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} initialCentre={navFilter?.page === 'reports' ? navFilter?.centre : undefined} />)}
+          {currentPage === 'anomalies' && (sewaMode === SEWA_MODE_PREVISIT ? <PrevisitView schedules={schedules} scheduleId={scheduleId} initialTab="attention" /> : <AnomaliesPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} />)}
           {currentPage === 'control' && <ControlPanelPage schedules={schedules} scheduleId={scheduleId} refreshSchedules={loadSchedules} />}
           {currentPage === 'users' && <UsersPage />}
         </Suspense>

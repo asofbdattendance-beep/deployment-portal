@@ -31,6 +31,10 @@ import {
   scannerStatus,
   timeAgo,
   deptInchargeKpis,
+  visitColumns,
+  buildAttendanceMatrixFromDayBadges,
+  splitDayLabel,
+  shortDayLabel,
 } from './attendance'
 
 /* ─── sessionMinutes ─── */
@@ -753,6 +757,27 @@ describe('buildTrendRows', () => {
     expect(rows).toHaveLength(5)
     expect(rows.every((r) => r.present === 0 && r.absent === 0 && r.rate === 0)).toBe(true)
   })
+
+  // Hard rule: the Bhati Visit strip is window-scoped. A previsit scan
+  // (Oct 2) must never be placed under a visit weekday, and a blank
+  // window yields an all-zero strip — never previsit data.
+  it('drops trend rows dated outside the visit window', () => {
+    const WINDOW = ['2026-10-07', '2026-10-08', '2026-10-09', '2026-10-10', '2026-10-11']
+    const rows = buildTrendRows([
+      { day: '2026-10-02', present: 50, absent: 50 },
+      { day: '2026-10-07', present: 80, absent: 20 },
+    ], WINDOW)
+    expect(rows.map((r) => r.day)).toEqual(['WED', 'THU', 'FRI', 'SAT', 'SUN'])
+    expect(rows[0]).toMatchObject({ present: 80, absent: 20, rate: 80 })
+    // 2026-10-02 is a Friday — without the window filter it would land on
+    // the FRI slot. It must read as a silent day instead.
+    expect(rows[2]).toMatchObject({ present: 0, absent: 100, rate: 0 })
+  })
+  it('returns an all-zero strip when the window is empty', () => {
+    const rows = buildTrendRows([{ day: '2026-10-02', present: 5, absent: 5 }], [])
+    expect(rows).toHaveLength(5)
+    expect(rows.every((r) => r.present === 0 && r.absent === 0 && r.rate === 0)).toBe(true)
+  })
 })
 
 describe('anomalyCounts', () => {
@@ -1055,5 +1080,228 @@ describe('deptInchargeKpis', () => {
     expect(k.byDepartment[0].visit).toMatchObject({ deployed: 0, present: 0, absent: 0, rate: 0 })
     // Nothing anywhere may read "NaN" or "undefined".
     expect(JSON.stringify(k)).not.toMatch(/NaN|undefined/)
+  })
+
+  it('repairs the department name when the first row for it carries none', () => {
+    const k = deptInchargeKpis(
+      [
+        { centre: 'C', department_id: 'd1', dept_name: '', expected: 6, present: 6, absent: 0, open_now: 0 },
+        { centre: 'C', department_id: 'd1', dept_name: 'Anmol', expected: 6, present: 6, absent: 0, open_now: 0 },
+      ],
+      [
+        { centre: 'C', department_id: 'd2', dept_name: null, deployed: 4, ever_present: 2, never_present: 2, open_now: 0 },
+        { centre: 'C', department_id: 'd2', dept_name: 'Zoom', deployed: 4, ever_present: 2, never_present: 2, open_now: 0 },
+      ]
+    )
+    expect(k.byDepartment.map((d) => d.deptName)).toEqual(['Anmol', 'Zoom'])
+  })
+})
+
+/* ─── visitColumns ─── */
+describe('visitColumns', () => {
+  const WINDOW = ['2026-10-07', '2026-10-08', '2026-10-09', '2026-10-10', '2026-10-11']
+  it('returns the schedule window when there are no trend rows', () => {
+    expect(visitColumns(WINDOW, [])).toEqual([...WINDOW])
+    expect(visitColumns(WINDOW, null)).toEqual([...WINDOW])
+    expect(visitColumns(WINDOW)).toEqual([...WINDOW])
+  })
+  it('is empty when the schedule has no window (previsit-only)', () => {
+    expect(visitColumns([], [])).toEqual([])
+    expect(visitColumns(null, [{ day: '2026-10-06' }])).toEqual([])
+    expect(visitColumns(null)).toEqual([])
+  })
+  it('never admits a trend day outside the window (the Oct 2 previsit leak)', () => {
+    // A previsit scan (Oct 2) must never become a Bhati Visit column —
+    // the schedule window is the only source of columns.
+    const cols = visitColumns(WINDOW, [
+      { day: '2026-10-02', present: 1, absent: 9 },
+      { day: '2026-10-12', present: 3, absent: 7 },
+    ])
+    expect(cols).toEqual([...WINDOW])
+  })
+  it('dedups dates already in the window', () => {
+    const cols = visitColumns(WINDOW, [{ day: '2026-10-07' }, { day: '2026-10-07' }])
+    expect(cols).toEqual([...WINDOW])
+  })
+  it('ignores missing and malformed values on both sides', () => {
+    const cols = visitColumns(['2026-10-07', null, 'nope', 20261008], [
+      {},
+      null,
+      undefined,
+      { day: null },
+      { day: '' },
+      { day: 'not-a-date' },
+      { day: '2026-10-7' },
+      { day: '07-10-2026' },
+      { day: 20261007 },
+    ])
+    expect(cols).toEqual(['2026-10-07'])
+  })
+})
+
+/* ─── buildAttendanceMatrixFromDayBadges ─── */
+describe('buildAttendanceMatrixFromDayBadges', () => {
+  const COLS = ['2026-10-07', '2026-10-08']
+  const r = (badge_number, sewadar_centre, sewadar_name = 'N', dept_name = 'MEDICAL', is_vss = false) => ({
+    badge_number, sewadar_centre, sewadar_name, dept_name, is_vss,
+  })
+
+  // B1 scans day one only; B2 never scans (absent everywhere); B3 is the
+  // centre-mismatch badge (present-arm centre differs from absent-arm centre).
+  function dayBadges() {
+    return {
+      '2026-10-07': {
+        present: [r('B1', 'DELHI', 'Asha', 'Traffic'), r('B3', 'X', 'Mismatch-Present', 'Wrong-Dept')],
+        absent: [r('B2', 'NOIDA', 'Zed', 'Medical'), r('B3', 'DELHI', 'Mismatch', 'Medical')],
+      },
+      '2026-10-08': {
+        present: [],
+        absent: [r('B1', 'DELHI', 'Asha', 'Traffic'), r('B2', 'NOIDA', 'Zed', 'Medical'), r('B3', 'DELHI', 'Mismatch', 'Medical')],
+      },
+    }
+  }
+
+  it('lists a never-scanned badge (absent all dates, present none) with all-false byDate', () => {
+    const { columns, rows } = buildAttendanceMatrixFromDayBadges(dayBadges(), COLS)
+    expect(columns).toEqual(COLS)
+    const zed = rows.find((x) => x.badge_number === 'B2')
+    expect(zed).toBeTruthy()
+    expect(zed.byDate).toEqual({ '2026-10-07': false, '2026-10-08': false })
+    expect(zed.presentCount).toBe(0)
+  })
+
+  it('keys presence by badge only — a centre mismatch still yields byDate true', () => {
+    const { rows } = buildAttendanceMatrixFromDayBadges(dayBadges(), COLS)
+    const m = rows.find((x) => x.badge_number === 'B3')
+    expect(m.byDate).toEqual({ '2026-10-07': true, '2026-10-08': false })
+    expect(m.presentCount).toBe(1)
+  })
+
+  it('prefers the absent-arm row for display fields (deployment truth)', () => {
+    const { rows } = buildAttendanceMatrixFromDayBadges(dayBadges(), COLS)
+    const m = rows.find((x) => x.badge_number === 'B3')
+    expect(m).toMatchObject({
+      sewadar_name: 'Mismatch', centre: 'DELHI', dept_name: 'Medical', is_vss: false,
+    })
+    // A badge seen ONLY on the present arm falls back to that row.
+    const { rows: rows2 } = buildAttendanceMatrixFromDayBadges(
+      { '2026-10-07': { present: [r('P1', 'DELHI', 'Only-Present', 'Traffic', true)], absent: [] } },
+      ['2026-10-07'],
+    )
+    expect(rows2.find((x) => x.badge_number === 'P1')).toMatchObject({
+      sewadar_name: 'Only-Present', centre: 'DELHI', dept_name: 'Traffic', is_vss: true,
+    })
+  })
+
+  it('sorts centre → name → badge like the other portal tables', () => {
+    const { rows } = buildAttendanceMatrixFromDayBadges(dayBadges(), COLS)
+    expect(rows.map((x) => x.badge_number)).toEqual(['B1', 'B3', 'B2'])
+  })
+
+  it('drops rows with a falsy badge_number', () => {
+    const { rows } = buildAttendanceMatrixFromDayBadges(
+      {
+        '2026-10-07': {
+          present: [r('', 'DELHI'), r(null, 'DELHI'), { sewadar_name: 'NoBadge' }, null, r('B1', 'DELHI', 'Asha')],
+          absent: [r(undefined, 'X'), r('B2', 'NOIDA', 'Zed')],
+        },
+      },
+      ['2026-10-07'],
+    )
+    expect(rows.map((x) => x.badge_number).sort()).toEqual(['B1', 'B2'])
+  })
+
+  it('tolerates null inputs without throwing', () => {
+    expect(buildAttendanceMatrixFromDayBadges(null, null)).toEqual({ columns: [], rows: [] })
+    expect(buildAttendanceMatrixFromDayBadges(null, COLS)).toEqual({ columns: [...COLS], rows: [] })
+    expect(buildAttendanceMatrixFromDayBadges(dayBadges(), null)).toEqual({
+      columns: [],
+      rows: expect.any(Array),
+    })
+    expect(buildAttendanceMatrixFromDayBadges(undefined, undefined)).toEqual({ columns: [], rows: [] })
+  })
+
+  it('tolerates ragged inputs: dup badges, bare arrays, null entries, missing dates, bare rows', () => {
+    const { columns, rows } = buildAttendanceMatrixFromDayBadges(
+      {
+        '2026-10-07': {
+          present: [
+            { badge_number: 'B1', sewadar_name: 'Asha', sewadar_centre: 'DELHI', dept_name: 'Traffic', is_vss: false },
+            { badge_number: 'B1', sewadar_name: 'Dupe', sewadar_centre: 'X', dept_name: 'Y', is_vss: true },
+            { badge_number: 'B0' },
+          ],
+          absent: [{ badge_number: 'B2' }],
+        },
+        '2026-10-08': [
+          { badge_number: 'B1', sewadar_name: 'Asha', sewadar_centre: 'DELHI', dept_name: 'Traffic' },
+        ],
+        '2026-10-09': null,
+      },
+      ['2026-10-07', '2026-10-08', '2026-10-09', '2026-10-10'],
+    )
+    expect(columns).toEqual(['2026-10-07', '2026-10-08', '2026-10-09', '2026-10-10'])
+    // '' centres sort before 'DELHI'; B0 before B2 on badge.
+    expect(rows.map((r) => r.badge_number)).toEqual(['B0', 'B2', 'B1'])
+    const b1 = rows.find((r) => r.badge_number === 'B1')
+    // First-seen display row wins, so the duplicate 'Dupe' row is ignored.
+    expect(b1).toMatchObject({ sewadar_name: 'Asha', centre: 'DELHI', dept_name: 'Traffic' })
+    expect(b1.byDate).toEqual({ '2026-10-07': true, '2026-10-08': true, '2026-10-09': false, '2026-10-10': false })
+    expect(b1.presentCount).toBe(2)
+    // Bare rows carry no display fields — blank cells, never "undefined".
+    expect(rows.find((r) => r.badge_number === 'B0')).toMatchObject({
+      sewadar_name: '', centre: '', dept_name: '',
+      byDate: { '2026-10-07': true, '2026-10-08': false, '2026-10-09': false, '2026-10-10': false },
+    })
+    expect(rows.find((r) => r.badge_number === 'B2').byDate).toEqual({
+      '2026-10-07': false, '2026-10-08': false, '2026-10-09': false, '2026-10-10': false,
+    })
+  })
+})
+
+/* ─── buildTrendRows: weekend + unplaceable weekdays ─── */
+describe('buildTrendRows weekend placement', () => {
+  it('places Saturday and Sunday, leaves Monday unplaced but counted', () => {
+    const rows = buildTrendRows([
+      { day: '2026-08-08', present: 5, absent: 5 },
+      { day: '2026-08-09', present: 6, absent: 4 },
+      { day: '2026-08-10', present: 7, absent: 3 },
+    ])
+    expect(rows.find((r) => r.day === 'SAT')).toMatchObject({ present: 5, absent: 5 })
+    expect(rows.find((r) => r.day === 'SUN')).toMatchObject({ present: 6, absent: 4 })
+    expect(rows.find((r) => r.day === 'WED')).toMatchObject({ present: 0, absent: 10 })
+  })
+  it('skips null rows and counts rollover dates toward deployed without placing them', () => {
+    const rows = buildTrendRows([
+      null,
+      { day: '2026-02-30', present: 2, absent: 8 },
+      { day: '2026-08-08', present: 5, absent: 5 },
+    ])
+    expect(rows.find((r) => r.day === 'SAT')).toMatchObject({ present: 5, absent: 5 })
+    expect(rows.find((r) => r.day === 'WED')).toMatchObject({ present: 0, absent: 10 })
+  })
+})
+
+/* ─── splitDayLabel / shortDayLabel ─── */
+describe('splitDayLabel', () => {
+  it('splits an ISO date into a short month + day pair', () => {
+    expect(splitDayLabel('2026-10-02')).toEqual({ mon: 'Oct', num: '2' })
+    expect(splitDayLabel('2026-01-15')).toEqual({ mon: 'Jan', num: '15' })
+  })
+
+  it('falls back to the raw string when unparseable', () => {
+    expect(splitDayLabel('soon')).toEqual({ mon: '', num: 'soon' })
+    expect(splitDayLabel(null)).toEqual({ mon: '', num: '' })
+  })
+})
+
+describe('shortDayLabel', () => {
+  it('formats an ISO date as "2 Oct"', () => {
+    expect(shortDayLabel('2026-10-02')).toBe('2 Oct')
+    expect(shortDayLabel('2026-10-11')).toBe('11 Oct')
+  })
+
+  it('passes junk through unchanged', () => {
+    expect(shortDayLabel('')).toBe('')
+    expect(shortDayLabel(null)).toBe('')
   })
 })

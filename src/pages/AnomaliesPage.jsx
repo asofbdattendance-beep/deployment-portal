@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { useToast } from '../components/Toast'
-import { anomalyCounts, UNASSIGNED_CENTRE } from '../lib/attendance'
+import { anomalyCounts, UNASSIGNED_CENTRE, shortDayLabel } from '../lib/attendance'
 import { todayStrIST } from '../lib/scannerUtils'
+import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
 import { exportWorkbook, fileSlug } from '../lib/excel'
 import {
   ShieldAlert, Download, Lock, RefreshCw, Loader2, Search, ArrowUpRight,
@@ -93,6 +94,10 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
 
   // '' = whole visit (p_date: null). See the p_date note above.
   const [date, setDate] = useState('')
+  // Bhati Visit shows visit-days data only: pin the picker inside the
+  // window ('' = whole-visit sweep and windowless schedules pass through).
+  const visitWin = useMemo(() => scheduleWindow(schedule), [schedule])
+  useEffect(() => { setDate((d) => clampDateToWindow(d, visitWin)) }, [visitWin])
   const [raw, setRaw] = useState([])
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(false)
@@ -364,7 +369,9 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
             <input
               type="date"
               value={date}
-              onChange={(e) => setDate(e.target.value)}
+              min={visitWin.start || undefined}
+              max={visitWin.end || undefined}
+              onChange={(e) => setDate(clampDateToWindow(e.target.value, visitWin))}
               className="input"
               style={{ height: 36 }}
               aria-label="Anomaly date"
@@ -376,7 +383,7 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
           <button onClick={() => setDate('')} className={`seg-btn ${date ? '' : 'seg-active'}`} style={{ height: 36 }} aria-pressed={!date}>
             All dates (visit)
           </button>
-          <button onClick={() => setDate(todayStrIST())} className={`seg-btn ${date === todayStrIST() ? 'seg-active' : ''}`} style={{ height: 36 }}>
+          <button onClick={() => setDate(clampDateToWindow(todayStrIST(), visitWin))} className={`seg-btn ${date === todayStrIST() ? 'seg-active' : ''}`} style={{ height: 36 }}>
             Today
           </button>
         </div>
@@ -386,7 +393,7 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
         <div className="stat">
           <div className="stat-label">Anomalies</div>
           <div className="stat-value" style={{ color: base.length ? '#b45309' : undefined }}>{cappedTotal(base.length)}</div>
-          <div className="stat-sub">{date ? `on ${date}` : 'across the whole visit'}{isCapped ? ' · showing newest' : ''}</div>
+          <div className="stat-sub">{date ? `on ${shortDayLabel(date)}` : 'across the whole visit'}{isCapped ? ' · showing newest' : ''}</div>
         </div>
         <div className="stat">
           <div className="stat-label">Rules fired</div>
@@ -436,7 +443,7 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
             )}
             {rules.length === 0 && (
               <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
-                No rule fired{date ? ` on ${date}` : ' for this visit'} — only “All” is available.
+                No rule fired{date ? ` on ${shortDayLabel(date)}` : ' for this visit'} — only “All” is available.
               </span>
             )}
           </div>
@@ -461,7 +468,7 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
             <div className="empty-text">
               {filtering
                 ? 'Try clearing the filters.'
-                : `No anomaly rule fired${date ? ` on ${date}` : ' for this visit'}.`}
+                : `No anomaly rule fired${date ? ` on ${shortDayLabel(date)}` : ' for this visit'}.`}
             </div>
           </div>
         ) : (

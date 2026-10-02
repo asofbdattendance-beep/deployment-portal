@@ -186,6 +186,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const isLeaderRef = useRef(true)
   const leaderClaimRef = useRef(0)
   const tapFocusCleanupRef = useRef(null)
+  // Periodic AF re-assert while nothing has decoded yet (foldables / Samsung
+  // firmwares that quietly drop continuous AF). Owned by the session: started
+  // once the preview is live, cleared in teardown().
+  const refocusTimerRef = useRef(null)
   const lastRawRef = useRef(null)
   const engineLabelRef = useRef('')
   const guidanceRef = useRef(null)
@@ -542,6 +546,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const teardown = useCallback(({ stopCamera = true } = {}) => {
     sessionRef.current++            // invalidate every in-flight continuation
     cancelFrame()
+    if (refocusTimerRef.current) { clearInterval(refocusTimerRef.current); refocusTimerRef.current = null }
     channelRef.current?.close(); channelRef.current = null
     if (tapFocusCleanupRef.current) { try { tapFocusCleanupRef.current() } catch {} tapFocusCleanupRef.current = null }
     if (stopCamera) {
@@ -732,6 +737,22 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         if (!isCurrent(session) || !mountedRef.current) return
         if (debugOn) pushDebug(`focus: ${r.poiApplied ? 'roi' : r.focusApplied ? 'continuous' : 'device default'}, zoom: ${r.zoomApplied ? 'yes' : 'no'}`)
       }).catch(() => {})
+      // Re-assert AF every 4s until the first decode: some devices drop
+      // continuous focus after the initial lock attempt. Stops itself on the
+      // first decode, on pause, or when the session ends.
+      if (refocusTimerRef.current) clearInterval(refocusTimerRef.current)
+      refocusTimerRef.current = setInterval(() => {
+        if (!isCurrent(session) || !mountedRef.current) {
+          clearInterval(refocusTimerRef.current); refocusTimerRef.current = null
+          return
+        }
+        if (hasEverDetectedRef.current || visibilityPausedRef.current || decisionPausedRef.current) return
+        const t = trackRef.current
+        if (!t || t.readyState !== 'live') return
+        applyFocusConstraints(t, { applyZoom: false, debug: debugOn }).then(r => {
+          if (debugOn && r.focusApplied) pushDebug('focus: re-asserted continuous AF')
+        }).catch(() => {})
+      }, 4000)
     }
 
     // Start looping immediately — unless a decision popup is open, in which

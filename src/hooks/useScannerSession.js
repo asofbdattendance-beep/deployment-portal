@@ -12,7 +12,7 @@ import { isDecisionPopup, resolveForgotOutTime } from '../lib/scannerUtils'
  *
  * Owns: popup + auto-dismiss, outTime, queued/syncing + the drain
  * subscription, the scan entry points (handleScan / handleCameraScan /
- * confirmScan / confirmForgot), and the camera pause/resume effect (L-46).
+ * commitScan / confirmForgot), and the camera pause/resume effect (L-46).
  * Pages own their loads, lists, tabs, exports, and render.
  *
  * @param {object} cfg
@@ -115,9 +115,9 @@ export function useScannerSession({
 
   const handleScan = useCallback(async (badge, scanOpts) => {
     // V15: a scan (camera OR manual) must not silently replace an open
-    // decision popup — the operator's Confirm click is aimed at the dialog
+    // decision popup — the operator's action click is aimed at the dialog
     // they see, and swapping it underneath writes the wrong sewadar. Confirmed
-    // follow-ups (confirmScan / confirmForgot's follow-up IN) carry
+    // follow-ups (commitScan / confirmForgot's follow-up IN) carry
     // `confirmed: true` and bypass this gate.
     if (!scanOpts?.confirmed && isDecisionPopup(popup?.status)) {
       toast.warning('Answer the pending prompt first — scan paused')
@@ -158,18 +158,17 @@ export function useScannerSession({
     return handleScan(code)
   }, [popup, handleScan, toast, getBusy])
 
-  // v44 — Confirm on a toggle gate. `confirmFor` scopes the approval to the
-  // direction the question was asked about, and `openId` pins an OUT to the
-  // exact session the prompt named, so a state change in between re-asks
-  // instead of writing the wrong entry.
-  const isConfirm = popup?.status === 'confirm_out' || popup?.status === 'confirm_in'
-  const confirmLabel = popup?.status === 'confirm_out' ? 'Yes, mark OUT'
-    : popup?.status === 'confirm_in' ? 'Yes, mark IN' : undefined
-  const confirmScan = useCallback(async () => {
+  // Explicit choice commit — the operator tapped Mark IN / Mark OUT on a
+  // `choose` popup. `confirmFor` scopes the approval to the direction the
+  // choice offered, and `openId` pins an OUT to the exact session the prompt
+  // named, so a state change in between re-asks instead of writing the wrong
+  // entry. `manual` carries through so a hand-typed correction keeps its
+  // audit flag (p_is_manual).
+  const commitScan = useCallback(async () => {
     const p = popup
-    if (!p) return
+    if (!p || p.status !== 'choose') return
     // V15: a popup that survived a schedule switch must never write against
-    // the new schedule — drop it loudly instead of confirming.
+    // the new schedule — drop it loudly instead of committing.
     if (p.scheduleId && p.scheduleId !== scheduleId) {
       toast.warning('Schedule changed — scan the badge again')
       setPopup(null)
@@ -177,15 +176,16 @@ export function useScannerSession({
     }
     await handleScan(p.badge, {
       confirmed: true,
-      confirmFor: p.status === 'confirm_out' ? 'OUT' : 'IN',
+      confirmFor: p.action === 'OUT' ? 'OUT' : 'IN',
       openId: p.openId || null,
       display: { name: p.name, centre: p.centre, deptName: p.deptName },
+      manual: p.manual === true,
     })
   }, [popup, handleScan, scheduleId, toast])
 
   const confirmForgot = useCallback(async () => {
     if (!popup || popup.status !== 'forgot') return
-    // V15: same schedule-stamp guard as confirmScan — a stale forgot form must
+    // V15: same schedule-stamp guard as commitScan — a stale forgot form must
     // never close a session on the new schedule.
     if (popup.scheduleId && popup.scheduleId !== scheduleId) {
       toast.warning('Schedule changed — scan the badge again')
@@ -255,8 +255,8 @@ export function useScannerSession({
 
   return {
     popup, outTime, setOutTime, showPopup, closePopup,
-    handleScan, handleCameraScan, confirmScan, confirmForgot,
-    isConfirm, confirmLabel, busy, resetBusy,
+    handleScan, handleCameraScan, commitScan, confirmForgot,
+    busy, resetBusy,
     queued, syncing, refreshQueue, scannerRef,
   }
 }

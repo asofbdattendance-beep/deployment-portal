@@ -42,6 +42,10 @@ test.describe('queue matrix', () => {
     )
     await context.setOffline(true)
     await manualScan(page, 'FB5971GA1002')
+    // Explicit choice: the unreachable lookup offers Mark IN; the tap
+    // attempts the write, which fails offline and hits the full queue.
+    await expect(page.getByRole('button', { name: 'Mark IN' })).toBeVisible()
+    await page.getByRole('button', { name: 'Mark IN' }).click()
     // Exact: the popup message contains the toast text as a substring.
     await expect(page.getByText('Offline queue is full', { exact: true })).toBeVisible()
     expect((await queueRows(page)).length).toBe(200)
@@ -54,23 +58,30 @@ test.describe('queue matrix', () => {
     await context.setOffline(true)
     // Tap via keyboard Enter, not the button: the button shifts under
     // toasts/popups (stability waits blow the 2s dupe window), while Enter
-    // calls the identical handleScan path. Tap 1 (no pending IN) queues IN;
-    // tap 2 sees the pending IN and queues OUT (C4); tap 3 lands inside the
-    // OUT dupe window and is refused.
+    // calls the identical handleScan path. Each tap only OFFERS the choice
+    // (nothing is written until tapped): tap 1 offers Mark IN (no pending
+    // IN) and the tap queues IN; tap 2 sees the pending IN and offers Mark
+    // OUT (C4) and the tap queues OUT; tap 3 lands inside the OUT dupe
+    // window and is refused.
     const tap = (badge) =>
       page
         .getByPlaceholder('Manual FB/BH/VS badge')
         .fill(badge)
         .then(() => page.getByPlaceholder('Manual FB/BH/VS badge').press('Enter'))
+    const choose = (name) =>
+      expect(page.getByRole('button', { name })).toBeVisible().then(() => page.getByRole('button', { name }).click())
     await tap('FB5971GA1003')
+    await choose('Mark IN')
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
     await tap('FB5971GA1003')
+    await choose('Mark OUT')
     // Tap 3 must land AFTER tap 2 completes (else the busy flag swallows it
     // silently) but INSIDE the 2s OUT dupe window from tap 2's enqueue.
     await expect
       .poll(async () => (await queueRows(page)).filter((r) => r.badge === 'FB5971GA1003').length)
       .toBe(2)
     await tap('FB5971GA1003')
+    await choose('Mark OUT')
     await expect(page.getByText(/Already queued/)).toBeVisible()
     const rows = (await queueRows(page)).filter((r) => r.badge === 'FB5971GA1003')
     expect(rows).toHaveLength(2)
@@ -136,8 +147,10 @@ test.describe('queue matrix', () => {
     await loginAsScanner(page)
     await context.setOffline(true)
     await manualScan(page, 'FB5971GA1901')
+    await page.getByRole('button', { name: 'Mark IN' }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
     await manualScan(page, 'FB5971GA1902')
+    await page.getByRole('button', { name: 'Mark IN' }).click()
     await expect.poll(async () => (await queueRows(page)).length).toBe(2)
 
     await seedMock(request, {
@@ -190,6 +203,7 @@ test.describe('queue matrix', () => {
     await page.getByRole('button', { name: 'Close OUT then IN' }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
     await manualScan(page, 'FB5971GA1702')
+    await page.getByRole('button', { name: 'Mark IN' }).click()
     await expect.poll(async () => (await queueRows(page)).length).toBe(2)
 
     await seedMock(request, {
@@ -209,6 +223,9 @@ test.describe('queue matrix', () => {
     await loginAsScanner(page)
     await context.setOffline(true)
     await manualScan(page, 'FB5971GA1801')
+    // The choice popup carries the manual flag through to the commit, so the
+    // queued row (and the drained scan_in) keeps its audit mark.
+    await page.getByRole('button', { name: 'Mark IN' }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
 
     const row = (await queueRows(page)).find((r) => r.badge === 'FB5971GA1801')
@@ -241,6 +258,7 @@ test.describe('queue matrix', () => {
     await loginAsScanner(page)
     await context.setOffline(true)
     await manualScan(page, 'FB5971GA1101')
+    await page.getByRole('button', { name: 'Mark IN' }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
     const before = (await queueRows(page)).find((r) => r.badge === 'FB5971GA1101')
     expect(before).toBeTruthy()
@@ -265,6 +283,7 @@ test.describe('queue matrix', () => {
     await expect(page.getByText('Online', { exact: true }).first()).toBeVisible()
     await context.setOffline(true)
     await manualScan(page, 'FB5971GA1201')
+    await page.getByRole('button', { name: 'Mark IN' }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
     // A scan forces the state flush that re-renders the header pill.
     await expect(page.getByText('Offline', { exact: true }).first()).toBeVisible()
@@ -280,6 +299,7 @@ test.describe('queue matrix', () => {
     await loginAsScanner(page)
     await context.setOffline(true)
     await manualScan(page, 'FB5971GA1301')
+    await page.getByRole('button', { name: 'Mark IN' }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
 
     // The server already applied this scan (commit-then-lost-response): the

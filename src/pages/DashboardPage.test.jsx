@@ -57,7 +57,11 @@ vi.mock('../components/Toast', () => ({
   useToast: () => toast,
 }))
 
-const SCHEDULES = [{ id: 'sched-1', name: 'October 2026 Visit', status: 'open' }]
+const SCHEDULES = [{ id: 'sched-1', name: 'October 2026 Visit', status: 'open', visit_start_date: '2026-10-07', visit_end_date: '2026-10-11' }]
+// Windowless variant for tests that need the scan day to stay on today
+// (e.g. the scanner "active" verdict compares against today IST) — the
+// scanner logic itself is window-independent.
+const NOWINDOW_SCHEDULES = [{ id: 'sched-1', name: 'October 2026 Visit', status: 'open', visit_start_date: null, visit_end_date: null }]
 
 // IST is a fixed +05:30 offset with no DST, so shifting by 5.5h gives the exact
 // wall clock `todayStrIST()` formats — the same day key AND the same time the
@@ -80,8 +84,8 @@ const SCANNER = [
   },
 ]
 const TREND = [
-  { day: '2026-09-23', present: 8, absent: 2 },
-  { day: '2026-09-24', present: 5, absent: 5 },
+  { day: '2026-10-07', present: 8, absent: 2 },
+  { day: '2026-10-08', present: 5, absent: 5 },
 ]
 
 /** Queue one resolved result per RPC, or an error for anything in `fail`. */
@@ -144,7 +148,7 @@ describe('DashboardPage — renders', () => {
   })
 
   it('counts a scanner whose last scan is now in IST as active', async () => {
-    await renderPage()
+    await renderPage({ schedules: NOWINDOW_SCHEDULES })
     // 1/1 — the +05:30 combination with todayStrIST() has to line up, or the
     // scanner silently reads as offline.
     expect(screen.getByText('1/1')).toBeTruthy()
@@ -157,6 +161,17 @@ describe('DashboardPage — renders', () => {
     // bare string would match both and hide which one broke.
     const trendCard = screen.getByText('5-day trend').closest('.card')
     // buildTrendRows maps 8/10 → 80% and 5/10 → 50%.
+    expect(within(trendCard).getByText('80%')).toBeTruthy()
+    expect(within(trendCard).getByText('50%')).toBeTruthy()
+  })
+
+  it('never places a previsit scan under a visit weekday in the trend strip', async () => {
+    // The reported bug on the dept-incharge matrix, same root cause here: an
+    // Oct 2 scan (a Friday) must not render as the FRI visit slot.
+    respondWith({ trend: [...TREND, { day: '2026-10-02', present: 10, absent: 0 }] })
+    await renderPage()
+    const trendCard = screen.getByText('5-day trend').closest('.card')
+    expect(within(trendCard).queryByText('100%')).toBeNull()
     expect(within(trendCard).getByText('80%')).toBeTruthy()
     expect(within(trendCard).getByText('50%')).toBeTruthy()
   })
@@ -216,7 +231,7 @@ describe('DashboardPage — one failed RPC degrades one section', () => {
 describe('DashboardPage — a failed section renders "—", never a healthy 0', () => {
   it('dashes the four daily-backed tiles when attendance_daily_summary fails', async () => {
     respondWith({ fail: ['attendance_daily_summary'] })
-    await renderPage()
+    await renderPage({ schedules: NOWINDOW_SCHEDULES })
     // "—" says unknown; a 0 here would claim nobody came. Scoped per tile:
     // the em-dash also appears in empty states elsewhere on the page.
     for (const label of ['Present today', 'Attendance %', 'Absent today', 'Open now']) {

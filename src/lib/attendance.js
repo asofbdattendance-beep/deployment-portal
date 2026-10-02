@@ -662,13 +662,32 @@ export function buildVisitRows(rows) {
  * present + absent == deployed (max across ALL rows, including rows whose
  * day cannot be placed). First row wins on a weekday collision.
  * Adds rate = present share of the day (0 when the day has no deployed).
+ *
+ * Hard rule (Bhati Visit shows visit-days data only): when `windowDates`
+ * is an array, rows dated outside it are dropped before placement
+ * (a previsit scan must never land under a visit weekday) and the deployed
+ * estimate is drawn from in-window rows only. An EMPTY array means the
+ * schedule has no visit window — the strip is five zero slots. `null` /
+ * `undefined` keeps the legacy unfiltered behaviour for callers that do
+ * not scope by schedule.
+ *
+ * @param {Array<object>} rows trend rows with a `day` field
+ * @param {string[]|null} [windowDates] expanded visit window ('YYYY-MM-DD')
  */
-export function buildTrendRows(rows) {
+export function buildTrendRows(rows, windowDates = null) {
   const list = Array.isArray(rows) ? rows : []
+  // null/undefined = caller does not scope by schedule (legacy unfiltered).
+  // ANY array (even empty) scopes: only listed dates place, an empty window
+  // drops everything so a windowless schedule reads as an all-zero strip.
+  const inWindow = Array.isArray(windowDates)
+    ? new Set(windowDates.filter((d) => typeof d === 'string' && d))
+    : null
   const byWeekday = new Map()
   let deployed = 0
   for (const r of list) {
     if (!r) continue
+    // A previsit scan never seeds the visit denominator either.
+    if (inWindow && !inWindow.has(r?.day)) continue
     const present = Number(r?.present) || 0
     const absent = Number(r?.absent) || 0
     deployed = Math.max(deployed, present + absent)
@@ -860,4 +879,145 @@ export function deptInchargeKpis(dailyRaw, visitRaw) {
     .sort((a, b) => a.deptName.localeCompare(b.deptName))
 
   return { today, visit: whole, byDepartment }
+}
+
+/* ─── Short day labels ("2 Oct") — the single display format for dates
+   across the attendance module (chips, strips, registers, matrices,
+   empty states, toasts). Parsed as UTC so the day never shifts; RPC
+   params, export filenames and sheet contents stay ISO. ─── */
+
+const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/**
+ * Split an ISO 'YYYY-MM-DD' date into a short month + day pair for the
+ * day-column headers ("Oct" over "2"). Falls back to the raw string as
+ * the number line when unparseable.
+ * @param {string} date ISO date
+ * @returns {{mon: string, num: string}}
+ */
+export function splitDayLabel(date) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(date || '').slice(0, 10))
+  if (!m) return { mon: '', num: String(date || '') }
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]))
+  if (Number.isNaN(d.getTime())) return { mon: '', num: String(date || '') }
+  return { mon: MONTH_SHORT[d.getUTCMonth()], num: String(d.getUTCDate()) }
+}
+
+/**
+ * One-line short date for running text ("2 Oct"). Unparseable input
+ * passes through unchanged, so empty stays empty.
+ * @param {string} date ISO date
+ * @returns {string}
+ */
+export function shortDayLabel(date) {
+  const { mon, num } = splitDayLabel(date)
+  return mon ? `${num} ${mon}` : num
+}
+
+/* ─── Attendance matrix (per-sewadar × per-day presence grid) ─── */
+
+/**
+ * Ordered column dates for the attendance matrix: EXACTLY the schedule's
+ * visit window (use expandDateRange from sewaMode.js — the DB window is the
+ * single source of truth since v60). Trend rows NEVER contribute columns:
+ * a previsit scan (or any out-of-window day) must not grow a Bhati Visit
+ * column — those dates belong to the Previsit modules. An empty/unusable
+ * window yields no columns (the page renders a no-window notice instead).
+ *
+ * @param {string[]} windowDates expanded visit window ('YYYY-MM-DD')
+ * @returns {string[]} ordered unique 'YYYY-MM-DD' strings
+ */
+export function visitColumns(windowDates) {
+  const set = new Set()
+  for (const d of Array.isArray(windowDates) ? windowDates : []) {
+    if (typeof d === 'string' && d && /^\d{4}-\d{2}-\d{2}$/.test(d)) set.add(d)
+  }
+  return [...set].sort()
+}
+
+/**
+ * Build the per-sewadar × per-day presence grid behind AttendanceMatrix from
+ * the per-date `attendance_day_badges` lists.
+ *
+ * Identity is the UNION of badges across ALL present + absent lists (rows with
+ * a falsy `badge_number` are skipped), so a deployed-never-scanned sewadar —
+ * absent on every date, present on none — still yields a row instead of going
+ * missing (the scanned-only `attendance_sewadar_summary` could never list
+ * them). Display fields (`sewadar_name`, `centre`, `dept_name`, `is_vss`)
+ * prefer the ABSENT-arm row when the badge appears in any absent list — the
+ * absent list is deployment truth — and fall back to the present-arm row for
+ * badges seen only there. Presence is keyed by BADGE ONLY: `byDate[date]` is
+ * true iff the badge is in that date's present list, and centres are never
+ * compared (the present snapshot and the deployment truth can disagree on
+ * centre for the same badge). Rows are ordered centre → name → badge, the same
+ * hierarchy grouping the other portal tables use.
+ *
+ * @param {object} dayBadges per-date lists: `{ [date]: { present: Array, absent: Array } }`,
+ *   each row shaped `{ badge_number, sewadar_name, sewadar_centre, dept_name, is_vss }`
+ * @param {string[]} columns ordered 'YYYY-MM-DD' strings (see visitColumns)
+ * @returns {{columns: string[], rows: Array<object>}} rows shaped
+ *   {badge_number, sewadar_name, centre, dept_name, is_vss, byDate, presentCount}
+ */
+export function buildAttendanceMatrixFromDayBadges(dayBadges, columns) {
+  const cols = Array.isArray(columns) ? [...columns] : []
+  const source = dayBadges && typeof dayBadges === 'object' ? dayBadges : {}
+  const presentByDate = {}
+  const absentDisplay = new Map()
+  const presentDisplay = new Map()
+  const badges = new Set()
+  const takeRow = (map, row) => {
+    const badge = row?.badge_number
+    if (!badge || map.has(badge)) return
+    map.set(badge, row)
+  }
+  for (const date of Object.keys(source)) {
+    const entry = source[date]
+    // Tolerate a bare array (treated as the present list) alongside the
+    // documented { present, absent } shape.
+    const presentList = Array.isArray(entry?.present) ? entry.present : (Array.isArray(entry) ? entry : [])
+    const absentList = Array.isArray(entry?.absent) ? entry.absent : []
+    const presentSet = new Set()
+    for (const row of presentList) {
+      if (!row || !row.badge_number) continue
+      badges.add(row.badge_number)
+      presentSet.add(row.badge_number)
+      takeRow(presentDisplay, row)
+    }
+    presentByDate[date] = presentSet
+    for (const row of absentList) {
+      if (!row || !row.badge_number) continue
+      badges.add(row.badge_number)
+      takeRow(absentDisplay, row)
+    }
+  }
+  const rows = [...badges]
+    .map((badge) => {
+      // Every badge in `badges` was stored in at least one of the two maps
+      // above (add + takeRow happen together), so no third fallback exists.
+      const display = absentDisplay.get(badge) || presentDisplay.get(badge)
+      const byDate = {}
+      let presentCount = 0
+      for (const date of cols) {
+        const present = !!presentByDate[date]?.has(badge)
+        byDate[date] = present
+        if (present) presentCount += 1
+      }
+      return {
+        badge_number: badge,
+        sewadar_name: display.sewadar_name || '',
+        centre: display.sewadar_centre || '',
+        dept_name: display.dept_name || '',
+        is_vss: !!display.is_vss,
+        byDate,
+        presentCount,
+      }
+    })
+    // compareSewadarRows reads `sewadar_centre`; the matrix row carries the
+    // same value as `centre`, so adapt the shape instead of duplicating the
+    // comparator.
+    .sort((a, b) => compareSewadarRows(
+      { sewadar_centre: a.centre, sewadar_name: a.sewadar_name, badge_number: a.badge_number },
+      { sewadar_centre: b.centre, sewadar_name: b.sewadar_name, badge_number: b.badge_number },
+    ))
+  return { columns: cols, rows }
 }

@@ -14,6 +14,11 @@ const SCHEDULE_STATUS_LABELS = {
 // complete values are ever sent to the DB.
 const COMPLETE_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/
 
+// Visit-window dates are plain 'YYYY-MM-DD' (the DB columns are date).
+// A schedule with no window is a valid "previsit-only" schedule: every
+// scan reads as previsit until the ASO sets the window.
+const COMPLETE_DATE = /^\d{4}-\d{2}-\d{2}$/
+
 const pad2 = n => String(n).padStart(2, '0')
 const toLocalInput = (iso) => {
   if (!iso) return ''
@@ -38,6 +43,33 @@ function DeadlineDraftInput({ iso, onCommit, style, title }) {
   return (
     <input
       type="datetime-local"
+      value={draft}
+      onChange={e => { setDraft(e.target.value); onCommit(e.target.value) }}
+      style={style}
+      title={title}
+    />
+  )
+}
+
+/* A date field that keeps its own draft while typing, mirroring
+   DeadlineDraftInput. date inputs emit '' while cleared — the parent
+   decides whether '' means "keep" (transient) or null (explicit clear).
+   Key the component by the saved value so a successful save remounts it;
+   a rejected edit snaps back on the next reload. */
+function DateDraftInput({ isoDate, onCommit, style, title, inputKey }) {
+  const toInput = (v) => (typeof v === 'string' ? v.slice(0, 10) : '')
+  const [draft, setDraft] = useState(() => toInput(isoDate))
+  const savedRef = useRef(isoDate)
+  useEffect(() => {
+    if (isoDate !== savedRef.current) {
+      savedRef.current = isoDate
+      setDraft(toInput(isoDate))
+    }
+  }, [isoDate])
+  return (
+    <input
+      key={inputKey}
+      type="date"
       value={draft}
       onChange={e => { setDraft(e.target.value); onCommit(e.target.value) }}
       style={style}
@@ -114,8 +146,11 @@ export default function ScheduleMakerPage({ refreshSchedules }) {
 function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, loadSchedules, refreshSchedules, isSuper, toast }) {
   const [newName, setNewName] = useState('')
   const [newDeadline, setNewDeadline] = useState('')
+  const [newVisitStart, setNewVisitStart] = useState('')
+  const [newVisitEnd, setNewVisitEnd] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(null)
   const [confirmClearDeadline, setConfirmClearDeadline] = useState(null)
+  const [confirmClearWindow, setConfirmClearWindow] = useState(null)
   const { profile } = usePortalAuth()
 
   // datetime-local inputs emit PARTIAL values while typing ("2026-08",
@@ -137,13 +172,24 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
       if (isNaN(d.getTime())) { toast.error('Invalid deadline date/time'); return }
       payload.deadline = d.toISOString()
     }
+    // Visit window: both dates or neither. Empty = previsit-only schedule
+    // (every scan reads as previsit until the ASO sets the window).
+    if (newVisitStart || newVisitEnd) {
+      if (!COMPLETE_DATE.test(newVisitStart) || !COMPLETE_DATE.test(newVisitEnd)) { toast.error('Pick both visit start and end dates (or leave both empty)'); return }
+      if (newVisitEnd < newVisitStart) { toast.error('Visit end date cannot be before the start date'); return }
+      payload.visit_start_date = newVisitStart
+      payload.visit_end_date = newVisitEnd
+    }
     const { error } = await supabase.from('deployment_schedules').insert(payload)
     if (error) { toast.error(error.message); return }
     setNewName('')
     setNewDeadline('')
+    setNewVisitStart('')
+    setNewVisitEnd('')
     loadSchedules()
     refreshSchedules?.()
-    toast.success('Schedule created')
+    if (!newVisitStart) toast.warning('Schedule created — no visit dates set, so it reads as previsit-only until you add them')
+    else toast.success('Schedule created')
   }
 
   const setStatus = async (id, status) => {
@@ -176,6 +222,34 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
     loadSchedules()
     refreshSchedules?.()
     toast.success('Deadline cleared')
+  }
+
+  // Visit window: either side commits independently; both must be complete
+  // dates and end >= start. A half window (one side set, other NULL) is
+  // allowed mid-edit and simply reads as previsit-only — the row's amber
+  // "Previsit-only" pill says so — until both sides are set. Clearing goes
+  // through the explicit confirm flow below (both columns nulled together).
+  const setVisitDate = async (sched, column, value) => {
+    if (!value) return // transient while clearing — use the ✕ flow
+    if (!COMPLETE_DATE.test(value)) { toast.error('Pick a complete date'); return }
+    const other = column === 'visit_start_date' ? sched.visit_end_date?.slice(0, 10) : sched.visit_start_date?.slice(0, 10)
+    const start = column === 'visit_start_date' ? value : other
+    const end = column === 'visit_end_date' ? value : other
+    if (start && end && end < start) { toast.error('Visit end date cannot be before the start date'); loadSchedules(); return }
+    const { error } = await supabase.from('deployment_schedules').update({ [column]: value }).eq('id', sched.id)
+    if (error) { toast.error(error.message); return }
+    loadSchedules()
+    refreshSchedules?.()
+    toast.success('Visit dates updated')
+  }
+
+  const clearVisitWindow = async (id) => {
+    const { error } = await supabase.from('deployment_schedules').update({ visit_start_date: null, visit_end_date: null }).eq('id', id)
+    if (error) { toast.error(error.message); return }
+    setConfirmClearWindow(null)
+    loadSchedules()
+    refreshSchedules?.()
+    toast.success('Visit dates cleared — schedule reads as previsit-only')
   }
 
   const deleteSchedule = async (id) => {
@@ -223,6 +297,20 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
               style={{ flex: '0 0 auto', padding: '0.35rem 0.6rem', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: '0.8rem' }}
               title="Deadline (date + time) — after this, all editing is disabled"
             />
+            <input
+              type="date"
+              value={newVisitStart}
+              onChange={e => setNewVisitStart(e.target.value)}
+              style={{ flex: '0 0 auto', padding: '0.35rem 0.6rem', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: '0.8rem' }}
+              title="Visit start date — scans on/after this day count as the Bhati visit"
+            />
+            <input
+              type="date"
+              value={newVisitEnd}
+              onChange={e => setNewVisitEnd(e.target.value)}
+              style={{ flex: '0 0 auto', padding: '0.35rem 0.6rem', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: '0.8rem' }}
+              title="Visit end date — scans after this day count as previsit sewa"
+            />
             <button onClick={createSchedule} disabled={!newName.trim()} style={{ padding: '0.35rem 0.7rem', border: 'none', borderRadius: 6, background: '#2563eb', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', opacity: newName.trim() ? 1 : 0.5 }}>
               <Plus size={15} />
             </button>
@@ -247,8 +335,36 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
                 <span className={`pill ${s.status === "done" ? "pill-gray" : "pill-green"}`}>
                   {SCHEDULE_STATUS_LABELS[s.status] || s.status}
                 </span>
+                {(!s.visit_start_date || !s.visit_end_date) && (
+                  <span className="pill pill-amber" title="No visit dates set — every scan reads as previsit sewa until you add them">
+                    Previsit-only
+                  </span>
+                )}
                 {isSuper && (
                   <>
+                    <div className="cluster" onClick={e => e.stopPropagation()} style={{ gap: '0.4rem' }}>
+                      <span style={{ fontSize: '0.7rem', fontWeight: 700, color: '#64748b' }}>Visit</span>
+                      <DateDraftInput
+                        inputKey={`ws-${s.id}`}
+                        isoDate={s.visit_start_date}
+                        onCommit={value => setVisitDate(s, 'visit_start_date', value)}
+                        style={{ padding: '0.25rem 0.4rem', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: '0.75rem' }}
+                        title="Visit start date — scans on/after this day count as the Bhati visit"
+                      />
+                      <span style={{ fontSize: '0.7rem', color: '#9ca3af' }}>→</span>
+                      <DateDraftInput
+                        inputKey={`we-${s.id}`}
+                        isoDate={s.visit_end_date}
+                        onCommit={value => setVisitDate(s, 'visit_end_date', value)}
+                        style={{ padding: '0.25rem 0.4rem', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: '0.75rem' }}
+                        title="Visit end date — scans after this day count as previsit sewa"
+                      />
+                      {(s.visit_start_date || s.visit_end_date) && (
+                        <button onClick={() => setConfirmClearWindow(s)} className="btn btn-ghost" style={{ padding: '0.2rem 0.35rem', fontSize: '0.7rem', color: '#b91c1c' }} title="Clear the visit dates (schedule becomes previsit-only)">
+                          <X size={12} />
+                        </button>
+                      )}
+                    </div>
                     <div className="cluster" onClick={e => e.stopPropagation()} style={{ gap: '0.4rem' }}>
                       <span style={{ fontSize: '0.7rem', fontWeight: 700, color: deadlinePassed ? '#b91c1c' : '#64748b' }}>Deadline</span>
                       <DeadlineDraftInput
@@ -311,6 +427,21 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
             <div style={{ display: 'flex', gap: '0.6rem', justifyContent: 'flex-end' }}>
               <button onClick={() => setConfirmClearDeadline(null)} className="btn">Cancel</button>
               <button onClick={() => clearDeadline(confirmClearDeadline.id)} className="btn btn-warning">Clear deadline</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmClearWindow && (
+        <div className="modal-overlay" onClick={() => setConfirmClearWindow(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <h4 style={{ fontSize: '0.95rem', fontWeight: 700, marginBottom: '0.5rem' }}>Clear the visit dates?</h4>
+            <p style={{ fontSize: '0.82rem', color: '#64748b', marginBottom: '1rem' }}>
+              <b>{confirmClearWindow.name}</b> will become previsit-only — every scan will read as previsit sewa and the visit reports will go empty until you set the dates again.
+            </p>
+            <div style={{ display: 'flex', gap: '0.6rem', justifyContent: 'flex-end' }}>
+              <button onClick={() => setConfirmClearWindow(null)} className="btn">Cancel</button>
+              <button onClick={() => clearVisitWindow(confirmClearWindow.id)} className="btn btn-warning">Clear visit dates</button>
             </div>
           </div>
         </div>

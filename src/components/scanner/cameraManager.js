@@ -183,6 +183,11 @@ export async function toggleTorch(track, on) {
  * Must be called AFTER `video.play()` — some devices only accept advanced
  * constraints once the stream is actively rendering.
  *
+ * Focus and zoom are applied in SEPARATE `applyConstraints` calls on purpose:
+ * several Samsung firmwares (incl. the Galaxy Z Fold 6) reject or silently
+ * ignore a combined advanced set, which used to void the autofocus request
+ * along with the zoom. Flags are set only after their own call succeeds.
+ *
  * @param {MediaStreamTrack} track
  * @param {{applyZoom?: boolean, point?: {x:number,y:number}|null, debug?: boolean}} [opts]
  * @returns {Promise<{focusApplied:boolean, zoomApplied:boolean, poiApplied:boolean}>}
@@ -205,35 +210,45 @@ export async function applyFocusConstraints(track, opts = {}) {
       } catch { /* unsupported region */ }
     }
 
-    const advanced = []
+    const focusModes = Array.isArray(caps.focusMode) ? caps.focusMode : []
+    const focusSet = {}
+    // Some Samsung firmwares report no focusMode list at all while still
+    // honouring continuous AF — request it anyway on Android rather than
+    // leaving the lens at its (possibly macro-locked) default.
+    if (focusModes.includes('continuous') || (platform.isAndroid && focusModes.length === 0)) {
+      focusSet.focusMode = 'continuous'
+    }
+    if (Array.isArray(caps.exposureMode) && caps.exposureMode.includes('continuous')) {
+      focusSet.exposureMode = 'continuous'
+    }
+    if (Array.isArray(caps.whiteBalanceMode) && caps.whiteBalanceMode.includes('continuous')) {
+      focusSet.whiteBalanceMode = 'continuous'
+    }
 
-    if (Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) {
-      advanced.push({ focusMode: 'continuous' })
-      result.focusApplied = true
+    if (Object.keys(focusSet).length) {
+      try {
+        await track.applyConstraints({ advanced: [focusSet] })
+        if (focusSet.focusMode) result.focusApplied = true
+      } catch { /* unsupported set — zoom below still gets its own chance */ }
     }
 
     // Digital zoom makes the barcode physically larger in the frame, which is
     // the single most effective cure for a blurry/low-res capture. Enabled for
     // any device exposing `zoom` (not only Android — Samsung and desktop
-    // Chrome expose it too).
+    // Chrome expose it too). Kept modest (1.25): a heavy digital crop on a
+    // foldable's sensor magnifies focus hunting more than it helps decoding.
     if (applyZoom && caps.zoom) {
       const maxZoom = Number(caps.zoom.max) || 1
-      const idealZoom = Math.min(1.5, maxZoom)
+      const idealZoom = Math.min(1.25, maxZoom)
       if (idealZoom > 1) {
-        advanced.push({ zoom: idealZoom })
-        result.zoomApplied = true
-        if (debug) console.log(`[CameraMgr] zoom ${idealZoom}`)
+        try {
+          await track.applyConstraints({ advanced: [{ zoom: idealZoom }] })
+          result.zoomApplied = true
+          if (debug) console.log(`[CameraMgr] zoom ${idealZoom}`)
+        } catch { /* zoom unsupported despite caps — focus above stands */ }
       }
     }
 
-    if (Array.isArray(caps.exposureMode) && caps.exposureMode.includes('continuous')) {
-      advanced.push({ exposureMode: 'continuous' })
-    }
-    if (Array.isArray(caps.whiteBalanceMode) && caps.whiteBalanceMode.includes('continuous')) {
-      advanced.push({ whiteBalanceMode: 'continuous' })
-    }
-
-    if (advanced.length) await track.applyConstraints({ advanced })
     if (debug) console.log('[CameraMgr] focus constraints applied', result)
   } catch (e) {
     if (debug) console.warn('[CameraMgr] focus constraints failed:', e?.message)

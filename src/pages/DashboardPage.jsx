@@ -13,8 +13,10 @@ import {
   rateBand,
   UNASSIGNED_CENTRE,
   VISIT_DAYS,
+  shortDayLabel,
 } from '../lib/attendance'
 import { todayStrIST, withTimeout } from '../lib/scannerUtils'
+import { scheduleWindow, expandDateRange, clampDateToWindow } from '../lib/sewaMode'
 import { exportWorkbook, fileSlug } from '../lib/excel'
 import {
   LayoutDashboard, Users, UserX, Percent, Clock, Radio, AlertTriangle,
@@ -155,7 +157,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   // The dashboard has no date picker: it always reports TODAY (IST). Re-sync on
   // mount and on window focus so a tab left open across IST midnight stops
   // reporting yesterday without a manual refresh.
-  const [date, setDate] = useState(() => todayStrIST())
+  const [date, setDate] = useState(() => clampDateToWindow(todayStrIST(), scheduleWindow(schedule)))
   const [now, setNow] = useState(() => Date.now())
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(false)
@@ -180,12 +182,21 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   // that actually fired, so a sustained burst cannot starve the reload.
   const lastReloadAt = useRef(0)
 
+  // Bhati Visit shows visit-days data only: the dashboard always reports
+  // a clamped today (windowless schedules pass through untouched).
+  const visitWin = useMemo(() => scheduleWindow(schedule), [schedule])
+  const winRef = useRef(visitWin)
+  winRef.current = visitWin
   useEffect(() => {
-    const sync = () => setDate((d) => (d === todayStrIST() ? d : todayStrIST()))
+    const sync = () => setDate((d) => {
+      const today = clampDateToWindow(todayStrIST(), winRef.current)
+      return d === today ? d : today
+    })
     sync()
     window.addEventListener('focus', sync)
     return () => window.removeEventListener('focus', sync)
   }, [])
+  useEffect(() => { setDate((d) => clampDateToWindow(d, visitWin)) }, [visitWin])
 
   // The "updated Ns ago" label only needs second resolution, not a re-render
   // per second.
@@ -295,7 +306,12 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   const visit = useMemo(() => buildVisitRows(rowsAreCurrent ? sec.visit.rows : []), [sec.visit.rows, rowsAreCurrent])
   const scannerRows = useMemo(() => buildScannerRows(rowsAreCurrent ? sec.ops.rows : []), [sec.ops.rows, rowsAreCurrent])
   const anomalyRows = useMemo(() => (rowsAreCurrent ? sec.anom.rows : []).filter((r) => r && r.rule), [sec.anom.rows, rowsAreCurrent])
-  const trend = useMemo(() => buildTrendRows(rowsAreCurrent ? sec.trend.rows : []), [sec.trend.rows, rowsAreCurrent])
+  // The strip is window-scoped (hard rule): a previsit scan must never
+  // land under a visit weekday, and a windowless schedule reads all-zero.
+  const trend = useMemo(
+    () => buildTrendRows(rowsAreCurrent ? sec.trend.rows : [], expandDateRange(visitWin.start, visitWin.end)),
+    [sec.trend.rows, rowsAreCurrent, visitWin]
+  )
 
   const totals = useMemo(() => dailyTotals(dailyRows), [dailyRows])
   const counts = useMemo(() => anomalyCounts(anomalyRows), [anomalyRows])
@@ -465,7 +481,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
       const absent = await dayWorkbook('absent')
       if (present.written) toast.success('Present list exported')
       if (absent.written) toast.success('Absent list exported')
-      if (!present.written && !absent.written) toast.warning(`No attendance for ${date} — nothing exported`)
+      if (!present.written && !absent.written) toast.warning(`No attendance for ${shortDayLabel(date)} — nothing exported`)
     } catch (e) {
       console.error('[Dashboard] snapshot export failed:', e)
       toast.error('Could not export the snapshot')
@@ -479,7 +495,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
     try {
       const result = await dayWorkbook(mode)
       if (result.written) toast.success(`${mode === 'present' ? 'Present' : 'Absent'} list exported`)
-      else toast.warning(`No ${mode} sewadars for ${date} — nothing exported`)
+      else toast.warning(`No ${mode} sewadars for ${shortDayLabel(date)} — nothing exported`)
     } catch (e) {
       console.error(`[Dashboard] ${mode} export failed:`, e)
       toast.error(`Could not export the ${mode} list`)
@@ -549,7 +565,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
           </div>
           <div>
             <div className="stat-label" style={{ marginBottom: '0.2rem' }}>Scan day (IST)</div>
-            <div style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text)', fontVariantNumeric: 'tabular-nums' }}>{date}</div>
+            <div style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text)', fontVariantNumeric: 'tabular-nums' }}>{shortDayLabel(date)}</div>
           </div>
         </div>
       </div>
@@ -603,7 +619,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
           <div className="stat-value" style={{ color: sec.daily.error ? '#b45309' : (totals.open_now ? '#b45309' : undefined) }} title={sec.daily.error ? 'Open sessions could not be loaded' : undefined}>{sec.daily.error ? '—' : totals.open_now}</div>
           <div className="stat-sub">IN, not yet OUT</div>
         </button>
-        <button type="button" onClick={() => go('liveScanners')} className="stat" style={TILE} title="Open Live Scanners">
+        <button type="button" onClick={() => go('attendance')} className="stat" style={TILE} title="Open Attendance (Scanner Ops)">
           <div className="stat-label">Scanners active</div>
           <div className="stat-value" style={sec.ops.error ? errStyle : undefined} title={sec.ops.error ? 'Scanner activity could not be loaded' : undefined}>{sec.ops.error ? '—' : `${activeScanners}/${scannerHealth.length}`}</div>
           <div className="stat-sub">scanned in the last 15 min</div>
@@ -750,7 +766,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
             <div className="section-header" style={{ flexWrap: 'wrap', gap: '0.5rem' }}>
               <div className="section-title"><Radio size={15} /> Scanner health</div>
               <div style={{ flex: 1 }} />
-              <button onClick={() => go('liveScanners')} className="btn btn-ghost" style={{ padding: '0.15rem 0.4rem', fontSize: '0.7rem' }}>
+              <button onClick={() => go('attendance')} className="btn btn-ghost" style={{ padding: '0.15rem 0.4rem', fontSize: '0.7rem' }}>
                 View all <ArrowUpRight size={12} />
               </button>
             </div>
@@ -758,7 +774,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
               <SectionError label="Scanner health" onRetry={load} />
             ) : scannerHealth.length === 0 ? (
               <div className="empty" style={{ padding: '0.75rem' }}>
-                <div className="empty-text">No scanner activity recorded on {date}.</div>
+                <div className="empty-text">No scanner activity recorded on {shortDayLabel(date)}.</div>
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginTop: '0.6rem' }}>
@@ -786,7 +802,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
                 {scannerHealth.length > 6 && (
                   <div style={{ fontSize: '0.72rem', color: '#64748b' }}>
                     +{scannerHealth.length - 6} more scanners —{' '}
-                    <button onClick={() => go('liveScanners')} className="btn btn-ghost" style={{ padding: 0, fontSize: '0.72rem', color: '#4f46e5' }}>view all</button>
+                    <button onClick={() => go('attendance')} className="btn btn-ghost" style={{ padding: 0, fontSize: '0.72rem', color: '#4f46e5' }}>view all</button>
                   </div>
                 )}
               </div>
@@ -857,7 +873,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
         <div className="section-header" style={{ flexWrap: 'wrap', gap: '0.6rem' }}>
           <div>
             <div className="section-title"><FileDown size={15} /> Quick actions</div>
-            <div className="page-sub" style={{ margin: 0 }}>Lists for {date} · each workbook has a per-centre Summary with a TOTAL plus the full badge list</div>
+            <div className="page-sub" style={{ margin: 0 }}>Lists for {shortDayLabel(date)} · each workbook has a per-centre Summary with a TOTAL plus the full badge list</div>
           </div>
           <div style={{ flex: 1 }} />
           <button onClick={() => runExport('present')} disabled={exporting || !rowsAreCurrent} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
@@ -869,8 +885,8 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
           <button onClick={() => go('reports')} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
             <Users size={13} /> Reports
           </button>
-          <button onClick={() => go('liveScanners')} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
-            <Radio size={13} /> Live Scanners
+          <button onClick={() => go('attendance')} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
+            <Radio size={13} /> Scanner Ops
           </button>
           <button onClick={() => go('anomalies')} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
             <AlertTriangle size={13} /> Anomalies

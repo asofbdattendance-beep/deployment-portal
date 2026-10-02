@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'react'
 import { supabase } from '../lib/supabase'
 import { useToast } from '../components/Toast'
-import { scannerStatus, timeAgo, UNASSIGNED_CENTRE } from '../lib/attendance'
+import { scannerStatus, timeAgo, UNASSIGNED_CENTRE, shortDayLabel } from '../lib/attendance'
+import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
 import { todayStrIST } from '../lib/scannerUtils'
 import { exportWorkbook, fileSlug } from '../lib/excel'
 import {
@@ -72,7 +73,11 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
   const toast = useToast()
   const schedule = schedules?.find((s) => s.id === scheduleId)
 
-  const [date, setDate] = useState(() => todayStrIST())
+  const [date, setDate] = useState(() => clampDateToWindow(todayStrIST(), scheduleWindow(schedule)))
+  // Bhati Visit shows visit-days data only: pin the picker inside the
+  // window (windowless schedules pass through untouched).
+  const visitWin = useMemo(() => scheduleWindow(schedule), [schedule])
+  useEffect(() => { setDate((d) => clampDateToWindow(d, visitWin)) }, [visitWin])
   const [raw, setRaw] = useState([])
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(false)
@@ -428,7 +433,9 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
             <input
               type="date"
               value={date}
-              onChange={(e) => { dateTouchedRef.current = true; setDate(e.target.value) }}
+              min={visitWin.start || undefined}
+              max={visitWin.end || undefined}
+              onChange={(e) => { dateTouchedRef.current = true; setDate(clampDateToWindow(e.target.value, visitWin)) }}
               className="input"
               style={{ height: 36 }}
               aria-label="Scan day"
@@ -452,7 +459,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
         <div className="stat">
           <div className="stat-label">Scanners today</div>
           <div className="stat-value">{stats.scanners}</div>
-          <div className="stat-sub">on {date || 'no scan day'}</div>
+          <div className="stat-sub">on {shortDayLabel(date) || 'no scan day'}</div>
         </div>
         <div className="stat">
           <div className="stat-label">Scans in</div>
@@ -514,7 +521,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
             <div className="empty-icon"><Radio size={22} /></div>
             <div className="empty-title">No scanner activity</div>
             <div className="empty-text">
-              {term ? 'Try clearing the search.' : `No scans were recorded on ${date}.`}
+              {term ? 'Try clearing the search.' : `No scans were recorded on ${shortDayLabel(date)}.`}
             </div>
           </div>
         ) : (
@@ -621,7 +628,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
                                             {clock(s.in_time)}
                                           </div>
                                           {s.in_date && s.in_date !== date && (
-                                            <div style={{ fontSize: '0.72rem', color: '#b45309' }}>{s.in_date}</div>
+                                            <div style={{ fontSize: '0.72rem', color: '#b45309' }} title={s.in_date}>{shortDayLabel(s.in_date)}</div>
                                           )}
                                         </td>
                                       </tr>

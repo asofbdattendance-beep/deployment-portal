@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { withTimeout, friendly, todayStrIST, hhmmIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, withinToggleGuard, minutesSince, SCAN_TOGGLE_GUARD_MS, isDecisionPopup, isEdgeDetection, isTimestampStale, CLOCK_SKEW_FUTURE_MS, CLOCK_SKEW_MAX_AGE_MS } from './scannerUtils'
+import { withTimeout, friendly, todayStrIST, hhmmIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, isDecisionPopup, isEdgeDetection, isTimestampStale, CLOCK_SKEW_FUTURE_MS, CLOCK_SKEW_MAX_AGE_MS } from './scannerUtils'
 
 afterEach(() => { vi.useRealTimers() })
 
@@ -381,71 +381,15 @@ describe('isSecureCameraContext', () => {
   })
 })
 
-/* ─── withinToggleGuard (v44) ─── */
-describe('withinToggleGuard', () => {
-  const NOW = 1_757_000_000_000
-  const H = 3600_000
-
-  it('guards a toggle 1 minute after the previous event', () => {
-    expect(withinToggleGuard(NOW - 60_000, NOW)).toBe(true)
-  })
-
-  it('guards a toggle 59 minutes 59s after the previous event', () => {
-    expect(withinToggleGuard(NOW - (59 * 60_000 + 59_000), NOW)).toBe(true)
-  })
-
-  it('does NOT guard at exactly 1h (strictly-less-than boundary)', () => {
-    expect(withinToggleGuard(NOW - H, NOW)).toBe(false)
-  })
-
-  it('does not guard past the window', () => {
-    expect(withinToggleGuard(NOW - (H + 1), NOW)).toBe(false)
-    expect(withinToggleGuard(NOW - (3 * H), NOW)).toBe(false)
-  })
-
-  it('does NOT guard an unknown timestamp — a first-ever scan must never be prompted', () => {
-    expect(withinToggleGuard(NaN, NOW)).toBe(false)
-    expect(withinToggleGuard(undefined, NOW)).toBe(false)
-    expect(withinToggleGuard('yesterday', NOW)).toBe(false)
-  })
-
-  it('DOES guard a future timestamp (device/server clock skew) — ask when in doubt', () => {
-    expect(withinToggleGuard(NOW + 60_000, NOW)).toBe(true)
-    expect(withinToggleGuard(NOW + (5 * H), NOW)).toBe(true)
-  })
-
-  it('honours a custom window', () => {
-    expect(withinToggleGuard(NOW - (3 * H), NOW, 4 * H)).toBe(true)
-    expect(withinToggleGuard(NOW - (5 * H), NOW, 4 * H)).toBe(false)
-  })
-
-  it('defaults to a 1-hour window', () => {
-    expect(SCAN_TOGGLE_GUARD_MS).toBe(60 * 60 * 1000)
-    expect(withinToggleGuard(Date.now() - (30 * 60_000))).toBe(true)
-    expect(withinToggleGuard(Date.now() - (90 * 60_000))).toBe(false)
-  })
-})
-
-/* ─── minutesSince (v44) ─── */
-describe('minutesSince', () => {
-  const NOW = 1_757_000_000_000
-  it('rounds to the nearest minute', () => {
-    expect(minutesSince(NOW - (8 * 60_000), NOW)).toBe('8')
-    expect(minutesSince(NOW - (8 * 60_000 + 20_000), NOW)).toBe('8')
-    expect(minutesSince(NOW - (8 * 60_000 + 40_000), NOW)).toBe('9')
-  })
-  it('floors at 0 for a future or unknown timestamp — never a negative age', () => {
-    expect(minutesSince(NOW + (10 * 60_000), NOW)).toBe('0')
-    expect(minutesSince(NaN, NOW)).toBe('0')
-  })
-})
-
-/* ─── isDecisionPopup (v44 camera pause) ─── */
+/* ─── isDecisionPopup (explicit choice + forgot camera pause) ─── */
 describe('isDecisionPopup', () => {
-  it('gates the two confirm gates and the forgot prompt', () => {
+  it('gates the choose popup, the forgot prompt (and retired confirm gates)', () => {
+    expect(isDecisionPopup('choose')).toBe(true)
+    expect(isDecisionPopup('forgot')).toBe(true)
+    // Retired v44 gates are kept in the check so a stale popup can never
+    // slip through and get swapped underneath the operator.
     expect(isDecisionPopup('confirm_out')).toBe(true)
     expect(isDecisionPopup('confirm_in')).toBe(true)
-    expect(isDecisionPopup('forgot')).toBe(true)
   })
 
   it('does NOT gate anything else — rapid scanning and retries must keep working', () => {

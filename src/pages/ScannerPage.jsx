@@ -19,7 +19,7 @@ import RecentScansTable from '../components/scanner/RecentScansTable'
 const isFailedQueueRow = (r) => !!r && (r.status === 'failed' || r.failed === true)
 const isOrphanedQueueRow = (r) => !isFailedQueueRow(r) && (r.owner ?? null) === null && !r.synced
 
-export default function ScannerPage({ schedules, scheduleId }){
+export default function ScannerPage({ schedules, scheduleId, sewaMode }){
   const { profile } = usePortalAuth()
   const toast=useToast()
   const schedule = schedules.find(s=>s.id===scheduleId)
@@ -94,8 +94,8 @@ export default function ScannerPage({ schedules, scheduleId }){
 
   const {
     popup, outTime, setOutTime, closePopup,
-    handleScan, handleCameraScan, confirmScan, confirmForgot,
-    isConfirm, confirmLabel, busy, resetBusy,
+    handleScan, handleCameraScan, commitScan, confirmForgot,
+    busy, resetBusy,
     queued, syncing, refreshQueue, scannerRef,
   } = useScannerSession({
     scheduleId,
@@ -155,6 +155,11 @@ export default function ScannerPage({ schedules, scheduleId }){
     <div className="page" style={{maxWidth:900, margin:'0 auto'}}>
       <div className="page-header"><div><h2 className="page-title"><ScanLine size={22}/> Scanner</h2><div className="page-sub" style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
         {profile?.centre} · {schedule?.name||''}
+        {sewaMode && (
+          <span className={`pill ${sewaMode === 'previsit' ? 'pill-amber' : 'pill-blue'}`} style={{ fontSize: '0.7rem' }} title="Recording mode is automatic — the scan date decides whether this counts as Previsit sewa or the Bhati visit">
+            {sewaMode === 'previsit' ? 'Previsit sewa' : 'Bhati visit'}
+          </span>
+        )}
         {pendingCount > 0 && (
           <span className="pill pill-amber" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
             {syncing ? <RefreshCw size={10} className="spin"/> : <WifiOff size={10}/>}
@@ -223,6 +228,7 @@ export default function ScannerPage({ schedules, scheduleId }){
       <ScanResultPopup
         open={!!popup}
         status={popup?.status}
+        action={popup?.action}
         badge={popup?.badge}
         name={popup?.name}
         centre={popup?.centre}
@@ -234,8 +240,7 @@ export default function ScannerPage({ schedules, scheduleId }){
         outTime={outTime}
         onOutTimeChange={setOutTime}
         onClose={closePopup}
-        confirmLabel={confirmLabel}
-        onConfirm={popup?.status==='forgot' ? confirmForgot : isConfirm ? confirmScan : closePopup}
+        onConfirm={popup?.status==='forgot' ? confirmForgot : popup?.status==='choose' ? commitScan : closePopup}
       />
     </div>
   )

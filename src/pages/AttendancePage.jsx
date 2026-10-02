@@ -18,8 +18,10 @@ import {
   FULL_VISIT_DAYS,
   UNASSIGNED_CENTRE,
   VISIT_DAYS,
+  shortDayLabel,
 } from '../lib/attendance'
 import { todayStrIST, withTimeout } from '../lib/scannerUtils'
+import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
 import { exportWorkbook, fileSlug } from '../lib/excel'
 import {
   ScanLine, Users, Clock, Download, Search, RefreshCw, Loader2,
@@ -86,7 +88,11 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   const schedule = schedules.find((s) => s.id === scheduleId)
 
   const [tab, setTab] = useState('sewadars') // sewadars | daily | scanners
-  const [date, setDate] = useState(() => todayStrIST())
+  const [date, setDate] = useState(() => clampDateToWindow(todayStrIST(), scheduleWindow(schedule)))
+  // Bhati Visit shows visit-days data only: pin the picker inside the
+  // window (windowless schedules pass through untouched).
+  const visitWin = useMemo(() => scheduleWindow(schedule), [schedule])
+  useEffect(() => { setDate((d) => clampDateToWindow(d, visitWin)) }, [visitWin])
   const [sewadarRaw, setSewadarRaw] = useState([])
   const [dailyRaw, setDailyRaw] = useState([])
   const [scannerRaw, setScannerRaw] = useState([])
@@ -531,7 +537,9 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
             <input
               type="date"
               value={date}
-              onChange={(e) => { dateTouchedRef.current = true; setDate(e.target.value) }}
+              min={visitWin.start || undefined}
+              max={visitWin.end || undefined}
+              onChange={(e) => { dateTouchedRef.current = true; setDate(clampDateToWindow(e.target.value, visitWin)) }}
               className="input"
               style={{ height: 36 }}
               aria-label="Scan day"
@@ -650,10 +658,10 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
                         <td style={{ textAlign: 'center', fontWeight: 700 }}>
                           {hasExpectedDays(r) ? `${r.days_present}/${r.expected_days}` : r.days_present > 0 ? `${r.days_present} (no dept)` : '—'}
                         </td>
-                        <td>{r.first_in_date ? `${r.first_in_date} ${(r.first_in_time || '').slice(0, 5)}` : '—'}</td>
+                        <td>{r.first_in_date ? `${shortDayLabel(r.first_in_date)} ${(r.first_in_time || '').slice(0, 5)}` : '—'}</td>
                         <td>
                           {r.last_out_date
-                            ? `${r.last_out_date} ${(r.last_out_time || '').slice(0, 5)}`
+                            ? `${shortDayLabel(r.last_out_date)} ${(r.last_out_time || '').slice(0, 5)}`
                             : r.still_open ? <span className="pill pill-amber">still IN</span> : '—'}
                         </td>
                         <td>{sessionDuration(r)}</td>

@@ -15,57 +15,20 @@ export function getBusySafetyTimeout() {
 }
 export const CACHE_TTL = 10 * 60 * 1000 // 10 minutes for preloadDeployed cache
 export const MAX_DRAIN_ATTEMPTS = 12     // after this, mark permanently failed
-export const SCAN_TOGGLE_GUARD_MS = 60 * 60 * 1000 // 1h — minimum dwell before an automatic IN↔OUT toggle
-
-// ─── withinToggleGuard ────────────────────────────────────────────────────────
-/**
- * Is a scan that would flip IN↔OUT too close to the opposite event to be made
- * automatically?
- *
- * The ladder itself is right — first scan IN, next scan OUT, next IN — but an
- * operator who re-scans a badge they just scanned (a double tap, a badge left
- * in front of the lens, a correction) silently writes a bogus 90-second session
- * and skews the attendance stats. So a toggle inside `windowMs` of the previous
- * event is held back for an explicit Confirm.
- *
- * Strictly-less-than: at exactly 60:00 the toggle is automatic again.
- *
- * @param {number} tsMs — epoch ms of the PREVIOUS event (open `in_date`+`in_time`,
- *   or the last CLOSED session's `out_date`+`out_time`). `NaN` when unknown.
- * @param {number} [nowMs]
- * @param {number} [windowMs]
- * @returns {boolean} true = confirm before toggling. A non-finite `tsMs` (we
- *   don't know when the last event was) is NOT guarded — we must not strand a
- *   legitimate scan behind a prompt we cannot justify. A ts in the future (clock
- *   skew between the scanner's device and the server) IS guarded: when in doubt,
- *   ask.
- */
-export function withinToggleGuard(tsMs, nowMs = Date.now(), windowMs = SCAN_TOGGLE_GUARD_MS) {
-  if (!Number.isFinite(tsMs)) return false
-  return (nowMs - tsMs) < windowMs
-}
-
-/**
- * Human "N min" label for the confirm prompt, rounded to the nearest minute and
- * floored at 0 (a future timestamp must never read as a negative age).
- *
- * @param {number} tsMs
- * @param {number} [nowMs]
- * @returns {string} e.g. "8"
- */
-export function minutesSince(tsMs, nowMs = Date.now()) {
-  if (!Number.isFinite(tsMs)) return '0'
-  return String(Math.max(0, Math.round((nowMs - tsMs) / 60000)))
-}
-
 // ─── isDecisionPopup ──────────────────────────────────────────────────────────
 /**
  * Popup statuses that ask the operator a question which must be ANSWERED
  * before any other badge is scanned. While one of these is open, camera scans
  * are ignored so a second badge scanned behind the modal cannot silently
- * replace the pending question (the operator's Confirm click is aimed at the
+ * replace the pending question (the operator's action click is aimed at the
  * dialog they see — if the dialog changed underneath, the click writes the
  * wrong sewadar). Answering or cancelling resumes the camera.
+ *
+ * `choose` is the explicit IN/OUT choice: a scan only resolves the sewadar's
+ * state and shows their details, and NOTHING is written until the operator
+ * taps Mark IN / Mark OUT — so the popup must be answered, never swapped.
+ * The old v44 1h confirm gates (confirm_out/confirm_in) are retired; they are
+ * kept in this check only so a stale persisted popup can never slip through.
  *
  * Only this set is gated. `error` popups are deliberately NOT included: the
  * lookup-timeout and storage-failure paths explicitly tell the operator to
@@ -76,7 +39,7 @@ export function minutesSince(tsMs, nowMs = Date.now()) {
  * @returns {boolean}
  */
 export function isDecisionPopup(status) {
-  return status === 'confirm_out' || status === 'confirm_in' || status === 'forgot'
+  return status === 'choose' || status === 'confirm_out' || status === 'confirm_in' || status === 'forgot'
 }
 
 // ─── withTimeout ──────────────────────────────────────────────────────────────
