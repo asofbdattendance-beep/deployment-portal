@@ -341,6 +341,7 @@ vi.mock('xlsx', () => ({
     book_append_sheet: vi.fn(),
   },
   writeFile: vi.fn(),
+  write: vi.fn(() => new Uint8Array([1, 2, 3])),
 }))
 
 describe('DashboardPage — export snapshot accounting', () => {

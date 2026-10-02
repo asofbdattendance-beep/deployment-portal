@@ -4,7 +4,10 @@ import { useToast } from '../components/Toast'
 import { anomalyCounts, UNASSIGNED_CENTRE, shortDayLabel } from '../lib/attendance'
 import { todayStrIST } from '../lib/scannerUtils'
 import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
-import { exportWorkbook, fileSlug } from '../lib/excel'
+import { exportWorkbook, exportWorkbookBlob, fileSlug } from '../lib/excel'
+import { useIsMobile } from '../hooks/useMediaQuery'
+import { useExport } from '../hooks/useExport'
+import ExportSheet from '../components/mobile/ExportSheet'
 import {
   ShieldAlert, Download, Lock, RefreshCw, Loader2, Search, ArrowUpRight,
 } from 'lucide-react'
@@ -244,16 +247,10 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
   }, [base, rule, search])
 
   // ─── Excel ───
-  const exportExcel = useCallback(async () => {
-    if (!visible.length) {
-      toast.warning('No anomalies to export')
-      return
-    }
-    setExporting(true)
-    try {
-      const written = await exportWorkbook(
-        `${fileSlug(schedule?.name)}_${date || 'visit'}_anomalies.xlsx`,
-        [
+  const exportFilename = `${fileSlug(schedule?.name)}_${date || 'visit'}_anomalies.xlsx`
+  // Sheet rows are built WITHOUT saving so desktop (direct download) and
+  // mobile (share sheet) share one builder — the two paths can never drift.
+  const buildExportSheets = () => ([
           {
             name: 'Anomalies',
             rows: visible.map((r) => ({
@@ -279,7 +276,34 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
             ],
           },
         ]
-      )
+  )
+
+  const isMobile = useIsMobile()
+  // Mobile export delivery (share sheet + save fallback). Desktop keeps the
+  // direct download below.
+  const mobileExport = useExport()
+  const [exportSheetOpen, setExportSheetOpen] = useState(false)
+  const onExportPress = async () => {
+    setExportSheetOpen(true)
+    await mobileExport.prepare(async () => {
+      const { blob, written } = await exportWorkbookBlob(exportFilename, buildExportSheets())
+      if (!written) return null
+      return { blob, filename: exportFilename }
+    })
+  }
+
+  // Plain function (not useCallback): it closes over the per-render sheet
+  // builder above, so memoizing it would only pin a stale closure.
+  const exportExcel = async () => {
+    if (!visible.length) {
+      toast.warning('No anomalies to export')
+      return
+    }
+    // Mobile: same builder, delivered through the share sheet.
+    if (isMobile) { await onExportPress(); return }
+    setExporting(true)
+    try {
+      const written = await exportWorkbook(exportFilename, buildExportSheets())
       if (!written) {
         toast.warning('No anomalies to export')
         return
@@ -290,7 +314,7 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
     } finally {
       setExporting(false)
     }
-  }, [visible, counts, isCapped, capNote, schedule, date, toast])
+  }
 
   // ─── Guards (early returns, so no hooks run after them) ───
   if (!schedules.length) {
@@ -348,7 +372,7 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
             <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
               {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
             </button>
-            <button onClick={exportExcel} disabled={exporting || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+            <button onClick={exportExcel} disabled={exporting || mobileExport.building || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export Excel
             </button>
             {/* The dashboard deep-links here for a rule; the jump used to be
@@ -449,7 +473,7 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
           </div>
           <div style={{ flex: 1 }} />
           <div style={{ position: 'relative', minWidth: 200 }}>
-            <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
+            <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none' }} />
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -514,6 +538,19 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
         An anomaly is cleared by fixing the underlying scan or deployment record — this page never
         writes, and there is no “resolve” action to click.
       </div>
+
+      <ExportSheet
+        open={isMobile && exportSheetOpen}
+        onClose={() => { setExportSheetOpen(false); mobileExport.reset() }}
+        filename={exportFilename}
+        file={mobileExport.file?.blob || null}
+        building={mobileExport.building}
+        buildError={mobileExport.buildError}
+        delivering={mobileExport.delivering}
+        deliveredVia={mobileExport.deliveredVia}
+        onDeliver={mobileExport.deliver}
+        onRetry={onExportPress}
+      />
     </div>
   )
 }

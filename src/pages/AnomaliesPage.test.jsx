@@ -68,7 +68,27 @@ vi.mock('xlsx', () => ({
     json_to_sheet: (rows) => ({ rows }),
   },
   writeFile: (...a) => writeFile(...a),
+  write: vi.fn(() => new Uint8Array([1, 2, 3])),
 }))
+
+// The export now downloads via an anchor Blob URL (not xlsx.writeFile), so
+// filename assertions read the anchor's download attribute.
+async function clickExportAndGetFilename() {
+  URL.createObjectURL = vi.fn(() => 'blob:mock')
+  URL.revokeObjectURL = vi.fn()
+  let downloaded = null
+  const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+    downloaded = this.download
+  })
+  try {
+    fireEvent.click(screen.getByText('Export Excel'))
+    const { write } = await import('xlsx')
+    await waitFor(() => expect(write).toHaveBeenCalled())
+    return downloaded
+  } finally {
+    clickSpy.mockRestore()
+  }
+}
 
 const SCHEDULES = [
   { id: 'sched-1', name: 'October 2026 Visit' },
@@ -267,12 +287,11 @@ describe('filtering — chips and search narrow the table, not the counts', () =
 describe('Excel — two sheets, and nothing is written when there is nothing to write', () => {
   it('writes an Anomalies sheet and a Counts sheet to a date-stamped filename', async () => {
     await renderPage()
-    fireEvent.click(screen.getByText('Export Excel'))
-    await waitFor(() => expect(writeFile).toHaveBeenCalled())
+    const downloaded = await clickExportAndGetFilename()
 
     // 'visit' in the filename, because no date is pinned — a whole-visit export
     // must not be labelled with a day it does not represent.
-    expect(writeFile.mock.calls[0][1]).toBe('October_2026_Visit_visit_anomalies.xlsx')
+    expect(downloaded).toBe('October_2026_Visit_visit_anomalies.xlsx')
 
     const sheetNames = bookAppendSheet.mock.calls.map((c) => c[2])
     expect(sheetNames).toEqual(['Anomalies', 'Counts'])
@@ -331,8 +350,7 @@ describe('null-safe display — a null centre and a null event date are never bl
   it('exports the same bucket, never a blank cell', async () => {
     respondWith({ rows: [NULL_ROW] })
     await renderPage()
-    fireEvent.click(screen.getByText('Export Excel'))
-    await waitFor(() => expect(writeFile).toHaveBeenCalled())
+    await clickExportAndGetFilename()
     expect(bookAppendSheet.mock.calls[0][1].rows[0]).toEqual({
       Rule: 'Ineligible badge',
       Badge: 'FB5971GA0003',
@@ -392,8 +410,7 @@ describe('cap-aware counts — a capped feed reads as a lower bound, never a cen
   it('exports capped counts with the cap note on the Counts sheet', async () => {
     respondWith({ rows: bigRows('UNDEPLOYED_SCAN', 200) })
     await renderPage()
-    fireEvent.click(screen.getByText('Export Excel'))
-    await waitFor(() => expect(writeFile).toHaveBeenCalled())
+    await clickExportAndGetFilename()
     const countsRows = bookAppendSheet.mock.calls[1][1].rows
     expect(countsRows[0]).toEqual({ Rule: 'Undeployed scan', Count: '200+' })
     expect(countsRows[countsRows.length - 1].Rule).toMatch(/showing newest 200/i)

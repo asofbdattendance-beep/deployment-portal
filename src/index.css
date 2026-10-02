@@ -1721,3 +1721,179 @@ select.previsit-control { max-width: 15rem; }
   animation: spin 0.6s linear infinite;
   flex-shrink: 0;
 }
+
+/* ═══ Mobile reports layer ═══ */
+
+/* Sticky filter summary above report tables (phones only). */
+@media (max-width: 768px) {
+  .mobile-filterbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    background: #f6f7fb;
+    padding: 0.5rem 0;
+  }
+  .mobile-filter-open {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    touch-action: manipulation;
+  }
+  .mobile-filter-badge {
+    min-width: 20px;
+    height: 20px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: #4f46e5;
+    color: #fff;
+    font-size: 0.7rem;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .mobile-filter-chips {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    overflow-x: auto;
+    flex: 1 1 auto;
+    padding: 2px 0;
+  }
+  .mobile-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    background: #fff;
+    border-radius: 999px;
+    padding: 0.3rem 0.3rem 0.3rem 0.65rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-sec);
+  }
+  .mobile-chip-x {
+    width: 28px;
+    height: 28px;
+    border: 0;
+    border-radius: 999px;
+    background: #f1f5f9;
+    color: var(--text-sec);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+  .mobile-chip-clear {
+    border: 0;
+    background: none;
+    color: #4f46e5;
+    font-size: 0.78rem;
+    font-weight: 700;
+    white-space: nowrap;
+    flex-shrink: 0;
+    min-height: 44px;
+    padding: 0 0.4rem;
+    cursor: pointer;
+  }
+  .mobile-filterbar-count {
+    margin-left: auto;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .mobile-filter-sheet-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .mobile-filter-clear { min-height: 44px; }
+  .mobile-filter-result {
+    font-size: 0.8rem;
+    color: var(--text-sec);
+    margin-top: 0.25rem;
+    font-variant-numeric: tabular-nums;
+  }
+  /* Pages pass their desktop filter controls unchanged — stack them full
+     width inside the sheet so the same state/handlers just reflow. */
+  .mobile-filter-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    margin-top: 0.75rem;
+  }
+  .mobile-filter-fields .previsit-field,
+  .mobile-filter-fields .previsit-field--search {
+    flex: 1 1 100%;
+    max-width: none;
+  }
+  .mobile-filter-fields select,
+  .mobile-filter-fields input {
+    width: 100%;
+    min-height: 44px;
+    font-size: 16px;
+  }
+}
+
+/* Card-mode hardening (≤640px): stacked rows must never inherit desktop
+   scroll-table mechanics. Desktop ≥641px untouched. */
+@media (max-width: 640px) {
+  /* Frozen panes are meaningless in a stacked card — static, or the
+     190/280px offsets overlap neighbouring cards. */
+  .table-sticky td.table-sticky-col,
+  .table-sticky td.table-sticky-col-2,
+  .table-sticky td.table-sticky-col-3 {
+    position: static;
+    min-width: 0;
+  }
+  /* The wide register collapses to labelled cards on phones instead of
+     forcing 896px-wide "cards" inside a ~300px viewport. */
+  .previsit-table { min-width: 0; }
+  /* Tappable controls inside cards reach 44px. */
+  .table tbody td .btn { min-height: 44px; }
+}
+
+/* ═══ Mobile export sheet ═══ */
+@media (max-width: 768px) {
+  .mobile-export-state {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    color: var(--text-sec);
+    padding: 0.7rem 0.2rem;
+  }
+  .mobile-export-state .spin { flex-shrink: 0; }
+  .mobile-export-error { color: #b91c1c; flex-wrap: wrap; }
+  .mobile-export-file {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    background: #f8fafc;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.7rem 0.8rem;
+    margin-top: 0.5rem;
+    color: #4f46e5;
+  }
+  .mobile-export-name { font-weight: 700; font-size: 0.85rem; color: var(--text); word-break: break-all; }
+  .mobile-export-size { font-size: 0.75rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  .mobile-export-actions { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.75rem; }
+  .mobile-export-actions .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    min-height: 48px;
+  }
+}

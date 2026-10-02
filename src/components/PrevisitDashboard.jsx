@@ -127,9 +127,9 @@ export default function PrevisitDashboard({ schedules = [], scheduleId }) {
                 <tbody>
                   {byDept.map((g) => (
                     <tr key={g.id || 'none'}>
-                      <td>{g.name}</td>
-                      <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{g.sewas}</td>
-                      <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{g.present}</td>
+                      <td data-label="Department">{g.name}</td>
+                      <td data-label="Sewas" style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{g.sewas}</td>
+                      <td data-label="Present" style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{g.present}</td>
                     </tr>
                   ))}
                 </tbody>

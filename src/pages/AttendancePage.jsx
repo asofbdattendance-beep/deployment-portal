@@ -22,7 +22,11 @@ import {
 } from '../lib/attendance'
 import { todayStrIST, withTimeout } from '../lib/scannerUtils'
 import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
-import { exportWorkbook, fileSlug } from '../lib/excel'
+import { exportWorkbook, exportWorkbookBlob, fileSlug } from '../lib/excel'
+import { useIsMobile } from '../hooks/useMediaQuery'
+import { useExport } from '../hooks/useExport'
+import FilterSheet, { MobileFilterBar } from '../components/mobile/FilterSheet'
+import ExportSheet from '../components/mobile/ExportSheet'
 import {
   ScanLine, Users, Clock, Download, Search, RefreshCw, Loader2,
   AlertTriangle, CheckCircle2, Radio, Lock,
@@ -101,6 +105,11 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   const [search, setSearch] = useState('')
   const [filterCentre, setFilterCentre] = useState('all')
   const [filterDept, setFilterDept] = useState('all')
+  // Mobile filter sheet state. The sheet hosts the SAME filter controls as
+  // the desktop toolbar (same state, same handlers) — never a fork.
+  const isMobile = useIsMobile()
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const clearFilters = () => { setFilterCentre('all'); setFilterDept('all'); setSearch('') }
   // Per-RPC errors, not one all-or-nothing flag. Only the sewadar summary
   // failing blanks the page (every tab and tile is built on it); a daily or
   // scanner-ops failure degrades that tab in place while the healthy datasets
@@ -361,6 +370,39 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     if (search.trim()) parts.push(`"${search.trim()}"`)
     return parts.length ? ` · ${parts.join(' · ')}` : ''
   }, [filterCentre, filterDept, search])
+
+  // Mobile filter bar + sheet share these nodes (same state as desktop).
+  const filtersNode = (<>
+    <select value={filterCentre} onChange={(e) => setFilterCentre(e.target.value)} className="select" aria-label="Filter by centre">
+      <option value="all">All centres</option>
+      {centres.map((c) => <option key={c} value={c}>{c}</option>)}
+    </select>
+    <select value={filterDept} onChange={(e) => setFilterDept(e.target.value)} className="select" aria-label="Filter by department">
+      <option value="all">All departments</option>
+      {depts.map((d) => <option key={d} value={d}>{d}</option>)}
+    </select>
+    <div style={{ position: 'relative', minWidth: 200 }}>
+      <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none' }} />
+      <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name / badge / centre..." className="input" style={{ width: '100%', paddingLeft: 30 }} aria-label="Search attendance" />
+    </div>
+  </>)
+  const filterChips = useMemo(() => {
+    const chips = []
+    if (filterCentre !== 'all') chips.push({ key: 'centre', label: `Centre: ${filterCentre}` })
+    if (filterDept !== 'all') chips.push({ key: 'dept', label: `Dept: ${filterDept}` })
+    if (search.trim()) chips.push({ key: 'search', label: `"${search.trim()}"` })
+    return chips
+  }, [filterCentre, filterDept, search])
+  const clearFilterChip = (key) => {
+    if (key === 'centre') setFilterCentre('all')
+    else if (key === 'dept') setFilterDept('all')
+    else if (key === 'search') setSearch('')
+  }
+  const filterResultText = tab === 'sewadars'
+    ? `${visible.length} of ${allSewadars.length}`
+    : tab === 'daily'
+      ? `${visibleDaily.length} of ${dailyRows.length}`
+      : `${visibleScanner.length} of ${scannerRows.length}`
   const centreSearchLabel = useMemo(() => {
     const parts = []
     if (filterCentre !== 'all') parts.push(filterCentre)
@@ -376,15 +418,10 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   // ─── Export — one sheet per tab, ALL honouring the same active filters,
   // built through the shared excel.js driver (L-24/L-25) so filenames are
   // slugged and sheet names null-safe like every other reports surface. ───
-  const exportExcel = async () => {
-    setExporting(true)
-    try {
-      // A9: the two "Attendance %" columns measure different things — this one
-      // is the whole-visit rate (days_present / expected_days), the Daily one
-      // is a single day's rate. Distinct names, so nobody reads them as one.
-      const written = await exportWorkbook(
-        `${fileSlug(schedule?.name)}_${date || 'no-date'}_attendance.xlsx`,
-        [
+  const exportFilename = `${fileSlug(schedule?.name)}_${date || 'no-date'}_attendance.xlsx`
+  // Sheet rows are built WITHOUT saving so desktop (direct download) and
+  // mobile (share sheet) share one builder — the two paths can never drift.
+  const buildExportSheets = () => ([
           {
             name: `Sewadars${filterLabel}`,
             rows: visible.map((r, i) => ({
@@ -429,7 +466,15 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
             })),
           },
         ]
-      )
+  )
+
+  const exportExcel = async () => {
+    setExporting(true)
+    try {
+      // A9: the two "Attendance %" columns measure different things — this one
+      // is the whole-visit rate (days_present / expected_days), the Daily one
+      // is a single day's rate. Distinct names, so nobody reads them as one.
+      const written = await exportWorkbook(exportFilename, buildExportSheets())
       // The driver skips empty sheets and writes nothing when all of them
       // are empty, returning 0 — which is the "nothing to export" case.
       if (written === 0) toast.warning('Nothing to export')
@@ -439,6 +484,20 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     } finally {
       setExporting(false)
     }
+  }
+
+  // Mobile export: same builder, delivered through the share sheet (the only
+  // reliable "save" on iOS Safari) with an anchor-download fallback.
+  const mobileExport = useExport()
+  const [exportSheetOpen, setExportSheetOpen] = useState(false)
+  const onExportPress = async () => {
+    if (!isMobile) { await exportExcel(); return }
+    setExportSheetOpen(true)
+    await mobileExport.prepare(async () => {
+      const { blob, written } = await exportWorkbookBlob(exportFilename, buildExportSheets())
+      if (!written) return null
+      return { blob, filename: exportFilename }
+    })
   }
 
   // ─── Guards (early returns, so no hooks run after them) ───
@@ -511,8 +570,8 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
             <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
               {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
             </button>
-            <button onClick={exportExcel} disabled={exporting || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-              {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export Excel
+            <button onClick={onExportPress} disabled={exporting || mobileExport.building || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+              {exporting || mobileExport.building ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export Excel
             </button>
             {filtering && tab === 'sewadars' && (
               <span className="pill pill-indigo" title="The table and all three Excel sheets show this filtered set">
@@ -599,19 +658,18 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
           <div style={{ flex: 1 }} />
           {/* A4: one filter set drives all three tabs, the three tables and all
               three export sheets, so the tooltip claim can stay honest. */}
-          <select value={filterCentre} onChange={(e) => setFilterCentre(e.target.value)} className="select" aria-label="Filter by centre">
-            <option value="all">All centres</option>
-            {centres.map((c) => <option key={c} value={c}>{c}</option>)}
-          </select>
-          <select value={filterDept} onChange={(e) => setFilterDept(e.target.value)} className="select" aria-label="Filter by department">
-            <option value="all">All departments</option>
-            {depts.map((d) => <option key={d} value={d}>{d}</option>)}
-          </select>
-          <div style={{ position: 'relative', minWidth: 200 }}>
-            <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name / badge / centre..." className="input" style={{ width: '100%', paddingLeft: 30 }} aria-label="Search attendance" />
-          </div>
+          {filtersNode}
         </div>
+        {isMobile && (
+          <MobileFilterBar
+            onOpen={() => setFiltersOpen(true)}
+            chips={filterChips}
+            onClearChip={clearFilterChip}
+            onClearAll={clearFilters}
+            resultText={filterResultText}
+            activeCount={filterChips.length}
+          />
+        )}
 
         {tab === 'sewadars' && (
           visible.length === 0 ? (
@@ -645,32 +703,32 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
                       // One row per badge: buildSewadarRows re-aggregates, so the
                       // badge alone is a unique key (dept_name is not).
                       <tr key={r.badge_number}>
-                        <td>{r.sewadar_centre || UNASSIGNED_CENTRE}</td>
-                        <td style={{ fontFamily: 'monospace' }}>
+                        <td data-label="Centre">{r.sewadar_centre || UNASSIGNED_CENTRE}</td>
+                        <td data-label="Badge" style={{ fontFamily: 'monospace' }}>
                           {r.badge_number}{' '}
                           {r.is_vss && <span className="pill pill-amber" style={{ fontSize: '0.6rem' }}>VSS</span>}
                         </td>
-                        <td>{r.sewadar_name}</td>
-                        <td>{r.dept_name || '—'}</td>
+                        <td data-label="Name">{r.sewadar_name}</td>
+                        <td data-label="Department">{r.dept_name || '—'}</td>
                         {/* A6: no department = no expected days. Showing "0/5"
                             would read as 0% attendance for someone who was never
                             scheduled to attend. */}
-                        <td style={{ textAlign: 'center', fontWeight: 700 }}>
+                        <td data-label="Days" style={{ textAlign: 'center', fontWeight: 700 }}>
                           {hasExpectedDays(r) ? `${r.days_present}/${r.expected_days}` : r.days_present > 0 ? `${r.days_present} (no dept)` : '—'}
                         </td>
-                        <td>{r.first_in_date ? `${shortDayLabel(r.first_in_date)} ${(r.first_in_time || '').slice(0, 5)}` : '—'}</td>
-                        <td>
+                        <td data-label="First In">{r.first_in_date ? `${shortDayLabel(r.first_in_date)} ${(r.first_in_time || '').slice(0, 5)}` : '—'}</td>
+                        <td data-label="Last Out">
                           {r.last_out_date
                             ? `${shortDayLabel(r.last_out_date)} ${(r.last_out_time || '').slice(0, 5)}`
                             : r.still_open ? <span className="pill pill-amber">still IN</span> : '—'}
                         </td>
-                        <td>{sessionDuration(r)}</td>
-                        <td style={{ textAlign: 'center' }}>
+                        <td data-label="Duration">{sessionDuration(r)}</td>
+                        <td data-label="Rate" style={{ textAlign: 'center' }}>
                           {hasExpectedDays(r)
                             ? <span className={`pill ${bandPill(r.band)}`}>{r.rate}%</span>
                             : <span className="pill pill-gray" title="No department, so there is no expected-days denominator">—</span>}
                         </td>
-                        <td>
+                        <td data-label="Flags">
                           <span style={{ display: 'inline-flex', gap: '0.25rem', flexWrap: 'wrap' }}>
                             {r.open_sessions > 0 && <span className="pill pill-amber" title="Scanned IN, not yet OUT"><Clock size={11} /> Open</span>}
                             {r.undeployed_scan && <span className="pill pill-red" title="Scanned at the gate but not deployed to any department"><AlertTriangle size={11} /> Undeployed</span>}
@@ -736,13 +794,13 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
                 <tbody>
                   {visibleDaily.map((r) => (
                     <tr key={`${r.centre}-${r.dept_name}`}>
-                      <td>{r.centre || UNASSIGNED_CENTRE}</td>
-                      <td>{r.dept_name || '—'}</td>
-                      <td style={{ textAlign: 'center' }}>{r.expected}</td>
-                      <td style={{ textAlign: 'center' }}>{r.present}</td>
-                      <td style={{ textAlign: 'center', color: r.absent ? '#b91c1c' : undefined, fontWeight: r.absent ? 700 : 400 }}>{r.absent}</td>
-                      <td style={{ textAlign: 'center' }}>{r.open_now}</td>
-                      <td style={{ textAlign: 'center' }}>
+                      <td data-label="Centre">{r.centre || UNASSIGNED_CENTRE}</td>
+                      <td data-label="Department">{r.dept_name || '—'}</td>
+                      <td data-label="Expected" style={{ textAlign: 'center' }}>{r.expected}</td>
+                      <td data-label="Present" style={{ textAlign: 'center' }}>{r.present}</td>
+                      <td data-label="Absent" style={{ textAlign: 'center', color: r.absent ? '#b91c1c' : undefined, fontWeight: r.absent ? 700 : 400 }}>{r.absent}</td>
+                      <td data-label="Open" style={{ textAlign: 'center' }}>{r.open_now}</td>
+                      <td data-label="Day Rate" style={{ textAlign: 'center' }}>
                         {r.expected > 0
                           ? <span className={`pill ${bandPill(r.band)}`}>{r.rate}%</span>
                           : <span className="pill pill-gray" title="Nobody was expected, so there is no rate">—</span>}
@@ -752,13 +810,13 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
                 </tbody>
                 <tfoot>
                   <tr style={{ fontWeight: 700, background: '#f8fafc' }}>
-                    <td>TOTAL</td>
-                    <td>—</td>
-                    <td style={{ textAlign: 'center' }}>{visibleTotals.expected}</td>
-                    <td style={{ textAlign: 'center' }}>{visibleTotals.present}</td>
-                    <td style={{ textAlign: 'center' }}>{visibleTotals.absent}</td>
-                    <td style={{ textAlign: 'center' }}>{visibleTotals.open_now}</td>
-                    <td style={{ textAlign: 'center' }}>{visibleTotals.expected > 0 ? `${visibleTotals.rate}%` : '—'}</td>
+                    <td data-label="Centre">TOTAL</td>
+                    <td data-label="Department">—</td>
+                    <td data-label="Expected" style={{ textAlign: 'center' }}>{visibleTotals.expected}</td>
+                    <td data-label="Present" style={{ textAlign: 'center' }}>{visibleTotals.present}</td>
+                    <td data-label="Absent" style={{ textAlign: 'center' }}>{visibleTotals.absent}</td>
+                    <td data-label="Open" style={{ textAlign: 'center' }}>{visibleTotals.open_now}</td>
+                    <td data-label="Day Rate" style={{ textAlign: 'center' }}>{visibleTotals.expected > 0 ? `${visibleTotals.rate}%` : '—'}</td>
                   </tr>
                 </tfoot>
               </table>
@@ -819,15 +877,15 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
                 <tbody>
                   {visibleScanner.map((r) => (
                     <tr key={r.scanner_badge}>
-                      <td>{r.scanner_name || '—'}</td>
-                      <td style={{ fontFamily: 'monospace' }}>{r.scanner_badge}</td>
-                      <td>{r.scanner_centre || UNASSIGNED_CENTRE}</td>
-                      <td style={{ textAlign: 'center', fontWeight: 700 }}>{r.scans_in}</td>
-                      <td style={{ textAlign: 'center' }}>{r.scans_out}</td>
-                      <td style={{ textAlign: 'center', color: r.open_now ? '#b45309' : undefined }}>{r.open_now}</td>
-                      <td style={{ textAlign: 'center' }}>{r.manual_scans}</td>
-                      <td>{(r.first_in_time || '').slice(0, 5) || '—'}</td>
-                      <td>{(r.last_scan_time || '').slice(0, 5) || '—'}</td>
+                      <td data-label="Scanner">{r.scanner_name || '—'}</td>
+                      <td data-label="Badge" style={{ fontFamily: 'monospace' }}>{r.scanner_badge}</td>
+                      <td data-label="Centre">{r.scanner_centre || UNASSIGNED_CENTRE}</td>
+                      <td data-label="Scans In" style={{ textAlign: 'center', fontWeight: 700 }}>{r.scans_in}</td>
+                      <td data-label="Scans Out" style={{ textAlign: 'center' }}>{r.scans_out}</td>
+                      <td data-label="Open" style={{ textAlign: 'center', color: r.open_now ? '#b45309' : undefined }}>{r.open_now}</td>
+                      <td data-label="Manual" style={{ textAlign: 'center' }}>{r.manual_scans}</td>
+                      <td data-label="First">{(r.first_in_time || '').slice(0, 5) || '—'}</td>
+                      <td data-label="Last">{(r.last_scan_time || '').slice(0, 5) || '—'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -838,6 +896,30 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
           </>
         )}
       </div>
+
+      <FilterSheet
+        open={isMobile && filtersOpen}
+        onClose={() => setFiltersOpen(false)}
+        title="Filters"
+        resultText={filterResultText}
+        onClearAll={clearFilters}
+        hasActive={filterChips.length > 0}
+      >
+        {filtersNode}
+      </FilterSheet>
+
+      <ExportSheet
+        open={isMobile && exportSheetOpen}
+        onClose={() => { setExportSheetOpen(false); mobileExport.reset() }}
+        filename={exportFilename}
+        file={mobileExport.file?.blob || null}
+        building={mobileExport.building}
+        buildError={mobileExport.buildError}
+        delivering={mobileExport.delivering}
+        deliveredVia={mobileExport.deliveredVia}
+        onDeliver={mobileExport.deliver}
+        onRetry={onExportPress}
+      />
 
       <div className="page-sub" style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
         <CheckCircle2 size={13} />

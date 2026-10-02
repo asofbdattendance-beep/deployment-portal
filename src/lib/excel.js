@@ -42,14 +42,48 @@ export function saveWorkbook(XLSX, wb, filename) {
   XLSX.writeFile(wb, filename)
 }
 
+export const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+
 /**
- * Full export driver: lazy-loads xlsx, builds every sheet, writes the file.
- * Sheets with zero rows are SKIPPED (an empty sheet still costs a tab and
- * confuses "nothing to export" checks) — unless opts.keepEmpty is set.
- * Returns the number of sheets written; 0 means the caller should toast
- * "Nothing to export" instead of writing an empty workbook.
+ * Anchor download for a Blob. Desktop path of exportWorkbook; the mobile
+ * share sheet lives in lib/mobile (shareOrDownload). Returns true when a
+ * download was triggered. Never throws.
  */
-export async function exportWorkbook(filename, sheets, opts = {}) {
+export function saveBlob(blob, filename) {
+  try {
+    if (typeof window === 'undefined' || typeof document === 'undefined' || !blob) return false
+    const url = (window.URL || URL).createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename || 'download'
+    document.body.appendChild(a)
+    a.click()
+    setTimeout(() => {
+      try { document.body.removeChild(a) } catch { /* ignore */ }
+      try { (window.URL || URL).revokeObjectURL(url) } catch { /* ignore */ }
+    }, 1000)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Serialize a built workbook to a Blob (no download triggered).
+ * The caller decides delivery: anchor download on desktop, Web Share
+ * sheet on phones (the only reliable "save" on iOS Safari).
+ */
+export function workbookToBlob(XLSX, wb) {
+  const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' })
+  return new Blob([out], { type: XLSX_MIME })
+}
+
+/**
+ * Blob variant of exportWorkbook: builds every sheet and returns the file
+ * instead of saving it. Returns { blob, written, filename }; blob is null
+ * when nothing was written (caller toasts "Nothing to export").
+ */
+export async function exportWorkbookBlob(filename, sheets, opts = {}) {
   const XLSX = await loadXlsx()
   const wb = newWorkbook(XLSX)
   let written = 0
@@ -59,7 +93,20 @@ export async function exportWorkbook(filename, sheets, opts = {}) {
     addSheet(XLSX, wb, s.name, rows)
     written += 1
   }
+  if (written === 0) return { blob: null, written: 0, filename }
+  return { blob: workbookToBlob(XLSX, wb), written, filename }
+}
+
+/**
+ * Full export driver: lazy-loads xlsx, builds every sheet, writes the file.
+ * Sheets with zero rows are SKIPPED (an empty sheet still costs a tab and
+ * confuses "nothing to export" checks) — unless opts.keepEmpty is set.
+ * Returns the number of sheets written; 0 means the caller should toast
+ * "Nothing to export" instead of writing an empty workbook.
+ */
+export async function exportWorkbook(filename, sheets, opts = {}) {
+  const { blob, written } = await exportWorkbookBlob(filename, sheets, opts)
   if (written === 0) return 0
-  saveWorkbook(XLSX, wb, filename)
+  saveBlob(blob, filename)
   return written
 }

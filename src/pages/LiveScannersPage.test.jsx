@@ -270,16 +270,27 @@ vi.mock('xlsx', () => ({
     book_append_sheet: vi.fn(),
   },
   writeFile: vi.fn(),
+  write: vi.fn(() => new Uint8Array([1, 2, 3])),
 }))
 
 describe('C2 — exports use the shared driver naming (L-24/L-25)', () => {
   it('writes a slugged {schedule}_{date}_scanners.xlsx filename', async () => {
     await renderPage()
-    fireEvent.click(screen.getByText(/Export Excel/))
-    const { writeFile } = await import('xlsx')
-    await waitFor(() => expect(writeFile).toHaveBeenCalled())
-    // Schedule "October 2026 Visit" must not land in the filename with raw
-    // spaces. Date is clock-pinned to 2026-09-23 in this file.
-    expect(writeFile).toHaveBeenCalledWith(expect.anything(), 'October_2026_Visit_2026-09-23_scanners.xlsx')
+    URL.createObjectURL = vi.fn(() => 'blob:mock')
+    URL.revokeObjectURL = vi.fn()
+    let downloaded = null
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      downloaded = this.download
+    })
+    try {
+      fireEvent.click(screen.getByText(/Export Excel/))
+      const { write } = await import('xlsx')
+      await waitFor(() => expect(write).toHaveBeenCalled())
+      // Schedule "October 2026 Visit" must not land in the filename with raw
+      // spaces. Date is clock-pinned to 2026-09-23 in this file.
+      expect(downloaded).toBe('October_2026_Visit_2026-09-23_scanners.xlsx')
+    } finally {
+      clickSpy.mockRestore()
+    }
   })
 })

@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   jsonToSheet: vi.fn((rows) => ({ rows })),
   bookAppendSheet: vi.fn(),
   writeFile: vi.fn(),
+  write: vi.fn(() => new Uint8Array([1, 2, 3])),
 }))
 
 vi.mock('xlsx', () => ({
@@ -22,13 +23,15 @@ vi.mock('xlsx', () => ({
     book_append_sheet: (...a) => mocks.bookAppendSheet(...a),
   },
   writeFile: (...a) => mocks.writeFile(...a),
+  write: (...a) => mocks.write(...a),
   default: {},
 }))
 
 beforeEach(() => {
-  for (const k of ['bookNew', 'jsonToSheet', 'bookAppendSheet', 'writeFile']) mocks[k].mockReset()
+  for (const k of ['bookNew', 'jsonToSheet', 'bookAppendSheet', 'writeFile', 'write']) mocks[k].mockReset()
   mocks.bookNew.mockReturnValue({})
   mocks.jsonToSheet.mockImplementation((rows) => ({ rows }))
+  mocks.write.mockReturnValue(new Uint8Array([1, 2, 3]))
 })
 
 describe('sheetName', () => {
@@ -83,5 +86,33 @@ describe('exportWorkbook', () => {
 
   it('exportWorkbook is the lazy driver pages call (smoke: module surface)', async () => {
     expect(typeof exportWorkbook).toBe('function')
+  })
+})
+
+describe('exportWorkbookBlob', () => {
+  it('builds a Blob without downloading (mobile share path)', async () => {
+    const { exportWorkbookBlob, XLSX_MIME } = await import('./excel')
+    const { blob, written, filename } = await exportWorkbookBlob('a.xlsx', [
+      { name: 'One', rows: [{ a: 1 }] },
+      { name: 'Empty', rows: [] },
+    ])
+    expect(written).toBe(1)
+    expect(filename).toBe('a.xlsx')
+    expect(blob).toBeInstanceOf(Blob)
+    expect(blob.type).toBe(XLSX_MIME)
+    expect(blob.size).toBeGreaterThan(0)
+  })
+
+  it('returns a null blob when every sheet is empty', async () => {
+    const { exportWorkbookBlob } = await import('./excel')
+    const { blob, written } = await exportWorkbookBlob('a.xlsx', [{ name: 'One', rows: [] }])
+    expect(written).toBe(0)
+    expect(blob).toBeNull()
+  })
+
+  it('saveBlob is a no-op without a DOM and never throws', async () => {
+    const { saveBlob } = await import('./excel')
+    expect(saveBlob(new Blob(['x']), 'a.xlsx')).toBe(false)
+    expect(saveBlob(null, 'a.xlsx')).toBe(false)
   })
 })

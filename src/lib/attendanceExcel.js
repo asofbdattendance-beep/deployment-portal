@@ -165,6 +165,27 @@ export function buildAttendanceWorkbook(ExcelNS, { scheduleName, date, kpis, mat
 }
 
 /**
+ * Blob variant: builds the snapshot workbook and returns the file instead
+ * of downloading it. Returns { blob, sheetsWritten }; blob is null when
+ * nothing was written.
+ */
+export async function buildAttendanceBlob(
+  { scheduleName, date, kpis, matrix },
+  loadExcel = () => import('exceljs'),
+) {
+  const mod = await loadExcel()
+  const { wb, sheetsWritten } = buildAttendanceWorkbook(mod?.default || mod, {
+    scheduleName, date, kpis, matrix,
+  })
+  if (sheetsWritten === 0) return { blob: null, sheetsWritten: 0 }
+  const buf = await wb.xlsx.writeBuffer()
+  return {
+    blob: new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+    sheetsWritten,
+  }
+}
+
+/**
  * Build, serialize and download the snapshot workbook. `loadExcel` is an
  * injectable lazy loader so tests can pass a fake without importing exceljs.
  *
@@ -174,14 +195,12 @@ export async function exportAttendanceWorkbook(
   { filename, scheduleName, date, kpis, matrix },
   loadExcel = () => import('exceljs'),
 ) {
-  const mod = await loadExcel()
-  const { wb, sheetsWritten } = buildAttendanceWorkbook(mod?.default || mod, {
-    scheduleName, date, kpis, matrix,
-  })
-  if (sheetsWritten === 0) return 0
-  const buf = await wb.xlsx.writeBuffer()
+  const { blob, sheetsWritten } = await buildAttendanceBlob(
+    { scheduleName, date, kpis, matrix },
+    loadExcel,
+  )
+  if (sheetsWritten === 0 || !blob) return 0
   if (typeof document !== 'undefined') {
-    const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url

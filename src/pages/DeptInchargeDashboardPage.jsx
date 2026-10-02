@@ -5,7 +5,10 @@ import { deptInchargeKpis, timeAgo, VISIT_DAYS, UNASSIGNED_CENTRE, visitColumns,
 import { scheduleWindow, expandDateRange, clampDateToWindow } from '../lib/sewaMode'
 import { todayStrIST } from '../lib/scannerUtils'
 import { fileSlug } from '../lib/excel'
-import { exportAttendanceWorkbook } from '../lib/attendanceExcel'
+import { exportAttendanceWorkbook, buildAttendanceBlob } from '../lib/attendanceExcel'
+import { useIsMobile } from '../hooks/useMediaQuery'
+import { useExport } from '../hooks/useExport'
+import ExportSheet from '../components/mobile/ExportSheet'
 import AttendanceMatrix from '../components/AttendanceMatrix'
 import {
   LayoutDashboard, Users, UserX, Percent, Clock, RefreshCw, Download,
@@ -321,6 +324,27 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
   }, [matrix, matrixCentre, matrixQuery])
   const matrixFiltersActive = matrixQuery.trim() !== '' || matrixCentre !== ''
 
+  const exportFilename = `${fileSlug(schedule?.name)}_incharge_${date}.xlsx`
+
+  // Mobile export delivery (share sheet + save fallback). Desktop keeps the
+  // direct download inside exportSnapshot below.
+  const isMobile = useIsMobile()
+  const mobileExport = useExport()
+  const [exportSheetOpen, setExportSheetOpen] = useState(false)
+  const onExportPress = useCallback(async () => {
+    setExportSheetOpen(true)
+    await mobileExport.prepare(async () => {
+      const { blob, sheetsWritten } = await buildAttendanceBlob({
+        scheduleName: schedule?.name || '',
+        date,
+        kpis,
+        matrix: matrixForView,
+      })
+      if (!sheetsWritten) return null
+      return { blob, filename: exportFilename }
+    })
+  }, [mobileExport, schedule?.name, date, kpis, matrixForView, exportFilename])
+
   const exportSnapshot = useCallback(async () => {
     // A snapshot over a half-failed load would print one half's numbers as
     // the whole truth — every arm must have landed.
@@ -328,13 +352,15 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
       toast.warning('One half of the snapshot failed to load — retry before exporting')
       return
     }
+    // Mobile: same workbook, delivered through the share sheet.
+    if (isMobile) { await onExportPress(); return }
     setExporting(true)
     try {
       // Styled workbook (lazy exceljs): same sheets and P/A contract as the
       // old xlsx export, plus title row, frozen header, widths and green/red
       // day cells on the Attd Matrix sheet — see src/lib/attendanceExcel.js.
       const n = await exportAttendanceWorkbook({
-        filename: `${fileSlug(schedule?.name)}_incharge_${date}.xlsx`,
+        filename: exportFilename,
         scheduleName: schedule?.name || '',
         date,
         kpis,
@@ -346,7 +372,7 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
     } finally {
       setExporting(false)
     }
-  }, [schedule?.name, date, kpis, matrixForView, errs, toast])
+  }, [schedule?.name, date, kpis, matrixForView, errs, toast, isMobile, onExportPress, exportFilename])
 
   if (loading && !rowsAreCurrent) {
     return (
@@ -384,8 +410,8 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
             <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
               {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
             </button>
-            <button onClick={exportSnapshot} disabled={exporting || !rowsAreCurrent || noWindow || errs.daily || errs.visit || errs.trend || errs.badges} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-              {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export Attd Matrix
+            <button onClick={exportSnapshot} disabled={exporting || mobileExport.building || !rowsAreCurrent || noWindow || errs.daily || errs.visit || errs.trend || errs.badges} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+              {exporting || mobileExport.building ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export Attd Matrix
             </button>
           </div>
         </div>
@@ -408,6 +434,7 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
               max={visitWin.end || undefined}
               onChange={(e) => { dateTouchedRef.current = true; setDate(clampDateToWindow(e.target.value, visitWin)) }}
               className="input"
+              aria-label="Scan day"
               style={{ fontSize: '0.82rem', padding: '0.25rem 0.4rem' }}
             />
           </div>
@@ -554,6 +581,19 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
         Present/absent reflects scans for the selected day. &ldquo;Ever present&rdquo; covers the whole visit. Scans are recorded on the{' '}
         <button onClick={() => go('reports')} className="btn btn-ghost" style={{ padding: '0 0.2rem', fontSize: '0.78rem' }}>Reports <ArrowUpRight size={11} /></button> page.
       </div>
+
+      <ExportSheet
+        open={isMobile && exportSheetOpen}
+        onClose={() => { setExportSheetOpen(false); mobileExport.reset() }}
+        filename={exportFilename}
+        file={mobileExport.file?.blob || null}
+        building={mobileExport.building}
+        buildError={mobileExport.buildError}
+        delivering={mobileExport.delivering}
+        deliveredVia={mobileExport.deliveredVia}
+        onDeliver={mobileExport.deliver}
+        onRetry={onExportPress}
+      />
     </div>
   )
 }

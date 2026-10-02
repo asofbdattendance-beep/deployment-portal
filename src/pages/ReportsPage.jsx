@@ -4,7 +4,10 @@ import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 // `exportWorkbook` runs every sheet name through `sheetName` internally (≤31
 // chars, no \ / * ? : [ ]), so one sheet per centre needs no extra trimming.
-import { exportWorkbook, fileSlug } from '../lib/excel'
+import { exportWorkbook, exportWorkbookBlob, fileSlug } from '../lib/excel'
+import { useIsMobile } from '../hooks/useMediaQuery'
+import { useExport } from '../hooks/useExport'
+import ExportSheet from '../components/mobile/ExportSheet'
 import { shortDayLabel } from '../lib/attendance'
 import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
 import { todayStrIST, withTimeout } from '../lib/scannerUtils'
@@ -278,6 +281,16 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
     Status: r.status,
   })
 
+  const exportFilename = `${fileSlug(schedule?.name ?? 'schedule')}_${date}_${tab}.xlsx`
+  // Sheet rows are built WITHOUT saving so desktop (direct download) and
+  // mobile (share sheet) share one builder — the two paths can never drift.
+  const buildExportSheets = () => groupsByCentre.map(([centre, rows]) => ({
+    name: centre,
+    rows: rows.map(toSheetRow),
+  }))
+
+  const isMobile = useIsMobile()
+
   const handleExport = async () => {
     if (!rowsAreCurrent) {
       toast.warning('Reports are still loading — try again in a moment')
@@ -287,14 +300,11 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
       toast.warning(`Nothing to export — no ${tabLabel.toLowerCase()} rows match the current filters`)
       return
     }
+    // Mobile: same builder, delivered through the share sheet.
+    if (isMobile) { await onExportPress(); return }
     setExporting(true)
     try {
-      const sheets = groupsByCentre.map(([centre, rows]) => ({
-        name: centre,
-        rows: rows.map(toSheetRow),
-      }))
-      const filename = `${fileSlug(schedule?.name ?? 'schedule')}_${date}_${tab}.xlsx`
-      const written = await exportWorkbook(filename, sheets)
+      const written = await exportWorkbook(exportFilename, buildExportSheets())
       if (written === 0) {
         toast.warning('Nothing to export — no rows match the current filters')
       } else {
@@ -306,6 +316,19 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
     } finally {
       if (mountedRef.current) setExporting(false)
     }
+  }
+
+  // Mobile export delivery (share sheet + save fallback). Desktop keeps the
+  // direct download above.
+  const mobileExport = useExport()
+  const [exportSheetOpen, setExportSheetOpen] = useState(false)
+  const onExportPress = async () => {
+    setExportSheetOpen(true)
+    await mobileExport.prepare(async () => {
+      const { blob, written } = await exportWorkbookBlob(exportFilename, buildExportSheets())
+      if (!written) return null
+      return { blob, filename: exportFilename }
+    })
   }
 
   const filtering = filterCentre !== 'all' || String(search || '').trim() !== ''
@@ -393,8 +416,8 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
               </button>
             )}
             {canExport ? (
-              <button onClick={handleExport} disabled={exporting || loading || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-                {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Download Excel
+              <button onClick={handleExport} disabled={exporting || mobileExport.building || loading || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+                {exporting || mobileExport.building ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Download Excel
               </button>
             ) : (
               <button onClick={() => window.print()} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
@@ -517,6 +540,19 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
           </section>
         ))}
       </div>
+
+      <ExportSheet
+        open={isMobile && exportSheetOpen}
+        onClose={() => { setExportSheetOpen(false); mobileExport.reset() }}
+        filename={exportFilename}
+        file={mobileExport.file?.blob || null}
+        building={mobileExport.building}
+        buildError={mobileExport.buildError}
+        delivering={mobileExport.delivering}
+        deliveredVia={mobileExport.deliveredVia}
+        onDeliver={mobileExport.deliver}
+        onRetry={onExportPress}
+      />
     </div>
   )
 }

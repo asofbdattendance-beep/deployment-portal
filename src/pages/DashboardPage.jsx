@@ -17,7 +17,10 @@ import {
 } from '../lib/attendance'
 import { todayStrIST, withTimeout } from '../lib/scannerUtils'
 import { scheduleWindow, expandDateRange, clampDateToWindow } from '../lib/sewaMode'
-import { exportWorkbook, fileSlug } from '../lib/excel'
+import { exportWorkbook, exportWorkbookBlob, fileSlug } from '../lib/excel'
+import { useIsMobile } from '../hooks/useMediaQuery'
+import { useExport } from '../hooks/useExport'
+import ExportSheet from '../components/mobile/ExportSheet'
 import {
   LayoutDashboard, Users, UserX, Percent, Clock, Radio, AlertTriangle,
   CalendarClock, RefreshCw, Download, FileDown, ArrowUp, ArrowDown,
@@ -433,13 +436,20 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   // disk. The old code returned an overloaded 0 for BOTH "no rows" and "write
   // produced nothing", so a half-success (present exported, absent empty)
   // warned "nothing exported" over a workbook that DID download.
-  const dayWorkbook = useCallback(async (mode) => {
+  //
+  // Mobile shares fetchDayRows/buildDaySheets (same rows, same sheets) and
+  // delivers one file through the share sheet: the snapshot combines Present
+  // + Absent into a single 4-sheet workbook instead of two downloads.
+  const fetchDayRows = useCallback(async (mode) => {
     const rows = await withTimeout(
       rpcRows('attendance_day_badges', { p_schedule: scheduleId, p_date: date, p_mode: mode }),
       15000,
       'attendance_day_badges'
     )
-    if (!rows.length) return { written: false, count: 0 }
+    return Array.isArray(rows) ? rows : []
+  }, [scheduleId, date])
+
+  const buildDaySheets = (mode, rows) => {
     const label = mode === 'present' ? 'Present' : 'Absent'
     const byCentre = new Map()
     for (const r of rows) {
@@ -454,7 +464,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
         .map(([centre, n]) => ({ Centre: centre, [label]: n })),
       { Centre: 'TOTAL', [label]: rows.length },
     ]
-    const written = await exportWorkbook(`${fileSlug(schedule?.name)}_${date}_${mode}.xlsx`, [
+    return [
       { name: 'Summary', rows: summary },
       {
         name: label,
@@ -467,9 +477,17 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
           Department: r.dept_name || '—',
         })),
       },
-    ])
+    ]
+  }
+
+  const dayFilename = useCallback((mode) => `${fileSlug(schedule?.name)}_${date}_${mode}.xlsx`, [schedule, date])
+
+  const dayWorkbook = useCallback(async (mode) => {
+    const rows = await fetchDayRows(mode)
+    if (!rows.length) return { written: false, count: 0 }
+    const written = await exportWorkbook(dayFilename(mode), buildDaySheets(mode, rows))
     return { written: written > 0, count: rows.length }
-  }, [scheduleId, date, schedule])
+  }, [fetchDayRows, dayFilename])
 
   // Both workbooks, one after the other, inside the same click. Success is
   // toasted PER workbook that landed; the "nothing exported" warning fires
@@ -503,6 +521,56 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
       setExporting(false)
     }
   }, [dayWorkbook, toast, date])
+
+  // Mobile export delivery (share sheet + save fallback). Desktop keeps the
+  // direct downloads above. The snapshot combines Present + Absent into one
+  // file on phones (one share instead of two downloads); per-list buttons
+  // share their single list.
+  const isMobile = useIsMobile()
+  const mobileExport = useExport()
+  const [exportSheetOpen, setExportSheetOpen] = useState(false)
+  const [exportSheetName, setExportSheetName] = useState('')
+  const prepareMobileExport = async (filename, sheets) => {
+    setExportSheetName(filename)
+    setExportSheetOpen(true)
+    await mobileExport.prepare(async () => {
+      const { blob, written } = await exportWorkbookBlob(filename, sheets)
+      if (!written) return null
+      return { blob, filename }
+    })
+  }
+  const onListExportPress = async (mode) => {
+    if (!isMobile) { await runExport(mode); return }
+    try {
+      const rows = await fetchDayRows(mode)
+      if (!rows.length) { toast.warning(`No ${mode} sewadars for ${shortDayLabel(date)} — nothing exported`); return }
+      await prepareMobileExport(dayFilename(mode), buildDaySheets(mode, rows))
+    } catch (e) {
+      console.error(`[Dashboard] ${mode} mobile export failed:`, e)
+      toast.error(`Could not export the ${mode} list`)
+    }
+  }
+  const onSnapshotPress = async () => {
+    if (!isMobile) { await exportSnapshot(); return }
+    setExporting(true)
+    try {
+      const [present, absent] = await Promise.all([fetchDayRows('present'), fetchDayRows('absent')])
+      if (!present.length && !absent.length) {
+        toast.warning(`No attendance for ${shortDayLabel(date)} — nothing exported`)
+        return
+      }
+      const sheets = [
+        ...(present.length ? buildDaySheets('present', present).map((s, i) => ({ ...s, name: i === 0 ? 'Present summary' : 'Present' })) : []),
+        ...(absent.length ? buildDaySheets('absent', absent).map((s, i) => ({ ...s, name: i === 0 ? 'Absent summary' : 'Absent' })) : []),
+      ]
+      await prepareMobileExport(`${fileSlug(schedule?.name)}_${date}_snapshot.xlsx`, sheets)
+    } catch (e) {
+      console.error('[Dashboard] snapshot mobile export failed:', e)
+      toast.error('Could not export the snapshot')
+    } finally {
+      setExporting(false)
+    }
+  }
 
   // ─── Guards ───
   if (!schedules.length) {
@@ -548,8 +616,8 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
             <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
               {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
             </button>
-            <button onClick={exportSnapshot} disabled={exporting || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-              {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export snapshot
+            <button onClick={onSnapshotPress} disabled={exporting || mobileExport.building || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+              {exporting || mobileExport.building ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export snapshot
             </button>
           </div>
         </div>
@@ -674,11 +742,11 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
               </tbody>
               <tfoot>
                 <tr style={{ fontWeight: 700, background: '#f8fafc' }}>
-                  <td style={{ position: 'sticky', left: 0, background: '#f8fafc', zIndex: 1 }}>TOTAL</td>
-                  <td style={{ textAlign: 'center' }}>{visit.totals.deployed}</td>
-                  <td style={{ textAlign: 'center' }}>{visit.totals.everPresent}</td>
-                  <td style={{ textAlign: 'center' }}>{visit.totals.neverPresent}</td>
-                  <td style={{ textAlign: 'center' }}>{visit.totals.deployed > 0 ? `${Math.round((visit.totals.everPresent / visit.totals.deployed) * 100)}%` : '—'}</td>
+                  <td data-label="Department" style={{ position: 'sticky', left: 0, background: '#f8fafc', zIndex: 1 }}>TOTAL</td>
+                  <td data-label="Deployed" style={{ textAlign: 'center' }}>{visit.totals.deployed}</td>
+                  <td data-label="Ever present" style={{ textAlign: 'center' }}>{visit.totals.everPresent}</td>
+                  <td data-label="Never present" style={{ textAlign: 'center' }}>{visit.totals.neverPresent}</td>
+                  <td data-label="Seen rate" style={{ textAlign: 'center' }}>{visit.totals.deployed > 0 ? `${Math.round((visit.totals.everPresent / visit.totals.deployed) * 100)}%` : '—'}</td>
                 </tr>
               </tfoot>
             </table>
@@ -749,10 +817,10 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
                 </tbody>
                 <tfoot>
                   <tr style={{ fontWeight: 700, background: '#f8fafc' }}>
-                    <td style={{ position: 'sticky', left: 0, background: '#f8fafc', zIndex: 1 }}>TOTAL</td>
-                    <td style={{ textAlign: 'center' }}>{totals.present}</td>
-                    <td style={{ textAlign: 'center' }}>{totals.absent}</td>
-                    <td style={{ textAlign: 'center' }}>{totals.expected > 0 ? `${totals.rate}%` : '—'}</td>
+                    <td data-label="Centre" style={{ position: 'sticky', left: 0, background: '#f8fafc', zIndex: 1 }}>TOTAL</td>
+                    <td data-label="Present" style={{ textAlign: 'center' }}>{totals.present}</td>
+                    <td data-label="Absent" style={{ textAlign: 'center' }}>{totals.absent}</td>
+                    <td data-label="Rate" style={{ textAlign: 'center' }}>{totals.expected > 0 ? `${totals.rate}%` : '—'}</td>
                   </tr>
                 </tfoot>
               </table>
@@ -876,10 +944,10 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
             <div className="page-sub" style={{ margin: 0 }}>Lists for {shortDayLabel(date)} · each workbook has a per-centre Summary with a TOTAL plus the full badge list</div>
           </div>
           <div style={{ flex: 1 }} />
-          <button onClick={() => runExport('present')} disabled={exporting || !rowsAreCurrent} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
+          <button onClick={() => onListExportPress('present')} disabled={exporting || !rowsAreCurrent} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
             {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Download Present workbook
           </button>
-          <button onClick={() => runExport('absent')} disabled={exporting || !rowsAreCurrent} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
+          <button onClick={() => onListExportPress('absent')} disabled={exporting || !rowsAreCurrent} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
             {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Download Absent workbook
           </button>
           <button onClick={() => go('reports')} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
@@ -893,6 +961,19 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
           </button>
         </div>
       </div>
+
+      <ExportSheet
+        open={isMobile && exportSheetOpen}
+        onClose={() => { setExportSheetOpen(false); mobileExport.reset() }}
+        filename={exportSheetName}
+        file={mobileExport.file?.blob || null}
+        building={mobileExport.building}
+        buildError={mobileExport.buildError}
+        delivering={mobileExport.delivering}
+        deliveredVia={mobileExport.deliveredVia}
+        onDeliver={mobileExport.deliver}
+        onRetry={onSnapshotPress}
+      />
     </div>
   )
 }
