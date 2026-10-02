@@ -47,13 +47,19 @@ function quarantineRow(id, reason) {
   })
 }
 
-// ─── Error taxonomy (Task 1: L-04 + L-08) ───────────────────────────────
+// ─── Error taxonomy (Task 1: L-04 + L-08; T8) ────────────────────────────
 // Pure classifier — no I/O, unit-tested in offlineQueue.test.js.
 // Server contracts from sql/v46 (scan_in) + sql/v41 (scan_out):
 //  - dedup: replay already applied server-side → drop row, keep draining.
 //  - drop: row will never succeed, no operator action → remove, keep draining.
-//  - permanent: auth/clock failures needing human fix → quarantine terminal,
-//    keep draining (never backoff+break — that wedged the queue ~12 min).
+//  - permanent: auth/RLS/clock failures needing human fix → quarantine
+//    terminal, keep draining (never backoff+break — that wedged the queue
+//    ~12 min). T8: decided from err.code AND message text — message-only
+//    matching let 401/403/42501 and PostgREST RLS denials classify as
+//    `retry` → markFailed + break, wedging the queue behind a row that can
+//    never succeed. PGRST202 stays `retry`: it means the RPC itself is
+//    missing (frontend shipped before the migration — deploy ordering),
+//    which resolves itself without operator action.
 //  - retry: network/timeout/deploy-ordering → markFailed + backoff + break.
 export function classifyScanError(msg, err) {
   const s = String(msg || err?.message || '')
@@ -74,7 +80,28 @@ export function classifyScanError(msg, err) {
     s.includes('Timestamp cannot be in the future') ||
     s.includes('Timestamp too old')
   ) return 'permanent'
+  // T8: honour err.code (supabase-js attaches .code to RPC errors; it may be
+  // numeric or string). 401/403/42501 and any PGRST3xx are auth/RLS denials —
+  // the row can never succeed, so quarantine instead of retrying. PGRST202
+  // (missing function) is deliberately NOT matched by the PGRST3 prefix and
+  // stays `retry`.
+  const codeStr = String(err?.code ?? '').trim()
+  if (codeStr === '401' || codeStr === '403' || codeStr === '42501') return 'permanent'
+  if (/^PGRST3/i.test(codeStr)) return 'permanent'
+  // Same denials when the code only survives inside the message text (raw
+  // Postgres/PostgREST error bodies, pre-wrapped messages).
+  if (/permission denied|row-level|row level|\bjwt\b|not authorized/i.test(s)) return 'permanent'
+  if (/\b(401|403|42501)\b/.test(s)) return 'permanent'
+  if (/PGRST3\d*/i.test(s) && !/PGRST202/i.test(s)) return 'permanent'
   return 'retry'
+}
+
+// T9: did this failure ever reach the server? Pure network/timeout failures
+// (jammer, dropped connection, withTimeout abort) must NOT burn one of the
+// row's MAX_DRAIN_ATTEMPTS — the scan was never attempted, so counting it
+// terminally loses scans that may succeed on the next drain.
+export function isNetworkNotReached(msg) {
+  return /failed to fetch|timed?\s*out|abort|network\s*error|fetch failed|load failed/i.test(String(msg || ''))
 }
 
 export function getDrainTiming() {
@@ -99,7 +126,7 @@ export function __getConsecutiveFailures() {
   return _consecutiveFailures
 }
 
-const MAX_QUEUE_SIZE = 200
+const MAX_QUEUE_SIZE = 2000
 
 const DB_NAME = 'sewadar_offline_q'
 const DB_VERSION = 2
@@ -168,6 +195,18 @@ export async function enqueueScan(scan) {
     return { ok: false, reason: 'full' }
   }
   const id = scan.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  // C5: monotonic createdAt floor — a device clock that jumps BACKWARD
+  // (manual change, NTP correction, jammer-adjacent skew) must not reorder
+  // already-queued rows behind new ones and invert drain order. The floor is
+  // persisted in localStorage; storage exceptions (private mode) fall back
+  // to Date.now().
+  let createdAt = Date.now()
+  try {
+    const LS_KEY = 'sewadar_offline_q_last_ts'
+    const last = Number(localStorage.getItem(LS_KEY) || 0)
+    createdAt = Math.max(Date.now(), (Number.isFinite(last) ? last : 0) + 1)
+    localStorage.setItem(LS_KEY, String(createdAt))
+  } catch { /* storage unavailable — Date.now() stands */ }
   return new Promise((resolve) => {
     let tx2 = null
     // `IDBTransaction.error` THROWS (InvalidStateError) unless the transaction
@@ -176,7 +215,7 @@ export async function enqueueScan(scan) {
     const txError = () => { try { return tx2 ? tx2.error : null } catch { return null } }
     try {
       tx2 = db.transaction(STORE, 'readwrite')
-      tx2.objectStore(STORE).put({ ...scan, id, createdAt: Date.now(), attempts: 0, synced: false, owner: owner ?? null })
+      tx2.objectStore(STORE).put({ ...scan, id, createdAt, attempts: 0, synced: false, owner: owner ?? null })
     } catch (e) {
       // A closing connection or a non-cloneable value throws synchronously.
       resolve({ ok: false, reason: 'write-failed', error: e })
@@ -287,6 +326,52 @@ export async function clearOrphanedQueue() {
   })
 }
 
+// T10: a null-owner row that is still live (not failed, not synced) is
+// STRANDED — getQueuedScans hides it while logged in, the drain skips it,
+// and clearOrphanedQueue only runs while logged out — so without surfacing,
+// it sits invisible forever. This is a live predicate + a read-only list:
+// pages show the rows with per-row manual Clear (removeQueued). Nothing
+// here auto-drains or auto-deletes; the drain keeps skipping null-owner
+// rows (cross-user safety, D1a) and clearOrphanedQueue keeps its
+// logged-out-only bulk-clear semantics.
+export function isStrandedRow(r) {
+  return !!r && !isFailedRow(r) && !r.synced && (r.owner ?? null) === null
+}
+
+export async function listStrandedQueue() {
+  const db = await getDB()
+  if (!db) return []
+  return new Promise((res) => {
+    const req = db.transaction(STORE, 'readonly').objectStore(STORE).getAll()
+    req.onsuccess = () => res((req.result || []).filter(isStrandedRow))
+    req.onerror = () => res([])
+  })
+}
+
+// Cap policy: bulk-remove the current owner's NON-failed rows only (failed
+// rows stay for clearFailedQueue; other users' / null-owner rows are never
+// touched — the filter mirrors getQueuedScans visibility exactly). Wired to
+// the confirmed "Clear live queued scans" page action. Returns removed count.
+export async function clearLiveQueue() {
+  const db = await getDB()
+  if (!db) return 0
+  const uid = await resolveOwnerId(null)
+  const rows = await new Promise((res) => {
+    const req = db.transaction(STORE, 'readonly').objectStore(STORE).getAll()
+    req.onsuccess = () => res(req.result || [])
+    req.onerror = () => res([])
+  })
+  const doomed = rows.filter(r => !isFailedRow(r) && (r.owner ?? null) === uid)
+  if (doomed.length === 0) return 0
+  return new Promise((resolve) => {
+    const tx = db.transaction(STORE, 'readwrite')
+    const store = tx.objectStore(STORE)
+    for (const r of doomed) store.delete(r.id)
+    tx.oncomplete = () => resolve(doomed.length)
+    tx.onerror = () => resolve(0)
+  })
+}
+
 export async function cacheSet(key, value) {
   const db = await getDB()
   if (!db) return
@@ -366,9 +451,22 @@ export async function drainQueue(supabase, onProgress) {
       })
       const pending = queued
         .filter(q => (q.owner ?? null) === uid && !q.synced && !isFailedRow(q))
-        .sort((a, b) => a.createdAt - b.createdAt)
+        // C5: id tiebreak — two rows sharing a createdAt (same-ms enqueue,
+        // restored rows, putRaw test rows) drain deterministically.
+        .sort((a, b) => (a.createdAt - b.createdAt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 
       if (pending.length === 0) { _consecutiveFailures = 0; return 0 }
+
+      // T9: badge+schedule pairs whose IN was quarantined (terminally
+      // failed). An OUT for one of these pairs that then fails as
+      // dedup/drop ("No open session") means the IN never landed — deleting
+      // the OUT would leave zero rows and lose the pair silently. Seeded
+      // from the store snapshot, extended as this drain quarantines INs.
+      const failedInKeys = new Set(
+        queued
+          .filter(r => r.action === 'IN' && isFailedRow(r) && (r.owner ?? null) === uid)
+          .map(r => `${r.badge}␟${r.schedule_id}`)
+      )
 
       let drained = 0
       for (const q of pending) {
@@ -384,6 +482,10 @@ export async function drainQueue(supabase, onProgress) {
           ts = d.toISOString()
         } catch (e) {
           await quarantineRow(q.id, 'bad-timestamp')
+          // C3 gap: a quarantined IN orphans its badge+schedule pair — seed
+          // the key now so a later OUT failing as dedup/drop is quarantined
+          // (visible) instead of deleted (silent pair loss).
+          if (q.action === 'IN') failedInKeys.add(`${q.badge}␟${q.schedule_id}`)
           onProgress?.(q, false, e)
           continue
         }
@@ -415,13 +517,82 @@ export async function drainQueue(supabase, onProgress) {
           const msg = String(e?.message || '')
           const kind = classifyScanError(msg, e)
           if (kind === 'dedup' || kind === 'drop') {
-            await removeQueued(q.id)
-            drained++
-            _consecutiveFailures = Math.max(0, _consecutiveFailures - 1)
+            // T9: an OUT orphaned by its quarantined IN is quarantined, NOT
+            // deleted — both rows stay visible for manual recovery instead
+            // of vanishing as a pair.
+            // C3: dedup-delete is IN-only ('Already IN' on an IN means the
+            // server holds the session — safe to drop). An OUT that fails as
+            // dedup/drop ('No open session' etc.) is quarantined, never
+            // deleted, so it stays visible for manual recovery.
+            if (q.action === 'OUT' && failedInKeys.has(`${q.badge}␟${q.schedule_id}`)) {
+              await quarantineRow(q.id, msg.slice(0, 160) || kind)
+            } else if (q.action === 'OUT') {
+              await quarantineRow(q.id, msg.slice(0, 160) || kind)
+            } else if (q.action === 'IN' && q.uncertain && /Already IN/.test(msg)) {
+              // C6: an uncertain IN answered 'Already IN' means the server
+              // holds an open session this device never saw (the online IN
+              // landed but its response was lost, or another device scanned
+              // first) — the operator's second scan was almost certainly the
+              // OUT. Attempt it now (resolve the real open session, close
+              // exactly that id) and only then drop the row. Any failure
+              // quarantines instead of deleting: the pair stays visible for
+              // manual recovery.
+              let outOk = false
+              try {
+                const { data: openData, error: openError } = await withTimeout(
+                  supabase.rpc('get_open_session', { p_badge: q.badge, p_schedule: q.schedule_id }),
+                  10000,
+                  'Drain OUT'
+                )
+                if (openError) throw openError
+                const openRow = Array.isArray(openData) ? openData[0] : openData
+                if (!openRow?.id) throw new Error('No open session to close', { cause: e })
+                const { error: outError } = await withTimeout(
+                  supabase.rpc('scan_out', { p_badge: q.badge, p_schedule: q.schedule_id, p_ts: ts, p_open_id: openRow.id }),
+                  10000,
+                  'Drain OUT'
+                )
+                if (outError) throw outError
+                outOk = true
+              } catch (e2) {
+                await quarantineRow(q.id, String(e2?.message || msg).slice(0, 160) || kind)
+              }
+              if (outOk) {
+                await removeQueued(q.id)
+                drained++
+                _consecutiveFailures = Math.max(0, _consecutiveFailures - 1)
+                onProgress?.(q, true)
+                continue
+              }
+            } else {
+              await removeQueued(q.id)
+              drained++
+              _consecutiveFailures = Math.max(0, _consecutiveFailures - 1)
+            }
           } else if (kind === 'permanent') {
             await quarantineRow(q.id, msg.slice(0, 160) || 'permanent')
+            if (q.action === 'IN') failedInKeys.add(`${q.badge}␟${q.schedule_id}`)
           } else {
-            await markFailed(q.id)
+            // T9: pure network/timeout failures never reached the server —
+            // back off and break WITHOUT burning one of the row's
+            // MAX_DRAIN_ATTEMPTS. Server-reached retries still markFailed.
+            // C1: the drain's OWN withTimeout ('Drain IN/OUT timed out') is
+            // the exception — withTimeout abandons the race WITHOUT
+            // cancelling the in-flight request, so the server may HAVE
+            // applied the scan. Treat as server-possibly-reached: burn ONE
+            // attempt (bounded by MAX_DRAIN_ATTEMPTS via markFailed), then
+            // break + backoff.
+            // C4: PGRST202 (missing RPC = frontend shipped before the
+            // migration — self-healing deploy ordering) is skipped like a
+            // network error: still break + backoff, but burn no attempt, so
+            // the row is retried after the deploy lands instead of counting
+            // down to terminal.
+            const codeStr = String(e?.code ?? '')
+            if (/Drain (IN|OUT).*timed out/.test(msg)) {
+              await markFailed(q.id)
+            } else if (!isNetworkNotReached(msg) && !/PGRST202/i.test(msg) && !/PGRST202/i.test(codeStr)) {
+              await markFailed(q.id)
+            }
             _consecutiveFailures++
             break // network error — stop draining, backoff
           }

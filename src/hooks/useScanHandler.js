@@ -17,6 +17,7 @@ import {
   withinToggleGuard,
   minutesSince,
   resolveForgotOutTime,
+  isTimestampStale,
 } from '../lib/scannerUtils'
 
 /**
@@ -55,6 +56,28 @@ function isAuthError(e) {
  */
 function isTimeoutError(e) {
   return /timed out after \d+ms$/i.test(String(e?.message || ''))
+}
+
+/**
+ * V14: clock-skew rejections from `scan_in`/`scan_out` (v26/v46 guards:
+ * 'Timestamp cannot be in the future' past now()+5min, 'Timestamp too old'
+ * before now()-30d). The device clock disagrees with the server clock, so
+ * the raw text is replaced with the device-clock warning — warn-only, the
+ * ts that was sent is never rewritten (cf. resolveForgotOutTime clamping).
+ */
+const CLOCK_SKEW_MESSAGE = 'Device clock looks wrong — check the date/time and retry the scan'
+function isClockSkewMessage(msg) {
+  const s = String(msg || '')
+  return s.includes('Timestamp cannot be in the future') || s.includes('Timestamp too old')
+}
+/**
+ * True when the failure is a clock-skew rejection: either the server said so
+ * explicitly, or the ts we sent is itself outside the budget the server
+ * enforces (same 5min/30d window via isTimestampStale — e.g. a replayed or
+ * caller-supplied ts that could never be accepted).
+ */
+function isClockSkewed(msg, ts) {
+  return isClockSkewMessage(msg) || isTimestampStale(Date.parse(ts))
 }
 
 /**
@@ -183,10 +206,25 @@ async function lookupOpenSessionLegacy(badge, scheduleId) {
  *  - `opts.display` — the identity already resolved for the prompt, reused to
  *    label the resulting OUT popup without a second lookup.
  *
- * EVERY exit of handleScan resolves to an object carrying a boolean `ok` —
- * callers may destructure the result without a TypeError. `outTimeDefault` is
- * present only on the forgot-OUT prompt, where the scan is not yet written.
- */
+  * EVERY exit of handleScan resolves to an object carrying a boolean `ok` —
+  * callers may destructure the result without a TypeError. `outTimeDefault` is
+  * present only on the forgot-OUT prompt, where the scan is not yet written.
+  *
+  * V6 (busy): a call arriving while another scan is in flight is DROPPED with
+  * `{ ok: false, reason: 'busy' }` — plus a visible error popup + warning toast
+  * so the operator retries the badge. The reason is DISTINCT on purpose (see
+  * the camera-suppressor contract at the busy guard): a 'busy' means "this
+  * scan never ran", which is different from every other ok:false outcome.
+  *
+  * V7 (forgot-OUT follow-up): the 200ms re-IN that follows a forgot-OUT lives
+  * in useScannerSession (NOT in this hook) and fires blind — if it races an
+  * inflight scan it is dropped as `{ ok: false, reason: 'busy' }`. The caller
+  * MUST inspect the returned `{ ok, reason }`: on `ok: false` (notably
+  * `reason: 'busy'`) it must re-arm/retry instead of assuming the IN landed,
+  * or the OUT is left without its follow-up IN while the operator saw success.
+  * The hook side of that contract is this distinct 'busy' reason — verified by
+  * the V7 test pinning it for a confirm-scoped follow-up re-IN.
+  */
 export function useScanHandler({ scheduleId, profile, deptName, deptNameById, showPopup, toast, onQueued, onAfterScan }) {
   const [busy, setBusy] = useState(false)
   const busyRef = useRef(false)
@@ -198,12 +236,14 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
   const lastQueuedAtRef = useRef(new Map())
   const OFFLINE_DUPE_MS = 2000
   const noteQueuedOffline = useCallback((badge, action) => {
-    lastQueuedAtRef.current.set(`${badge}:${action}`, Date.now())
-  }, [])
+    // The dupe key includes the schedule: the same badge scanned under two
+    // schedules within 2s is two distinct intents, not a double tap.
+    lastQueuedAtRef.current.set(`${scheduleId}:${badge}:${action}`, Date.now())
+  }, [scheduleId])
   const isOfflineDupe = useCallback((badge, action) => {
-    const at = lastQueuedAtRef.current.get(`${badge}:${action}`)
+    const at = lastQueuedAtRef.current.get(`${scheduleId}:${badge}:${action}`)
     return at !== undefined && Date.now() - at < OFFLINE_DUPE_MS
-  }, [])
+  }, [scheduleId])
   // A2 (L-01): belt-and-braces. A1 made the real enqueueScan never reject,
   // but if any future change (or a test double) throws, the rejection must
   // still surface as a write-failed outcome — never escape handleScan, whose
@@ -218,7 +258,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
   const offlineEnqueueFailed = useCallback((res, badge) => {
     const time = new Date().toLocaleTimeString()
     if (res.reason === 'full') {
-      showPopup({ status: 'error', badge, message: 'Offline queue is full (200 scans) — sync when online, or clear failed scans', time })
+      showPopup({ status: 'error', badge, message: 'Offline queue is full (2000 scans) — sync when online, or clear queued scans', time })
       toast.error('Offline queue is full')
       return { ok: false, reason: 'offline_queue_full' }
     }
@@ -271,6 +311,8 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
       return { ok: true }
     } catch (e) {
       const msg = String(e.message || '')
+      // V14: a clock-skew rejection keeps the page's form AND names the cause.
+      if (isClockSkewed(msg, ts)) return { ok: false, reason: 'server', message: CLOCK_SKEW_MESSAGE }
       const fb = await enqueueOutFallback({ b: badge, ts, openId }, msg)
       if (fb.handled) return fb.outcome
       return { ok: false, reason: 'server', message: friendly(msg) }
@@ -329,7 +371,23 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
      * caller that forgets `confirmFor` re-asks rather than writing blind.
      */
     const isConfirmed = (dir) => confirmed === true && confirmFor === dir
-    if (busyRef.current) return { ok: false, reason: 'busy' }
+    // V6: a busy-guard drop must SURFACE feedback — the old silent return left
+    // the operator holding a badge at a seemingly dead scanner. Toast + error
+    // popup name the badge so the retry is obvious. The reason stays the
+    // DISTINCT 'busy' (never folded into another reason): callers — notably
+    // the camera's 2s duplicate-suppressor (Track 4) — rely on it to tell "this
+    // scan never ran, retry me" apart from a real outcome. CAMERA SUPPRESSOR
+    // CONTRACT (Track 4 owns BarcodeScanner.jsx — NOT touched here):
+    // BarcodeScanner must record its `lastScan` suppressor entry only AFTER
+    // onScan acceptance, i.e. only when this hook did NOT answer 'busy'.
+    // Recording it before the call burns the 2s window on a scan that never
+    // ran, so the operator's retry is swallowed as a duplicate.
+    if (busyRef.current) {
+      const bBusy = String(badge ?? '').trim().toUpperCase()
+      showPopup({ status: 'error', badge: bBusy, message: 'Scanner busy — retry this badge', time: new Date().toLocaleTimeString() })
+      toast.warning('Scanner busy — retry this badge')
+      return { ok: false, reason: 'busy' }
+    }
     const b = String(badge).trim().toUpperCase()
     if (!b) return { ok: false, reason: 'empty' }
     if (!BADGE_REGEX.test(b)) {
@@ -399,6 +457,11 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
             toast.success(`OUT queued (offline) ${b}`)
             scanOk = true
             onQueued?.()
+          } else if (isClockSkewed(msg, tsFast)) {
+            // V14: the device clock disagrees with the server — say so instead
+            // of the raw 'Timestamp …' text. Warn-only: tsFast is sent unchanged.
+            showPopup({ status: 'error', badge: b, message: CLOCK_SKEW_MESSAGE, time: new Date().toLocaleTimeString() })
+            toast.warning(CLOCK_SKEW_MESSAGE)
           } else {
             showPopup({ status: 'error', badge: b, message: friendly(msg), time: new Date().toLocaleTimeString() })
             toast.error(friendly(msg))
@@ -534,6 +597,12 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
             // refresh); every other offline outcome resolves ok:false.
             if (fb.outcome.reason === 'queued') { scanOk = true }
             else return fb.outcome
+          } else if (isClockSkewed(msg, ts)) {
+            // V14: device clock vs server clock — warn, do not queue (a clock
+            // rejection is authoritative, not a network blip) and send ts
+            // unchanged.
+            showPopup({ status: 'error', badge: b, message: CLOCK_SKEW_MESSAGE, time: new Date().toLocaleTimeString() })
+            toast.warning(CLOCK_SKEW_MESSAGE)
           } else {
             showPopup({ status: 'error', badge: b, message: friendly(msg), time: new Date().toLocaleTimeString() })
             toast.error(friendly(msg))
@@ -625,21 +694,41 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
               return { ok: false, reason: 'session_lookup_failed' }
             }
             // Genuine null: the session closed between the two lookups, so the
-            // original 'Already IN' is still the honest message.
-            showPopup({ status: 'error', badge: b, message: 'Already checked IN — please OUT first', time: new Date().toLocaleTimeString() })
+            // original 'Already IN' is still the honest message. But the same
+            // shape is produced by a stale server scan_in (pre-v56 `IF FOUND`
+            // raises Already IN with no open session at all, for EVERY badge)
+            // — so point the operator at the one action that fixes that case.
+            showPopup({ status: 'error', badge: b, message: 'Already checked IN — please OUT first. If this repeats for every badge, ask the ASO to apply the pending database migrations.', time: new Date().toLocaleTimeString() })
             toast.error('Already IN — OUT first')
           } else if (!navigator.onLine || msg.includes('Failed to fetch') || msg.includes('timed out')) {
             if (isOfflineDupe(b, 'IN')) {
               toast.warning('Already queued — ignoring duplicate scan')
               return { ok: false, reason: 'duplicate_queued' }
             }
-            const queuedRes = await tryEnqueue({ badge: b, schedule_id: scheduleId, action: 'IN', ts, centre: profile?.centre, dept: deptName, id: nonce, is_manual: manual })
+            // C6: flag the row uncertain when this device holds no pending
+            // local IN for the badge+schedule — the lookup failed, so server
+            // state is unknown and a second scan of the same badge may be the
+            // OUT. At drain, an uncertain IN answered 'Already IN' attempts
+            // the OUT flow instead of being silently dropped.
+            let uncertainIn = false
+            try {
+              const queued = await getQueuedScans()
+              uncertainIn = !(queued || []).some(q =>
+                q && q.synced !== true && q.failed !== true && q.status !== 'failed'
+                && q.action === 'IN' && q.badge === b && q.schedule_id === scheduleId)
+            } catch { uncertainIn = false }
+            const queuedRes = await tryEnqueue({ badge: b, schedule_id: scheduleId, action: 'IN', ts, centre: profile?.centre, dept: deptName, id: nonce, is_manual: manual, ...(uncertainIn ? { uncertain: true } : {}) })
             if (!queuedRes.ok) return offlineEnqueueFailed(queuedRes, b)
             noteQueuedOffline(b, 'IN')
             showPopup({ status: 'queued', badge: b, time: new Date().toLocaleTimeString(), message: 'Queued offline — will sync when online' })
             toast.success(`IN queued (offline) ${b}`)
             scanOk = true
             onQueued?.()
+          } else if (isClockSkewed(msg, ts)) {
+            // V14: device clock vs server clock — warn instead of the raw
+            // 'Timestamp …' text. Warn-only: ts is sent unchanged.
+            showPopup({ status: 'error', badge: b, message: CLOCK_SKEW_MESSAGE, time: new Date().toLocaleTimeString() })
+            toast.warning(CLOCK_SKEW_MESSAGE)
           } else {
             showPopup({ status: 'error', badge: b, message: friendly(msg), time: new Date().toLocaleTimeString() })
             toast.error(friendly(msg))

@@ -479,6 +479,11 @@ describe('toDailyRow', () => {
     expect(r.rate).toBe(0)
     expect(r.band).toBe('none')
   })
+  it('clamps the rate at 100 when present exceeds expected', () => {
+    const r = toDailyRow({ centre: 'DELHI', dept_name: 'MEDICAL', expected: 4, present: 6, absent: 0, open_now: 0 })
+    expect(r.rate).toBe(100)
+    expect(r.band).toBe('full')
+  })
   it('tolerates missing fields', () => {
     const r = toDailyRow({})
     expect(r.centre).toBe('')
@@ -513,6 +518,12 @@ describe('dailyTotals', () => {
   })
   it('returns rate 0 when nothing is expected', () => {
     expect(dailyTotals([])).toEqual({ expected: 0, present: 0, absent: 0, open_now: 0, rate: 0 })
+  })
+  it('clamps the total rate at 100 when present exceeds expected', () => {
+    const rows = buildDailyRows([
+      { centre: 'A', dept_name: 'X', expected: 4, present: 6, absent: 0, open_now: 0 },
+    ])
+    expect(dailyTotals(rows).rate).toBe(100)
   })
   it('tolerates non-array input', () => {
     expect(dailyTotals(null).expected).toBe(0)
@@ -719,6 +730,29 @@ describe('buildTrendRows', () => {
     expect(rows[0].rate).toBe(100)
     expect(rows[1].rate).toBe(0)
   })
+
+  it('synthesises all five VISIT_DAYS in order, zero-filling silent days', () => {
+    // 2026-08-05 is a WED, 2026-08-07 a FRI — THU/SAT/SUN have no events.
+    const rows = buildTrendRows([
+      { day: '2026-08-05', present: 80, absent: 20 },
+      { day: '2026-08-07', present: 30, absent: 70 },
+    ])
+    expect(rows).toHaveLength(5)
+    expect(rows.map((r) => r.day)).toEqual(['WED', 'THU', 'FRI', 'SAT', 'SUN'])
+    expect(rows[0]).toMatchObject({ present: 80, absent: 20, rate: 80 })
+    expect(rows[2]).toMatchObject({ present: 30, absent: 70, rate: 30 })
+    // Silent days: present 0, absent = deployed (100, known from the event
+    // rows via present + absent), rate 0.
+    for (const silent of [rows[1], rows[3], rows[4]]) {
+      expect(silent).toMatchObject({ present: 0, absent: 100, rate: 0 })
+    }
+  })
+
+  it('zero-fills silent days with absent 0 when deployed is unknowable', () => {
+    const rows = buildTrendRows([])
+    expect(rows).toHaveLength(5)
+    expect(rows.every((r) => r.present === 0 && r.absent === 0 && r.rate === 0)).toBe(true)
+  })
 })
 
 describe('anomalyCounts', () => {
@@ -744,6 +778,19 @@ describe('scannerStatus', () => {
   it('honours a custom window', () => {
     expect(scannerStatus('11:00:00', '2026-08-06', NOW, 120)).toBe('active')
     expect(scannerStatus('11:00:00', '2026-08-06', NOW, 30)).toBe('idle')
+  })
+  it('returns scanned for a valid non-today date, active/idle for today, offline for missing', () => {
+    // NOW is 2026-08-06 12:00 IST. A fresh scan time on a PAST date is not
+    // idle — it belongs to another visit day.
+    expect(scannerStatus('11:50:00', '2026-08-05', NOW)).toBe('scanned')
+    expect(scannerStatus('11:50:00', '2026-08-07', NOW)).toBe('scanned')
+    // Today keeps the active/idle split …
+    expect(scannerStatus('11:50:00', '2026-08-06', NOW)).toBe('active')
+    expect(scannerStatus('08:00:00', '2026-08-06', NOW)).toBe('idle')
+    // … and missing/unparseable stays offline.
+    expect(scannerStatus(null, '2026-08-06', NOW)).toBe('offline')
+    expect(scannerStatus('11:50:00', null, NOW)).toBe('offline')
+    expect(scannerStatus('11:50:00', 'not-a-date', NOW)).toBe('offline')
   })
 })
 
@@ -861,9 +908,15 @@ describe('sparse and empty inputs (robustness + branch coverage)', () => {
     })
     expect(totals).toEqual({ deployed: 0, everPresent: 0, neverPresent: 0, openNow: 0 })
   })
-  it('buildTrendRows tolerates null input and missing days', () => {
-    expect(buildTrendRows(null)).toEqual([])
-    expect(buildTrendRows([{ present: 2, absent: 2 }])[0]).toMatchObject({ day: '', rate: 50 })
+  it('buildTrendRows synthesises the full strip for null input and unplaceable days', () => {
+    // Null input: five zero rows, deployed unknowable so absent is 0.
+    const empty = buildTrendRows(null)
+    expect(empty.map((r) => r.day)).toEqual(['WED', 'THU', 'FRI', 'SAT', 'SUN'])
+    expect(empty.every((r) => r.present === 0 && r.absent === 0 && r.rate === 0)).toBe(true)
+    // A day-less row places nowhere but still reveals the deployed total.
+    const placed = buildTrendRows([{ present: 2, absent: 2 }])
+    expect(placed).toHaveLength(5)
+    expect(placed[0]).toMatchObject({ day: 'WED', present: 0, absent: 4, rate: 0 })
   })
   it('anomalyCounts tolerates null input', () => {
     expect(anomalyCounts(null)).toEqual({})
@@ -915,6 +968,27 @@ describe('deptInchargeKpis', () => {
     )
     expect(k.today).toMatchObject({ deployed: 16, present: 12, absent: 4, openNow: 1, rate: 75, band: 'partial' })
     expect(k.visit).toMatchObject({ deployed: 16, present: 15, absent: 1, rate: 94, band: 'partial' })
+  })
+
+  it('accumulates the per-department breakdown across centres instead of letting the last centre win', () => {
+    const k = deptInchargeKpis(
+      [
+        { centre: 'DELHI', department_id: 'd1', dept_name: 'MEDICAL', expected: 10, present: 8, absent: 2, open_now: 1 },
+        { centre: 'NOIDA', department_id: 'd1', dept_name: 'MEDICAL', expected: 6, present: 4, absent: 2, open_now: 0 },
+      ],
+      [
+        { centre: 'DELHI', department_id: 'd1', dept_name: 'MEDICAL', deployed: 10, ever_present: 9, never_present: 1, open_now: 1 },
+        { centre: 'NOIDA', department_id: 'd1', dept_name: 'MEDICAL', deployed: 6, ever_present: 5, never_present: 1, open_now: 0 },
+      ]
+    )
+    // tiles sum across centres (unchanged behaviour)
+    expect(k.today).toMatchObject({ deployed: 16, present: 12, absent: 4 })
+    expect(k.visit).toMatchObject({ deployed: 16, present: 14, absent: 2 })
+    // the breakdown row for the SAME department must match the tiles, not the
+    // last centre row (6/4/2). Old code assigned per row, so NOIDA won.
+    expect(k.byDepartment).toHaveLength(1)
+    expect(k.byDepartment[0].today).toMatchObject({ deployed: 16, present: 12, absent: 4, rate: 75 })
+    expect(k.byDepartment[0].visit).toMatchObject({ deployed: 16, present: 14, absent: 2 })
   })
 
   it('keeps visit present (ever_present) distinct from today present', () => {

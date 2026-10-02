@@ -14,8 +14,9 @@
 //
 // The mock setup mirrors src/hooks/useScanHandler.test.jsx.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, cleanup, act } from '@testing-library/react'
 import { todayStrIST } from '../lib/scannerUtils'
+import { UNASSIGNED_CENTRE } from '../lib/attendance'
 import AttendancePage from './AttendancePage'
 
 const rpc = vi.fn()
@@ -24,9 +25,15 @@ const toastSuccess = vi.fn()
 const toastWarning = vi.fn()
 
 // Supabase realtime is inert here: a chainable no-op that satisfies
-// channel().on(...).subscribe() and removeChannel().
+// channel().on(...).subscribe() and removeChannel(). Handlers are captured
+// so the max-wait test can fire reloads on demand.
+const pgHandlers = []
 const noopChannel = () => {
-  const ch = { on: () => ch, subscribe: () => ch, unsubscribe: () => ch }
+  const ch = {
+    on: (event, filter, cb) => { if (typeof cb === 'function') pgHandlers.push(cb); return ch },
+    subscribe: () => ch,
+    unsubscribe: () => ch,
+  }
   return ch
 }
 
@@ -117,6 +124,7 @@ async function renderPage(props = {}) {
 
 beforeEach(() => {
   rpc.mockReset()
+  pgHandlers.length = 0
   toastError.mockReset()
   toastSuccess.mockReset()
   toastWarning.mockReset()
@@ -160,18 +168,73 @@ describe('A11 — an RPC failure renders an error state, never a silent empty vi
     expect(rpc).toHaveBeenCalledTimes(6)
   })
 
-  it('still errors out when only one of the three RPCs fails', async () => {
+  it('degrades only the Scanner tab when scanner_ops fails — the page stays live', async () => {
     rpc.mockImplementation((name) =>
       name === 'attendance_scanner_ops'
         ? Promise.resolve({ data: null, error: { message: 'permission denied for scanner_ops' } })
+        : name === 'attendance_sewadar_summary'
+          ? Promise.resolve({ data: [SEWADAR, OTHER_CENTRE], error: null })
+          : Promise.resolve({ data: DAILY, error: null })
+    )
+    await renderPage()
+    // A partial outage must NOT read as "no attendance records": no
+    // full-page error, and the Sewadars tab renders its rows.
+    expect(screen.queryByText('Could not load attendance')).toBeNull()
+    expect(screen.getByText('RAM')).toBeTruthy()
+    expect(screen.getByText('SHAM')).toBeTruthy()
+    expect(screen.queryByText(/permission denied/)).toBeNull()
+    expect(screen.queryByText('No attendance records')).toBeNull()
+
+    // The Scanner Ops tab carries its own error card with a Retry.
+    fireEvent.click(screen.getByText('Scanner Ops'))
+    expect(screen.getByText('Scanner activity')).toBeTruthy()
+    expect(screen.getByText(/could not be loaded/)).toBeTruthy()
+    expect(screen.getByText('Retry')).toBeTruthy()
+
+    // The Daily tab is unaffected — healthy data is never blanked.
+    fireEvent.click(screen.getByText('Daily'))
+    expect(screen.queryByRole('alert')).toBeNull()
+    const dailyBody = document.querySelectorAll('table tbody tr')
+    expect(dailyBody).toHaveLength(2)
+    expect(dailyBody[0].textContent).toContain('DELHI')
+  })
+
+  it('degrades only the Daily tab when attendance_daily_summary fails', async () => {
+    rpc.mockImplementation((name) =>
+      name === 'attendance_daily_summary'
+        ? Promise.resolve({ data: null, error: { message: 'daily is gone' } })
+        : name === 'attendance_sewadar_summary'
+          ? Promise.resolve({ data: [SEWADAR, OTHER_CENTRE], error: null })
+          : Promise.resolve({ data: SCANNER, error: null })
+    )
+    await renderPage()
+    expect(screen.queryByText('Could not load attendance')).toBeNull()
+    expect(screen.getByText('RAM')).toBeTruthy()
+
+    fireEvent.click(screen.getByText('Daily'))
+    expect(screen.getByText('Daily figures')).toBeTruthy()
+    expect(screen.getByText('Retry')).toBeTruthy()
+
+    // Retry re-issues the RPCs; a recovered backend clears the card.
+    respondWith()
+    fireEvent.click(screen.getByText('Retry'))
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+    const dailyBody = document.querySelectorAll('table tbody tr')
+    expect(dailyBody).toHaveLength(2)
+    expect(dailyBody[0].textContent).toContain('DELHI')
+  })
+
+  it('still takes the whole page when the sewadar summary alone fails', async () => {
+    // Every tile and every tab is built on the sewadar rows — without them
+    // there is nothing honest to show, so this one failure stays full-page.
+    rpc.mockImplementation((name) =>
+      name === 'attendance_sewadar_summary'
+        ? Promise.resolve({ data: null, error: { message: 'sewadar summary is gone' } })
         : Promise.resolve({ data: [], error: null })
     )
     await renderPage()
-    // A partial outage must NOT read as "no attendance records" just because
-    // two of the three calls happened to succeed.
     expect(screen.getByText('Could not load attendance')).toBeTruthy()
-    expect(screen.queryByText(/permission denied/)).toBeNull()
-    expect(screen.queryByText('No attendance records')).toBeNull()
+    expect(screen.queryByText(/sewadar summary is gone/)).toBeNull()
     expect(screen.queryByText('Scanned')).toBeNull()
   })
 })
@@ -419,6 +482,106 @@ describe('C2 — exports use the shared driver naming (L-24/L-25)', () => {
     for (const n of names) {
       expect(typeof n).toBe('string')
       expect(n.length).toBeLessThanOrEqual(31)
+    }
+  })
+})
+
+describe('UNASSIGNED filter matches the pre-normalised rows', () => {
+  it('shows null-centre sewadars AND normalised daily rows under the Unassigned filter', async () => {
+    respondWith({
+      sew: [{ ...SEWADAR, sewadar_centre: null }],
+      daily: [{ centre: null, dept_name: 'MEDICAL', expected: 1, present: 0, absent: 1, open_now: 0 }],
+      scanners: [],
+    })
+    await renderPage()
+    // The option exists (unioned from both row sets)…
+    expect([...screen.getByLabelText('Filter by centre').querySelectorAll('option')].map((o) => o.value))
+      .toContain(UNASSIGNED_CENTRE)
+    fireEvent.change(screen.getByLabelText('Filter by centre'), { target: { value: UNASSIGNED_CENTRE } })
+    await settle()
+    // …and the sewadar with no home centre is still listed.
+    expect(screen.getByText('RAM')).toBeTruthy()
+    // The daily row was normalised to the UNASSIGNED string (never null), so
+    // the old `!value`-only matcher dropped it and the tab read 0 rows.
+    fireEvent.click(screen.getByText('Daily'))
+    const body = document.querySelectorAll('table tbody tr')
+    expect(body).toHaveLength(1)
+    expect(body[0].textContent).toContain('MEDICAL')
+  })
+})
+
+describe('the "Showing N of M" pill counts the active tab', () => {
+  it('switches its denominator when the tab switches', async () => {
+    await renderPage()
+    fireEvent.change(screen.getByLabelText('Filter by centre'), { target: { value: 'DELHI' } })
+    await settle()
+    expect(screen.getByText('Showing 1 of 2')).toBeTruthy()
+
+    // The Daily tab agrees here (DELHI 1 of 2) — the Scanner tab is the
+    // discriminator: one DELHI scanner of one total, not the sewadar 1-of-2.
+    fireEvent.click(screen.getByText('Scanner Ops'))
+    await settle()
+    expect(screen.getByText('Showing 1 of 1')).toBeTruthy()
+    expect(screen.queryByText('Showing 1 of 2')).toBeNull()
+  })
+})
+
+describe('centre options union sewadar and daily rows', () => {
+  it('offers a deployed-but-unscanned centre that only the daily rows know', async () => {
+    // FARIDABAD is deployed (daily row) but has no scanned sewadar row.
+    respondWith({
+      sew: [SEWADAR],
+      daily: [{ centre: 'FARIDABAD', dept_name: 'COOKING', expected: 2, present: 0, absent: 2, open_now: 0 }],
+      scanners: [],
+    })
+    await renderPage()
+    expect([...screen.getByLabelText('Filter by centre').querySelectorAll('option')].map((o) => o.value))
+      .toEqual(['all', 'DELHI', 'FARIDABAD'])
+  })
+})
+
+describe('realtime max-wait', () => {
+  it('debounces a burst but fires immediately past the 2000ms max-wait', async () => {
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => 2_000_000)
+    try {
+      await renderPage()
+      expect(rpc).toHaveBeenCalledTimes(3)
+      expect(pgHandlers.length).toBeGreaterThan(0)
+      const reload = pgHandlers[0]
+
+      // 500ms after the load: inside the window → trailing 400ms debounce.
+      nowSpy.mockImplementation(() => 2_000_500)
+      reload()
+      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(6))
+
+      // 5s after the last load: past max-wait → immediate, no timer wait.
+      nowSpy.mockImplementation(() => 2_010_000)
+      reload()
+      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(9))
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+})
+
+describe('a hung RPC degrades its tab instead of latching loading', () => {
+  it('times out attendance_daily_summary and keeps the Sewadars tab live', async () => {
+    respondWith()
+    const baseImpl = rpc.getMockImplementation()
+    rpc.mockImplementation((...args) => (args[0] === 'attendance_daily_summary' ? new Promise(() => {}) : baseImpl(...args)))
+    vi.useFakeTimers()
+    try {
+      render(<AttendancePage schedules={SCHEDULES} scheduleId="sched-1" />)
+      // The 15s withTimeout abort is a timer: advance past it and flush.
+      await act(async () => { await vi.advanceTimersByTimeAsync(16000) })
+      expect(screen.queryByText('Loading attendance…')).toBeNull()
+      expect(screen.queryByText('Could not load attendance')).toBeNull()
+      expect(screen.getByText('RAM')).toBeTruthy()
+      fireEvent.click(screen.getByText('Daily'))
+      expect(screen.getByText('Daily figures')).toBeTruthy()
+      expect(screen.getByText('Retry')).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
     }
   })
 })

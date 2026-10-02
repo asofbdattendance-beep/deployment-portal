@@ -60,6 +60,19 @@ const ruleText = (rule) => RULE_META[rule]?.text || 'Reported by the server but 
 /** Centre for display + sorting: a null home centre is never a blank cell. */
 const centreOf = (r) => r?.sewadar_centre || UNASSIGNED_CENTRE
 
+// The server caps the anomaly feed: each rule reports at most RULE_CAP rows and
+// the whole result at most TOTAL_CAP rows (sql/v45 LIMIT 1000 — the feed shows
+// the NEWEST rows first). A count sitting exactly on a cap is therefore a lower
+// bound, and the UI must say so: "200+" with a "showing newest N" note, on the
+// tiles, on the chips, and in the Counts export sheet. Without this a capped
+// feed reads as an exact census.
+const RULE_CAP = 200
+const TOTAL_CAP = 1000
+// Numbers stay numbers below the cap (the Counts export sheet keeps numeric
+// cells); only a capped value becomes a "200+"/"1000+" string.
+const cappedRuleCount = (n) => (n >= RULE_CAP ? `${RULE_CAP}+` : n)
+const cappedTotal = (n) => (n >= TOTAL_CAP ? `${TOTAL_CAP}+` : n)
+
 /**
  * Anomalies — the read-only anomaly feed over `attendance_anomalies`
  * (sql/v45_attendance_reports.sql §6).
@@ -176,6 +189,15 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
 
   const counts = useMemo(() => anomalyCounts(base), [base])
 
+  // Any rule sitting on the server cap (or the whole result on the total cap)
+  // means the feed is truncated: counts below are lower bounds over the newest
+  // N rows, not a census of the visit.
+  const isCapped = useMemo(
+    () => base.length >= TOTAL_CAP || Object.values(counts).some((n) => n >= RULE_CAP),
+    [base, counts]
+  )
+  const capNote = isCapped ? `Showing newest ${base.length} — counts hit the server cap` : null
+
   // Known rules first (severity order), then anything the server sent that this
   // page does not know, alphabetically — never drop a rule silently.
   const rules = useMemo(() => {
@@ -242,9 +264,14 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
           {
             // Counts are over the WHOLE result set, not the filtered view, so
             // the sheet answers "what fired today" rather than "what am I
-            // looking at".
+            // looking at". A count on the server cap is a lower bound over the
+            // newest rows — rendered "200+" with the cap note below, never a
+            // bare number that reads as exact.
             name: 'Counts',
-            rows: Object.entries(counts).map(([r, n]) => ({ Rule: ruleLabel(r), Count: n })),
+            rows: [
+              ...Object.entries(counts).map(([r, n]) => ({ Rule: ruleLabel(r), Count: cappedRuleCount(n) })),
+              ...(isCapped ? [{ Rule: `Note: ${capNote}`, Count: '' }] : []),
+            ],
           },
         ]
       )
@@ -258,7 +285,7 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
     } finally {
       setExporting(false)
     }
-  }, [visible, counts, schedule, date, toast])
+  }, [visible, counts, isCapped, capNote, schedule, date, toast])
 
   // ─── Guards (early returns, so no hooks run after them) ───
   if (!schedules.length) {
@@ -358,8 +385,8 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
       <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
         <div className="stat">
           <div className="stat-label">Anomalies</div>
-          <div className="stat-value" style={{ color: base.length ? '#b45309' : undefined }}>{base.length}</div>
-          <div className="stat-sub">{date ? `on ${date}` : 'across the whole visit'}</div>
+          <div className="stat-value" style={{ color: base.length ? '#b45309' : undefined }}>{cappedTotal(base.length)}</div>
+          <div className="stat-sub">{date ? `on ${date}` : 'across the whole visit'}{isCapped ? ' · showing newest' : ''}</div>
         </div>
         <div className="stat">
           <div className="stat-label">Rules fired</div>
@@ -388,20 +415,25 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
             <button
               onClick={() => setRule('all')}
               className={`seg-btn ${rule === 'all' ? 'seg-active' : ''}`}
-              title="Every rule that fired"
+              title={isCapped ? `Every rule that fired (${capNote})` : 'Every rule that fired'}
             >
-              All ({base.length})
+              All ({cappedTotal(base.length)})
             </button>
             {rules.map((r) => (
               <button
                 key={r}
                 onClick={() => setRule(r)}
                 className={`seg-btn ${rule === r ? 'seg-active' : ''}`}
-                title={ruleText(r)}
+                title={counts[r] >= RULE_CAP ? `${ruleText(r)} (${capNote})` : ruleText(r)}
               >
-                {ruleLabel(r)} ({counts[r]})
+                {ruleLabel(r)} ({cappedRuleCount(counts[r])})
               </button>
             ))}
+            {isCapped && (
+              <span style={{ fontSize: '0.74rem', color: '#b45309', fontWeight: 600 }}>
+                {capNote}
+              </span>
+            )}
             {rules.length === 0 && (
               <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
                 No rule fired{date ? ` on ${date}` : ' for this visit'} — only “All” is available.

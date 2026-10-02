@@ -102,12 +102,22 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(false)
   const [errs, setErrs] = useState({})
-  // A13: which schedule the rows in state belong to. Rows from a previous
-  // schedule must never be shown (or exported) under the new one.
+  // A13: which schedule AND date the rows in state belong to. Rows from a
+  // previous schedule — or a previous scan day — must never be shown (or
+  // exported) under the new one. Stamped whenever at least one arm lands, so a
+  // half-failed load still owns its date instead of reading as another day.
   const [rowsScheduleId, setRowsScheduleId] = useState(null)
+  const [rowsDate, setRowsDate] = useState(null)
   const mountedRef = useRef(true)
   const seqRef = useRef(0)
   const [lastRefreshAt, setLastRefreshAt] = useState(null)
+  // Ticks once a minute so the LIVE "updated Ns ago" pill advances without an
+  // RPC — freshness is a function of the clock, not of the data.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60000)
+    return () => clearInterval(id)
+  }, [])
 
   // Re-sync "today" across an IST midnight and on window focus, but never
   // overwrite a day the incharge picked by hand.
@@ -140,9 +150,17 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
     setErrs(next)
     if (daily.status === 'fulfilled' || visit.status === 'fulfilled') {
       setRowsScheduleId(scheduleId)
+      setRowsDate(date)
       setLastRefreshAt(Date.now())
     }
     setLoading(false)
+  }, [scheduleId, date])
+
+  // A schedule or scan-day change invalidates the rows on screen until the new
+  // load lands — the previous day's tiles must never read as this day's.
+  useEffect(() => {
+    setRowsScheduleId((cur) => (cur === scheduleId ? cur : null))
+    setRowsDate((cur) => (cur === date ? cur : null))
   }, [scheduleId, date])
 
   // The mount flag is re-asserted HERE, in the same effect that loads. A
@@ -184,19 +202,30 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
     return () => { alive = false; if (timer) clearTimeout(timer); try { supabase.removeChannel(ch) } catch { /* already torn down */ } }
   }, [scheduleId, load])
 
-  const rowsAreCurrent = rowsScheduleId === scheduleId
-  const kpis = useMemo(() => deptInchargeKpis(dailyRaw, visitRaw), [dailyRaw, visitRaw])
+  const rowsAreCurrent = rowsScheduleId === scheduleId && rowsDate === date
+  // Until the load for THIS schedule and scan day lands there are no rows —
+  // the previous day's tiles must never read as this day's.
+  const kpis = useMemo(
+    () => deptInchargeKpis(rowsAreCurrent ? dailyRaw : [], rowsAreCurrent ? visitRaw : []),
+    [dailyRaw, visitRaw, rowsAreCurrent]
+  )
 
   // Centres contributing to the department — informational, never a scope.
   // An unresolved home centre is bucketed rather than dropped, so the count
   // matches the rows above it (every other page does the same via
   // UNASSIGNED_CENTRE in src/lib/attendance.js).
   const centreCount = useMemo(
-    () => new Set((Array.isArray(dailyRaw) ? dailyRaw : []).map((r) => r?.centre || UNASSIGNED_CENTRE)).size,
-    [dailyRaw]
+    () => new Set((rowsAreCurrent && Array.isArray(dailyRaw) ? dailyRaw : []).map((r) => r?.centre || UNASSIGNED_CENTRE)).size,
+    [dailyRaw, rowsAreCurrent]
   )
 
   const exportSnapshot = useCallback(async () => {
+    // A snapshot over a half-failed load would print one half's numbers as
+    // the whole truth — both arms must have landed.
+    if (errs.daily || errs.visit) {
+      toast.warning('One half of the snapshot failed to load — retry before exporting')
+      return
+    }
     setExporting(true)
     try {
       const n = await exportWorkbook(`${fileSlug(schedule?.name)}_incharge_${date}.xlsx`, [
@@ -221,7 +250,7 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
     } finally {
       setExporting(false)
     }
-  }, [schedule?.name, date, kpis, toast])
+  }, [schedule?.name, date, kpis, errs, toast])
 
   if (loading && !rowsAreCurrent) {
     return (
@@ -237,7 +266,10 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
   }
 
   const go = (target, payload) => onNavigate?.(target, payload)
-  const noScope = rowsAreCurrent && kpis.today.deployed === 0 && kpis.visit.deployed === 0
+  // "No department assigned" requires BOTH arms to have actually answered:
+  // a failed visit RPC leaves visitRaw empty, which would otherwise read as
+  // zero deployed and blame the login instead of the outage.
+  const noScope = rowsAreCurrent && !errs.daily && !errs.visit && kpis.today.deployed === 0 && kpis.visit.deployed === 0
 
   return (
     <div className="page" style={{ maxWidth: 1200 }}>
@@ -248,7 +280,7 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
           <div className="page-sub">Your department&rsquo;s attendance · {VISIT_DAYS.join(' · ')}</div>
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
             <span className="pill" style={{ background: '#ecfdf5', color: '#047857', fontWeight: 600 }} title={lastRefreshAt ? `Last reload at ${new Date(lastRefreshAt).toLocaleTimeString('en-IN')}` : 'Not loaded yet'}>
-              <LiveDot /> LIVE · updated {timeAgo(lastRefreshAt)}
+              <LiveDot /> LIVE · updated {timeAgo(lastRefreshAt, now)}
             </span>
             <span className="pill pill-gray" title="Attendance is read-only here — scans are recorded on the Dept Incharge page" style={{ fontWeight: 600 }}>
               <Lock size={12} /> View-only
@@ -256,7 +288,7 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
             <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
               {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
             </button>
-            <button onClick={exportSnapshot} disabled={exporting || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+            <button onClick={exportSnapshot} disabled={exporting || !rowsAreCurrent || errs.daily || errs.visit} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export snapshot
             </button>
           </div>
@@ -298,17 +330,17 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
           <button type="button" onClick={() => go('deptIncharge')} className="stat" style={TILE} title="Open the Dept Incharge lists">
             <div className="stat-label">Total deployed</div>
             <div className="stat-value">{kpis.today.deployed}</div>
-            <div className="stat-sub">in your department{centreCount > 0 ? ` · ${centreCount} centre${centreCount === 1 ? '' : 's'}` : ''}</div>
+            <div className="stat-sub">in your department{centreCount > 0 ? ` · ${centreCount} centre${centreCount === 1 ? '' : 's'}` : ''} · {date}</div>
           </button>
           <button type="button" onClick={() => go('deptIncharge')} className="stat" style={TILE} title="Open the Dept Incharge lists">
             <div className="stat-label">Present today</div>
             <div className="stat-value" style={{ color: '#047857' }}>{kpis.today.present}</div>
-            <div className="stat-sub">of {kpis.today.deployed} deployed</div>
+            <div className="stat-sub">of {kpis.today.deployed} deployed · {date}</div>
           </button>
           <button type="button" onClick={() => go('deptIncharge')} className="stat" style={TILE} title="Open the Dept Incharge lists">
             <div className="stat-label">Absent today</div>
             <div className="stat-value" style={{ color: kpis.today.absent > 0 ? '#b91c1c' : undefined }}>{kpis.today.absent}</div>
-            <div className="stat-sub">expected but not scanned</div>
+            <div className="stat-sub">expected but not scanned · {date}</div>
           </button>
           <button type="button" onClick={() => go('deptIncharge')} className="stat" style={TILE} title="Open the Dept Incharge lists">
             <div className="stat-label">Attendance %</div>
@@ -317,7 +349,7 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
                 <div className={`progress-bar${bandBar(kpis.today.band)}`} style={{ width: `${kpis.today.rate}%` }} />
               </div>
             </div>
-            <div className="stat-sub">{kpis.today.rate}% present today</div>
+            <div className="stat-sub">{kpis.today.rate}% present on {date}</div>
           </button>
           <div className="stat" title="Sessions still open right now">
             <div className="stat-label">Open now</div>
@@ -380,7 +412,7 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
                 {kpis.byDepartment.map((d) => (
                   <tr key={d.department_id}>
                     <td><span className="pill pill-blue">{d.deptName}</span></td>
-                    <td style={{ fontVariantNumeric: 'tabular-nums' }}>{d.today.deployed || d.visit.deployed}</td>
+                    <td style={{ fontVariantNumeric: 'tabular-nums' }}>{d.today.deployed}</td>
                     <td style={{ fontVariantNumeric: 'tabular-nums' }}>{d.today.present}</td>
                     <td style={{ fontVariantNumeric: 'tabular-nums', color: d.today.absent > 0 ? '#b91c1c' : undefined }}>{d.today.absent}</td>
                     <td><span className={`pill ${bandPill(d.today.band)}`}>{d.today.rate}%</span></td>

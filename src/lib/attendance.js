@@ -346,7 +346,7 @@ export function toDailyRow(r) {
   const expected = Number(r?.expected) || 0
   const present = Number(r?.present) || 0
   const absent = Number(r?.absent) || 0
-  const rate = expected > 0 ? Math.round((present / expected) * 100) : 0
+  const rate = expected > 0 ? Math.min(100, Math.round((present / expected) * 100)) : 0
   return {
     centre: r?.centre || '',
     dept_name: r?.dept_name || '',
@@ -389,7 +389,7 @@ export function dailyTotals(rows) {
     absent += r.absent
     openNow += r.open_now
   }
-  return { expected, present, absent, open_now: openNow, rate: expected > 0 ? Math.round((present / expected) * 100) : 0 }
+  return { expected, present, absent, open_now: openNow, rate: expected > 0 ? Math.min(100, Math.round((present / expected) * 100)) : 0 }
 }
 
 /* ─── Scanner ops shaping ─── */
@@ -652,26 +652,67 @@ export function buildVisitRows(rows) {
 }
 
 /**
- * Normalize attendance_trend rows for the dashboard strip.
+ * Normalize attendance_trend rows into the full 5-day visit strip.
  * Input columns: day (YYYY-MM-DD), present, absent.
+ * The RPC only lists days with scan events, so a silent day vanishes and a
+ * sparse visit renders as a short strip. This maps every row onto its
+ * VISIT_DAY weekday (UTC) and emits all five WED–SUN slots in order — days
+ * with no events become zero rows (present 0, absent = deployed-if-known
+ * else 0, rate 0). Deployed is derived from the v47 invariant
+ * present + absent == deployed (max across ALL rows, including rows whose
+ * day cannot be placed). First row wins on a weekday collision.
  * Adds rate = present share of the day (0 when the day has no deployed).
  */
 export function buildTrendRows(rows) {
-  return (Array.isArray(rows) ? rows : []).map((r) => {
+  const list = Array.isArray(rows) ? rows : []
+  const byWeekday = new Map()
+  let deployed = 0
+  for (const r of list) {
+    if (!r) continue
     const present = Number(r?.present) || 0
     const absent = Number(r?.absent) || 0
+    deployed = Math.max(deployed, present + absent)
+    const wd = weekdayOf(r?.day)
+    if (wd && !byWeekday.has(wd)) byWeekday.set(wd, { present, absent })
+  }
+  return VISIT_DAYS.map((wd) => {
+    const hit = byWeekday.get(wd)
+    const present = hit ? hit.present : 0
+    const absent = hit ? hit.absent : deployed
     const total = present + absent
     // L-32/L-51: a rate is a share of a day — clamp to 0..100 so a server
     // over-count past the deployed total (or corrupt negatives) cannot
     // render as 120% or -100%.
     const raw = total > 0 ? Math.round((present / total) * 100) : 0
     return {
-      day: r?.day || '',
+      day: wd,
       present,
       absent,
       rate: Math.min(100, Math.max(0, raw)),
     }
   })
+}
+
+/**
+ * VISIT_DAY weekday ('WED'..'SUN') for an ISO 'YYYY-MM-DD' string, parsed as
+ * UTC so the weekday never shifts. Null for missing/malformed dates and for
+ * MON/TUE (outside the visit strip — those rows still count toward the
+ * deployed estimate, they just place nowhere).
+ */
+function weekdayOf(day) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day || '')
+  if (!m) return null
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]))
+  if (Number.isNaN(d.getTime())) return null
+  if (d.getUTCFullYear() !== +m[1] || d.getUTCMonth() !== +m[2] - 1 || d.getUTCDate() !== +m[3]) return null
+  switch (d.getUTCDay()) {
+    case 3: return 'WED'
+    case 4: return 'THU'
+    case 5: return 'FRI'
+    case 6: return 'SAT'
+    case 0: return 'SUN'
+    default: return null
+  }
 }
 
 /**
@@ -691,14 +732,21 @@ export function anomalyCounts(rows) {
  * Live-scanner verdict off a scanner_ops row's last_scan_time.
  * last_scan_time is a bare IST wall-clock for the queried date, so the page
  * passes that same date back in: combine as +05:30, compare to now.
- * - 'active': last scan within activeMin (default 15).
- * - 'idle': scanned that date but the last scan is older.
- * - 'offline': no scan time at all (or unparseable).
+ * - 'active': the scanned date is TODAY (IST) and the last scan is within
+ *   activeMin (default 15).
+ * - 'idle': the scanned date is today but the last scan is older.
+ * - 'scanned': the scan date is valid but is NOT today (a past/future visit
+ *   day) — render as a neutral "Scanned HH:MM" pill, never counted in
+ *   Active-now tiles (those count 'active' only).
+ * - 'offline': no scan time/date at all (or unparseable).
+ * @returns {'active'|'idle'|'scanned'|'offline'}
  */
 export function scannerStatus(lastScanTime, dateStr, nowMs = Date.now(), activeMin = 15) {
   if (!lastScanTime || !dateStr) return 'offline'
   const t = Date.parse(`${dateStr}T${lastScanTime}+05:30`)
   if (!Number.isFinite(t)) return 'offline'
+  const todayIST = new Date(nowMs).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+  if (dateStr !== todayIST) return 'scanned'
   return nowMs - t <= activeMin * 60000 ? 'active' : 'idle'
 }
 
@@ -784,21 +832,19 @@ export function deptInchargeKpis(dailyRaw, visitRaw) {
   }
   for (const r of daily) {
     const row = slot(r)
-    row.deptName = r.dept_name || row.deptName
-    row.today = {
-      deployed: (Number(r.expected) || 0),
-      present: (Number(r.present) || 0),
-      absent: (Number(r.absent) || 0),
-    }
+    if ((!row.deptName || row.deptName === '—') && r.dept_name) row.deptName = r.dept_name
+    if (!row.today) row.today = { deployed: 0, present: 0, absent: 0 }
+    row.today.deployed += (Number(r.expected) || 0)
+    row.today.present += (Number(r.present) || 0)
+    row.today.absent += (Number(r.absent) || 0)
   }
   for (const r of visit) {
     const row = slot(r)
-    row.deptName = r.dept_name || row.deptName
-    row.visit = {
-      deployed: (Number(r.deployed) || 0),
-      present: (Number(r.ever_present) || 0),
-      absent: (Number(r.never_present) || 0),
-    }
+    if ((!row.deptName || row.deptName === '—') && r.dept_name) row.deptName = r.dept_name
+    if (!row.visit) row.visit = { deployed: 0, present: 0, absent: 0 }
+    row.visit.deployed += (Number(r.deployed) || 0)
+    row.visit.present += (Number(r.ever_present) || 0)
+    row.visit.absent += (Number(r.never_present) || 0)
   }
   const byDepartment = [...byId.values()]
     .map((row) => {

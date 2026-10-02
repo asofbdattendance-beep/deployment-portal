@@ -17,10 +17,20 @@ const mocks = vi.hoisted(() => ({
   fromCalls: [],
   rpc: vi.fn(),
   fetchAllRows: vi.fn(),
+  getQueuedScans: vi.fn(),
+  clearFailedQueue: vi.fn(),
+  clearLiveQueue: vi.fn(),
+  clearOrphanedQueue: vi.fn(),
+  listStrandedQueue: vi.fn(),
+  removeQueued: vi.fn(),
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
 }))
 
-vi.mock('./scanner/cameraManager', async (importOriginal) => {
+// V10: the path must reach the cameraManager the component actually imports
+// (src/components/scanner/cameraManager). The old './scanner/cameraManager'
+// resolved to a non-existent src/pages/scanner/* module, so this mock applied
+// to nothing and the page silently tested the REAL openCamera.
+vi.mock('../components/scanner/cameraManager', async (importOriginal) => {
   const actual = await importOriginal()
   return { ...actual, openCamera: (...args) => mocks.openCamera(...args) }
 })
@@ -47,11 +57,14 @@ vi.mock('../context/PortalAuthContext', () => ({
 }))
 vi.mock('../components/Toast', () => ({ useToast: () => mocks.toast }))
 vi.mock('../lib/offlineQueue', () => ({
-  getQueuedScans: vi.fn(async () => []),
+  getQueuedScans: (...args) => mocks.getQueuedScans(...args),
   installDrainListeners: vi.fn(() => vi.fn()),
   preloadDeployed: vi.fn(async () => {}),
-  clearFailedQueue: vi.fn(async () => {}),
-  clearOrphanedQueue: vi.fn(async () => {}),
+  clearFailedQueue: (...args) => mocks.clearFailedQueue(...args),
+  clearLiveQueue: (...args) => mocks.clearLiveQueue(...args),
+  clearOrphanedQueue: (...args) => mocks.clearOrphanedQueue(...args),
+  listStrandedQueue: (...args) => mocks.listStrandedQueue(...args),
+  removeQueued: (...args) => mocks.removeQueued(...args),
 }))
 
 function makeStream(name = 'stream') {
@@ -72,6 +85,12 @@ beforeEach(() => {
   mocks.openCamera.mockReset()
   mocks.rpc.mockReset()
   mocks.fetchAllRows.mockReset()
+  mocks.getQueuedScans.mockReset()
+  mocks.clearFailedQueue.mockReset()
+  mocks.clearLiveQueue.mockReset()
+  mocks.clearOrphanedQueue.mockReset()
+  mocks.listStrandedQueue.mockReset()
+  mocks.removeQueued.mockReset()
   mocks.fromCalls.length = 0
   for (const k of ['success', 'error', 'warning', 'info']) mocks.toast[k].mockReset()
 
@@ -79,6 +98,9 @@ beforeEach(() => {
   mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
   mocks.rpc.mockResolvedValue({ data: null })
   mocks.fetchAllRows.mockResolvedValue([])
+  mocks.getQueuedScans.mockResolvedValue([])
+  mocks.listStrandedQueue.mockResolvedValue([])
+  mocks.removeQueued.mockResolvedValue(undefined)
 
   Object.defineProperty(window.navigator, 'mediaDevices', {
     configurable: true, writable: true,
@@ -130,5 +152,136 @@ describe('ScannerPage render', () => {
     expect(screen.getByText('Scanner')).toBeTruthy()
     expect(screen.getByText('No scans by you yet today')).toBeTruthy()
     expect(screen.getByPlaceholderText('Manual FB/BH/VS badge')).toBeTruthy()
+  })
+
+  // V10 failing-first: with the old './scanner/cameraManager' mock path the
+  // mock applied to nothing, so the page tested the REAL openCamera and this
+  // assertion failed (mock never called, no <video> in ready state).
+  it('applies the cameraManager mock (openCamera called, preview ready)', async () => {
+    const { container } = render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+    await settle()
+    expect(mocks.openCamera).toHaveBeenCalled()
+    expect(container.querySelector('video')).toBeTruthy()
+  })
+})
+
+describe('ScannerPage queue pills (V16)', () => {
+  it('surfaces failed rows with a count and wires Clear failed', async () => {
+    mocks.getQueuedScans.mockResolvedValue([
+      { id: 'bad-1', synced: false, failed: true, status: 'failed', owner: 'u-1' },
+      { id: 'live-1', synced: false, failed: false, owner: 'u-1' },
+    ])
+    render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+    await settle()
+    // Counted pills: 1 pending + 1 failed.
+    expect(screen.getByText('1 queued')).toBeTruthy()
+    expect(screen.getByText('1 failed')).toBeTruthy()
+    const btn = screen.getByRole('button', { name: /clear failed \(1\)/i })
+    await act(async () => { btn.click(); await new Promise(r => setTimeout(r, 20)) })
+    expect(mocks.clearFailedQueue).toHaveBeenCalledTimes(1)
+  })
+
+  it('surfaces orphaned rows with a count and wires Clear orphaned', async () => {
+    mocks.getQueuedScans.mockResolvedValue([
+      { id: 'orph-1', synced: false, failed: false, owner: null },
+    ])
+    render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+    await settle()
+    expect(screen.getByText('1 orphaned')).toBeTruthy()
+    const btn = screen.getByRole('button', { name: /clear orphaned \(1\)/i })
+    await act(async () => { btn.click(); await new Promise(r => setTimeout(r, 20)) })
+    expect(mocks.clearOrphanedQueue).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows no queue pills when the queue is empty', async () => {
+    render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+    await settle()
+    expect(screen.queryByText(/queued/)).toBeNull()
+    expect(screen.queryByText(/failed/)).toBeNull()
+    expect(screen.queryByText(/orphaned/)).toBeNull()
+    expect(screen.queryByText(/stranded/)).toBeNull()
+  })
+})
+
+describe('ScannerPage stranded scans (T10)', () => {
+  it('surfaces stranded rows with a count and per-row Clear wired to removeQueued', async () => {
+    mocks.listStrandedQueue.mockResolvedValue([
+      { id: 'strand-1', badge: 'VS0001', action: 'IN', synced: false, owner: null },
+      { id: 'strand-2', badge: 'VS0002', action: 'OUT', synced: false, owner: null },
+    ])
+    render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+    await settle()
+    expect(screen.getByText('2 stranded')).toBeTruthy()
+    expect(screen.getByText(/Stranded scans \(2\)/)).toBeTruthy()
+    const btns = screen.getAllByRole('button', { name: 'Clear' })
+    expect(btns).toHaveLength(2)
+    // Per-row Clear removes exactly that row, then refreshes the list.
+    mocks.listStrandedQueue.mockResolvedValue([
+      { id: 'strand-2', badge: 'VS0002', action: 'OUT', synced: false, owner: null },
+    ])
+    await act(async () => { btns[0].click(); await new Promise(r => setTimeout(r, 20)) })
+    expect(mocks.removeQueued).toHaveBeenCalledTimes(1)
+    expect(mocks.removeQueued).toHaveBeenCalledWith('strand-1')
+    await settle()
+    expect(screen.getByText('1 stranded')).toBeTruthy()
+  })
+
+  it('shows no stranded section when listStrandedQueue is empty', async () => {
+    render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+    await settle()
+    expect(screen.queryByText(/stranded/)).toBeNull()
+    expect(mocks.removeQueued).not.toHaveBeenCalled()
+  })
+})
+
+describe('ScannerPage unified live count + clear-live + stranded interval', () => {
+  it('excludes orphaned rows from the live queued count (shown separately)', async () => {
+    mocks.getQueuedScans.mockResolvedValue([
+      { id: 'live-1', synced: false, failed: false, owner: 'u-1' },
+      { id: 'orph-1', synced: false, failed: false, owner: null },
+    ])
+    render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+    await settle()
+    // Live only — the orphaned row must not inflate the sync pill.
+    expect(screen.getByText('1 queued')).toBeTruthy()
+    expect(screen.getByText('1 orphaned')).toBeTruthy()
+  })
+
+  it('wires a confirmed Clear live queued action to clearLiveQueue', async () => {
+    mocks.getQueuedScans.mockResolvedValue([
+      { id: 'live-1', synced: false, failed: false, owner: 'u-1' },
+    ])
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    try {
+      render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+      await settle()
+      const btn = screen.getByRole('button', { name: /clear live queued \(1\)/i })
+      await act(async () => { btn.click(); await new Promise(r => setTimeout(r, 20)) })
+      expect(mocks.clearLiveQueue).toHaveBeenCalledTimes(1)
+    } finally { confirm.mockRestore() }
+  })
+
+  it('does NOT clear live rows when the confirm is declined', async () => {
+    mocks.getQueuedScans.mockResolvedValue([
+      { id: 'live-1', synced: false, failed: false, owner: 'u-1' },
+    ])
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    try {
+      render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+      await settle()
+      const btn = screen.getByRole('button', { name: /clear live queued \(1\)/i })
+      await act(async () => { btn.click(); await new Promise(r => setTimeout(r, 20)) })
+      expect(mocks.clearLiveQueue).not.toHaveBeenCalled()
+    } finally { confirm.mockRestore() }
+  })
+
+  it('re-checks stranded scans on a 30s interval (mount + periodic)', async () => {
+    const spy = vi.spyOn(window, 'setInterval')
+    try {
+      render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+      await settle()
+      expect(spy.mock.calls.some(c => c[1] === 30000)).toBe(true)
+      expect(mocks.listStrandedQueue).toHaveBeenCalled()
+    } finally { spy.mockRestore() }
   })
 })

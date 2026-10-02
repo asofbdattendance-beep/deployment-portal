@@ -11,12 +11,15 @@ import {
 import { reportRealtimeStatus } from '../lib/realtime'
 
 // Live-scanner verdict → pill colour. One place, used by the table and the
-// export so the sheet can never disagree with the screen.
-const STATUS_PILL = { active: 'pill-green', idle: 'pill-amber', offline: 'pill-gray' }
+// export so the sheet can never disagree with the screen. 'scanned' is a valid
+// scan on a NON-today date — a neutral grey pill with the last-scan clock,
+// never the amber Idle: amber means "went quiet today", which is the wrong
+// claim for a past/future visit day.
+const STATUS_PILL = { active: 'pill-green', idle: 'pill-amber', scanned: 'pill-gray', offline: 'pill-gray' }
 const STATUS_LABEL = { active: 'Active', idle: 'Idle', offline: 'Offline' }
-const STATUS_RANK = { active: 0, idle: 1, offline: 2 }
+const STATUS_RANK = { active: 0, idle: 1, scanned: 2, offline: 3 }
 const statusPill = (s) => STATUS_PILL[s] || STATUS_PILL.offline
-const statusLabel = (s) => STATUS_LABEL[s] || STATUS_LABEL.offline
+const statusLabel = (s, lastScanTime) => (s === 'scanned' ? `Scanned ${clock(lastScanTime)}` : (STATUS_LABEL[s] || STATUS_LABEL.offline))
 
 /**
  * Unwrap a supabase-js PostgREST result.
@@ -294,11 +297,25 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
   ), [sorted, term])
 
   const stats = useMemo(() => ({
+    // Active-now counts status==='active' ONLY: a 'scanned' row (valid scan on
+    // a non-today date) is not scanning now and must never inflate this tile.
     active: all.filter((r) => r.status === 'active').length,
     scanners: all.length,
     scansIn: all.reduce((n, r) => n + (r.scans_in || 0), 0),
     open: all.reduce((n, r) => n + (r.open_now || 0), 0),
   }), [all])
+
+  // Newest last-scan on screen — the date-aware Active-now sub for non-today
+  // days ("last scan 3h ago"). NaN when nothing scanned: timeAgo renders '—',
+  // which is the honest answer, not 0.
+  const latestScanMs = useMemo(() => {
+    let m = NaN
+    for (const r of all) {
+      if (Number.isFinite(r.lastScanMs)) m = Number.isFinite(m) ? Math.max(m, r.lastScanMs) : r.lastScanMs
+    }
+    return m
+  }, [all])
+  const isToday = date === todayStrIST()
 
   // ─── Export — one sheet, honouring the active search, built through the
   // shared excel.js driver (L-24/L-25) like every other reports surface. ───
@@ -314,7 +331,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
               Scanner: scannerName(r),
               Badge: r.scanner_badge,
               Centre: r.scanner_centre || UNASSIGNED_CENTRE,
-              Status: statusLabel(r.status),
+              Status: statusLabel(r.status, r.last_scan_time),
               'Scans In': r.scans_in || 0,
               'Scans Out': r.scans_out || 0,
               'Manual Scans': r.manual_scans || 0,
@@ -430,7 +447,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
         <div className="stat">
           <div className="stat-label">Active now</div>
           <div className="stat-value" style={{ color: stats.active ? '#16a34a' : undefined }}>{stats.active}</div>
-          <div className="stat-sub">scanned in the last 15 min</div>
+          <div className="stat-sub">{isToday ? 'scanned in the last 15 min' : `last scan ${timeAgo(latestScanMs, now)}`}</div>
         </div>
         <div className="stat">
           <div className="stat-label">Scanners today</div>
@@ -543,7 +560,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
                             style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
                           >
                             {isOpen ? <ChevronDown size={14} style={{ color: '#94a3b8' }} /> : <ChevronRight size={14} style={{ color: '#94a3b8' }} />}
-                            <span className={`pill ${statusPill(r.status)}`}>{statusLabel(r.status)}</span>
+                            <span className={`pill ${statusPill(r.status)}`}>{statusLabel(r.status, r.last_scan_time)}</span>
                           </button>
                         </td>
                         <td data-label="Scanner">

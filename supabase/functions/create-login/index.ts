@@ -83,7 +83,7 @@ async function handler(req) {
     const email = String(body.email || '').trim()
     const name = String(body.name || '').trim()
     const role = String(body.role || '')
-    const centre = String(body.centre || '').trim() || null
+    const centre = role === 'dept_incharge' ? null : (String(body.centre || '').trim() || null)
     const badge = String(body.badge_number || '').trim() || null
     const customId = body.custom_role_id || null
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: 'Enter a valid email address' }, 400)

@@ -18,7 +18,7 @@ import {
 // sheetName() is deliberately NOT imported here — the `Summary {date}` and
 // `{label} list` names still get the ≤31-char / illegal-char treatment for free.
 import { exportWorkbook, fileSlug } from '../lib/excel'
-import { todayStrIST } from '../lib/scannerUtils'
+import { todayStrIST, withTimeout } from '../lib/scannerUtils'
 import {
   BarChart3, Users, Radio, Download, Search,
   RefreshCw, Loader2, AlertTriangle, Lock, ChevronRight, ChevronDown,
@@ -55,6 +55,9 @@ async function rpcRows(name, params) {
 /**
  * A percentage, or null when there is no denominator. A6 from AttendancePage:
  * a group with nothing deployed has no rate — it must never read as 0%.
+ * Clamped to 0..100 so a server over-count past the deployed total (or a
+ * corrupt negative) cannot render as 120% or -100% — mirrors the attendance.js
+ * contract (buildTrendRows / dailyTotals clamp the same way).
  * @param {number} part
  * @param {number} whole
  * @returns {number|null}
@@ -63,7 +66,7 @@ function pct(part, whole) {
   const p = Number(part) || 0
   const w = Number(whole) || 0
   if (w <= 0) return null
-  return Math.round((p / w) * 100)
+  return Math.min(100, Math.max(0, Math.round((p / w) * 100)))
 }
 
 /**
@@ -137,13 +140,19 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
   const [expanded, setExpanded] = useState(() => new Set())
   // An RPC failure must render a visible error panel, not a silent [].
   const [loadError, setLoadError] = useState(null)
-  // Which schedule the rows in state actually belong to. Rows from the previous
-  // schedule must never be shown (or exported) under the new one.
+  // Which schedule AND date the rows in state actually belong to. Rows from the
+  // previous schedule — or the previous date — must never be shown (or
+  // exported) under the new one. Both are stamped on success AND on failure
+  // (a failed load leaves empty rows that still belong to what was asked for).
   const [rowsScheduleId, setRowsScheduleId] = useState(null)
+  const [rowsDate, setRowsDate] = useState(null)
   const mountedRef = useRef(true)
   // A monotonically increasing request sequence — a slow load for date A must not
   // overwrite a fast load for date B.
   const seqRef = useRef(0)
+  // Timestamp of the last load START — the realtime reload below fires
+  // immediately when the data is older than MAX_WAIT, otherwise debounces.
+  const lastLoadAtRef = useRef(0)
   // Once the operator picks a day by hand, window-focus must stop moving it.
   const dateTouchedRef = useRef(false)
 
@@ -167,16 +176,19 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
     // here latched the page on its spinner with no timeout and no error.
     if (!scheduleId) { setLoading(false); return }
     const seq = ++seqRef.current
+    lastLoadAtRef.current = Date.now()
     setLoading(true)
     try {
       // Never send an empty p_date — Postgres rejects '' with "invalid input
       // syntax for type date" and the result would look like a day with no data.
       // The date-keyed RPC is skipped entirely and an inline message is rendered.
+      // Every RPC races a 15s timeout so a hung connection degrades to the
+      // error panel instead of a permanent spinner.
       const dayCall = date
-        ? rpcRows('attendance_daily_summary', { p_schedule: scheduleId, p_date: date })
+        ? withTimeout(rpcRows('attendance_daily_summary', { p_schedule: scheduleId, p_date: date }), 15000, 'attendance_daily_summary')
         : Promise.resolve([])
       const [visitR, dayR, centresR] = await Promise.allSettled([
-        rpcRows('attendance_visit_summary', { p_schedule: scheduleId }),
+        withTimeout(rpcRows('attendance_visit_summary', { p_schedule: scheduleId }), 15000, 'attendance_visit_summary'),
         dayCall,
         // Centres are reference data, not report data: a failure here degrades
         // the tree to a flat list instead of failing the whole load.
@@ -190,12 +202,15 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
       if (failed.length) {
         throw new Error(failed.map((r) => r.reason?.message || 'Unknown error').join(' · '))
       }
-      if (centresR.status === 'fulfilled' && Array.isArray(centresR.value)) {
+      // A failed or empty centres fetch must never blank the filter options —
+      // only a fulfilled non-empty array replaces what is on screen.
+      if (centresR.status === 'fulfilled' && Array.isArray(centresR.value) && centresR.value.length > 0) {
         setCentresList(centresR.value)
       }
       setVisitRaw(visitR.value)
       setDailyRaw(dayR.value)
       setRowsScheduleId(scheduleId)
+      setRowsDate(date)
       setLoadError(null)
     } catch (e) {
       if (!mountedRef.current || seq !== seqRef.current) return
@@ -205,8 +220,8 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
       console.error('[Reports] load failed:', e)
       setVisitRaw([])
       setDailyRaw([])
-      setCentresList([])
       setRowsScheduleId(scheduleId)
+      setRowsDate(date)
       setLoadError(e?.message || 'Unknown error')
     } finally {
       if (mountedRef.current && seq === seqRef.current) setLoading(false)
@@ -228,15 +243,20 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
     setExpanded(new Set())
   }, [scheduleId])
 
-  // Mark the in-flight rows as belonging to nothing the moment the schedule
-  // changes, so the previous schedule's figures are never rendered or exported
-  // under the new schedule's name.
+  // Mark the in-flight rows as belonging to nothing the moment the schedule or
+  // the date changes, so the previous schedule's — or the previous day's —
+  // figures are never rendered or exported under the new schedule/date. The
+  // memos below gate on rowsAreCurrent, so until the new load lands the page
+  // shows the skeleton/empty state, never stale rows.
   useEffect(() => {
     setRowsScheduleId((cur) => (cur === scheduleId ? cur : null))
-  }, [scheduleId])
+    setRowsDate((cur) => (cur === date ? cur : null))
+  }, [scheduleId, date])
 
   // Realtime: a scan landing mid-visit should update the report without a manual
-  // refresh. Debounced so a burst of scans triggers ONE reload, not dozens. No
+  // refresh. Trailing-debounced at 400ms so a burst of scans triggers ONE
+  // reload, not dozens — but when the data on screen is older than 2s the
+  // reload fires immediately instead of queuing behind the burst. No
   // write-echo logic is needed — this page never writes.
   useEffect(() => {
     if (!scheduleId) return
@@ -244,6 +264,12 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
     let timer = null
     const reload = () => {
       if (!alive) return
+      if (Date.now() - lastLoadAtRef.current > 2000) {
+        if (timer) clearTimeout(timer)
+        timer = null
+        if (alive) load().catch(() => {})
+        return
+      }
       if (timer) clearTimeout(timer)
       timer = setTimeout(() => { if (alive) load().catch(() => {}) }, 400)
     }
@@ -263,10 +289,11 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
   }, [scheduleId, load])
 
   // ─── Derived rows ───
-  // Until the in-flight load for THIS schedule lands, there are no rows. Feeding
-  // the builders an empty list blanks the tables instead of leaving the previous
-  // schedule's rows on screen under the new schedule's name.
-  const rowsAreCurrent = rowsScheduleId === scheduleId
+  // Until the in-flight load for THIS schedule AND date lands, there are no
+  // rows. Feeding the builders an empty list blanks the tables instead of
+  // leaving the previous schedule's — or the previous day's — rows on screen
+  // under the new schedule's name and date.
+  const rowsAreCurrent = rowsScheduleId === scheduleId && rowsDate === date
 
   /**
    * One uniform row shape for BOTH views, so the matrices, the totals and the
@@ -444,50 +471,67 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
     search
   )
 
-  // ─── Export. Detail sheets honour the active filters; the Summary sheet is
-  // always the full schedule, so a filtered download can never be mistaken for
-  // the whole picture. ───
+  // ─── Export. The Summary sheet follows the ACTIVE view and the SAME filtered
+  // set as the matrix (centre / department / text), so the workbook matches
+  // the screen — a filtered download can never be mistaken for the whole
+  // schedule. The detail (Present/Absent list) sheets honour the badge-level
+  // filters instead: centre, department, and badge/name text via searchRows. ───
   const download = async (mode) => {
     if (!date) {
       toast.warning('Pick a day before downloading')
       return
     }
+    if (loading || !rowsAreCurrent) {
+      toast.warning('The report is still loading — try again in a moment')
+      return
+    }
+    // Search honesty: the matrix filters on centre/department text, so a search
+    // that matches no matrix rows must say so — not ship an empty workbook
+    // behind a success toast.
+    if (search.trim() && visible.length === 0) {
+      toast.warning('No rows match the current search — nothing to export')
+      return
+    }
     setExporting(true)
     setExportKind(mode)
     try {
-      const badgeRows = filterBadges(await rpcRows('attendance_day_badges', {
+      const badgeRows = filterBadges(await withTimeout(rpcRows('attendance_day_badges', {
         p_schedule: scheduleId,
         p_date: date,
         p_mode: mode,
+      }), 15000, 'attendance_day_badges'))
+      // Summary rows ARE the visible matrix rows: the view decides which
+      // dataset they come from (visit = ever-present over the whole visit,
+      // today = expected/present on the picked day) and the filters have
+      // already been applied above.
+      const summaryRows = visible.map((r) => ({
+        Centre: r.centre,
+        Department: r.deptName,
+        [view === 'visit' ? 'Deployed' : 'Expected']: r.deployed,
+        [view === 'visit' ? 'Ever present' : 'Present']: r.present,
+        [view === 'visit' ? 'Never present' : 'Absent']: r.absent,
+        'Open now': r.openNow,
+        'Attendance %': pct(r.present, r.deployed) ?? '—',
       }))
-      const summaryRows = buildDailyRows(
-        (rowsAreCurrent ? dailyRaw : []).map((r) => ({ ...r, centre: r?.centre || UNASSIGNED_CENTRE }))
-      )
-      const t = dailyTotals(summaryRows)
+      const t = visibleTotals
       const label = mode === 'present' ? 'Present' : 'Absent'
       // exportWorkbook skips empty sheets and writes nothing when all of them
       // are empty, returning 0 — which is the "nothing to export" case.
       const written = await exportWorkbook(
-        `${fileSlug(schedule?.name)}_${date}_${mode}.xlsx`,
+        `${fileSlug(schedule?.name)}_${date}_${mode}${view === 'visit' ? '_visit' : ''}.xlsx`,
         [
           {
             name: `Summary ${date}`,
             rows: [
-              ...summaryRows.map((r) => ({
-                Centre: r.centre,
-                Department: r.dept_name || '—',
-                Expected: r.expected,
-                Present: r.present,
-                Absent: r.absent,
-                'Day Attendance %': pct(r.present, r.expected) ?? '—',
-              })),
+              ...summaryRows,
               {
                 Centre: 'TOTAL',
                 Department: '',
-                Expected: t.expected,
-                Present: t.present,
-                Absent: t.absent,
-                'Day Attendance %': pct(t.present, t.expected) ?? '—',
+                [view === 'visit' ? 'Deployed' : 'Expected']: t.deployed,
+                [view === 'visit' ? 'Ever present' : 'Present']: t.present,
+                [view === 'visit' ? 'Never present' : 'Absent']: t.absent,
+                'Open now': t.openNow,
+                'Attendance %': pct(t.present, t.deployed) ?? '—',
               },
             ],
           },
@@ -529,7 +573,10 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
   if (!schedules.length) {
     return <div className="page"><div className="card" style={{ padding: '2rem', textAlign: 'center' }}>No schedules</div></div>
   }
-  if (loading && !allRows.length) {
+  // While a new schedule or date is loading the rows in state belong to the
+  // previous one (rowsAreCurrent is false), so the skeleton shows instead of
+  // stale rows — never the old figures under the new name/date.
+  if (loading && !rowsAreCurrent) {
     return (
       <div className="page" style={{ maxWidth: 1400 }}>
         <div className="card"><div className="empty"><div className="spin" style={{ width: 24, height: 24, border: '2px solid #e2e8f0', borderTopColor: '#6366f1', borderRadius: '50%', animation: 'spin .6s linear infinite' }} /><div className="empty-text">Loading reports…</div></div></div>
@@ -718,8 +765,8 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
       </div>
       {tree.length === 0 ? (
         <div className="empty">
-          <div className="empty-title">Nothing to show</div>
-          <div className="empty-text">{filtering ? 'Try clearing the filters.' : 'No deployed sewadars for this schedule yet.'}</div>
+          <div className="empty-title">{filtering ? 'No rows match the current filters' : 'Nothing to show'}</div>
+          <div className="empty-text">{filtering ? 'No centre/department matches this filter set — try clearing the search or the filters. Nothing would be exported.' : 'No deployed sewadars for this schedule yet.'}</div>
         </div>
       ) : (
         <div className="table-wrap" style={{ border: 'none', borderRadius: 0, padding: '0 1.25rem 1.25rem' }}>
@@ -833,15 +880,15 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
             <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
               {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
             </button>
-            <button onClick={() => download('present')} disabled={exporting || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+            <button onClick={() => download('present')} disabled={exporting || loading || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               {exporting && exportKind === 'present' ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Download Present
             </button>
-            <button onClick={() => download('absent')} disabled={exporting || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+            <button onClick={() => download('absent')} disabled={exporting || loading || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               {exporting && exportKind === 'absent' ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Download Absent
             </button>
             {filtering && (
-                <span className="pill pill-indigo" title="The matrix and the downloaded detail lists show this filtered set">
-                Showing {visible.length} of {allRows.length}
+                <span className="pill pill-indigo" title="The matrix filters by centre/department text; the downloaded Present/Absent lists filter by badge/name instead">
+                Showing {visible.length} of {allRows.length} in the matrix
               </span>
             )}
           </div>

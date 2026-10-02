@@ -19,7 +19,7 @@ import {
   UNASSIGNED_CENTRE,
   VISIT_DAYS,
 } from '../lib/attendance'
-import { todayStrIST } from '../lib/scannerUtils'
+import { todayStrIST, withTimeout } from '../lib/scannerUtils'
 import { exportWorkbook, fileSlug } from '../lib/excel'
 import {
   ScanLine, Users, Clock, Download, Search, RefreshCw, Loader2,
@@ -95,8 +95,13 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   const [search, setSearch] = useState('')
   const [filterCentre, setFilterCentre] = useState('all')
   const [filterDept, setFilterDept] = useState('all')
-  // A11: an RPC failure must render a visible error panel, not a silent [].
-  const [loadError, setLoadError] = useState(null)
+  // Per-RPC errors, not one all-or-nothing flag. Only the sewadar summary
+  // failing blanks the page (every tab and tile is built on it); a daily or
+  // scanner-ops failure degrades that tab in place while the healthy datasets
+  // stay live — a partial outage must never read as "no attendance records".
+  const [sewErr, setSewErr] = useState(null)
+  const [dayErr, setDayErr] = useState(null)
+  const [opsErr, setOpsErr] = useState(null)
   // A13: which schedule the rows in state actually belong to. Rows from the
   // previous schedule must never be shown (or exported) under the new one.
   const [rowsScheduleId, setRowsScheduleId] = useState(null)
@@ -107,6 +112,9 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   // A12: once the operator picks a scan day by hand, window-focus must stop
   // moving it.
   const dateTouchedRef = useRef(false)
+  // Max-wait for the realtime debounce below: the timestamp of the last load
+  // that actually fired, so a sustained burst cannot starve the reload.
+  const lastReloadAt = useRef(0)
 
   // A12: `todayStrIST()` was evaluated once at mount, so a page left open across
   // IST midnight showed yesterday until a manual refresh. Re-sync on mount and
@@ -129,50 +137,58 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     // here latched the page on its spinner with no timeout and no error.
     if (!scheduleId) { setLoading(false); return }
     const seq = ++seqRef.current
+    lastReloadAt.current = Date.now()
     setLoading(true)
     try {
       // A5: never send an empty p_date — Postgres rejects '' with
       // "invalid input syntax for type date" and the result would look like a
       // day with no data. The two date-keyed RPCs are skipped entirely and an
       // inline message is rendered instead.
+      // Every RPC is wrapped in withTimeout: a hung function must surface a
+      // friendly error, never latch the page on its spinner forever.
       const dayCalls = date
         ? [
-            rpcRows('attendance_daily_summary', { p_schedule: scheduleId, p_date: date }),
-            rpcRows('attendance_scanner_ops', { p_schedule: scheduleId, p_date: date }),
+            withTimeout(rpcRows('attendance_daily_summary', { p_schedule: scheduleId, p_date: date }), 15000, 'attendance_daily_summary'),
+            withTimeout(rpcRows('attendance_scanner_ops', { p_schedule: scheduleId, p_date: date }), 15000, 'attendance_scanner_ops'),
           ]
         : [Promise.resolve([]), Promise.resolve([])]
       const [sewR, dayR, opsR] = await Promise.allSettled([
-        rpcRows('attendance_sewadar_summary', { p_schedule: scheduleId }),
+        withTimeout(rpcRows('attendance_sewadar_summary', { p_schedule: scheduleId }), 15000, 'attendance_sewadar_summary'),
         dayCalls[0],
         dayCalls[1],
       ])
       // A3: drop a stale response that landed after a newer one.
       if (!mountedRef.current || seq !== seqRef.current) return
       // allSettled, not all: with `all` a single failure is reported and the
-      // other two messages are lost, so a partial outage (say the two v39
-      // functions missing while the third exists) reads as one vague error.
-      const failed = [sewR, dayR, opsR].filter((r) => r.status === 'rejected')
-      if (failed.length) {
-        throw new Error(failed.map((r) => r.reason?.message || 'Unknown error').join(' · '))
-      }
-      setSewadarRaw(sewR.value)
-      setDailyRaw(dayR.value)
-      setScannerRaw(opsR.value)
-      setRowsScheduleId(scheduleId)
-      setLoadError(null)
-    } catch (e) {
-      if (!mountedRef.current || seq !== seqRef.current) return
+      // other two messages are lost, so a partial outage reads as one vague
+      // error. Each section settles independently; a rejection keeps the
+      // previous rows for that section rather than blanking healthy data.
       // The panel shown to the operator is friendly on purpose; the detail —
-      // including every RPC that failed, since allSettled collects them all —
-      // is logged here so it is still recoverable without exposing SQL/RLS
-      // internals on screen.
-      console.error('[Attendance] load failed:', e)
-      setLoadError(e?.message || 'Unknown error')
-      setSewadarRaw([])
-      setDailyRaw([])
-      setScannerRaw([])
+      // including every RPC that failed — is logged here so it is still
+      // recoverable without exposing SQL/RLS internals on screen.
+      if (sewR.status === 'fulfilled') {
+        setSewadarRaw(sewR.value)
+        setSewErr(null)
+      } else {
+        console.error('[Attendance] sewadar load failed:', sewR.reason)
+        setSewErr(sewR.reason?.message || 'Unknown error')
+        toast.error('Could not load attendance')
+      }
+      if (dayR.status === 'fulfilled') {
+        setDailyRaw(dayR.value)
+        setDayErr(null)
+      } else {
+        console.error('[Attendance] daily load failed:', dayR.reason)
+        setDayErr(dayR.reason?.message || 'Unknown error')
+      }
+      if (opsR.status === 'fulfilled') {
+        setScannerRaw(opsR.value)
+        setOpsErr(null)
+      } else {
+        console.error('[Attendance] scanner-ops load failed:', opsR.reason)
+        setOpsErr(opsR.reason?.message || 'Unknown error')
+      }
       setRowsScheduleId(scheduleId)
-      toast.error('Could not load attendance')
     } finally {
       if (mountedRef.current && seq === seqRef.current) setLoading(false)
     }
@@ -208,6 +224,14 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     let timer = null
     const reload = () => {
       if (!alive) return
+      // Max-wait: the 400ms trailing debounce coalesces bursts, but a
+      // sustained burst would re-arm it forever and starve the reload. Fire
+      // immediately when the last actual load is more than 2000ms old.
+      if (Date.now() - lastReloadAt.current > 2000) {
+        if (timer) clearTimeout(timer)
+        if (alive) load().catch(() => {})
+        return
+      }
       if (timer) clearTimeout(timer)
       timer = setTimeout(() => { if (alive) load().catch(() => {}) }, 400)
     }
@@ -235,13 +259,30 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   const dailyRows = useMemo(() => buildDailyRows((rowsAreCurrent ? dailyRaw : []).map((r) => ({ ...r, centre: r?.centre || UNASSIGNED_CENTRE }))), [dailyRaw, rowsAreCurrent])
   const scannerRows = useMemo(() => buildScannerRows(rowsAreCurrent ? scannerRaw : []), [scannerRaw, rowsAreCurrent])
 
-  const centres = useMemo(() => centreOptions(allSewadars), [allSewadars])
+  const centres = useMemo(() => {
+    // Union the sewadar rows AND the daily rows: a centre that is deployed
+    // but unscanned has no sewadar row, and without the union it is not
+    // selectable even though the Daily tab has figures for it.
+    const set = new Set(centreOptions(allSewadars))
+    for (const r of dailyRows) set.add(r.centre || UNASSIGNED_CENTRE)
+    return [...set].sort((a, b) => a.localeCompare(b))
+  }, [allSewadars, dailyRows])
 
   // A16: department options are derived from the CENTRE-FILTERED rows. Building
   // them from the unfiltered set let the operator pick a centre × department
   // pair that can never match, showing 0 rows behind an apparently valid filter.
+  // Daily rows are unioned in for the same reason as `centres` above: a
+  // deployed-but-unscanned department has no sewadar row.
   const centreFiltered = useMemo(() => filterByCentre(allSewadars, filterCentre), [allSewadars, filterCentre])
-  const depts = useMemo(() => deptOptions(centreFiltered), [centreFiltered])
+  const depts = useMemo(() => {
+    const set = new Set(deptOptions(centreFiltered))
+    for (const r of dailyRows) {
+      if (!r.dept_name) continue
+      if (filterCentre !== 'all' && r.centre !== filterCentre) continue
+      set.add(r.dept_name)
+    }
+    return [...set].sort((a, b) => a.localeCompare(b))
+  }, [centreFiltered, dailyRows, filterCentre])
 
   // A2 (second half): drop a filter value whose option no longer exists, so the
   // <select> value and the option list can never disagree.
@@ -277,7 +318,10 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   }
   const centreMatches = (value) => {
     if (filterCentre === 'all') return true
-    if (filterCentre === UNASSIGNED_CENTRE) return !value
+    // Daily/scanner rows are pre-normalised to the UNASSIGNED_CENTRE string
+    // (never null), so matching only `!value` misses every one of them — the
+    // filter read "Unassigned centre" and showed 0 rows behind it.
+    if (filterCentre === UNASSIGNED_CENTRE) return !value || value === UNASSIGNED_CENTRE
     return value === filterCentre
   }
 
@@ -403,16 +447,18 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     )
   }
 
-  // A11: an RPC failure is NOT an empty visit. Missing v39 function (PGRST202),
-  // an RLS/permission denial or a dropped connection all land here and say so,
-  // instead of rendering zeros and "No attendance records".
+  // A11: a SEWADAR RPC failure is NOT an empty visit. Missing v39 function
+  // (PGRST202), an RLS/permission denial or a dropped connection all land here
+  // and say so, instead of rendering zeros and "No attendance records".
   //
   // The panel is deliberately FRIENDLY: the raw backend text (function names,
   // PGRST202, the server's own wording) is not shown to the operator. `load`
   // still collects every failure that occurred and `console.error`s it, so the
   // detail stays one devtools away for whoever has to debug it — without
   // putting SQL/RLS internals in front of a centre user.
-  if (loadError) {
+  // Only the sewadar failure takes the whole page: daily/scanner failures
+  // degrade their own tab in place (see the tab-level cards below).
+  if (sewErr) {
     return (
       <div className="page" style={{ maxWidth: 1400 }}>
         <div className="card" style={{ padding: '1.5rem', maxWidth: 720, margin: '0 auto' }} role="alert">
@@ -462,9 +508,19 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
             <button onClick={exportExcel} disabled={exporting || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export Excel
             </button>
-            {filtering && (
+            {filtering && tab === 'sewadars' && (
               <span className="pill pill-indigo" title="The table and all three Excel sheets show this filtered set">
                 Showing {visible.length} of {allSewadars.length}
+              </span>
+            )}
+            {filtering && tab === 'daily' && (
+              <span className="pill pill-indigo" title="The Daily table and its Excel sheet show this filtered set">
+                Showing {visibleDaily.length} of {dailyRows.length}
+              </span>
+            )}
+            {filtering && tab === 'scanners' && (
+              <span className="pill pill-indigo" title="The Scanner Ops table and its Excel sheet show this filtered set">
+                Showing {visibleScanner.length} of {scannerRows.length}
               </span>
             )}
           </div>
@@ -623,7 +679,24 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
         )}
 
         {tab === 'daily' && (
-          !date ? (
+          <>
+            {dayErr && (
+              <div
+                role="alert"
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap',
+                  background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10,
+                  padding: '0.6rem 0.75rem', fontSize: '0.8rem', color: '#b91c1c', marginBottom: '0.75rem',
+                }}
+              >
+                <AlertTriangle size={15} />
+                <span><strong>Daily figures</strong> could not be loaded — the Sewadars and Scanner Ops tabs are unaffected.</span>
+                <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.15rem 0.45rem', fontSize: '0.72rem' }}>
+                  <RefreshCw size={12} /> Retry
+                </button>
+              </div>
+            )}
+            {!date ? (
             // A5: never claim "no deployment for this day" when no day was asked for.
             <div className="empty">
               <div className="empty-icon"><Clock size={22} /></div>
@@ -683,10 +756,29 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
               </table>
             </div>
           )
+          }
+          </>
         )}
 
         {tab === 'scanners' && (
-          !date ? (
+          <>
+            {opsErr && (
+              <div
+                role="alert"
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap',
+                  background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10,
+                  padding: '0.6rem 0.75rem', fontSize: '0.8rem', color: '#b91c1c', marginBottom: '0.75rem',
+                }}
+              >
+                <AlertTriangle size={15} />
+                <span><strong>Scanner activity</strong> could not be loaded — the Sewadars and Daily tabs are unaffected.</span>
+                <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.15rem 0.45rem', fontSize: '0.72rem' }}>
+                  <RefreshCw size={12} /> Retry
+                </button>
+              </div>
+            )}
+            {!date ? (
             <div className="empty">
               <div className="empty-icon"><Radio size={22} /></div>
               <div className="empty-title">No scan day selected</div>
@@ -734,6 +826,8 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
               </table>
             </div>
           )
+          }
+          </>
         )}
       </div>
 

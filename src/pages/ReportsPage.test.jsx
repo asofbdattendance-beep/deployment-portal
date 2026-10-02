@@ -20,6 +20,7 @@ const rpc = vi.fn()
 const toastError = vi.fn()
 const toastSuccess = vi.fn()
 const toastWarning = vi.fn()
+const fetchCentresMock = vi.fn(() => Promise.resolve(CENTRES))
 
 // Supabase realtime is inert here: a chainable no-op that satisfies
 // channel().on(...).subscribe() and removeChannel().
@@ -34,7 +35,7 @@ vi.mock('../lib/supabase', () => ({
     channel: () => noopChannel(),
     removeChannel: () => {},
   },
-  fetchCentres: () => Promise.resolve(CENTRES),
+  fetchCentres: (...args) => fetchCentresMock(...args),
 }))
 
 const toast = { error: toastError, success: toastSuccess, warning: toastWarning, info: vi.fn() }
@@ -108,6 +109,9 @@ beforeEach(() => {
   toastError.mockReset()
   toastSuccess.mockReset()
   toastWarning.mockReset()
+  exportWorkbook.mockClear()
+  fetchCentresMock.mockReset()
+  fetchCentresMock.mockResolvedValue(CENTRES)
   respondWith()
 })
 
@@ -201,5 +205,135 @@ describe('ReportsPage — a failed RPC is never a silent empty report', () => {
     await renderPage()
     expect(screen.getByRole('alert').textContent).toMatch(/could not load reports/i)
     expect(document.querySelectorAll('table tbody tr')).toHaveLength(0)
+  })
+})
+
+describe('ReportsPage — date currency (rows never shown under the wrong date)', () => {
+  it('hides stale rows and disables downloads while a new date loads', async () => {
+    await renderPage()
+    expect(document.querySelector('table')).toBeTruthy()
+    // Gate every RPC behind a deferred: the new date is loading, the old rows
+    // must already be gone.
+    let release
+    const gate = new Promise((res) => { release = res })
+    rpc.mockImplementation(() => gate)
+    fireEvent.change(screen.getByLabelText('Report day'), { target: { value: '2026-09-24' } })
+    // Skeleton, not the previous day's matrix under the new date.
+    await waitFor(() => expect(screen.queryByText('Loading reports…')).toBeTruthy())
+    expect(document.querySelector('table')).toBeNull()
+    // No download affordance at all while the new date loads — the skeleton
+    // early-returns the whole header, so there is nothing stale to click.
+    expect(screen.queryByRole('button', { name: /Download Present/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Download Absent/i })).toBeNull()
+    // Drain so no 15s withTimeout timer dangles past the test.
+    release({ data: [], error: null })
+    await waitFor(() => expect(screen.queryByText('Loading reports…')).toBeNull())
+  })
+
+  it('disables downloads during a same-date refresh', async () => {
+    // Same schedule+date: rows stay current (no skeleton) but `loading` alone
+    // must gate the buttons until the refresh lands.
+    await renderPage()
+    expect(screen.getByRole('button', { name: /Download Present/i }).disabled).toBe(false)
+    let release
+    const gate = new Promise((res) => { release = res })
+    rpc.mockImplementation(() => gate)
+    fireEvent.click(screen.getByRole('button', { name: /Refresh/i }))
+    await waitFor(() => expect(screen.getByRole('button', { name: /Download Present/i }).disabled).toBe(true))
+    expect(screen.getByRole('button', { name: /Download Absent/i }).disabled).toBe(true)
+    release({ data: [], error: null })
+    await waitFor(() => expect(screen.getByRole('button', { name: /Download Present/i }).disabled).toBe(false))
+  })
+
+  it('stamps the new date on failure instead of leaving the old rows current', async () => {    await renderPage()
+    rpc.mockImplementation(() => Promise.resolve({ data: null, error: { message: 'boom' } }))
+    fireEvent.change(screen.getByLabelText('Report day'), { target: { value: '2026-09-24' } })
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
+    expect(screen.getByText(/could not load reports/i)).toBeTruthy()
+    expect(document.querySelector('table')).toBeNull()
+  })
+})
+
+describe('ReportsPage — export summary follows the active view + filters', () => {
+  it('builds the Visit summary from the visit rows with an Open now column', async () => {
+    await renderPage()
+    fireEvent.click(screen.getByRole('button', { name: /Download Present/i }))
+    await waitFor(() => expect(exportWorkbook).toHaveBeenCalled())
+    const summary = exportWorkbook.mock.calls[0][1].find((s) => s.name.startsWith('Summary'))
+    // DELHI/MEDICAL 4, DELHI-1/MEDICAL 6, DELHI-1/COOKING 2, plus the TOTAL.
+    expect(summary.rows).toHaveLength(4)
+    const delhi = summary.rows.find((r) => r.Centre === 'DELHI' && r.Department === 'MEDICAL')
+    expect(delhi.Deployed).toBe(4)
+    expect(delhi['Ever present']).toBe(3)
+    expect(delhi['Never present']).toBe(1)
+    expect(delhi['Open now']).toBe(0)
+    const total = summary.rows.find((r) => r.Centre === 'TOTAL')
+    expect(total.Deployed).toBe(12)
+    expect(total['Open now']).toBe(1)
+  })
+
+  it('applies the centre filter to the summary rows, not just the detail list', async () => {
+    await renderPage()
+    fireEvent.change(screen.getByLabelText('Filter by centre'), { target: { value: 'DELHI-1' } })
+    fireEvent.click(screen.getByRole('button', { name: /Download Present/i }))
+    await waitFor(() => expect(exportWorkbook).toHaveBeenCalled())
+    const summary = exportWorkbook.mock.calls[0][1].find((s) => s.name.startsWith('Summary'))
+    // Two DELHI-1 rows plus the TOTAL — the DELHI-only row is gone.
+    expect(summary.rows).toHaveLength(3)
+    expect(summary.rows.every((r) => r.Centre === 'DELHI-1' || r.Centre === 'TOTAL')).toBe(true)
+  })
+
+  it('builds the Day summary from the daily rows in the Today view', async () => {
+    await renderPage()
+    fireEvent.click(screen.getByRole('button', { name: /^Today$/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Download Present/i }))
+    await waitFor(() => expect(exportWorkbook).toHaveBeenCalled())
+    const summary = exportWorkbook.mock.calls[0][1].find((s) => s.name.startsWith('Summary'))
+    const row = summary.rows.find((r) => r.Centre === 'DELHI')
+    expect(row.Expected).toBe(4)
+    expect(row.Present).toBe(3)
+    expect(row['Open now']).toBe(0)
+  })
+})
+
+describe('ReportsPage — rates clamp to 0..100', () => {
+  it('renders 100%, never 120%, for an over-count day', async () => {
+    respondWith({ daily: [{ centre: 'DELHI', department_id: 'd1', dept_name: 'MEDICAL', expected: 10, present: 12, absent: 0, open_now: 0 }] })
+    await renderPage()
+    fireEvent.click(screen.getByRole('button', { name: /^Today$/i }))
+    await waitFor(() => expect(document.body.textContent).toContain('100%'))
+    expect(document.body.textContent).not.toContain('120%')
+  })
+})
+
+describe('ReportsPage — search honesty', () => {
+  it('says no rows match instead of shipping an empty export', async () => {
+    await renderPage()
+    fireEvent.change(screen.getByLabelText('Search reports'), { target: { value: 'ZZZ-no-such-place' } })
+    await waitFor(() => expect(screen.getByText(/No rows match the current filters/i)).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /Download Present/i }))
+    await waitFor(() => expect(toastWarning).toHaveBeenCalledWith(expect.stringMatching(/no rows match/i)))
+    expect(exportWorkbook).not.toHaveBeenCalled()
+  })
+
+  it('describes exactly what the filter pill covers', async () => {
+    await renderPage()
+    fireEvent.change(screen.getByLabelText('Search reports'), { target: { value: 'DELHI' } })
+    const pill = await screen.findByText(/in the matrix/i)
+    expect(pill.title).toMatch(/badge\/name/i)
+  })
+})
+
+describe('ReportsPage — centres reference data never blanks the filters', () => {
+  it('keeps the last good centres when a refresh fails to fetch them', async () => {
+    await renderPage()
+    expect(screen.getByLabelText('Filter by centre').textContent).toContain('DELHI')
+    fetchCentresMock.mockRejectedValueOnce(new Error('centres down'))
+    fireEvent.click(screen.getByRole('button', { name: /Refresh/i }))
+    // visit + daily re-fire (2 initial + 2 refresh); the failed centres fetch
+    // must not blank the options or raise the error panel.
+    await waitFor(() => expect(rpc).toHaveBeenCalledTimes(4))
+    expect(screen.getByLabelText('Filter by centre').textContent).toContain('DELHI')
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })

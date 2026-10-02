@@ -14,7 +14,7 @@ import {
   UNASSIGNED_CENTRE,
   VISIT_DAYS,
 } from '../lib/attendance'
-import { todayStrIST } from '../lib/scannerUtils'
+import { todayStrIST, withTimeout } from '../lib/scannerUtils'
 import { exportWorkbook, fileSlug } from '../lib/excel'
 import {
   LayoutDashboard, Users, UserX, Percent, Clock, Radio, AlertTriangle,
@@ -96,6 +96,8 @@ function msLeft(ms) {
 
 /** 'WED' from an ISO 'YYYY-MM-DD'. Parsed as UTC so the weekday never shifts. */
 function dayLabel(day) {
+  // buildTrendRows emits weekday labels ('WED'…'SUN') — pass them through.
+  if (/^(WED|THU|FRI|SAT|SUN|MON|TUE)$/i.test(String(day || '').trim())) return String(day).toUpperCase()
   const d = new Date(`${day}T00:00:00Z`)
   if (Number.isNaN(d.getTime())) return String(day || '—').slice(0, 2)
   return d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' })
@@ -174,6 +176,9 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   // A monotonically increasing request sequence — a slow load must not
   // overwrite a fast newer one.
   const seqRef = useRef(0)
+  // Max-wait for the realtime debounce below: the timestamp of the last load
+  // that actually fired, so a sustained burst cannot starve the reload.
+  const lastReloadAt = useRef(0)
 
   useEffect(() => {
     const sync = () => setDate((d) => (d === todayStrIST() ? d : todayStrIST()))
@@ -195,15 +200,18 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
     // here latched the page on its spinner with no timeout and no error.
     if (!scheduleId) { setLoading(false); return }
     const seq = ++seqRef.current
+    lastReloadAt.current = Date.now()
     setLoading(true)
     try {
+      // Every RPC is wrapped in withTimeout: a hung function must surface a
+      // friendly section error, never latch the page on its spinner forever.
       const results = await Promise.allSettled([
-        rpcRows('attendance_daily_summary', { p_schedule: scheduleId, p_date: date }),
-        rpcRows('attendance_visit_summary', { p_schedule: scheduleId }),
-        rpcRows('attendance_scanner_ops', { p_schedule: scheduleId, p_date: date }),
+        withTimeout(rpcRows('attendance_daily_summary', { p_schedule: scheduleId, p_date: date }), 15000, 'attendance_daily_summary'),
+        withTimeout(rpcRows('attendance_visit_summary', { p_schedule: scheduleId }), 15000, 'attendance_visit_summary'),
+        withTimeout(rpcRows('attendance_scanner_ops', { p_schedule: scheduleId, p_date: date }), 15000, 'attendance_scanner_ops'),
         // p_date: null → the visit-wide anomaly sweep, not one day.
-        rpcRows('attendance_anomalies', { p_schedule: scheduleId, p_date: null }),
-        rpcRows('attendance_trend', { p_schedule: scheduleId }),
+        withTimeout(rpcRows('attendance_anomalies', { p_schedule: scheduleId, p_date: null }), 15000, 'attendance_anomalies'),
+        withTimeout(rpcRows('attendance_trend', { p_schedule: scheduleId }), 15000, 'attendance_trend'),
       ])
       if (!mountedRef.current || seq !== seqRef.current) return
       const next = {}
@@ -219,7 +227,9 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
       })
       setSec(next)
       setRowsScheduleId(scheduleId)
-      setLastRefreshAt(Date.now())
+      // No silent freshness: the LIVE pill only advances when at least one
+      // source actually answered — five rejections leave the old timestamp.
+      if (results.some((r) => r.status === 'fulfilled')) setLastRefreshAt(Date.now())
     } finally {
       if (mountedRef.current && seq === seqRef.current) setLoading(false)
     }
@@ -247,6 +257,14 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
     let timer = null
     const reload = () => {
       if (!alive) return
+      // Max-wait: the 400ms trailing debounce coalesces bursts, but a
+      // sustained burst would re-arm it forever and starve the reload. Fire
+      // immediately when the last actual load is more than 2000ms old.
+      if (Date.now() - lastReloadAt.current > 2000) {
+        if (timer) clearTimeout(timer)
+        if (alive) load().catch(() => {})
+        return
+      }
       if (timer) clearTimeout(timer)
       timer = setTimeout(() => { if (alive) load().catch(() => {}) }, 400)
     }
@@ -282,6 +300,14 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   const totals = useMemo(() => dailyTotals(dailyRows), [dailyRows])
   const counts = useMemo(() => anomalyCounts(anomalyRows), [anomalyRows])
   const anomalyTotal = useMemo(() => Object.values(counts).reduce((a, b) => a + b, 0), [counts])
+
+  // Sources that failed the last load — surfaced in the LIVE pill tooltip so
+  // a partially-degraded dashboard never presents as fully fresh.
+  const failedSources = ['daily', 'visit', 'ops', 'anom', 'trend'].filter((k) => sec[k].error).length
+  // KPI tiles must never render a healthy 0 for a section that failed to
+  // load: "—" in amber says "unknown", 0 says "nobody came". The SectionError
+  // cards below still carry the retry.
+  const errStyle = { color: '#b45309' }
 
   // Centre leaderboard: the daily rows folded up to one row per centre.
   const centreRows = useMemo(() => {
@@ -387,12 +413,17 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   }, [anomalyTotal, schedule, now, centreRows, totals.open_now])
 
   // ─── Export. The badge list is fetched at CLICK time, never on page load. ───
+  // Returns { written, count }: `written` says a workbook actually landed on
+  // disk. The old code returned an overloaded 0 for BOTH "no rows" and "write
+  // produced nothing", so a half-success (present exported, absent empty)
+  // warned "nothing exported" over a workbook that DID download.
   const dayWorkbook = useCallback(async (mode) => {
-    const rows = await rpcRows('attendance_day_badges', { p_schedule: scheduleId, p_date: date, p_mode: mode })
-    if (!rows.length) {
-      toast.warning(`No ${mode} sewadars for ${date} — nothing exported`)
-      return 0
-    }
+    const rows = await withTimeout(
+      rpcRows('attendance_day_badges', { p_schedule: scheduleId, p_date: date, p_mode: mode }),
+      15000,
+      'attendance_day_badges'
+    )
+    if (!rows.length) return { written: false, count: 0 }
     const label = mode === 'present' ? 'Present' : 'Absent'
     const byCentre = new Map()
     for (const r of rows) {
@@ -407,7 +438,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
         .map(([centre, n]) => ({ Centre: centre, [label]: n })),
       { Centre: 'TOTAL', [label]: rows.length },
     ]
-    return exportWorkbook(`${fileSlug(schedule?.name)}_${date}_${mode}.xlsx`, [
+    const written = await exportWorkbook(`${fileSlug(schedule?.name)}_${date}_${mode}.xlsx`, [
       { name: 'Summary', rows: summary },
       {
         name: label,
@@ -421,35 +452,41 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
         })),
       },
     ])
-  }, [scheduleId, date, schedule, toast])
+    return { written: written > 0, count: rows.length }
+  }, [scheduleId, date, schedule])
 
-  // Both workbooks, one after the other, inside the same click.
+  // Both workbooks, one after the other, inside the same click. Success is
+  // toasted PER workbook that landed; the "nothing exported" warning fires
+  // only when NEITHER workbook was written.
   const exportSnapshot = useCallback(async () => {
     setExporting(true)
     try {
       const present = await dayWorkbook('present')
       const absent = await dayWorkbook('absent')
-      if (present && absent) toast.success('Snapshot exported — present and absent workbooks')
+      if (present.written) toast.success('Present list exported')
+      if (absent.written) toast.success('Absent list exported')
+      if (!present.written && !absent.written) toast.warning(`No attendance for ${date} — nothing exported`)
     } catch (e) {
       console.error('[Dashboard] snapshot export failed:', e)
       toast.error('Could not export the snapshot')
     } finally {
       setExporting(false)
     }
-  }, [dayWorkbook, toast])
+  }, [dayWorkbook, toast, date])
 
   const runExport = useCallback(async (mode) => {
     setExporting(true)
     try {
-      const written = await dayWorkbook(mode)
-      if (written) toast.success(`${mode === 'present' ? 'Present' : 'Absent'} list exported`)
+      const result = await dayWorkbook(mode)
+      if (result.written) toast.success(`${mode === 'present' ? 'Present' : 'Absent'} list exported`)
+      else toast.warning(`No ${mode} sewadars for ${date} — nothing exported`)
     } catch (e) {
       console.error(`[Dashboard] ${mode} export failed:`, e)
       toast.error(`Could not export the ${mode} list`)
     } finally {
       setExporting(false)
     }
-  }, [dayWorkbook, toast])
+  }, [dayWorkbook, toast, date])
 
   // ─── Guards ───
   if (!schedules.length) {
@@ -484,7 +521,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
             <span
               className="pill"
-              title={lastRefreshAt ? `Last successful reload at ${new Date(lastRefreshAt).toLocaleTimeString('en-IN')}` : 'Not loaded yet'}
+              title={lastRefreshAt ? `Last successful reload at ${new Date(lastRefreshAt).toLocaleTimeString('en-IN')}${failedSources ? ` · ${failedSources} of 5 sources failed` : ''}` : 'Not loaded yet'}
               style={{ background: '#ecfdf5', color: '#047857', fontWeight: 600 }}
             >
               <LiveDot /> LIVE · updated {timeAgo(lastRefreshAt, now)}
@@ -542,37 +579,39 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
       <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
         <button type="button" onClick={() => go('reports')} className="stat" style={TILE} title="Open the Attendance reports for today">
           <div className="stat-label">Present today</div>
-          <div className="stat-value">{totals.present}</div>
-          <div className="stat-sub">of {totals.expected} deployed</div>
+          <div className="stat-value" style={sec.daily.error ? errStyle : undefined} title={sec.daily.error ? 'Present today could not be loaded' : undefined}>{sec.daily.error ? '—' : totals.present}</div>
+          <div className="stat-sub">of {sec.daily.error ? '—' : totals.expected} deployed</div>
         </button>
         <button type="button" onClick={() => go('reports')} className="stat" style={TILE} title="Open the Attendance reports for today">
           <div className="stat-label">Attendance %</div>
-          <div className="stat-value" style={{ fontSize: '1.1rem', paddingTop: '0.35rem' }}>
-            <div className="progress" style={{ height: 10 }}>
-              <div className={`progress-bar${bandBar(rateBand(totals.rate))}`} style={{ width: `${totals.rate}%` }} />
-            </div>
+          <div className="stat-value" style={{ fontSize: '1.1rem', paddingTop: '0.35rem', ...(sec.daily.error ? errStyle : {}) }} title={sec.daily.error ? 'Attendance rate could not be loaded' : undefined}>
+            {sec.daily.error ? '—' : (
+              <div className="progress" style={{ height: 10 }}>
+                <div className={`progress-bar${bandBar(rateBand(totals.rate))}`} style={{ width: `${totals.rate}%` }} />
+              </div>
+            )}
           </div>
-          <div className="stat-sub">{totals.rate}% present today</div>
+          <div className="stat-sub">{sec.daily.error ? 'could not be loaded' : `${totals.rate}% present today`}</div>
         </button>
         <button type="button" onClick={() => go('reports')} className="stat" style={TILE} title="Open the Attendance reports for today">
           <div className="stat-label">Absent today</div>
-          <div className="stat-value">{totals.absent}</div>
+          <div className="stat-value" style={sec.daily.error ? errStyle : undefined} title={sec.daily.error ? 'Absent today could not be loaded' : undefined}>{sec.daily.error ? '—' : totals.absent}</div>
           <div className="stat-sub">expected but not scanned</div>
         </button>
         <button type="button" onClick={() => go('reports')} className="stat" style={TILE} title="Open the Attendance reports for today">
           <div className="stat-label">Open now</div>
-          <div className="stat-value" style={{ color: totals.open_now ? '#b45309' : undefined }}>{totals.open_now}</div>
+          <div className="stat-value" style={{ color: sec.daily.error ? '#b45309' : (totals.open_now ? '#b45309' : undefined) }} title={sec.daily.error ? 'Open sessions could not be loaded' : undefined}>{sec.daily.error ? '—' : totals.open_now}</div>
           <div className="stat-sub">IN, not yet OUT</div>
         </button>
         <button type="button" onClick={() => go('liveScanners')} className="stat" style={TILE} title="Open Live Scanners">
           <div className="stat-label">Scanners active</div>
-          <div className="stat-value">{activeScanners}/{scannerHealth.length}</div>
+          <div className="stat-value" style={sec.ops.error ? errStyle : undefined} title={sec.ops.error ? 'Scanner activity could not be loaded' : undefined}>{sec.ops.error ? '—' : `${activeScanners}/${scannerHealth.length}`}</div>
           <div className="stat-sub">scanned in the last 15 min</div>
         </button>
         <button type="button" onClick={() => go('anomalies')} className="stat" style={TILE} title="Open Attendance Anomalies">
           <div className="stat-label">Anomalies</div>
-          <div className="stat-value" style={{ color: anomalyTotal ? '#b91c1c' : undefined }}>{anomalyTotal}</div>
-          <div className="stat-sub">{anomalyTotal ? `${Object.keys(counts).length} rules flagged` : 'nothing flagged'}</div>
+          <div className="stat-value" style={{ color: sec.anom.error ? '#b45309' : (anomalyTotal ? '#b91c1c' : undefined) }} title={sec.anom.error ? 'Anomalies could not be loaded' : undefined}>{sec.anom.error ? '—' : anomalyTotal}</div>
+          <div className="stat-sub">{sec.anom.error ? 'could not be loaded' : (anomalyTotal ? `${Object.keys(counts).length} rules flagged` : 'nothing flagged')}</div>
         </button>
       </div>
 

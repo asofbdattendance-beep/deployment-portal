@@ -353,3 +353,49 @@ describe('null-safe display — a null centre and a null event date are never bl
     expect(pill.textContent).toContain('FUTURE RULE')
   })
 })
+
+describe('cap-aware counts — a capped feed reads as a lower bound, never a census', () => {
+  // The server caps each rule at 200 rows and the whole feed at 1000 (newest
+  // first). A count sitting on a cap must render "200+" with a newest-rows
+  // note — a bare 200 would read as an exact census.
+  const bigRows = (rule, n, start = 0) => Array.from({ length: n }, (_, i) => ({
+    rule,
+    badge_number: `B${String(start + i).padStart(4, '0')}`,
+    sewadar_name: `NAME${start + i}`,
+    sewadar_centre: 'DELHI',
+    dept_name: 'MEDICAL',
+    detail: 'detail',
+    event_date: '2026-09-23',
+  }))
+
+  it('renders 200+ on a chip sitting on the server cap, with a newest-rows note', async () => {
+    respondWith({ rows: bigRows('UNDEPLOYED_SCAN', 200) })
+    await renderPage()
+    expect(screen.getByText('Undeployed scan (200+)')).toBeTruthy()
+    expect(screen.getByText(/showing newest 200/i)).toBeTruthy()
+  })
+
+  it('keeps exact counts exact below the cap', async () => {
+    respondWith({ rows: bigRows('UNDEPLOYED_SCAN', 3) })
+    await renderPage()
+    expect(screen.getByText('Undeployed scan (3)')).toBeTruthy()
+    expect(screen.queryByText(/showing newest/i)).toBeNull()
+  })
+
+  it('renders 1000+ when the whole result hits the total cap', async () => {
+    respondWith({ rows: [...bigRows('UNDEPLOYED_SCAN', 200), ...bigRows('STALE_OPEN', 800, 200)] })
+    await renderPage()
+    expect(screen.getByText('All (1000+)')).toBeTruthy()
+    expect(screen.getByText(/showing newest 1000/i)).toBeTruthy()
+  })
+
+  it('exports capped counts with the cap note on the Counts sheet', async () => {
+    respondWith({ rows: bigRows('UNDEPLOYED_SCAN', 200) })
+    await renderPage()
+    fireEvent.click(screen.getByText('Export Excel'))
+    await waitFor(() => expect(writeFile).toHaveBeenCalled())
+    const countsRows = bookAppendSheet.mock.calls[1][1].rows
+    expect(countsRows[0]).toEqual({ Rule: 'Undeployed scan', Count: '200+' })
+    expect(countsRows[countsRows.length - 1].Rule).toMatch(/showing newest 200/i)
+  })
+})

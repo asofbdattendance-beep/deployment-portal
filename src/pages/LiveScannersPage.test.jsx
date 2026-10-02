@@ -218,6 +218,51 @@ describe('I5 — an expanded drill-down refreshes with the list', () => {
   })
 })
 
+describe('scanned — a valid scan on a non-today date is neutral, never Idle', () => {
+  // The same last_scan_time that reads Active/Idle on the scan day itself must
+  // read as a neutral "Scanned HH:MM" pill on any other day: amber Idle claims
+  // the scanner "went quiet today", which is the wrong claim for a past visit
+  // day. The pinned clock is 2026-09-23 10:00 IST, so 2026-09-22 is not today.
+  async function renderPastDay() {
+    await renderPage()
+    fireEvent.change(screen.getByLabelText('Scan day'), { target: { value: '2026-09-22' } })
+    await waitFor(() => expect(screen.getByText('Scanned 09:52')).toBeTruthy())
+  }
+
+  it('renders the neutral Scanned pill instead of amber Idle', async () => {
+    await renderPastDay()
+    const pill = screen.getByText('Scanned 09:52')
+    expect(pill.className).toContain('pill-gray')
+    expect(pill.className).not.toContain('pill-amber')
+    expect(screen.getByText('Scanned 07:10')).toBeTruthy()
+    expect(screen.queryByText('Idle')).toBeNull()
+  })
+
+  it('keeps Active-now at active-only with a date-aware sub on a past day', async () => {
+    await renderPastDay()
+    const tile = screen.getByText('Active now').closest('.stat')
+    expect(tile.querySelector('.stat-value').textContent).toBe('0')
+    expect(tile.querySelector('.stat-sub').textContent).toMatch(/last scan/i)
+  })
+
+  it('keeps the "in the last 15 min" sub on the scan day itself', async () => {
+    await renderPage()
+    const tile = screen.getByText('Active now').closest('.stat')
+    expect(tile.querySelector('.stat-value').textContent).toBe('1')
+    expect(tile.querySelector('.stat-sub').textContent).toMatch(/last 15 min/i)
+  })
+
+  it('exports the Scanned label so the sheet matches the screen', async () => {
+    const xlsx = await import('xlsx')
+    xlsx.utils.book_append_sheet.mockClear()
+    await renderPastDay()
+    fireEvent.click(screen.getByText(/Export Excel/))
+    await waitFor(() => expect(xlsx.utils.book_append_sheet).toHaveBeenCalled())
+    const rows = xlsx.utils.book_append_sheet.mock.calls[0][1].rows
+    expect(rows[0].Status).toBe('Scanned 09:52')
+  })
+})
+
 vi.mock('xlsx', () => ({
   utils: {
     book_new: vi.fn(() => ({})),

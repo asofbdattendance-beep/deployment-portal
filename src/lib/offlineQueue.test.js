@@ -21,7 +21,7 @@ vi.mock('./supabase', () => ({
   },
 }))
 
-const { enqueueScan, getQueuedScans, removeQueued, markFailed, clearFailedQueue, clearOrphanedQueue, drainQueue, classifyScanError, getDrainTiming, __resetDrainState, __getConsecutiveFailures, cacheSet, getCachedDeployed, preloadDeployed, installDrainListeners } = await import('./offlineQueue')
+const { enqueueScan, getQueuedScans, removeQueued, markFailed, clearFailedQueue, clearLiveQueue, clearOrphanedQueue, drainQueue, classifyScanError, isNetworkNotReached, isStrandedRow, listStrandedQueue, getDrainTiming, __resetDrainState, __getConsecutiveFailures, cacheSet, getCachedDeployed, preloadDeployed, installDrainListeners } = await import('./offlineQueue')
 
 /** Read EVERY row in the store, bypassing the owner filter — test-only helper. */
 function allRows() {
@@ -66,7 +66,7 @@ beforeEach(async () => {
   // The warm result is ignored — a leftover-full queue reports 'full' here
   // and the clear below makes room before the asserted init.
   await enqueueScan({ id: '__warm__', badge: 'FB5971GA0000', schedule_id: 's', action: 'IN' })
-  // Clear SECOND: cap-filling tests leave 200 rows behind, and the init below
+  // Clear SECOND: cap-filling tests leave 2000 rows behind, and the init below
   // would hit 'full' if it ran before the clear (A1 contract).
   for (const r of await allRows()) await removeQueued(r.id)
   // Initialise the schema through the module's own safeOpenDB path first, so
@@ -124,7 +124,7 @@ const liveRow = (i, extra = {}) => ({
 })
 
 describe('enqueueScan result contract (Task A1: L-01 / L-02)', () => {
-  const CAP = 200 // MAX_QUEUE_SIZE — module-private, mirrored deliberately.
+  const CAP = 2000 // MAX_QUEUE_SIZE — module-private, mirrored deliberately.
 
   it('never rejects: resolves a result object on the happy path', async () => {
     await expect(
@@ -262,14 +262,14 @@ describe('orphan sweep (A3 / L-03)', () => {
   const orphan = (i) => ({ id: `orphan-${i}`, badge: `VS${String(i).padStart(4, '0')}`, schedule_id: 's', action: 'IN', createdAt: 1, attempts: 0, synced: false, owner: null })
 
   it('null-owner orphans do not consume the logged-in cap (no wedge)', async () => {
-    await putMany(Array.from({ length: 200 }, (_, i) => orphan(i)))
+    await putMany(Array.from({ length: 2000 }, (_, i) => orphan(i)))
     const res = await enqueueScan({ id: 'after-orphans', badge: 'VS9999', schedule_id: 's', action: 'IN' })
     expect(res.ok).toBe(true)
   })
 
-  it('logged-out queueing is still capped at 200 own rows', async () => {
+  it('logged-out queueing is still capped at 2000 own rows', async () => {
     currentUserId = null
-    await putMany(Array.from({ length: 200 }, (_, i) => orphan(i)))
+    await putMany(Array.from({ length: 2000 }, (_, i) => orphan(i)))
     const res = await enqueueScan({ id: 'overflow-anon', badge: 'VS9999', schedule_id: 's', action: 'IN' })
     expect(res).toEqual({ ok: false, reason: 'full' })
   })
@@ -367,6 +367,40 @@ describe('classifyScanError (Task 1: L-04 + L-08)', () => {
     expect(classifyScanError('duplicate key value violates unique constraint "portal_users_email_key"')).toBe('retry')
   })
 
+  it('honours err.code: 401/403/42501 and PGRST3xx are permanent (T8)', () => {
+    // RLS / auth denials can never succeed — quarantine, never retry.
+    expect(classifyScanError('forbidden', { code: 401 })).toBe('permanent')
+    expect(classifyScanError('forbidden', { code: '401' })).toBe('permanent')
+    expect(classifyScanError('forbidden', { code: 403 })).toBe('permanent')
+    expect(classifyScanError('insufficient_privilege', { code: '42501' })).toBe('permanent')
+    expect(classifyScanError('insufficient_privilege', { code: 42501 })).toBe('permanent')
+    expect(classifyScanError('policy violation', { code: 'PGRST301' })).toBe('permanent')
+    expect(classifyScanError('policy violation', { code: 'pgrst301' })).toBe('permanent')
+  })
+
+  it('classifies RLS/JWT message shapes as permanent with no err.code (T8)', () => {
+    expect(classifyScanError('permission denied for table dp_attendance_sessions')).toBe('permanent')
+    expect(classifyScanError('new row violates row-level security policy')).toBe('permanent')
+    expect(classifyScanError('invalid JWT signature')).toBe('permanent')
+    expect(classifyScanError('Not Authorized: missing role')).toBe('permanent')
+    expect(classifyScanError('request failed with code 42501')).toBe('permanent')
+    expect(classifyScanError('PGRST301 ambiguous thing')).toBe('permanent')
+  })
+
+  it('keeps PGRST202 (missing function = deploy ordering) as retry (T8)', () => {
+    expect(classifyScanError('PGRST202 whatever')).toBe('retry')
+    expect(classifyScanError('function does not exist', { code: 'PGRST202' })).toBe('retry')
+    // PGRST202 in text does not leak into the PGRST3 permanent rule either.
+    expect(classifyScanError('PGRST202: Could not find the function')).toBe('retry')
+  })
+
+  it('keeps pure network/timeout shapes as retry (T8)', () => {
+    expect(classifyScanError('Failed to fetch')).toBe('retry')
+    expect(classifyScanError('Failed to fetch', { code: '' })).toBe('retry')
+    expect(classifyScanError('Drain IN timed out after 10000ms')).toBe('retry')
+    expect(classifyScanError('')).toBe('retry')
+  })
+
   it('exposes injectable drain timing for T2', () => {
     expect(getDrainTiming()).toEqual({ base: 7000, max: 60000 })
     globalThis.__OFFLINEQ_BASE_INTERVAL__ = 100
@@ -405,7 +439,10 @@ describe('drainQueue poison-row behaviour (L-04)', () => {  function fakeSupabas
     expect(rows[0].status).toBe('failed')
   })
 
-  it('drops a stale open_id row and keeps draining (L-08)', async () => {
+  it('quarantines a stale open_id OUT and keeps draining (L-08 + C3)', async () => {
+    // C3 changed the OUT half: a stale p_open_id ('Session does not match')
+    // is quarantined for manual recovery, not deleted — the IN behind it
+    // still drains.
     __resetDrainState()
     const calls = []
     await enqueueScan({ id: 'stale', badge: 'FB5971GA0003', schedule_id: 'sched-1', action: 'OUT', ts: '2026-09-24T13:00:00Z', open_id: 'wrong-id' })
@@ -414,9 +451,143 @@ describe('drainQueue poison-row behaviour (L-04)', () => {  function fakeSupabas
       if (params.p_open_id === 'wrong-id') return { data: null, error: new Error('Session does not match badge/schedule') }
       return { data: { ok: true }, error: null }
     }))
-    expect(drained).toBe(2)
+    expect(drained).toBe(1)
     expect(calls).toHaveLength(2)
-    expect(await getQueuedScans()).toHaveLength(0)
+    const rows = await allRows()
+    expect(rows.map((r) => r.id)).toEqual(['stale'])
+    expect(rows[0].failed).toBe(true)
+    expect(rows[0].status).toBe('failed')
+  })
+})
+
+describe('drain orphaned-OUT quarantine (T9)', () => {
+  function fakeSupabase(calls, impl) {
+    return {
+      auth: { getSession: async () => ({ data: { session: { user: { id: 'user-A' } } } }) },
+      rpc: async (name, params) => {
+        calls.push([name, params])
+        return impl ? impl(name, params) : { data: { ok: true }, error: null }
+      },
+    }
+  }
+
+  it('quarantines (not deletes) an OUT whose IN was quarantined this drain', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw({ id: 'qin', badge: 'VS0001', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:00:00Z', createdAt: 1, attempts: 0, synced: false, owner: 'user-A' })
+    await putRaw({ id: 'qout', badge: 'VS0001', schedule_id: 's', action: 'OUT', ts: '2026-09-24T13:00:00Z', open_id: 'open-1', createdAt: 2, attempts: 0, synced: false, owner: 'user-A' })
+    const drained = await drainQueue(fakeSupabase(calls, (name, _params) => {
+      // The IN is rejected terminally; the following OUT then finds no open
+      // session — deleting it would leave zero rows and lose the pair.
+      if (name === 'scan_in') return { data: null, error: new Error('Not authorized to scan') }
+      return { data: null, error: new Error('No open session to close') }
+    }))
+    expect(drained).toBe(0)
+    expect(calls).toHaveLength(2)
+    const rows = await allRows()
+    const inRow = rows.find((r) => r.id === 'qin')
+    const outRow = rows.find((r) => r.id === 'qout')
+    expect(inRow.failed).toBe(true)
+    expect(inRow.status).toBe('failed')
+    // Quarantined, NOT deleted — both rows stay visible for manual recovery.
+    expect(outRow.failed).toBe(true)
+    expect(outRow.status).toBe('failed')
+  })
+
+  it('quarantines an OUT whose IN was quarantined in a previous drain', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw({ id: 'qin-old', badge: 'VS0002', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:00:00Z', createdAt: 1, attempts: 0, synced: false, owner: 'user-A', failed: true, status: 'failed' })
+    await putRaw({ id: 'qout-new', badge: 'VS0002', schedule_id: 's', action: 'OUT', ts: '2026-09-24T13:00:00Z', open_id: 'open-9', createdAt: 2, attempts: 0, synced: false, owner: 'user-A' })
+    const drained = await drainQueue(fakeSupabase(calls, () => ({ data: null, error: new Error('No open session to close') })))
+    expect(drained).toBe(0)
+    expect(calls).toHaveLength(1)
+    const outRow = (await allRows()).find((r) => r.id === 'qout-new')
+    expect(outRow.failed).toBe(true)
+    expect(outRow.status).toBe('failed')
+  })
+
+  it('quarantines (not deletes) a lone OUT failing as dedup/drop (C3)', async () => {
+    // C3: dedup-delete is IN-only. A lone OUT with 'No open session' means
+    // the IN never landed anywhere this device can see — deleting it loses
+    // the scan silently. Quarantine keeps it visible for manual recovery.
+    __resetDrainState()
+    const calls = []
+    await putRaw({ id: 'lone-out', badge: 'VS0003', schedule_id: 's', action: 'OUT', ts: '2026-09-24T13:00:00Z', open_id: 'open-3', createdAt: 1, attempts: 0, synced: false, owner: 'user-A' })
+    const drained = await drainQueue(fakeSupabase(calls, () => ({ data: null, error: new Error('No open session to close') })))
+    expect(drained).toBe(0)
+    expect(calls).toHaveLength(1)
+    const outRow = (await allRows()).find((r) => r.id === 'lone-out')
+    expect(outRow.failed).toBe(true)
+    expect(outRow.status).toBe('failed')
+  })
+
+  it('a drain-timeout burns ONE attempt but still breaks the drain (C1)', async () => {
+    // C1: withTimeout abandons the race WITHOUT cancelling the in-flight
+    // request, so the server may HAVE applied the scan — unlike a pure
+    // network error it must burn one attempt (bounded by MAX_DRAIN_ATTEMPTS).
+    __resetDrainState()
+    const calls = []
+    expect(isNetworkNotReached('Drain OUT timed out after 10000ms')).toBe(true)
+    expect(isNetworkNotReached('Failed to fetch')).toBe(true)
+    expect(isNetworkNotReached('unexpected server wobble 500')).toBe(false)
+    await putRaw({ id: 'tout', badge: 'VS0004', schedule_id: 's', action: 'OUT', ts: '2026-09-24T13:00:00Z', open_id: 'open-4', createdAt: 1, attempts: 0, synced: false, owner: 'user-A' })
+    const drained = await drainQueue(fakeSupabase(calls, () => ({ data: null, error: new Error('Drain OUT timed out after 10000ms') })))
+    expect(drained).toBe(0)
+    expect(calls).toHaveLength(1)
+    expect((await allRows()).find((r) => r.id === 'tout').attempts).toBe(1)
+    expect(__getConsecutiveFailures()).toBe(1)
+  })
+})
+
+describe('stranded rows (T10)', () => {
+  const live = (id, extra = {}) => ({
+    id, badge: 'VS0001', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:00:00Z',
+    createdAt: 1, attempts: 0, synced: false, ...extra,
+  })
+
+  it('isStrandedRow matches only live, non-failed, non-synced null-owner rows', () => {
+    expect(isStrandedRow(live('a', { owner: null }))).toBe(true)
+    expect(isStrandedRow(live('b', { owner: 'user-A' }))).toBe(false)
+    expect(isStrandedRow(live('c', { owner: null, failed: true, status: 'failed' }))).toBe(false)
+    expect(isStrandedRow(live('d', { owner: null, failed: true }))).toBe(false)
+    expect(isStrandedRow(live('e', { owner: null, synced: true }))).toBe(false)
+    expect(isStrandedRow(live('f', {}))).toBe(true) // missing owner reads as null
+    expect(isStrandedRow(null)).toBe(false)
+  })
+
+  it('listStrandedQueue returns null-owner live rows while logged in (read-only)', async () => {
+    await putRaw(live('strand-1', { owner: null }))
+    await putRaw(live('mine-1', { owner: 'user-A' }))
+    await putRaw(live('dead-1', { owner: null, failed: true, status: 'failed' }))
+    // getQueuedScans hides the stranded row while logged in (D1a)…
+    expect((await getQueuedScans()).map((r) => r.id)).toEqual(['mine-1'])
+    // …but the stranded list surfaces it regardless of login.
+    expect((await listStrandedQueue()).map((r) => r.id)).toEqual(['strand-1'])
+  })
+
+  it('a stranded row is removable per-row via removeQueued and never drains', async () => {
+    __resetDrainState()
+    const calls = []
+    const fake = {
+      auth: { getSession: async () => ({ data: { session: { user: { id: 'user-A' } } } }) },
+      rpc: async (name, params) => { calls.push([name, params]); return { data: { ok: true }, error: null } },
+    }
+    await putRaw(live('strand-9', { owner: null }))
+    // Drain skips null-owner rows (cross-user safety) — zero RPCs for it.
+    await drainQueue(fake)
+    expect(calls).toHaveLength(0)
+    expect((await listStrandedQueue()).map((r) => r.id)).toEqual(['strand-9'])
+    // Manual per-row clear removes exactly that row.
+    await removeQueued('strand-9')
+    expect(await listStrandedQueue()).toEqual([])
+    expect(await allRows()).toHaveLength(0)
+  })
+
+  it('clearOrphanedQueue still returns 0 while logged in (semantics kept)', async () => {
+    await putRaw(live('strand-2', { owner: null }))
+    await expect(clearOrphanedQueue()).resolves.toBe(0)
+    expect((await listStrandedQueue()).map((r) => r.id)).toEqual(['strand-2'])
   })
 })
 
@@ -485,7 +656,7 @@ describe('drainQueue owner + retry semantics (V12)', () => {
     expect((await allRows()).map((r) => r.id).sort()).toEqual(['anon', 'theirs'])
   })
 
-  it('retry arm marks failed, breaks, and climbs backoff (V12)', async () => {
+  it('retry arm breaks and climbs backoff without burning attempts on network failures (V12 + T9)', async () => {
     __resetDrainState()
     const calls = []
     await putRaw({ id: 'flaky-1', badge: 'VS0001', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:00:00Z', createdAt: 1, attempts: 0, synced: false, owner: 'user-A' })
@@ -495,7 +666,9 @@ describe('drainQueue owner + retry semantics (V12)', () => {
     // Head-of-line block: the drain stops at the first network error.
     expect(calls).toHaveLength(1)
     const rows = await allRows()
-    expect(rows.find((r) => r.id === 'flaky-1').attempts).toBe(1)
+    // T9: the RPC was never reached, so no attempt is burned (a jammer must
+    // not terminally lose scans that were never attempted).
+    expect(rows.find((r) => r.id === 'flaky-1').attempts).toBe(0)
     // The row behind the failure is never attempted.
     expect(rows.find((r) => r.id === 'flaky-2').attempts).toBe(0)
     expect(__getConsecutiveFailures()).toBe(1)
@@ -505,15 +678,29 @@ describe('drainQueue owner + retry semantics (V12)', () => {
     __resetDrainState()
     const calls = []
     await putRaw({ id: 'solo', badge: 'VS0001', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:00:00Z', createdAt: 1, attempts: 0, synced: false, owner: 'user-A' })
-    // Two failed drains climb the backoff 0 → 1 → 2.
+    // Two failed drains climb the backoff 0 → 1 → 2 (T9: network failures
+    // climb the backoff but burn no attempts — the scan was never reached).
     await drainQueue(fakeSupabase(calls, () => ({ data: null, error: new Error('Failed to fetch') })))
     expect(__getConsecutiveFailures()).toBe(1)
     await drainQueue(fakeSupabase(calls, () => ({ data: null, error: new Error('Failed to fetch') })))
     expect(__getConsecutiveFailures()).toBe(2)
-    expect((await allRows()).find((r) => r.id === 'solo').attempts).toBe(2)
+    expect((await allRows()).find((r) => r.id === 'solo').attempts).toBe(0)
     // One successful drain decays exactly one step (2 → 1), not a reset.
     const drained = await drainQueue(fakeSupabase(calls))
     expect(drained).toBe(1)
+    expect(__getConsecutiveFailures()).toBe(1)
+  })
+
+  it('server-reached retry failures still burn attempts toward the cap (T9)', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw({ id: 'srv', badge: 'VS0001', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:00:00Z', createdAt: 1, attempts: 0, synced: false, owner: 'user-A' })
+    // An unknown server error reaches the RPC (not a network/timeout shape)
+    // → retry AND markFailed, so poison-but-retryable rows still terminate.
+    const drained = await drainQueue(fakeSupabase(calls, () => ({ data: null, error: new Error('unexpected server wobble 500') })))
+    expect(drained).toBe(0)
+    expect(calls).toHaveLength(1)
+    expect((await allRows()).find((r) => r.id === 'srv').attempts).toBe(1)
     expect(__getConsecutiveFailures()).toBe(1)
   })
 })
@@ -578,5 +765,180 @@ describe('drain quarantine + listeners + cache TTL (A5 / L-13)', () => {
     // Backdate past the 10-minute TTL: the cache must read as empty.
     await cacheSet('deployed_at:sched-ttl', Date.now() - 11 * 60 * 1000)
     expect(await getCachedDeployed('sched-ttl')).toEqual([])
+  })
+})
+
+describe('worst-case data-loss fixes (C1/C3/C4/C5/C6 + cap policy)', () => {
+  function fakeSupabase(calls, impl) {
+    return {
+      auth: { getSession: async () => ({ data: { session: { user: { id: 'user-A' } } } }) },
+      rpc: async (name, params) => {
+        calls.push([name, params])
+        return impl ? impl(name, params) : { data: { ok: true }, error: null }
+      },
+    }
+  }
+  const live = (id, extra = {}) => ({
+    id, badge: 'VS0001', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:00:00Z',
+    createdAt: 1, attempts: 0, synced: false, owner: 'user-A', ...extra,
+  })
+
+  it('C1: a drain-IN timeout burns ONE attempt but still breaks (server-possibly-reached)', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw(live('cin', { badge: 'VS0011' }))
+    const drained = await drainQueue(fakeSupabase(calls, () => ({ data: null, error: new Error('Drain IN timed out after 10000ms') })))
+    expect(drained).toBe(0)
+    expect(calls).toHaveLength(1)
+    expect((await allRows()).find((r) => r.id === 'cin').attempts).toBe(1)
+    expect(__getConsecutiveFailures()).toBe(1)
+  })
+
+  it('C1: repeated drain-timeouts still go terminal at MAX_DRAIN_ATTEMPTS (bounded)', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw(live('cbound', { badge: 'VS0012', attempts: 11 }))
+    await drainQueue(fakeSupabase(calls, () => ({ data: null, error: new Error('Drain IN timed out after 10000ms') })))
+    const row = (await allRows()).find((r) => r.id === 'cbound')
+    expect(row.attempts).toBe(12)
+    expect(row.failed).toBe(true)
+    expect(row.status).toBe('failed')
+  })
+
+  it('C4: PGRST202 (err.code) burns no attempt — self-healing deploy ordering', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw(live('c4code', { badge: 'VS0013' }))
+    const err = new Error('Could not find the function public.scan_in')
+    err.code = 'PGRST202'
+    const drained = await drainQueue(fakeSupabase(calls, () => ({ data: null, error: err })))
+    expect(drained).toBe(0)
+    expect(calls).toHaveLength(1) // still breaks + backs off
+    expect((await allRows()).find((r) => r.id === 'c4code').attempts).toBe(0)
+    expect(__getConsecutiveFailures()).toBe(1)
+  })
+
+  it('C4: PGRST202 in message text alone burns no attempt', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw(live('c4msg', { badge: 'VS0014' }))
+    const drained = await drainQueue(fakeSupabase(calls, () => ({ data: null, error: new Error('PGRST202: Could not find the function') })))
+    expect(drained).toBe(0)
+    expect((await allRows()).find((r) => r.id === 'c4msg').attempts).toBe(0)
+  })
+
+  it('C3 gap: a bad-timestamp IN seeds failedInKeys, so its OUT is quarantined not deleted', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw(live('cbad-in', { badge: 'VS0015', ts: 'not-a-date', createdAt: 1 }))
+    await putRaw(live('cbad-out', { badge: 'VS0015', action: 'OUT', open_id: 'open-x', createdAt: 2 }))
+    const drained = await drainQueue(fakeSupabase(calls, () => ({ data: null, error: new Error('No open session to close') })))
+    expect(drained).toBe(0)
+    expect(calls).toHaveLength(1) // only the OUT was attempted; the IN never RPCs
+    const rows = await allRows()
+    expect(rows.find((r) => r.id === 'cbad-in').failed).toBe(true)
+    const outRow = rows.find((r) => r.id === 'cbad-out')
+    expect(outRow.failed).toBe(true)
+    expect(outRow.status).toBe('failed')
+  })
+
+  it('C3: a plain IN answered Already IN is still deleted (server holds the session)', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw(live('cplain-in', { badge: 'VS0016' }))
+    const drained = await drainQueue(fakeSupabase(calls, () => ({ data: null, error: new Error('Already IN — OUT first') })))
+    expect(drained).toBe(1)
+    expect(calls).toHaveLength(1)
+    expect(await allRows()).toHaveLength(0)
+  })
+
+  it('C5: enqueue under a backward clock jump stays monotonic and drains in scan order', async () => {
+    // This repo's jsdom has no localStorage (typeof === 'undefined'), so the
+    // floor is exercised through a stubbed in-memory store — the impl reads
+    // the bare global, which is exactly what the stub replaces.
+    const mem = {}
+    vi.stubGlobal('localStorage', {
+      getItem: (k) => (k in mem ? mem[k] : null),
+      setItem: (k, v) => { mem[k] = String(v) },
+      removeItem: (k) => { delete mem[k] },
+    })
+    const realNow = Date.now()
+    const nowSpy = vi.spyOn(Date, 'now')
+    try {
+      nowSpy.mockReturnValue(realNow)
+      const a = await enqueueScan({ id: 'c5-a', badge: 'VS0017', schedule_id: 's', action: 'IN', ts: new Date().toISOString() })
+      expect(a.ok).toBe(true)
+      nowSpy.mockReturnValue(realNow - 60000) // device clock jumps BACKWARD
+      const b = await enqueueScan({ id: 'c5-b', badge: 'VS0018', schedule_id: 's', action: 'IN', ts: new Date().toISOString() })
+      expect(b.ok).toBe(true)
+      const rows = await allRows()
+      const ca = rows.find((r) => r.id === 'c5-a').createdAt
+      const cb = rows.find((r) => r.id === 'c5-b').createdAt
+      expect(cb).toBeGreaterThan(ca)
+      // …and the drain honours scan order, not wall-clock order.
+      __resetDrainState()
+      const calls = []
+      const fake = fakeSupabase(calls)
+      // drainQueue resolves owner via the injected client — same user.
+      await drainQueue(fake)
+      expect(calls.map((c) => c[1].p_badge)).toEqual(['VS0017', 'VS0018'])
+    } finally {
+      nowSpy.mockRestore()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('C6: an uncertain IN answered Already IN attempts the OUT flow, then drops', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw(live('c6', { badge: 'VS0019', uncertain: true }))
+    const drained = await drainQueue(fakeSupabase(calls, (name) => {
+      if (name === 'scan_in') return { data: null, error: new Error('Already IN — OUT first') }
+      if (name === 'get_open_session') return { data: { id: 'open-9', badge_number: 'VS0019' }, error: null }
+      return { data: { ok: true }, error: null } // scan_out
+    }))
+    expect(drained).toBe(1)
+    expect(calls.map((c) => c[0])).toEqual(['scan_in', 'get_open_session', 'scan_out'])
+    // The OUT closed exactly the resolved session — never a blind null id.
+    expect(calls[2][1]).toMatchObject({ p_badge: 'VS0019', p_schedule: 's', p_open_id: 'open-9' })
+    expect(await allRows()).toHaveLength(0)
+  })
+
+  it('C6: an uncertain IN whose OUT attempt fails is quarantined, never deleted', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw(live('c6q', { badge: 'VS0020', uncertain: true }))
+    const drained = await drainQueue(fakeSupabase(calls, (name) => {
+      if (name === 'scan_in') return { data: null, error: new Error('Already IN — OUT first') }
+      return { data: null, error: null } // get_open_session: no open session
+    }))
+    expect(drained).toBe(0)
+    const row = (await allRows()).find((r) => r.id === 'c6q')
+    expect(row.failed).toBe(true)
+    expect(row.status).toBe('failed')
+  })
+
+  it('C6: a certain (non-uncertain) IN answered Already IN is still just deleted', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw(live('c6c', { badge: 'VS0021' }))
+    const drained = await drainQueue(fakeSupabase(calls, () => ({ data: null, error: new Error('Already IN — OUT first') })))
+    expect(drained).toBe(1)
+    expect(calls).toHaveLength(1) // no get_open_session / scan_out follow-up
+    expect(await allRows()).toHaveLength(0)
+  })
+
+  it('cap policy: clearLiveQueue removes only the current owner live rows', async () => {
+    await putRaw(live('livemine', { badge: 'VS0031' }))
+    await putRaw(live('deadmin', { badge: 'VS0032', failed: true, status: 'failed' }))
+    await putRaw(live('theirs', { badge: 'VS0033', owner: 'user-B' }))
+    await putRaw(live('anon', { badge: 'VS0034', owner: null }))
+    await expect(clearLiveQueue()).resolves.toBe(1)
+    expect((await allRows()).map((r) => r.id).sort()).toEqual(['anon', 'deadmin', 'theirs'])
+  })
+
+  it('cap policy: clearLiveQueue returns 0 when there is nothing live to clear', async () => {
+    await putRaw(live('dead', { badge: 'VS0035', failed: true, status: 'failed' }))
+    await expect(clearLiveQueue()).resolves.toBe(0)
   })
 })

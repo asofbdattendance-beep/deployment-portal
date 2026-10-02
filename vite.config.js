@@ -51,6 +51,16 @@ export default defineConfig(({ command, mode }) => {
         'src/hooks/useScanHandler.js',
         'src/lib/offlineQueue.js',
         'src/lib/scannerUtils.js',
+        // scanner UI + session state -- covered by component/hook suites,
+        // gated so a regression here is visible to CI (V17)
+        'src/lib/scanDisplay.js',
+        'src/hooks/useScannerSession.js',
+        'src/components/scanner/BarcodeScanner.jsx',
+        'src/components/scanner/ScanResultPopup.jsx',
+        'src/components/scanner/RecentScansTable.jsx',
+        'src/components/scanner/enginePool.js',
+        'src/components/scanner/cameraManager.js',
+        'src/pages/ScannerPage.jsx',
       ],
       reporter: ['text', 'html'],
       // Aggregate floors are a coarse "did this collapse?" net only, kept low
@@ -67,16 +77,19 @@ export default defineConfig(({ command, mode }) => {
         // Per-file floors, each set just below the measured value so the gate
         // is real without being brittle.
         //
-        // HONEST CAVEAT: useScanHandler.js, offlineQueue.js and scannerUtils.js
-        // carry genuine untested surface and sit far below 90% -- offlineQueue
-        // covers only ~36% of statements and half of its functions. These
-        // floors pin current reality so it cannot silently rot further; they
-        // are NOT an endorsement of that coverage, and they should be raised
-        // as tests land. offlineQueue.js leaves lines 129-177 and 182-263 and
-        // 49 functions entirely unexercised.
+        // HONEST CAVEAT (2026-10-02): the scanner UI files sit well below 90%
+        // on branches -- BarcodeScanner 55%, ScannerPage 61%, enginePool 66%.
+        // These floors pin current reality so it cannot silently rot further;
+        // they are NOT an endorsement of that coverage, and they should be
+        // raised as tests land.
         //
-        // The three scanner files are actively being worked on, so they carry
+        // The scanner files are actively being worked on, so they carry
         // a couple of points of slack to absorb in-flight edits.
+        //
+        // NOTE: the v8 text reporter does not print a row for
+        // src/lib/scanDisplay.js (measured 100% across the board -- see the
+        // HTML report), but thresholds are evaluated on the underlying data
+        // and still enforced for it.
         'src/lib/logic.js': {
           statements: 99,
           branches: 99,
@@ -105,6 +118,54 @@ export default defineConfig(({ command, mode }) => {
           statements: 81,
           branches: 77,
           functions: 70,
+          lines: 91,
+        },
+        'src/lib/scanDisplay.js': {
+          statements: 98,
+          branches: 98,
+          functions: 98,
+          lines: 98,
+        },
+        'src/hooks/useScannerSession.js': {
+          statements: 74,
+          branches: 65,
+          functions: 74,
+          lines: 84,
+        },
+        'src/components/scanner/BarcodeScanner.jsx': {
+          statements: 69,
+          branches: 53,
+          functions: 73,
+          lines: 81,
+        },
+        'src/components/scanner/ScanResultPopup.jsx': {
+          statements: 72,
+          branches: 65,
+          functions: 75,
+          lines: 77,
+        },
+        'src/components/scanner/RecentScansTable.jsx': {
+          statements: 98,
+          branches: 93,
+          functions: 98,
+          lines: 98,
+        },
+        'src/components/scanner/enginePool.js': {
+          statements: 83,
+          branches: 64,
+          functions: 98,
+          lines: 94,
+        },
+        'src/components/scanner/cameraManager.js': {
+          statements: 79,
+          branches: 66,
+          functions: 71,
+          lines: 86,
+        },
+        'src/pages/ScannerPage.jsx': {
+          statements: 79,
+          branches: 58,
+          functions: 68,
           lines: 91,
         },
       },

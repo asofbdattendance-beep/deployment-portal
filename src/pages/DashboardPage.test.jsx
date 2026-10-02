@@ -18,7 +18,7 @@
 //
 // The mock setup mirrors src/pages/AttendancePage.test.jsx.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor, cleanup, within } from '@testing-library/react'
+import { render, screen, waitFor, cleanup, within, fireEvent, act } from '@testing-library/react'
 import DashboardPage from './DashboardPage'
 
 const rpc = vi.fn()
@@ -27,9 +27,15 @@ const toastSuccess = vi.fn()
 const toastWarning = vi.fn()
 
 // Supabase realtime is inert here: a chainable no-op that satisfies
-// channel().on(...).on(...).subscribe() and removeChannel().
+// channel().on(...).on(...).subscribe() and removeChannel(). Handlers are
+// captured so the max-wait tests can fire reloads on demand.
+const pgHandlers = []
 const noopChannel = () => {
-  const ch = { on: () => ch, subscribe: () => ch, unsubscribe: () => ch }
+  const ch = {
+    on: (event, filter, cb) => { if (typeof cb === 'function') pgHandlers.push(cb); return ch },
+    subscribe: () => ch,
+    unsubscribe: () => ch,
+  }
   return ch
 }
 
@@ -103,6 +109,7 @@ async function renderPage(props = {}) {
 
 beforeEach(() => {
   rpc.mockReset()
+  pgHandlers.length = 0
   toastError.mockReset()
   toastSuccess.mockReset()
   toastWarning.mockReset()
@@ -203,5 +210,162 @@ describe('DashboardPage — one failed RPC degrades one section', () => {
     expect(screen.queryByText(/PGRST202/)).toBeNull()
     expect(screen.queryByText(/attendance_trend/)).toBeNull()
     expect(screen.queryByText(/does not exist/)).toBeNull()
+  })
+})
+
+describe('DashboardPage — a failed section renders "—", never a healthy 0', () => {
+  it('dashes the four daily-backed tiles when attendance_daily_summary fails', async () => {
+    respondWith({ fail: ['attendance_daily_summary'] })
+    await renderPage()
+    // "—" says unknown; a 0 here would claim nobody came. Scoped per tile:
+    // the em-dash also appears in empty states elsewhere on the page.
+    for (const label of ['Present today', 'Attendance %', 'Absent today', 'Open now']) {
+      const tile = screen.getByText(label).closest('button')
+      expect(tile.textContent).toContain('—')
+    }
+    expect(screen.getByTitle('Present today could not be loaded')).toBeTruthy()
+    // Untouched sections still show numbers: the scanner tile reads 1/1.
+    expect(screen.getByText('1/1')).toBeTruthy()
+  })
+
+  it('dashes Scanners active when attendance_scanner_ops fails', async () => {
+    respondWith({ fail: ['attendance_scanner_ops'] })
+    await renderPage()
+    const tile = screen.getByText('Scanners active').closest('button')
+    expect(tile.textContent).toContain('—')
+    expect(screen.queryByText('1/1')).toBeNull()
+    // The daily tiles still carry the fixture's numbers (8 present of 10).
+    expect(screen.getByText('Present today').closest('button').textContent).toContain('8')
+  })
+
+  it('dashes Anomalies when attendance_anomalies fails', async () => {
+    respondWith({ fail: ['attendance_anomalies'] })
+    await renderPage()
+    // 'Anomalies' also heads the feed card below — scope to the KPI row.
+    const tile = within(document.querySelector('.stat-row')).getByText('Anomalies').closest('button')
+    expect(tile.textContent).toContain('—')
+    expect(screen.getByTitle('Anomalies could not be loaded')).toBeTruthy()
+  })
+})
+
+describe('DashboardPage — freshness accounting', () => {
+  it('leaves the LIVE pill un-advanced when all five RPCs fail', async () => {
+    respondWith({ fail: ['attendance_daily_summary', 'attendance_visit_summary', 'attendance_scanner_ops', 'attendance_anomalies', 'attendance_trend'] })
+    await renderPage()
+    // timeAgo(null) is '—': no successful reload ever happened, so the pill
+    // must not present a fresh timestamp.
+    const pill = screen.getByText(/LIVE · updated —/)
+    expect(pill.closest('span').title).toBe('Not loaded yet')
+  })
+
+  it('counts failed sources in the LIVE pill tooltip on partial failure', async () => {
+    respondWith({ fail: ['attendance_daily_summary', 'attendance_trend'] })
+    await renderPage()
+    const pill = screen.getByText(/LIVE · updated \d+s ago/)
+    expect(pill.closest('span').title).toMatch(/2 of 5 sources failed/)
+  })
+
+  it('reports no failures in the tooltip when everything loaded', async () => {
+    await renderPage()
+    const pill = screen.getByText(/LIVE · updated \d+s ago/)
+    expect(pill.closest('span').title).not.toMatch(/failed/)
+  })
+})
+
+describe('DashboardPage — realtime max-wait', () => {
+  it('debounces a burst but fires immediately past the 2000ms max-wait', async () => {
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => 1_000_000)
+    try {
+      await renderPage()
+      expect(rpc).toHaveBeenCalledTimes(5)
+      expect(pgHandlers.length).toBeGreaterThan(0)
+      const reload = pgHandlers[0]
+
+      // 500ms after the load: inside the window → trailing 400ms debounce.
+      nowSpy.mockImplementation(() => 1_000_500)
+      reload()
+      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(10))
+
+      // 5s after the last load: past max-wait → immediate, no timer wait.
+      nowSpy.mockImplementation(() => 1_010_000)
+      reload()
+      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(15))
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+})
+
+describe('DashboardPage — a hung RPC degrades its section instead of latching loading', () => {
+  it('times out attendance_trend and keeps the other sections live', async () => {
+    respondWith()
+    const baseImpl = rpc.getMockImplementation()
+    rpc.mockImplementation((...args) => (args[0] === 'attendance_trend' ? new Promise(() => {}) : baseImpl(...args)))
+    vi.useFakeTimers()
+    try {
+      render(<DashboardPage schedules={SCHEDULES} scheduleId="sched-1" />)
+      // The 15s withTimeout abort is a timer: advance past it and flush.
+      await act(async () => { await vi.advanceTimersByTimeAsync(16000) })
+      expect(screen.queryByText('Loading dashboard…')).toBeNull()
+      expect(screen.getByText('Dashboard')).toBeTruthy()
+      expect(screen.getByText('Present today')).toBeTruthy()
+      expect(screen.getByText('DELHI')).toBeTruthy()
+      const alerts = screen.getAllByRole('alert')
+      expect(alerts).toHaveLength(1)
+      expect(alerts[0].textContent).toMatch(/5-day trend/i)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+vi.mock('xlsx', () => ({
+  utils: {
+    book_new: vi.fn(() => ({})),
+    json_to_sheet: vi.fn((rows) => ({ rows })),
+    book_append_sheet: vi.fn(),
+  },
+  writeFile: vi.fn(),
+}))
+
+describe('DashboardPage — export snapshot accounting', () => {
+  const PRESENT_BADGE = [{ sewadar_centre: 'DELHI', badge_number: 'B1', sewadar_name: 'RAM', is_vss: false, dept_name: 'MEDICAL' }]
+
+  /** The five page-load RPCs succeed; attendance_day_badges answers per mode. */
+  function respondBadges({ present = PRESENT_BADGE, absent = [] } = {}) {
+    respondWith()
+    const base = rpc.getMockImplementation()
+    rpc.mockImplementation((name, params) => (
+      name === 'attendance_day_badges'
+        ? Promise.resolve({ data: params?.p_mode === 'present' ? present : absent, error: null })
+        : base(name, params)
+    ))
+  }
+
+  it('toasts success per written workbook and never warns on a half-success', async () => {
+    respondBadges({ present: PRESENT_BADGE, absent: [] })
+    await renderPage()
+    fireEvent.click(screen.getByText(/Export snapshot/))
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith('Present list exported'))
+    expect(toastSuccess).toHaveBeenCalledTimes(1)
+    // The absent workbook wrote nothing, but present DID — "nothing exported"
+    // would be a lie over a workbook that just downloaded.
+    expect(toastWarning).not.toHaveBeenCalled()
+  })
+
+  it('warns "nothing exported" only when neither workbook was written', async () => {
+    respondBadges({ present: [], absent: [] })
+    await renderPage()
+    fireEvent.click(screen.getByText(/Export snapshot/))
+    await waitFor(() => expect(toastWarning).toHaveBeenCalledWith(expect.stringMatching(/nothing exported/)))
+    expect(toastSuccess).not.toHaveBeenCalled()
+  })
+
+  it('toasts both workbooks when both have rows', async () => {
+    respondBadges({ present: PRESENT_BADGE, absent: PRESENT_BADGE })
+    await renderPage()
+    fireEvent.click(screen.getByText(/Export snapshot/))
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(2))
+    expect(toastWarning).not.toHaveBeenCalled()
   })
 })

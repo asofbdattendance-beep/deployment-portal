@@ -6,12 +6,20 @@ import { useToast } from '../components/Toast'
 import BarcodeScanner from '../components/scanner/BarcodeScanner'
 import ScanResultPopup from '../components/scanner/ScanResultPopup'
 import RecentScansTable from '../components/scanner/RecentScansTable'
-import { preloadDeployed, clearFailedQueue, clearOrphanedQueue } from '../lib/offlineQueue'
+import { clearFailedQueue, clearLiveQueue, clearOrphanedQueue } from '../lib/offlineQueue'
 import { todayStrIST } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import { exportWorkbook, fileSlug } from '../lib/excel'
 import { useScannerSession } from '../hooks/useScannerSession'
 import { ScanLine, Users, UserX, UserCheck, Search, Clock, AlertTriangle, Download, Wifi, WifiOff, RefreshCw, Loader2 } from 'lucide-react'
+
+// Canonical queue predicates, mirrored from offlineQueue + ScannerPage: a
+// failed row carries `failed: true` (v1) or `status: 'failed'` (newer); a
+// null-owner live row is stranded/orphaned (never drained, cleared
+// separately). The live "N queued" count excludes both — same filtered
+// definition as ScannerPage.
+const isFailedQueueRow = (r) => !!r && (r.status === 'failed' || r.failed === true)
+const isOrphanedQueueRow = (r) => !isFailedQueueRow(r) && (r.owner ?? null) === null && !r.synced
 
 // DeptInchargePage — the SCANNING + lists page for a dept_incharge.
 //
@@ -41,16 +49,38 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
   const [manualBadge, setManualBadge] = useState('')
   const [search, setSearch] = useState('')
   const [offline, setOffline] = useState(false)
+  // Reactive connectivity — `navigator.onLine` read at render time never
+  // updates, so the Online/Offline pill used to go stale until some other
+  // state change re-rendered the page.
+  const [isOnline, setIsOnline] = useState(() => typeof navigator === 'undefined' ? true : navigator.onLine)
+  useEffect(()=>{
+    const on = () => setIsOnline(true)
+    const off = () => setIsOnline(false)
+    window.addEventListener('online', on)
+    window.addEventListener('offline', off)
+    return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off) }
+  },[])
   // A slow load for schedule A must never land after a fast one for schedule B
   // and overwrite its rows — every sibling page sequences its loads.
   const mountedRef = useRef(true)
   const seqRef = useRef(0)
+  // T4: set on the first successful load OR poll — the stale-data pin means
+  // "showing last data", so a poll that fails before anything ever loaded
+  // must not raise it (there is no last data yet).
+  const loadedOnceRef = useRef(false)
+  // T3: the schedule whose rows are currently rendered. On a schedule switch
+  // the rows are cleared immediately (see the effect below) so stale rows
+  // never survive until the new load lands.
+  const [rowsScheduleId, setRowsScheduleId] = useState(selectedScheduleId)
   // popup/outTime/queued/syncing + the scan entry points live in the shared
   // session hook (Phase B task 5) — this page owns loads, lists, tabs, and render.
 
   const load = useCallback(async () => {
     if (!selectedScheduleId) { setLoading(false); return }
     const seq = ++seqRef.current
+    // T3: every setter below is gated on this — a slow schedule-A load that
+    // resolves after the schedule-B load must not touch rows, toasts or pins.
+    const alive = () => mountedRef.current && seq === seqRef.current
     setLoading(true)
     setLoadError(null)
     try {
@@ -61,6 +91,7 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
       // incharge to ask the ASO to re-provision them. Unwrap the error.
       const { data: deptIds, error: deptError } = await supabase.rpc('get_my_dept_ids', { p_schedule: selectedScheduleId })
       if (deptError) throw new Error(`get_my_dept_ids: ${deptError.message || deptError.code || 'failed'}`)
+      if (!alive()) return
       setMyDeptIds(Array.isArray(deptIds) ? deptIds : [])
       // Supabase max-rows=1000 — paginate every table that can exceed it.
       // I4: sessions follow the v45 event-date law (IN *or* OUT today counts —
@@ -73,8 +104,16 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
       const [deptAll, depAll, sessAll] = await Promise.all([
         fetchAllRows('deployment_departments', '*', (q) => q.order('name'), 'id'),
         fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId), 'id'),
-        fetchAllRows('dp_attendance_sessions', '*', (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id'),
+        // Narrow session columns — presentBadges needs badge/in/out dates,
+        // sessionByBadge needs in/out times, RecentScansTable needs the
+        // name/dept/VSS/flagged pills. `select('*')` would also drag in any
+        // future fat column on every load. V9: `created_at` is load-bearing —
+        // recent scans are ordered by it (not id) and sessionByBadge keeps the
+        // newest row per badge by it. T5: `sewadar_centre` is load-bearing —
+        // presence is keyed on centre|badge, never badge alone.
+        fetchAllRows('dp_attendance_sessions', 'id,badge_number,sewadar_name,sewadar_centre,sewadar_dept,in_date,out_date,in_time,out_time,is_vss,undeployed_scan,created_at', (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id'),
       ])
+      if (!alive()) return
       // v53 perf, phase 2: fetch sewadar profiles for the DEPLOYED badges only.
       // They are used solely to enrich the deployment rows (name / gender /
       // initiated via `swMap`), but they were fetched unfiltered — so the server
@@ -95,17 +134,18 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
         byBadge('vss_sewadars', 'badge_number, sewadar_name, centre, is_initiated, gender, is_active', 'badge_number'),
         byBadge('dp_sewadars', 'badge_number, sewadar_name, centre, is_initiated, gender', ['centre', 'badge_number']),
       ])
+      if (!alive()) return
       setDepts(deptAll||[])
       setDeployments(depAll||[])
       setVss(vssAll||[])
       setSewadars(sewAll||[])
       setSessions(sessAll||[])
-      const deployed = (depAll||[]).map(d=>({ badge_number:d.badge_number, deptId: d.deployed_department_id||d.department_id, is_vss: d.badge_number?.startsWith('VS') }))
-      await preloadDeployed(selectedScheduleId, deployed)
       // L-43: the amber "showing last data" pin (line ~289) used to be
       // unreachable from a failed load — success clears it, failure sets it.
       setOffline(false)
+      loadedOnceRef.current = true
     } catch(e){
+      if (!alive()) return
       console.error('[DeptIncharge] load failed:', e)
       setLoadError(e?.message || 'Could not load')
       toast.error(e?.message || 'Could not load')
@@ -122,6 +162,21 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
     }
   }, [myDeptIds, activeDept])
 
+  // T3: clear stale rows the moment the schedule changes — before the new
+  // load lands — and reset the client filters that point at the old rows.
+  // Declared before the load effect so the clear runs first on a switch.
+  useEffect(() => {
+    if (rowsScheduleId !== selectedScheduleId) {
+      setDeployments([])
+      setSewadars([])
+      setVss([])
+      setSessions([])
+      setCentreFilter('')
+      setActiveDept('')
+      setRowsScheduleId(selectedScheduleId)
+    }
+  }, [selectedScheduleId, rowsScheduleId])
+
   useEffect(() => {
     mountedRef.current = true
     load()
@@ -133,12 +188,25 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
   // full load (which would flash the page spinner every 15s). Same
   // event-date predicate as the initial load (I4); a capped in_date-only
   // refresh would regress the list right after a scan.
+  // T4: sequenced like the load — a slow poll that resolves after a newer
+  // one must not overwrite its sessions — and a success clears the stale pin.
   const refreshSessions = useCallback(async () => {
+    const seq = ++seqRef.current
+    const alive = () => mountedRef.current && seq === seqRef.current
     try {
       const today = todayStrIST()
-      const sess = await fetchAllRows('dp_attendance_sessions', '*', (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id')
+      const sess = await fetchAllRows('dp_attendance_sessions', 'id,badge_number,sewadar_name,sewadar_centre,sewadar_dept,in_date,out_date,in_time,out_time,is_vss,undeployed_scan,created_at', (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id')
+      if (!alive()) return
       setSessions(sess||[])
-    } catch(e){ console.warn('[Scanner] post-scan refresh failed:', e?.message); setOffline(true) }
+      setOffline(false)
+      loadedOnceRef.current = true
+    } catch(e){
+      if (!alive()) return
+      console.warn('[Scanner] post-scan refresh failed:', e?.message)
+      // Cold-load suppression: before the first successful load/poll there is
+      // no "last data" to show, so a failing poll must not raise the pin.
+      if (loadedOnceRef.current) setOffline(true)
+    }
   }, [selectedScheduleId])
   useEffect(()=>{ const id=setInterval(()=>refreshSessions(),15000); return()=>clearInterval(id) },[refreshSessions])
 
@@ -168,18 +236,47 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
 
   // v45 event-date law: an IN *or* an OUT today counts as present today.
   const isTodayEvent = (s) => { const t = todayStrIST(); return s.in_date === t || s.out_date === t }
-  const presentBadges = useMemo(()=> new Set(sessions.filter(isTodayEvent).map(s=>s.badge_number)),[sessions])
-  // Latest session per badge today — used for the export's In/Out columns.
-  // (fetchAllRows returns id-ascending order, so the newest wins by overwrite.)
+  // T5: centre-qualified session identity — two centres can legitimately share
+  // one badge number, so presence/session/export must never be keyed on badge
+  // alone. The fallback key when the centre is null is the bare badge: legacy
+  // rows written before the `sewadar_centre` column existed carry no centre,
+  // and dropping them would list genuinely-present sewadars as Absent. Centred
+  // sessions are stored ONLY under the qualified key (never also bare), so a
+  // bare lookup can only match a centre-less session — presence never leaks
+  // across centres. Lookups try the qualified key first, then the bare badge.
+  const sessKey = (centre, badge) => (centre ? `${centre}|${badge}` : `${badge}`)
+  const presentBadges = useMemo(()=> {
+    const set = new Set()
+    for (const s of sessions) {
+      if (!isTodayEvent(s)) continue
+      set.add(sessKey(s.sewadar_centre, s.badge_number))
+    }
+    return set
+  },[sessions])
+  // V9: recent scans are ordered by `created_at` desc — NOT by id.
+  // fetchAllRows pages by id and ids are not time-ordered, so id order could
+  // show a stale session first and (below) keep it for the export's In/Out.
+  const recentSessions = useMemo(() => sessions.slice().sort((a, b) =>
+    String(b.created_at || '').localeCompare(String(a.created_at || ''))), [sessions])
+  // Latest session per badge today — newest `created_at` wins — used for the
+  // export's In/Out columns. Keyed on centre|badge (T5); first-wins over the
+  // created_at-desc list keeps the newest row per key (V9).
   const sessionByBadge = useMemo(()=> {
     const m = new Map()
-    sessions.filter(isTodayEvent).forEach(s=>{ m.set(s.badge_number, s) })
+    for (const s of recentSessions) {
+      if (!isTodayEvent(s)) continue
+      const k = sessKey(s.sewadar_centre, s.badge_number)
+      if (!m.has(k)) m.set(k, s)
+    }
     return m
-  },[sessions])
+  },[recentSessions])
+  // T5 lookups: qualified key first, bare badge for centre-less legacy rows.
+  const isPresent = useCallback((centre, badge) => presentBadges.has(sessKey(centre, badge)) || presentBadges.has(badge), [presentBadges])
+  const sessionFor = useCallback((centre, badge) => sessionByBadge.get(sessKey(centre, badge)) || sessionByBadge.get(badge), [sessionByBadge])
   // Present = at least one session today; Absent = none. Both scoped to the
   // incharge's own departments (myDeployedEnriched), never the raw session list.
-  const present = useMemo(()=> myDeployedEnriched.filter(d=> presentBadges.has(d.badge_number)),[myDeployedEnriched,presentBadges])
-  const absentees = useMemo(()=> myDeployedEnriched.filter(d=> !presentBadges.has(d.badge_number)),[myDeployedEnriched,presentBadges])
+  const present = useMemo(()=> myDeployedEnriched.filter(d=> isPresent(d.centre, d.badge_number)),[myDeployedEnriched,isPresent])
+  const absentees = useMemo(()=> myDeployedEnriched.filter(d=> !isPresent(d.centre, d.badge_number)),[myDeployedEnriched,isPresent])
 
   // Centre options come from the rows already in scope — a pure client-side
   // filter over fetched data, so it never widens or fights the RLS gate.
@@ -219,6 +316,15 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
   // call and cannot list refreshQueue in its deps.
   useEffect(()=>{ refreshQueue() },[refreshQueue])
 
+  // Unified live/failed queue counts (same filtered definition as
+  // ScannerPage) + the confirmed bulk-delete of live rows only.
+  const pendingCount = queued.filter(q => !q.synced && !isFailedQueueRow(q) && !isOrphanedQueueRow(q)).length
+  const failedCount = queued.filter(isFailedQueueRow).length
+  const clearLive = useCallback(async () => {
+    if (!window.confirm(`Delete ${pendingCount} live queued scan(s)? They have NOT synced — only do this for duplicate or test rows.`)) return
+    await clearLiveQueue(); refreshQueue()
+  }, [refreshQueue, pendingCount])
+
   // Sheet name / filename slug per non-scanning tab. `sheet` labels the export,
   // `slug` names the file — both track the tab so an export is self-describing.
   const EXPORT_TABS = { list: { sheet:'Complete List', slug:'complete-list' }, present: { sheet:'Present', slug:'present' }, absent: { sheet:'Absent', slug:'absent' } }
@@ -231,14 +337,15 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
       'S.No.':i+1, Centre:r.centre, Badge:r.badge_number, Name:r.sewadar_name,
       Type: r.is_vss?'VSS':'Regular', Gender:r.gender||'—', Initiated: r.is_initiated?'Yes':'No',
       Dept: r.deptName,
-      Status: presentBadges.has(r.badge_number)?'Present':'Absent',
-      'In Time': sessionByBadge.get(r.badge_number)?.in_time || '—',
-      'Out Time': sessionByBadge.get(r.badge_number)?.out_time || '—',
+      Status: isPresent(r.centre, r.badge_number)?'Present':'Absent',
+      'In Time': sessionFor(r.centre, r.badge_number)?.in_time || '—',
+      'Out Time': sessionFor(r.centre, r.badge_number)?.out_time || '—',
     }))
     // The shared driver, like every other export in the app: it slugs the
     // filename, keeps the sheet name inside Excel's 31-char limit, and returns
-    // 0 when there is nothing to write.
-    const written = await exportWorkbook(fileSlug(`${schedule?.name||'schedule'}_${meta.slug}`), [
+    // 0 when there is nothing to write. T6: the driver writes whatever name it
+    // is given, so the `.xlsx` extension belongs on the caller-built filename.
+    const written = await exportWorkbook(`${fileSlug(`${schedule?.name||'schedule'}_${meta.slug}`)}.xlsx`, [
       { name: meta.sheet, rows },
     ])
     if (written === 0) toast.warning('Nothing to export')
@@ -261,18 +368,71 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
           <h2 className="page-title"><ScanLine size={22}/> Dept Incharge{activeDept ? ` — ${deptLabel}` : ''}</h2>
           <div className="page-sub" style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
             {deptLabel} · {schedule?.name||''}
-            {queued.filter(q=>!q.synced&&!q.failed).length > 0 && (
+            {pendingCount > 0 && (
               <span className="pill pill-amber" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
                 {syncing ? <RefreshCw size={10} className="spin"/> : <WifiOff size={10}/>}
-                {queued.filter(q=>!q.synced&&!q.failed).length} queued
+                {pendingCount} queued
               </span>
             )}
-            <span className={`pill ${navigator.onLine?'pill-green':'pill-red'}`} style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
-              {navigator.onLine ? <Wifi size={10}/> : <WifiOff size={10}/>}
-              {navigator.onLine ? 'Online' : 'Offline'}
+            <span className={`pill ${isOnline?'pill-green':'pill-red'}`} style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
+              {isOnline ? <Wifi size={10}/> : <WifiOff size={10}/>}
+              {isOnline ? 'Online' : 'Offline'}
             </span>
             {offline && <span style={{fontSize:'0.7rem', color:'#b45309'}}>· refresh failed — showing last data</span>}
-            {queued.some(q=>q.failed) && <button onClick={async ()=>{ await clearFailedQueue(); await clearOrphanedQueue(); refreshQueue() }} style={{fontSize:'0.7rem', color:'#b45309', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear failed scans</button>}
+            {failedCount > 0 && <button onClick={async ()=>{ await clearFailedQueue(); await clearOrphanedQueue(); refreshQueue() }} style={{fontSize:'0.7rem', color:'#b45309', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear failed scans</button>}
+            {pendingCount > 0 && <button onClick={clearLive} style={{fontSize:'0.7rem', color:'#b45309', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear live queued ({pendingCount})</button>}
+            {/* T10 stranded scans: live null-owner rows are invisible to
+                getQueuedScans while logged in and are never drained — surface
+                them here with per-row manual Clear. Never auto-drained or
+                auto-deleted. NOTE: this header block is the only editable
+                region of this file, so the widget is self-contained
+                (callback-ref fetch + dynamic import, no new hooks/imports/
+                state) and re-checks at most every 30s on re-render. */}
+            <span
+              data-t10-stranded
+              ref={(el) => {
+                if (!el) return
+                const last = Number(el.dataset.t10at || 0)
+                if (Date.now() - last < 30000) return
+                el.dataset.t10at = String(Date.now())
+                import('../lib/offlineQueue').then((m) => m.listStrandedQueue()).then((rows) => {
+                  if (!el.isConnected) return
+                  const list = Array.isArray(rows) ? rows : []
+                  el.style.display = list.length ? 'inline-flex' : 'none'
+                  const count = el.querySelector('[data-t10-count]')
+                  if (count) count.textContent = String(list.length)
+                  const box = el.querySelector('[data-t10-rows]')
+                  if (!box) return
+                  while (box.firstChild) box.removeChild(box.firstChild)
+                  const doc = box.ownerDocument
+                  list.forEach((r) => {
+                    const line = doc.createElement('div')
+                    line.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:0.7rem;color:#7f1d1d'
+                    const label = doc.createElement('span')
+                    label.textContent = `${r.badge || '?'} · ${r.action || 'IN'}`
+                    const btn = doc.createElement('button')
+                    btn.textContent = 'Clear'
+                    btn.style.cssText = 'margin-left:auto;font-size:0.7rem;color:#b91c1c;background:none;border:none;padding:0;cursor:pointer;text-decoration:underline'
+                    btn.onclick = async () => {
+                      const mod = await import('../lib/offlineQueue')
+                      await mod.removeQueued(r.id)
+                      line.remove()
+                      const left = box.childElementCount
+                      if (count) count.textContent = String(left)
+                      if (!left) el.style.display = 'none'
+                    }
+                    line.append(label, btn)
+                    box.append(line)
+                  })
+                }).catch(() => {})
+              }}
+              style={{display:'none', flexDirection:'column', gap:4}}
+            >
+              <span className="pill pill-red" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
+                <span data-t10-count>0</span>&nbsp;stranded
+              </span>
+              <span data-t10-rows style={{display:'flex', flexDirection:'column', gap:2}} />
+            </span>
           </div>
           {myDeptIds.length>1 && <select value={activeDept} onChange={e=>{ setActiveDept(e.target.value); setCentreFilter('') }} className="select" style={{marginTop:6}} aria-label="Filter by department">
             <option value="">All my departments ({myDeptIds.length})</option>
@@ -303,10 +463,10 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
             </div>
           </div>
           <div className="card" style={{padding:'1rem'}}>
-            <div className="section-title" style={{display:'flex', alignItems:'center', gap:6}}><Clock size={14}/> Recent scans (today) {queued.length? <span className="pill pill-amber">{queued.length} queued</span>:null}</div>
+            <div className="section-title" style={{display:'flex', alignItems:'center', gap:6}}><Clock size={14}/> Recent scans (today) {pendingCount ? <span className="pill pill-amber">{pendingCount} queued</span>:null}</div>
             <div style={{maxHeight:260, overflow:'auto', marginTop:8}}>
               <RecentScansTable
-                rows={sessions}
+                rows={recentSessions}
                 deptNameById={deptNameById}
                 limit={20}
                 emptyMessage="No scans today"
@@ -363,7 +523,7 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
             <table className="table">
               <thead><tr><th>#</th><th>Centre</th><th>Badge</th><th>Name</th><th>Type</th><th>Gender</th><th>Initiated</th><th>Dept</th><th>Today</th></tr></thead>
               <tbody>
-                {filteredList.map((r,i)=> <tr key={r.badge_number}><td style={{color:'#94a3b8', fontWeight:600}}>{i+1}</td><td>{r.centre}</td><td style={{fontFamily:'monospace'}}>{r.badge_number} {r.is_vss?<span className="pill pill-amber" style={{fontSize:'0.6rem'}}>VSS</span>:null}</td><td>{r.sewadar_name}</td><td><span className={`pill ${r.is_vss?'pill-amber':'pill-gray'}`} style={{fontSize:'0.68rem'}}>{r.is_vss?'VSS':'Regular'}</span></td><td>{r.gender||'—'}</td><td>{r.is_initiated?'Yes':'No'}</td><td><span className="pill pill-blue">{r.deptName}</span></td><td>{presentBadges.has(r.badge_number)?<span className="pill pill-green" style={{fontSize:'0.68rem'}}>Present</span>:<span className="pill pill-gray" style={{fontSize:'0.68rem'}}>Absent</span>}</td></tr>)}
+                {filteredList.map((r,i)=> <tr key={`${r.centre}|${r.badge_number}`}><td style={{color:'#94a3b8', fontWeight:600}}>{i+1}</td><td>{r.centre}</td><td style={{fontFamily:'monospace'}}>{r.badge_number} {r.is_vss?<span className="pill pill-amber" style={{fontSize:'0.6rem'}}>VSS</span>:null}</td><td>{r.sewadar_name}</td><td><span className={`pill ${r.is_vss?'pill-amber':'pill-gray'}`} style={{fontSize:'0.68rem'}}>{r.is_vss?'VSS':'Regular'}</span></td><td>{r.gender||'—'}</td><td>{r.is_initiated?'Yes':'No'}</td><td><span className="pill pill-blue">{r.deptName}</span></td><td>{isPresent(r.centre, r.badge_number)?<span className="pill pill-green" style={{fontSize:'0.68rem'}}>Present</span>:<span className="pill pill-gray" style={{fontSize:'0.68rem'}}>Absent</span>}</td></tr>)}
                 {filteredList.length===0 && <tr><td colSpan={9} style={{textAlign:'center', color:'#94a3b8', padding:'1rem'}}>{tab==='absent'?'No absentees — everyone has a scan today':tab==='present'?'No one scanned yet today':centreFilter?'No sewadars in this centre':'No sewadars in this dept'}</td></tr>}
               </tbody>
             </table>

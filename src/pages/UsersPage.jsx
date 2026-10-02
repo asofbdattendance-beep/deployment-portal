@@ -401,7 +401,7 @@ export default function UsersPage() {
         name,
         role: editForm.role,
         custom_role_id: custom ? custom.id : null,
-        centre: editForm.centre.trim() || null,
+        centre: editForm.role === 'dept_incharge' ? null : (editForm.centre.trim() || null),
         badge_number: editForm.badge.trim() || null,
       }
       const { error } = await supabase.from('portal_users').update(payload).eq('id', editUser.id)
@@ -502,7 +502,7 @@ export default function UsersPage() {
         name: form.name,
         role: form.role,
         custom_role_id: custom ? custom.id : null,
-        centre: form.centre || null,
+        centre: form.role === 'dept_incharge' ? null : (form.centre || null),
         badge_number: form.badge || null,
         // v51: the grant travels WITH the invite; trg_grant_incharge_on_claim
         // turns it into department_incharge_assignments rows at claim time.

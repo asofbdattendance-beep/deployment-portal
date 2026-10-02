@@ -19,7 +19,7 @@
 // The mock setup mirrors src/pages/DashboardPage.test.jsx.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { StrictMode } from 'react'
-import { render, screen, waitFor, cleanup, within } from '@testing-library/react'
+import { render, screen, waitFor, cleanup, within, fireEvent } from '@testing-library/react'
 import DeptInchargeDashboardPage from './DeptInchargeDashboardPage'
 
 const rpc = vi.fn()
@@ -127,6 +127,42 @@ describe('DeptInchargeDashboardPage — renders', () => {
   })
 })
 
+describe('DeptInchargeDashboardPage — by-department table (T1/T2)', () => {
+  // T1: the table row for one department across two centres must SUM (16/12/4
+  // like the tiles), not show the last centre row (6/4/2). Old code assigned
+  // per row, so NOIDA won.
+  it('sums the table row across centres instead of showing the last centre', async () => {
+    await renderPage()
+    const rowEl = [...document.querySelector('table').querySelectorAll('tbody tr')]
+      .find((tr) => tr.textContent.includes('MEDICAL'))
+    const nums = [...rowEl.querySelectorAll('td')].map((td) => td.textContent.trim())
+    expect(nums[1]).toBe('16') // Deployed
+    expect(nums[2]).toBe('12') // Present today
+    expect(nums[3]).toBe('4') // Absent today
+  })
+
+  // T2: an explicit today 0 must render as 0, never fall back to the visit
+  // number. Old code rendered `d.today.deployed || d.visit.deployed` → 5.
+  it('shows an explicit 0 in the Deployed column when today is 0', async () => {
+    respondWith({
+      daily: [{ centre: 'C', department_id: 'd9', dept_name: 'STORE', expected: 0, present: 0, absent: 0, open_now: 0 }],
+      visit: [{ centre: 'C', department_id: 'd9', dept_name: 'STORE', deployed: 5, ever_present: 4, never_present: 1, open_now: 0 }],
+    })
+    await renderPage()
+    const rowEl = [...document.querySelector('table').querySelectorAll('tbody tr')]
+      .find((tr) => tr.textContent.includes('STORE'))
+    const nums = [...rowEl.querySelectorAll('td')].map((td) => td.textContent.trim())
+    expect(nums[1]).toBe('0')
+  })
+
+  // T2: the tiles query the operator-picked scan day, so the subs name it
+  // instead of hardcoding "today".
+  it('names the selected scan day in the today subs', async () => {
+    await renderPage()
+    expect(kpiRow(0).getAllByText(/\d{4}-\d{2}-\d{2}/).length).toBeGreaterThan(0)
+  })
+})
+
 describe('DeptInchargeDashboardPage — RPC contract', () => {
   it('calls exactly the two scope-resolved RPCs and never a table directly', async () => {
     await renderPage()
@@ -170,8 +206,7 @@ describe('DeptInchargeDashboardPage — no department assigned', () => {
   })
 })
 
-describe('DeptInchargeDashboardPage — StrictMode (the v51 regression)', () => {
-  // main.jsx wraps the app in <React.StrictMode>, which double-invokes
+describe('DeptInchargeDashboardPage — StrictMode (the v51 regression)', () => {  // main.jsx wraps the app in <React.StrictMode>, which double-invokes
   // effects in dev: setup → cleanup → setup. A cleanup-only mount flag is
   // left false by the first cleanup and never restored, so `load()` bailed at
   // its `!mountedRef.current` guard BEFORE `setLoading(false)` and the page
@@ -190,5 +225,68 @@ describe('DeptInchargeDashboardPage — StrictMode (the v51 regression)', () => 
     expect(kpiRow(0).getByText('Total deployed')).toBeTruthy()
     expect(kpiRow(0).getByText('16')).toBeTruthy()
     utils.unmount()
+  })
+})
+
+describe('DeptInchargeDashboardPage — date currency (tiles never shown under the wrong day)', () => {
+  it('shows the loading state instead of stale tiles while a new scan day loads', async () => {
+    await renderPage()
+    expect(kpiRow(0).getByText('16')).toBeTruthy()
+    // Gate every RPC behind a deferred: the new day is loading, the old tiles
+    // must already be gone.
+    let release
+    const gate = new Promise((res) => { release = res })
+    rpc.mockImplementation(() => gate)
+    fireEvent.change(document.querySelector('input[type="date"]'), { target: { value: '2026-09-24' } })
+    await waitFor(() => expect(screen.queryByText(/Loading your department dashboard/)).toBeTruthy())
+    expect(screen.queryByText('Ever present (visit)')).toBeNull()
+    // Drain so no dangling promise outlives the test.
+    release({ data: [], error: null })
+    await waitFor(() => expect(screen.queryByText(/Loading your department dashboard/)).toBeNull())
+  })
+})
+
+describe('DeptInchargeDashboardPage — noScope requires both arms', () => {
+  it('never blames the login when the visit RPC failed', async () => {
+    // Daily answered (empty), visit errored: the old check read two empty
+    // arrays as "no department assigned" instead of an outage.
+    respondWith({ daily: [], fail: ['attendance_visit_summary'] })
+    await renderPage()
+    expect(screen.queryByText(/No department is assigned to this login/)).toBeNull()
+    expect(screen.getByText(/Whole-visit attendance unavailable/)).toBeTruthy()
+  })
+
+  it('never blames the login when the daily RPC failed', async () => {
+    respondWith({ visit: [], fail: ['attendance_daily_summary'] })
+    await renderPage()
+    expect(screen.queryByText(/No department is assigned to this login/)).toBeNull()
+    expect(screen.getByText(/Today’s attendance unavailable|Today's attendance unavailable/)).toBeTruthy()
+  })
+})
+
+describe('DeptInchargeDashboardPage — LIVE pill clock', () => {
+  it('installs a 60s tick so the updated-ago pill advances without an RPC', async () => {
+    const spy = vi.spyOn(globalThis, 'setInterval')
+    await renderPage()
+    expect(spy).toHaveBeenCalledWith(expect.any(Function), 60000)
+    spy.mockRestore()
+  })
+
+  it('renders the pill off the tick clock', async () => {
+    await renderPage()
+    expect(screen.getByText(/LIVE.*updated \ds ago/)).toBeTruthy()
+  })
+})
+
+describe('DeptInchargeDashboardPage — export needs both arms', () => {
+  it('disables Export snapshot when one arm failed', async () => {
+    respondWith({ fail: ['attendance_visit_summary'] })
+    await renderPage()
+    expect(screen.getByRole('button', { name: /Export snapshot/i }).disabled).toBe(true)
+  })
+
+  it('enables Export snapshot when both arms landed', async () => {
+    await renderPage()
+    expect(screen.getByRole('button', { name: /Export snapshot/i }).disabled).toBe(false)
   })
 })

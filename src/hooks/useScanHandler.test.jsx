@@ -9,6 +9,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useScanHandler } from './useScanHandler'
+// V11: timeout assertions below are built from the REAL withTimeout message
+// format — never a hardcoded copy — so a format change fails loudly here.
+import { withTimeout } from '../lib/scannerUtils'
 
 const rpc = vi.fn()
 const enqueueScan = vi.fn()
@@ -351,7 +354,8 @@ describe('get_scan_state PostgREST error (D-2)', () => {
     rpc.mockResolvedValueOnce({ data: null, error: null })
     const { result, showPopup, toast } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
-    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error', message: 'Already checked IN — please OUT first' }))
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error', message: 'Already checked IN — please OUT first. If this repeats for every badge, ask the ASO to apply the pending database migrations.' }))
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error', message: expect.stringContaining('pending database migrations') }))
     expect(toast.error).toHaveBeenCalledWith('Already IN — OUT first')
   })
 
@@ -1015,5 +1019,250 @@ describe('v44 toggle guard (1h)', () => {
       expect(rpc).toHaveBeenCalledWith('scan_out', expect.objectContaining({ p_open_id: 'open-1' }))
       expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'out' }))
     })
+  })
+})
+
+// ─── V6: a busy-guard drop must SURFACE feedback (never swallow) ─────────────
+// The old `if (busyRef.current) return { ok:false, reason:'busy' }` exit showed
+// nothing: the operator held a badge at the lens, the scan died silently, and
+// the retry looked like a dead scanner. It must toast + popup AND keep the
+// distinct 'busy' reason so Track 4's camera suppressor (which must record
+// lastScan only after onScan acceptance) can tell "retry me" apart.
+describe('V6 busy-guard feedback', () => {
+  it('V6 surfaces a toast + error popup on the dropped scan, keeping reason busy', async () => {
+    let release
+    rpc.mockImplementationOnce(() => new Promise((res) => { release = res }))
+    const { result, showPopup, toast } = setup()
+    let first
+    act(() => { first = result.current.handleScan(BADGE) })
+    expect(result.current.busy).toBe(true)
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(out).toEqual({ ok: false, reason: 'busy' })
+    expect(toast.warning).toHaveBeenCalledWith('Scanner busy — retry this badge')
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'error', badge: BADGE, message: 'Scanner busy — retry this badge',
+    }))
+    expect(rpc).toHaveBeenCalledTimes(1) // the drop wrote nothing
+    await act(async () => { release({ data: null }); await first })
+  })
+
+  it('V6 carries the badge on the busy popup so the operator knows WHAT to retry', async () => {
+    let release
+    rpc.mockImplementationOnce(() => new Promise((res) => { release = res }))
+    const { result, showPopup } = setup()
+    let first
+    act(() => { first = result.current.handleScan('fb5971ga0002') })
+    let out
+    await act(async () => { out = await result.current.handleScan('fb5971ga0002') })
+    expect(out.reason).toBe('busy')
+    const payload = showPopup.mock.calls[showPopup.mock.calls.length - 1][0]
+    expect(payload.badge).toBe('FB5971GA0002')
+    await act(async () => { release({ data: null }); await first })
+  })
+})
+
+// ─── V7: a busy-swallowed forgot-OUT follow-up must be DETECTABLE ────────────
+// useScannerSession owns the 200ms re-IN after a forgot-OUT (this file may not
+// touch it). The hook side of the contract: the follow-up re-IN returns the
+// DISTINCT 'busy' reason when it races an inflight scan, so the caller can
+// re-arm instead of assuming the IN landed (which would leave the OUT without
+// its follow-up IN while the operator saw success).
+describe('V7 forgot-OUT follow-up busy detectability', () => {
+  it('V7 a follow-up re-IN racing an inflight scan resolves busy, not ok', async () => {
+    let release
+    rpc.mockImplementationOnce(() => new Promise((res) => { release = res }))
+    const { result } = setup()
+    let first
+    act(() => { first = result.current.handleScan(BADGE) })
+    let out
+    await act(async () => {
+      out = await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' })
+    })
+    // Neither success nor a re-prompt: distinctly busy, so the follow-up
+    // caller knows the IN never ran and must re-arm.
+    expect(out).toEqual({ ok: false, reason: 'busy' })
+    expect(out.reason).not.toBe('confirm_required')
+    await act(async () => { release({ data: null }); await first })
+  })
+})
+
+// ─── V11: resolved-{error} arms + REAL withTimeout format ────────────────────
+// Every scan RPC is read as `{ data, error }`, but until now every test
+// exercised the error arms via REJECTION. A resolved `{ error }` takes the
+// `if (error) throw error` arm instead — these prove that arm executes for
+// both scan_in and the main-flow scan_out. Timeout strings are derived from
+// the real withTimeout (imported above), never hardcoded.
+describe('V11 resolved-error and real timeout format', () => {
+  const realTimeoutMessage = (label, ms) =>
+    withTimeout(new Promise(() => {}), ms, label).catch((e) => e.message)
+
+  it('V11 scan_in: a resolved { error: Already IN } executes the throw arm and refetches', async () => {
+    rpc.mockResolvedValueOnce({ data: { open: null, last_out: null } }) // lookup: no session
+    rpc.mockResolvedValueOnce({ data: null, error: new Error('Already IN') }) // scan_in RESOLVED error
+    rpc.mockResolvedValueOnce({ data: null, error: null }) // refetch: genuinely null
+    const { result, showPopup, toast } = setup()
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    // Without `if (error) throw error` this would celebrate as a success.
+    expect(rpc).toHaveBeenCalledWith('scan_in', expect.objectContaining({ p_badge: BADGE }))
+    expect(rpc).toHaveBeenCalledTimes(3) // lookup + scan_in + refetch
+    expect(showPopup).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'in' }))
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'error', message: 'Already checked IN — please OUT first. If this repeats for every badge, ask the ASO to apply the pending database migrations.',
+    }))
+    expect(toast.error).toHaveBeenCalledWith('Already IN — OUT first')
+    expect(out).toEqual({ ok: false })
+  })
+
+  it('V11 scan_out (main flow): a resolved { error } executes the throw arm', async () => {
+    // 2h-old session: past the 1h confirm gate, inside the 12h forgot
+    // threshold — the plain automatic-OUT band.
+    vi.useFakeTimers(); vi.setSystemTime(FIXED_NOW)
+    rpc.mockResolvedValueOnce({ data: { open: { id: 'open-1', status: 'OPEN', ...istStamp(2, 'in') }, last_out: null } })
+    rpc.mockResolvedValueOnce({ data: null, error: new Error('boom') }) // scan_out RESOLVED error
+    const { result, showPopup, toast } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
+    expect(rpc).toHaveBeenCalledWith('scan_out', expect.objectContaining({ p_open_id: 'open-1' }))
+    // Without `if (outError) throw outError` this would celebrate 'OUT marked'.
+    expect(showPopup).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'out' }))
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error', message: 'boom' }))
+    expect(toast.error).toHaveBeenCalledWith('boom')
+  })
+
+  it('V11 drives the session-lookup timeout path with the REAL withTimeout message', async () => {
+    const msg = await realTimeoutMessage('Session lookup', 20)
+    expect(msg).toMatch(/timed out after \d+ms$/) // the format under test
+    rpc.mockRejectedValueOnce(new Error(msg))
+    const { result, showPopup } = setup()
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(rpc).toHaveBeenCalledTimes(1)
+    expect(rpc).not.toHaveBeenCalledWith('scan_in', expect.anything())
+    expect(out).toEqual({ ok: false, reason: 'session_lookup_timeout' })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error' }))
+  })
+})
+
+// ─── V14: clock-skew rejections surface the device-clock warning ─────────────
+// The server rejects p_ts beyond now()+5min / before now()-30d (v26/v46). The
+// client must translate that into 'Device clock looks wrong' — and must NOT
+// rewrite the sent ts (warn-only; cf. resolveForgotOutTime which clamps).
+describe('V14 device-clock warning', () => {
+  it('V14 scan_in: a future-timestamp rejection warns about the device clock, not the raw text', async () => {
+    rpc.mockResolvedValueOnce({ data: { open: null, last_out: null } })
+    rpc.mockResolvedValueOnce({ data: null, error: new Error('Timestamp cannot be in the future') })
+    const { result, showPopup, toast } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
+    expect(rpc).toHaveBeenCalledWith('scan_in', expect.objectContaining({ p_badge: BADGE }))
+    const payload = showPopup.mock.calls[showPopup.mock.calls.length - 1][0]
+    expect(payload.status).toBe('error')
+    expect(payload.message).toContain('Device clock looks wrong')
+    expect(payload.message).not.toContain('Timestamp cannot be in the future')
+    expect(toast.warning).toHaveBeenCalledWith(expect.stringContaining('Device clock looks wrong'))
+  })
+
+  it('V14 scan_out: a too-old-timestamp rejection warns about the device clock', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(FIXED_NOW)
+    rpc.mockResolvedValueOnce({ data: { open: { id: 'open-1', status: 'OPEN', ...istStamp(2, 'in') }, last_out: null } })
+    rpc.mockResolvedValueOnce({ data: null, error: new Error('Timestamp too old (more than 30 days)') })
+    const { result, showPopup, toast } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
+    expect(rpc).toHaveBeenCalledWith('scan_out', expect.objectContaining({ p_open_id: 'open-1' }))
+    expect(showPopup).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'out' }))
+    const payload = showPopup.mock.calls[showPopup.mock.calls.length - 1][0]
+    expect(payload.message).toContain('Device clock looks wrong')
+    expect(payload.message).not.toContain('Timestamp too old')
+    expect(toast.warning).toHaveBeenCalledWith(expect.stringContaining('Device clock looks wrong'))
+  })
+
+  it('V14 still sends the server-accepted ts unchanged (warn-only, no clamping)', async () => {
+    // A normal scan is unaffected: the ts goes out exactly as built, and a
+    // non-clock error keeps its raw friendly text.
+    rpc.mockResolvedValueOnce({ data: { open: null, last_out: null } })
+    rpc.mockResolvedValueOnce({ data: null, error: new Error('Department quota already exhausted') })
+    const { result, showPopup, toast } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
+    const sent = rpc.mock.calls.find(([fn]) => fn === 'scan_in')[1]
+    expect(typeof sent.p_ts).toBe('string')
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'error', message: 'Department quota already exhausted',
+    }))
+    expect(toast.warning).not.toHaveBeenCalledWith(expect.stringContaining('Device clock'))
+  })
+})
+
+describe('offline uncertainty flag + schedule-keyed dupe + full-queue banner (C6/key/cap)', () => {
+  it('flags an offline IN uncertain when no pending local IN exists (C6)', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    rpc.mockRejectedValue(new Error('Failed to fetch'))
+    getQueuedScans.mockResolvedValue([])
+    enqueueScan.mockResolvedValue({ ok: true, id: 'q-u' })
+    const { result } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
+    expect(enqueueScan).toHaveBeenCalledWith(expect.objectContaining({ badge: BADGE, action: 'IN', uncertain: true }))
+  })
+
+  it('does NOT flag uncertain when a pending local IN already exists', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: true, configurable: true })
+    // Online jammer: lookup fails, scan_in attempt fails as network — the IN
+    // path re-checks the local queue, which already holds this badge's IN.
+    rpc.mockRejectedValue(new Error('Failed to fetch'))
+    getQueuedScans.mockResolvedValue([{ id: 'q-in', badge: BADGE, schedule_id: 'sched-1', action: 'IN', synced: false }])
+    enqueueScan.mockResolvedValue({ ok: true, id: 'q-2' })
+    const { result } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
+    expect(enqueueScan).toHaveBeenCalledTimes(1)
+    expect('uncertain' in enqueueScan.mock.calls[0][0]).toBe(false)
+  })
+
+  it('keys the offline dupe suppressor by schedule: same badge under a new schedule queues again', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    rpc.mockRejectedValue(new Error('Failed to fetch'))
+    getQueuedScans.mockResolvedValue([])
+    enqueueScan.mockResolvedValue({ ok: true, id: 'q-s' })
+    const showPopup = vi.fn()
+    const toast = { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }
+    const view = renderHook(
+      ({ scheduleId }) => useScanHandler({
+        scheduleId, profile: { centre: 'DELHI' }, deptName: null,
+        showPopup, toast, onQueued: vi.fn(), onAfterScan: vi.fn(),
+      }),
+      { initialProps: { scheduleId: 'sched-1' } },
+    )
+    await act(async () => { await view.result.current.handleScan(BADGE) })
+    expect(enqueueScan).toHaveBeenCalledTimes(1)
+    view.rerender({ scheduleId: 'sched-2' })
+    let second
+    await act(async () => { second = await view.result.current.handleScan(BADGE) })
+    // A new schedule is a distinct intent — not a double tap.
+    expect(second.ok).toBe(true)
+    expect(enqueueScan).toHaveBeenCalledTimes(2)
+    expect(enqueueScan.mock.calls[1][0]).toMatchObject({ schedule_id: 'sched-2', action: 'IN' })
+  })
+
+  it('still suppresses a same-schedule double tap within 2s', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    rpc.mockRejectedValue(new Error('Failed to fetch'))
+    getQueuedScans.mockResolvedValue([])
+    enqueueScan.mockResolvedValue({ ok: true, id: 'q-d' })
+    const { result } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
+    let second
+    await act(async () => { second = await result.current.handleScan(BADGE) })
+    expect(second).toEqual({ ok: false, reason: 'duplicate_queued' })
+    expect(enqueueScan).toHaveBeenCalledTimes(1)
+  })
+
+  it('the full-queue refusal names the 2000 cap in an unmissable error popup + toast', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    rpc.mockRejectedValue(new Error('Failed to fetch'))
+    enqueueScan.mockResolvedValue({ ok: false, reason: 'full' })
+    const { result, showPopup, toast } = setup()
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(out).toEqual({ ok: false, reason: 'offline_queue_full' })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error', message: expect.stringContaining('2000') }))
+    expect(toast.error).toHaveBeenCalledWith('Offline queue is full')
   })
 })
