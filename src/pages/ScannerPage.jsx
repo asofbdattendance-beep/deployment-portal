@@ -4,7 +4,7 @@ import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import BarcodeScanner from '../components/scanner/BarcodeScanner'
 import ScanResultPopup from '../components/scanner/ScanResultPopup'
-import { clearFailedQueue, clearLiveQueue, clearOrphanedQueue, listStrandedQueue, removeQueued } from '../lib/offlineQueue'
+import QueueRecoveryBar from '../components/mobile/QueueRecoveryBar'
 import { ScanLine, Clock, Wifi, WifiOff, RefreshCw, Loader2 } from 'lucide-react'
 import { useScannerSession } from '../hooks/useScannerSession'
 import { useIsMobile } from '../hooks/useMediaQuery'
@@ -14,13 +14,6 @@ import { todayStrIST } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import RecentScansTable from '../components/scanner/RecentScansTable'
 
-// V16: canonical "terminally failed" / orphan predicates, mirrored from
-// offlineQueue (which owns the definitions but does not export them —
-// isFailedRow there is module-private). A failed row carries `failed: true`
-// (v1) or `status: 'failed'` (newer); an orphaned row is a NON-failed row with
-// a null owner that no drain will ever consume (see clearOrphanedQueue).
-const isFailedQueueRow = (r) => !!r && (r.status === 'failed' || r.failed === true)
-const isOrphanedQueueRow = (r) => !isFailedQueueRow(r) && (r.owner ?? null) === null && !r.synced
 
 export default function ScannerPage({ schedules, scheduleId, sewaMode }){
   const { profile } = usePortalAuth()
@@ -117,40 +110,11 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
   // keep resetBusy referenced to avoid unused-var lint (hook exposes it for safety timeout)
   void resetBusy
 
-  // V16: queue counts surfaced in the header + recent-scans card. Pending rows
-  // drive the queued pill/spinner; failed and orphaned rows are otherwise
-  // invisible AND unremovable from this page, so each gets its own pill with a
-  // wired clear action. The live count excludes failed AND orphaned/stranded
-  // rows (same filtered definition as DeptInchargePage) — they are shown
-  // separately instead of inflating the sync pill.
-  const pendingCount = queued.filter(q => !q.synced && !isFailedQueueRow(q) && !isOrphanedQueueRow(q)).length
-  const failedCount = queued.filter(isFailedQueueRow).length
-  const orphanedCount = queued.filter(isOrphanedQueueRow).length
-  const clearFailed = useCallback(async () => { await clearFailedQueue(); refreshQueue() }, [refreshQueue])
-  const clearOrphaned = useCallback(async () => { await clearOrphanedQueue(); refreshQueue() }, [refreshQueue])
-  // Cap policy: confirmed bulk-delete of the current owner's live rows only
-  // (failed rows keep their own clear; other users' rows are never touched).
-  const clearLive = useCallback(async () => {
-    if (!window.confirm(`Delete ${pendingCount} live queued scan(s)? They have NOT synced — only do this for duplicate or test rows.`)) return
-    await clearLiveQueue(); refreshQueue()
-  }, [refreshQueue, pendingCount])
-
-  // T10 stranded scans: live null-owner rows are invisible to getQueuedScans
-  // while logged in and are never drained — surface them here with per-row
-  // manual Clear. Never auto-drained or auto-deleted (cross-user safety).
-  const [stranded, setStranded] = useState([])
-  const refreshStranded = useCallback(async () => {
-    try { setStranded(await listStrandedQueue() || []) }
-    catch (e) { console.warn('[Scanner] stranded refresh failed:', e?.message) }
-  }, [])
-  const clearOneStranded = useCallback(async (id) => { await removeQueued(id); refreshStranded() }, [refreshStranded])
+  void refreshQueue
 
   // Initial queue read (mount only — the drain subscription keeps it fresh
-  // after that) plus a 30s stranded re-check (same cadence as
-  // DeptInchargePage). A separate effect because refresh() is defined above the
-  // hook call and cannot list refreshQueue in its deps.
-  useEffect(()=>{ refreshQueue(); refreshStranded() },[refreshQueue, refreshStranded])
-  useEffect(()=>{ const id=setInterval(()=>refreshStranded(),30000); return()=>clearInterval(id) },[refreshStranded])
+  // after that). QueueRecoveryBar owns the stranded poll (it owns those rows).
+  useEffect(()=>{ refreshQueue() },[refreshQueue])
 
   useEffect(()=>{ refresh(); refreshDepts() },[refresh, refreshDepts])
   useEffect(()=>{ const id=setInterval(()=>refresh(),15000); return()=>clearInterval(id) },[refresh])
@@ -165,50 +129,14 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
         {sewaMode === 'previsit' ? 'Previsit sewa' : 'Bhati visit'}
       </span>
     )}
-    {pendingCount > 0 && (
-      <span className="pill pill-amber" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
-        {syncing ? <RefreshCw size={10} className="spin"/> : <WifiOff size={10}/>}
-        {pendingCount} queued
-      </span>
-    )}
-    {failedCount > 0 && (
-      <span className="pill pill-red" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
-        {failedCount} failed
-      </span>
-    )}
-    {orphanedCount > 0 && (
-      <span className="pill pill-gray" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
-        {orphanedCount} orphaned
-      </span>
-    )}
-    {stranded.length > 0 && (
-      <span className="pill pill-red" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
-        {stranded.length} stranded
-      </span>
-    )}
-    <span className={`pill ${isOnline?'pill-green':'pill-red'}`} style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
-      {isOnline ? <Wifi size={10}/> : <WifiOff size={10}/>}
+    <span className={`pill ${isOnline ? 'pill-green' : 'pill-red'} queue-pill`}>
+      {isOnline ? <Wifi size={10} aria-hidden="true" /> : <WifiOff size={10} aria-hidden="true" />}
       {isOnline ? 'Online' : 'Offline'}
     </span>
-    {offline && <span style={{fontSize:'0.7rem', color:'#b45309'}}>· refresh failed — showing last data</span>}
+    {offline && <span className="queue-stale">· refresh failed — showing last data</span>}
   </>)
   const queueBarNode = (<>
-    <div style={{display:'flex', alignItems:'center', gap:8, flexWrap:'wrap', marginTop:6}}>
-      {failedCount > 0 && <button onClick={clearFailed} style={{fontSize:'0.7rem', color:'#b91c1c', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear failed ({failedCount})</button>}
-      {pendingCount > 0 && <button onClick={clearLive} style={{marginLeft: failedCount > 0 ? 0 : 'auto', fontSize:'0.7rem', color:'#b45309', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear live queued ({pendingCount})</button>}
-      {orphanedCount > 0 && <button onClick={clearOrphaned} style={{marginLeft: (failedCount > 0 || pendingCount > 0) ? 0 : 'auto', fontSize:'0.7rem', color:'#64748b', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear orphaned ({orphanedCount})</button>}
-    </div>
-    {stranded.length > 0 && (
-      <div style={{marginTop:8, padding:'8px 10px', border:'1px solid #fecaca', borderRadius:8, background:'#fef2f2'}}>
-        <div style={{fontSize:'0.75rem', fontWeight:700, color:'#b91c1c'}}>Stranded scans ({stranded.length}) — queued with no owner, never auto-sync</div>
-        {stranded.map(r => (
-          <div key={r.id} style={{display:'flex', alignItems:'center', gap:6, fontSize:'0.75rem', color:'#7f1d1d', marginTop:4}}>
-            <span>{r.badge || '?'} · {r.action || 'IN'}</span>
-            <button onClick={() => clearOneStranded(r.id)} style={{marginLeft:'auto', fontSize:'0.7rem', color:'#b91c1c', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear</button>
-          </div>
-        ))}
-      </div>
-    )}
+    <QueueRecoveryBar queued={queued} syncing={syncing} isOnline={isOnline} offline={offline} />
     {!myBadge && <div style={{fontSize:'0.75rem', color:'#b45309', marginTop:4}}>Your profile has no badge number, so these cannot be filtered to your own scans — showing today&apos;s sessions.</div>}
   </>)
   const popupNode = (

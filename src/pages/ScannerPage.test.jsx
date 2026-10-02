@@ -65,6 +65,10 @@ vi.mock('../lib/offlineQueue', () => ({
   clearOrphanedQueue: (...args) => mocks.clearOrphanedQueue(...args),
   listStrandedQueue: (...args) => mocks.listStrandedQueue(...args),
   removeQueued: (...args) => mocks.removeQueued(...args),
+  // Real implementations: QueueRecoveryBar owns the failed/orphaned
+  // classification and the pages no longer keep private copies of it.
+  isFailedQueueRow: (r) => !!r && (r.status === 'failed' || r.failed === true),
+  isOrphanedQueueRow: (r) => !(!!r && (r.status === 'failed' || r.failed === true)) && (r?.owner ?? null) === null && !r?.synced,
 }))
 
 function makeStream(name = 'stream') {
@@ -185,6 +189,76 @@ describe('ScannerPage render', () => {
       expect(container.querySelector('video')).toBeTruthy()
     } finally {
       if (realMatchMedia) Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: realMatchMedia })
+      else delete window.matchMedia
+    }
+  })
+})
+
+// The desktop branch is a real render path (a laptop never sees the shell),
+// and the stale-data pins below keep the failure branches live — both were
+// masked when the queue handlers lived in the page and the tests only ever
+// drove the phone layout.
+describe('ScannerPage desktop layout + stale-data paths', () => {
+  function useDesktopMatchMedia() {
+    const real = window.matchMedia
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true, writable: true,
+      value: vi.fn((query) => ({
+        matches: false, // ≥769px → desktop
+        media: query,
+        addEventListener: vi.fn(), removeEventListener: vi.fn(),
+        addListener: vi.fn(), removeListener: vi.fn(),
+      })),
+    })
+    return () => {
+      if (real) Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: real })
+      else delete window.matchMedia
+    }
+  }
+
+  it('renders the desktop cards (no scan shell) and can scan from them', async () => {
+    const restore = useDesktopMatchMedia()
+    try {
+      const { container } = render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+      await settle()
+      expect(container.querySelector('.scan-shell')).toBeNull()
+      expect(screen.getByText('My last 10 scans (today, any dept incl. VSS)')).toBeTruthy()
+
+      // The desktop manual entry still drives the same scan state machine.
+      const input = screen.getByPlaceholderText('Manual FB/BH/VS badge')
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        setter.call(input, 'FB5971GA0001')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      expect(input.value).toBe('FB5971GA0001')
+    } finally {
+      restore()
+    }
+  })
+
+  it('pins the offline / stale-data pin when the session read fails', async () => {
+    // A failing session read must pin "showing last data", never an empty feed
+    // that reads as "nobody scanned today".
+    const realFrom = window.matchMedia
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true, writable: true,
+      value: vi.fn((q) => ({
+        matches: String(q).includes('768'), media: q,
+        addEventListener: vi.fn(), removeEventListener: vi.fn(),
+        addListener: vi.fn(), removeListener: vi.fn(),
+      })),
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      // supabase.from(...).then() resolves { data: [] }; make the dept read throw.
+      mocks.fetchAllRows.mockRejectedValueOnce(new Error('dept boom'))
+      render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+      await settle()
+      expect(warn).toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+      if (realFrom) Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: realFrom })
       else delete window.matchMedia
     }
   })

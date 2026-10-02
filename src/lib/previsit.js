@@ -8,7 +8,7 @@
  * The server already resolved the caller's scope, so these rows are the
  * caller's own — this only folds, filters and formats them.
  */
-import { splitDayLabel } from './attendance'
+import { splitDayLabel, UNASSIGNED_CENTRE, filterByCentre } from './attendance'
 
 /**
  * Distinct previsit dates, newest first. One date = one previsit sewa.
@@ -83,47 +83,33 @@ export function previsitKpis(summaryRows) {
 }
 
 /**
- * Department filter options present in the rows (id + name, A–Z).
- * Rows with no department resolve to the NO_DEPARTMENT_ID bucket so an
- * undeployed previsit badge is still selectable, never dropped — and the
- * bucket carries a real sentinel value (never ''), so it cannot be
- * confused with the "All departments" option.
- * @param {Array<object>} rows previsit_summary or previsit_sewadars rows
- * @returns {Array<{id: string, name: string}>}
+ * Bucket key for rows carrying no department, so an undeployed previsit
+ * badge stays visible in the dashboard breakdowns instead of vanishing.
+ * @type {string}
  */
 export const NO_DEPARTMENT_ID = '__none__'
 
-export function previsitDeptOptions(rows) {
-  const byId = new Map()
-  for (const r of Array.isArray(rows) ? rows : []) {
-    if (!r) continue
-    const id = r.department_id || NO_DEPARTMENT_ID
-    if (!byId.has(id)) byId.set(id, id === NO_DEPARTMENT_ID ? 'No department' : (r.dept_name || '—'))
-  }
-  return [...byId.entries()]
-    .map(([id, name]) => ({ id, name }))
-    .sort((a, b) => a.name.localeCompare(b.name))
-}
-
 /**
- * Filter previsit sewadar rows by date, department and free text.
+ * Filter previsit sewadar rows by date, centre and free text.
  * The text matches badge, name or home centre (case-insensitive).
+ *
+ * The centre gate delegates to `filterByCentre`, so previsit Reports and
+ * the Attendance register agree on what a centre means: 'all' (or a
+ * missing value) keeps everything, UNASSIGNED_CENTRE reaches rows with
+ * no home centre, and a named centre matches exactly — no subtree
+ * rollup, matching the two-arg AttendancePage precedent.
  * @param {Array<object>} rows previsit_sewadars rows
- * @param {object} filters { date?: string, departmentId?: string, query?: string }
+ * @param {object} filters { date?: string, centre?: string, query?: string }
  * @returns {Array<object>}
  */
 export function filterPrevisitRows(rows, filters = {}) {
-  const list = Array.isArray(rows) ? rows : []
+  const centre = typeof filters.centre === 'string' ? filters.centre : 'all'
+  const list = filterByCentre(Array.isArray(rows) ? rows : [], centre)
   const date = typeof filters.date === 'string' ? filters.date : ''
-  const dept = typeof filters.departmentId === 'string' ? filters.departmentId : ''
   const q = typeof filters.query === 'string' ? filters.query.trim().toLowerCase() : ''
   return list.filter((r) => {
     if (!r) return false
     if (date && String(r.event_date || '').slice(0, 10) !== date) return false
-    // '' means "all departments". A picked department hides department-less
-    // (undeployed) rows; NO_DEPARTMENT_ID selects exactly those rows.
-    if (dept === NO_DEPARTMENT_ID) return !r.department_id
-    if (dept !== '' && (r.department_id || '') !== dept) return false
     if (!q) return true
     return [r.badge_number, r.sewadar_name, r.sewadar_centre]
       .some((v) => String(v || '').toLowerCase().includes(q))
@@ -214,6 +200,86 @@ export function previsitByDept(summaryRows) {
 }
 
 /**
+ * Centre × sewa-day presence matrix for the dashboard heatmap — the
+ * department-incharge answer to "how did each CENTRE do, day by day".
+ *
+ * One row per centre (A–Z, UNASSIGNED_CENTRE last) with the present count
+ * for every sewa day, so a cell renders as `present / deployed`. The
+ * denominator comes from previsit_deployed (distinct badges per centre).
+ * When that roster is unavailable — RPC failed, still loading — the highest
+ * present count seen for the centre stands in, so a cell is never shown as
+ * `p/0`; if a centre has neither, the cell is genuinely empty (0).
+ *
+ * @param {Array<object>} summaryRows previsit_summary rows (centre × date × dept)
+ * @param {Array<object>} deployedRows previsit_deployed rows (one per badge)
+ * @returns {{columns: string[], rows: Array<{centre: string, deployed: number,
+ *   byDate: Object<string, number>, presentTotal: number, possible: number}>,
+ *   totals: {byDate: Object<string, number>, present: number, deployed: number, possible: number}}}
+ */
+export function previsitCentreMatrix(summaryRows, deployedRows) {
+  const summaries = Array.isArray(summaryRows) ? summaryRows : []
+  const roster = Array.isArray(deployedRows) ? deployedRows : []
+
+  const dates = new Set()
+  const present = new Map() // `${centre}\u0000${date}` → count
+  const peak = new Map() // centre → busiest single day
+  for (const r of summaries) {
+    if (!r) continue
+    const d = typeof r.event_date === 'string' ? r.event_date.slice(0, 10) : ''
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) continue
+    const c = typeof r.centre === 'string' && r.centre.trim() ? r.centre : UNASSIGNED_CENTRE
+    dates.add(d)
+    const key = `${c}\u0000${d}`
+    const n = (present.get(key) || 0) + (Number(r.present) || 0)
+    present.set(key, n)
+    if (n > (peak.get(c) || 0)) peak.set(c, n)
+  }
+
+  const badges = new Map() // centre → Set<badge>
+  for (const r of roster) {
+    if (!r?.badge_number) continue
+    const c = typeof r.sewadar_centre === 'string' && r.sewadar_centre.trim() ? r.sewadar_centre : UNASSIGNED_CENTRE
+    if (!badges.has(c)) badges.set(c, new Set())
+    badges.get(c).add(r.badge_number)
+  }
+
+  const columns = [...dates].sort()
+  const rows = [...new Set([...peak.keys(), ...badges.keys()])]
+    .map((centre) => {
+      const byDate = {}
+      let presentTotal = 0
+      for (const d of columns) {
+        const p = present.get(`${centre}\u0000${d}`) || 0
+        byDate[d] = p
+        presentTotal += p
+      }
+      const deployed = badges.has(centre) ? badges.get(centre).size : (peak.get(centre) || 0)
+      return { centre, deployed, byDate, presentTotal, possible: deployed * columns.length }
+    })
+    .sort((a, b) => {
+      const au = a.centre === UNASSIGNED_CENTRE
+      const bu = b.centre === UNASSIGNED_CENTRE
+      if (au !== bu) return au ? 1 : -1
+      return a.centre.localeCompare(b.centre)
+    })
+
+  const byDate = {}
+  let presentCount = 0
+  for (const d of columns) {
+    const p = rows.reduce((s, r) => s + r.byDate[d], 0)
+    byDate[d] = p
+    presentCount += p
+  }
+  const deployedCount = rows.reduce((s, r) => s + r.deployed, 0)
+
+  return {
+    columns,
+    rows,
+    totals: { byDate, present: presentCount, deployed: deployedCount, possible: deployedCount * columns.length },
+  }
+}
+
+/**
  * Badges scanned on one sewa day — the Present set behind the Total tab's
  * tick column. A badge with several sessions that day appears once.
  * @param {Array<object>} rows previsit_sewadars rows
@@ -272,20 +338,18 @@ export function previsitAttention(rows) {
 }
 
 /**
- * Filter the deployed Total list by department + free text. The text
+ * Filter the deployed Total list by centre + free text. The text
  * matches name, badge or home centre (case-insensitive).
  * @param {Array<object>} deployed previsit_deployed rows
- * @param {object} filters { departmentId?: string, query?: string }
+ * @param {object} filters { centre?: string, query?: string }
  * @returns {Array<object>}
  */
 export function filterPrevisitTotal(deployed, filters = {}) {
-  const list = Array.isArray(deployed) ? deployed : []
-  const dept = typeof filters.departmentId === 'string' ? filters.departmentId : ''
+  const centre = typeof filters.centre === 'string' ? filters.centre : 'all'
+  const list = filterByCentre(Array.isArray(deployed) ? deployed : [], centre)
   const q = typeof filters.query === 'string' ? filters.query.trim().toLowerCase() : ''
   return list.filter((r) => {
     if (!r) return false
-    if (dept === NO_DEPARTMENT_ID) return !r.department_id
-    if (dept !== '' && (r.department_id || '') !== dept) return false
     if (!q) return true
     return [r.badge_number, r.sewadar_name, r.sewadar_centre]
       .some((v) => String(v || '').toLowerCase().includes(q))

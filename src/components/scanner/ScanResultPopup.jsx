@@ -270,14 +270,19 @@ export default function ScanResultPopup({
       style={{
         position: 'fixed',
         inset: 0,
-        zIndex: 60,
+        zIndex: 90, // --z-sheet: above the bottom tab bar (40)
         display: 'flex',
         alignItems: isMobileScan ? 'flex-end' : 'center',
         justifyContent: 'center',
         padding: isMobileScan ? 0 : '1rem',
         // Safe-area aware bottom padding: on phones with a soft keyboard /
         // gesture bar the action row must never sit under the system UI.
-        paddingBottom: 'max(1rem, env(safe-area-inset-bottom))',
+        // On phones it must ALSO clear the fixed 84px bottom tab bar, which is
+        // painted under this sheet — without the tab offset the primary action
+        // sat inside the nav bar's footprint.
+        paddingBottom: isMobileScan
+          ? 'calc(84px + max(1rem, env(safe-area-inset-bottom)))'
+          : 'max(1rem, env(safe-area-inset-bottom))',
         background: visible ? 'rgba(15,23,42,0.48)' : 'rgba(15,23,42,0)',
         backdropFilter: visible ? 'blur(8px)' : 'blur(0px)',
         WebkitBackdropFilter: visible ? 'blur(8px)' : 'blur(0px)',
@@ -298,7 +303,7 @@ export default function ScanResultPopup({
           // the OUT-time field the layout viewport shrinks but a centred fixed
           // dialog would be pushed half off-screen. Cap to the dynamic viewport
           // and scroll internally so the action buttons stay reachable.
-          maxHeight: 'min(92dvh, 640px)',
+          maxHeight: isMobileScan ? 'min(86dvh, 640px)' : 'min(92dvh, 640px)',
           overflowY: 'auto',
           WebkitOverflowScrolling: 'touch',
           overscrollBehavior: 'contain',
@@ -527,7 +532,10 @@ export default function ScanResultPopup({
             gap: 8,
             flexWrap: 'wrap',
             padding: '0.85rem 1.1rem',
-            paddingBottom: 'max(0.85rem, env(safe-area-inset-bottom))',
+            paddingBottom: isMobileScan
+              // clear the bottom tab bar (84px) + safe area on phones
+              ? 'calc(84px + max(0.85rem, env(safe-area-inset-bottom)))'
+              : 'max(0.85rem, env(safe-area-inset-bottom))',
             background: 'var(--surface-2)',
             borderTop: '1px solid var(--border)',
             justifyContent: 'flex-end',

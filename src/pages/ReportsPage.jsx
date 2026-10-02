@@ -6,13 +6,15 @@ import { useToast } from '../components/Toast'
 // chars, no \ / * ? : [ ]), so one sheet per centre needs no extra trimming.
 import { exportWorkbook, exportWorkbookBlob, fileSlug } from '../lib/excel'
 import { useIsMobile } from '../hooks/useMediaQuery'
+import FilterSheet, { MobileFilterBar } from '../components/mobile/FilterSheet'
 import { useExport } from '../hooks/useExport'
 import ExportSheet from '../components/mobile/ExportSheet'
+import PrintPdfButton from '../components/PrintPdfButton'
 import { shortDayLabel } from '../lib/attendance'
 import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
 import { todayStrIST, withTimeout } from '../lib/scannerUtils'
 import {
-  FileText, Download, Printer, Search,
+  FileText, Download, Search,
   RefreshCw, Loader2, AlertTriangle, Lock, Users,
 } from 'lucide-react'
 
@@ -290,6 +292,54 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
   }))
 
   const isMobile = useIsMobile()
+  const [filtersOpen, setFiltersOpen] = useState(false)
+
+  // One filter set drives all three lists, the tables and every Excel sheet.
+  const clearFilters = () => { setFilterCentre('all'); setSearch('') }
+  const filterChips = useMemo(() => {
+    const chips = []
+    if (filterCentre !== 'all') chips.push({ key: 'centre', label: `Centre: ${filterCentre}` })
+    if (search.trim()) chips.push({ key: 'search', label: `"${search.trim()}"` })
+    return chips
+  }, [filterCentre, search])
+  const clearFilterChip = (key) => {
+    if (key === 'centre') setFilterCentre('all')
+    else if (key === 'search') setSearch('')
+  }
+  // "N of M" for the ACTIVE list, so the count can never describe another tab.
+  const activeRawRows = tab === 'present' ? present : tab === 'absent' ? absent : complete
+  const filterResultText = `${activeRows.length} of ${activeRawRows.length}`
+
+  // Desktop toolbar rows (hidden on mobile) and the phone sheet share these
+  // exact nodes — one state, one handler set, two presentations.
+  const reportFiltersNode = (<>
+    <div className="previsit-field">
+      <span className="previsit-label">Scan day</span>
+      <input
+        type="date"
+        value={date}
+        min={visitWin.start || undefined}
+        max={visitWin.end || undefined}
+        onChange={(e) => { dateTouchedRef.current = true; setDate(clampDateToWindow(e.target.value, visitWin)) }}
+        aria-label="Report day"
+        className="input previsit-control"
+      />
+    </div>
+    <div className="previsit-field">
+      <span className="previsit-label">Centre</span>
+      <select value={filterCentre} onChange={(e) => setFilterCentre(e.target.value)} className="select previsit-control" aria-label="Filter by centre">
+        <option value="all">All centres</option>
+        {centres.map((c) => <option key={c} value={c}>{c}</option>)}
+      </select>
+    </div>
+    <div className="previsit-field previsit-field--search">
+      <span className="previsit-label">Search</span>
+      <span className="previsit-search">
+        <Search size={14} aria-hidden="true" />
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search badge / name / dept..." className="input previsit-control" aria-label="Search reports" />
+      </span>
+    </div>
+  </>)
 
   const handleExport = async () => {
     if (!rowsAreCurrent) {
@@ -362,17 +412,20 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
   }
 
   const renderTable = (rows) => (
-    <div className="table-wrap table-wrap-sticky">
-      <table className="table table-sticky">
+    // `.rows-on-phone` keeps this a real row/column grid on phones (horizontal
+    // scroll + pinned Badge column) instead of collapsing every row into a
+    // stacked card — see the notes in index.css. Desktop is untouched.
+    <div className="table-wrap table-wrap-sticky table-wrap-rows">
+      <table className="table table-sticky rows-on-phone">
         <caption className="sr-only">Report rows</caption>
         <thead>
           <tr>
-            <th>Badge</th>
-            <th>Name</th>
-            <th>Centre</th>
-            <th>Dept</th>
-            <th>Type</th>
-            <th>Status</th>
+            <th scope="col">Badge</th>
+            <th scope="col">Name</th>
+            <th scope="col">Centre</th>
+            <th scope="col">Dept</th>
+            <th scope="col">Type</th>
+            <th scope="col">Status</th>
           </tr>
         </thead>
         <tbody>
@@ -407,28 +460,42 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
             <span className="pill" title="Read-only — this page never writes attendance" style={{ background: '#f1f5f9', color: '#64748b', fontWeight: 600 }}>
               <Lock size={12} /> View-only
             </span>
-            <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
+            <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ fontSize: '0.75rem' }}>
               {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
             </button>
             {onNavigate && (
-              <button onClick={() => onNavigate?.()} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
+              <button onClick={() => onNavigate?.()} className="btn btn-ghost" style={{ fontSize: '0.75rem' }}>
                 Back
               </button>
             )}
-            {canExport ? (
-              <button onClick={handleExport} disabled={exporting || mobileExport.building || loading || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+            {canExport && (
+              <button onClick={handleExport} disabled={exporting || mobileExport.building || loading || !rowsAreCurrent} className="btn btn-primary" style={{ fontSize: '0.78rem' }}>
                 {exporting || mobileExport.building ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Download Excel
               </button>
-            ) : (
-              <button onClick={() => window.print()} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-                <Printer size={13} /> Print PDF
-              </button>
             )}
+            {/* PDF sits BESIDE Excel, never instead of it: the same report
+                through the browser's Print-to-PDF (index.css `@media print`
+                strips the chrome and forces a real table, so a phone prints a
+                table — not a stack of cards). dept_incharge has no Excel
+                export, so this is its only export. */}
+            <PrintPdfButton className="btn" style={{ fontSize: '0.78rem' }} />
           </div>
         </div>
       </div>
 
       <div className="card print-hide" style={{ padding: '1.25rem' }}>
+        {isMobile && (
+          <MobileFilterBar
+            onOpen={() => setFiltersOpen(true)}
+            chips={filterChips}
+            onClearChip={clearFilterChip}
+            onClearAll={clearFilters}
+            resultText={filterResultText}
+            activeCount={filterChips.length}
+          />
+        )}
+        {/* List tabs stay visible on every width; the FIELD set moves into
+            the FilterSheet on phones (same nodes, same state). */}
         <div className="previsit-toolbar" role="search" style={{ marginBottom: 0 }}>
           <div className="previsit-tabs" role="tablist" aria-label="Report lists">
             {[
@@ -441,32 +508,7 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
               </button>
             ))}
           </div>
-          <div className="previsit-field">
-            <span className="previsit-label">Scan day</span>
-            <input
-              type="date"
-              value={date}
-              min={visitWin.start || undefined}
-              max={visitWin.end || undefined}
-              onChange={(e) => { dateTouchedRef.current = true; setDate(clampDateToWindow(e.target.value, visitWin)) }}
-              aria-label="Report day"
-              className="input previsit-control"
-            />
-          </div>
-          <div className="previsit-field">
-            <span className="previsit-label">Centre</span>
-            <select value={filterCentre} onChange={(e) => setFilterCentre(e.target.value)} className="select previsit-control" aria-label="Filter by centre">
-              <option value="all">All centres</option>
-              {centres.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </div>
-          <div className="previsit-field previsit-field--search">
-            <span className="previsit-label">Search</span>
-            <span className="previsit-search">
-              <Search size={14} aria-hidden="true" />
-              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search badge / name / dept..." className="input previsit-control" aria-label="Search reports" />
-            </span>
-          </div>
+          {!isMobile && reportFiltersNode}
         </div>
       </div>
 
@@ -540,6 +582,17 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
           </section>
         ))}
       </div>
+
+      <FilterSheet
+        open={isMobile && filtersOpen}
+        onClose={() => setFiltersOpen(false)}
+        title="Report filters"
+        resultText={filterResultText}
+        onClearAll={clearFilters}
+        hasActive={filterChips.length > 0}
+      >
+        {reportFiltersNode}
+      </FilterSheet>
 
       <ExportSheet
         open={isMobile && exportSheetOpen}

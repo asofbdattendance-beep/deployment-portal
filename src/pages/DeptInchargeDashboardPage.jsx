@@ -9,6 +9,8 @@ import { exportAttendanceWorkbook, buildAttendanceBlob } from '../lib/attendance
 import { useIsMobile } from '../hooks/useMediaQuery'
 import { useExport } from '../hooks/useExport'
 import ExportSheet from '../components/mobile/ExportSheet'
+import PrintPdfButton from '../components/PrintPdfButton'
+import FilterSheet, { MobileFilterBar } from '../components/mobile/FilterSheet'
 import AttendanceMatrix from '../components/AttendanceMatrix'
 import {
   LayoutDashboard, Users, UserX, Percent, Clock, RefreshCw, Download,
@@ -323,6 +325,43 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
     return { columns: matrix.columns, rows }
   }, [matrix, matrixCentre, matrixQuery])
   const matrixFiltersActive = matrixQuery.trim() !== '' || matrixCentre !== ''
+  const [matrixFiltersOpen, setMatrixFiltersOpen] = useState(false)
+  const clearMatrixFilters = () => { setMatrixQuery(''); setMatrixCentre('') }
+  const matrixChips = useMemo(() => {
+    const chips = []
+    if (matrixQuery.trim()) chips.push({ key: 'q', label: `"${matrixQuery.trim()}"` })
+    if (matrixCentre) chips.push({ key: 'centre', label: matrixCentre })
+    return chips
+  }, [matrixQuery, matrixCentre])
+  const clearMatrixChip = (key) => {
+    if (key === 'q') setMatrixQuery('')
+    else if (key === 'centre') setMatrixCentre('')
+  }
+  // The two matrix controls, shared by the desktop toolbar and the phone
+  // sheet (same state, same handlers, two presentations).
+  const matrixFiltersNode = (<>
+    <div style={{ position: 'relative', flex: '1 1 200px', minWidth: 0 }}>
+      <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none' }} />
+      <input
+        value={matrixQuery}
+        onChange={(e) => setMatrixQuery(e.target.value)}
+        placeholder="Search badge / name / centre / dept..."
+        className="input"
+        style={{ width: '100%', paddingLeft: 30 }}
+        aria-label="Search attendance matrix"
+      />
+    </div>
+    <select
+      value={matrixCentre}
+      onChange={(e) => setMatrixCentre(e.target.value)}
+      className="select"
+      style={{ width: '100%' }}
+      aria-label="Filter matrix by centre"
+    >
+      <option value="">All centres ({matrixCentreOptions.length})</option>
+      {matrixCentreOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+    </select>
+  </>)
 
   const exportFilename = `${fileSlug(schedule?.name)}_incharge_${date}.xlsx`
 
@@ -413,6 +452,7 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
             <button onClick={exportSnapshot} disabled={exporting || mobileExport.building || !rowsAreCurrent || noWindow || errs.daily || errs.visit || errs.trend || errs.badges} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               {exporting || mobileExport.building ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export Attd Matrix
             </button>
+            <PrintPdfButton className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }} />
           </div>
         </div>
         <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
@@ -435,7 +475,7 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
               onChange={(e) => { dateTouchedRef.current = true; setDate(clampDateToWindow(e.target.value, visitWin)) }}
               className="input"
               aria-label="Scan day"
-              style={{ fontSize: '0.82rem', padding: '0.25rem 0.4rem' }}
+              style={{ minHeight: 44 }}
             />
           </div>
         </div>
@@ -529,37 +569,25 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
               <div className="card-sub">Badge × day — green present, red absent</div>
             </div>
           </div>
-          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', padding: '0.75rem 1.25rem 0' }}>
-            <div style={{ position: 'relative', flex: '1 1 200px', minWidth: 180 }}>
-              <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none' }} />
-              <input
-                value={matrixQuery}
-                onChange={(e) => setMatrixQuery(e.target.value)}
-                placeholder="Search badge / name / centre / dept..."
-                className="input"
-                style={{ width: '100%', paddingLeft: 30 }}
-                aria-label="Search attendance matrix"
+          {isMobile && (
+            <div style={{ padding: '0.75rem 1.25rem 0' }}>
+              <MobileFilterBar
+                onOpen={() => setMatrixFiltersOpen(true)}
+                chips={matrixChips}
+                onClearChip={clearMatrixChip}
+                onClearAll={clearMatrixFilters}
+                resultText={`${matrixForView.rows.length} of ${matrix.rows.length} sewadars`}
+                activeCount={matrixChips.length}
               />
             </div>
-            <select
-              value={matrixCentre}
-              onChange={(e) => setMatrixCentre(e.target.value)}
-              className="select"
-              style={{ flex: '0 0 auto', minWidth: 160 }}
-              aria-label="Filter matrix by centre"
-            >
-              <option value="">All centres ({matrixCentreOptions.length})</option>
-              {matrixCentreOptions.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-            <span role="status" style={{ fontSize: '0.78rem', color: '#64748b' }}>
+          )}
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', padding: '0.75rem 1.25rem 0' }}>
+            {!isMobile && matrixFiltersNode}
+            <span role="status" className="matrix-count">
               {matrixForView.rows.length} of {matrix.rows.length} sewadars
             </span>
-            {matrixFiltersActive && (
-              <button
-                onClick={() => { setMatrixQuery(''); setMatrixCentre('') }}
-                className="btn btn-ghost"
-                style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}
-              >
+            {matrixFiltersActive && !isMobile && (
+              <button onClick={clearMatrixFilters} className="btn btn-ghost" style={{ fontSize: '0.75rem' }}>
                 Clear
               </button>
             )}
@@ -581,6 +609,17 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
         Present/absent reflects scans for the selected day. &ldquo;Ever present&rdquo; covers the whole visit. Scans are recorded on the{' '}
         <button onClick={() => go('reports')} className="btn btn-ghost" style={{ padding: '0 0.2rem', fontSize: '0.78rem' }}>Reports <ArrowUpRight size={11} /></button> page.
       </div>
+
+      <FilterSheet
+        open={isMobile && matrixFiltersOpen}
+        onClose={() => setMatrixFiltersOpen(false)}
+        title="Matrix filters"
+        resultText={`${matrixForView.rows.length} of ${matrix.rows.length} sewadars`}
+        onClearAll={clearMatrixFilters}
+        hasActive={matrixChips.length > 0}
+      >
+        {matrixFiltersNode}
+      </FilterSheet>
 
       <ExportSheet
         open={isMobile && exportSheetOpen}

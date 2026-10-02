@@ -51,6 +51,31 @@ jobs:
 
       - run: npx playwright test --project=mobile-chrome --project=mobile-safari
 
+  # PWA app-shell gate. Runs against a PRODUCTION build (vite preview), since
+  # the service worker only exists in `vite build` output — an installability
+  # test against the dev server could never fail.
+  pwa-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx playwright install --with-deps chromium
+
+      - name: Build (emits sw.js + the precache manifest)
+        run: npm run build
+        env:
+          VITE_SUPABASE_URL: http://127.0.0.1:54321
+          VITE_SUPABASE_ANON_KEY: e2e-anon-key
+
+      - run: npx playwright test --project=mobile-pwa
+
   migration-parity:
     runs-on: ubuntu-latest
     steps:

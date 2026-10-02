@@ -4,7 +4,14 @@ import { useToast } from '../components/Toast'
 import { scannerStatus, timeAgo, UNASSIGNED_CENTRE, shortDayLabel } from '../lib/attendance'
 import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
 import { todayStrIST } from '../lib/scannerUtils'
-import { exportWorkbook, fileSlug } from '../lib/excel'
+import { exportWorkbook, exportWorkbookBlob, fileSlug } from '../lib/excel'
+import { useIsMobile } from '../hooks/useMediaQuery'
+import { useExport } from '../hooks/useExport'
+import ExportSheet from '../components/mobile/ExportSheet'
+import PrintPdfButton from '../components/PrintPdfButton'
+import FilterSheet, { MobileFilterBar } from '../components/mobile/FilterSheet'
+import Skeleton from '../components/mobile/Skeleton'
+import VirtualList from '../components/mobile/VirtualList'
 import {
   Radio, Users, ScanLine, Clock, Download, Search, RefreshCw, Loader2,
   AlertTriangle, Lock, ChevronRight, ChevronDown, ArrowLeft,
@@ -324,29 +331,44 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
 
   // ─── Export — one sheet, honouring the active search, built through the
   // shared excel.js driver (L-24/L-25) like every other reports surface. ───
+  const exportFilename = `${fileSlug(schedule?.name)}_${date || 'no-date'}_scanners.xlsx`
+  const buildExportSheets = () => ([
+    {
+      name: `Scanners ${date || 'no date'}`,
+      rows: visible.map((r) => ({
+        Scanner: scannerName(r),
+        Badge: r.scanner_badge,
+        Centre: r.scanner_centre || UNASSIGNED_CENTRE,
+        Status: statusLabel(r.status, r.last_scan_time),
+        'Scans In': r.scans_in || 0,
+        'Scans Out': r.scans_out || 0,
+        'Manual Scans': r.manual_scans || 0,
+        'Open Now': r.open_now || 0,
+        'First Scan': clock(r.first_in_time),
+        'Last Scan': clock(r.last_scan_time),
+      })),
+    },
+  ])
+
+  // Phones deliver through the share sheet — a direct .xlsx download is
+  // unreliable on iOS Safari, and this page had NO mobile export path at all.
+  const isMobile = useIsMobile()
+  const mobileExport = useExport()
+  const [exportSheetOpen, setExportSheetOpen] = useState(false)
+  const [filtersOpen, setFiltersOpen] = useState(false)
   const exportExcel = async () => {
+    if (isMobile) {
+      setExportSheetOpen(true)
+      await mobileExport.prepare(async () => {
+        const { blob, written } = await exportWorkbookBlob(exportFilename, buildExportSheets())
+        if (!written) return null
+        return { blob, filename: exportFilename }
+      })
+      return
+    }
     setExporting(true)
     try {
-      const written = await exportWorkbook(
-        `${fileSlug(schedule?.name)}_${date || 'no-date'}_scanners.xlsx`,
-        [
-          {
-            name: `Scanners ${date || 'no date'}`,
-            rows: visible.map((r) => ({
-              Scanner: scannerName(r),
-              Badge: r.scanner_badge,
-              Centre: r.scanner_centre || UNASSIGNED_CENTRE,
-              Status: statusLabel(r.status, r.last_scan_time),
-              'Scans In': r.scans_in || 0,
-              'Scans Out': r.scans_out || 0,
-              'Manual Scans': r.manual_scans || 0,
-              'Open Now': r.open_now || 0,
-              'First Scan': clock(r.first_in_time),
-              'Last Scan': clock(r.last_scan_time),
-            })),
-          },
-        ]
-      )
+      const written = await exportWorkbook(exportFilename, buildExportSheets())
       if (written === 0) toast.warning('Nothing to export')
       else toast.success('Scanner activity exported')
     } catch (e) {
@@ -362,7 +384,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
   if (loading && !all.length) {
     return (
       <div className="page" style={{ maxWidth: 1400 }}>
-        <div className="card"><div className="empty"><div className="spin" style={{ width: 24, height: 24, border: '2px solid #e2e8f0', borderTopColor: '#6366f1', borderRadius: '50%', animation: 'spin .6s linear infinite' }} /><div className="empty-text">Loading scanner activity…</div></div></div>
+        <div className="card" style={{ padding: '1.25rem' }}><Skeleton variant="table" rows={6} /><div className="empty-text" style={{ marginTop: '0.75rem' }}>Loading scanner activity…</div></div>
       </div>
     )
   }
@@ -415,6 +437,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
             <button onClick={exportExcel} disabled={exporting || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export Excel
             </button>
+            <PrintPdfButton className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }} />
             {onNavigate && (
               <button onClick={() => onNavigate?.()} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
                 <ArrowLeft size={13} /> Back to Scanner
@@ -491,18 +514,28 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
       )}
 
       <div className="card" style={{ marginTop: '0.75rem', padding: '0.85rem 1rem' }}>
+        {isMobile && (
+          <MobileFilterBar
+            onOpen={() => setFiltersOpen(true)}
+            chips={search.trim() ? [{ key: 'q', label: `"${search.trim()}"` }] : []}
+            onClearChip={() => setSearch('')}
+            onClearAll={() => setSearch('')}
+            resultText={`${visible.length} of ${all.length}`}
+            activeCount={search.trim() ? 1 : 0}
+          />
+        )}
         <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
-          <div style={{ position: 'relative', flex: '1 1 240px', minWidth: 0 }}>
+          {isMobile ? <div style={{ flex: 1 }} /> : <div style={{ position: 'relative', flex: '1 1 240px', minWidth: 0 }}>
             <Search size={14} style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none' }} />
             <input
               className="input"
-              style={{ paddingLeft: 28, height: 34 }}
+              style={{ paddingLeft: 28, minHeight: 44 }}
               placeholder="Search badge, name or centre…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search scanners"
             />
-          </div>
+          </div>}
           {freshness && (
             <span className="page-sub" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', margin: 0 }}>
               <Clock size={13} /> {freshness}
@@ -653,6 +686,40 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
         <Users size={13} />
         Active = a scan in the last 15 minutes · scope is enforced by the database for your role
       </div>
+
+      <FilterSheet
+        open={isMobile && filtersOpen}
+        onClose={() => setFiltersOpen(false)}
+        title="Search scanners"
+        resultText={`${visible.length} of ${all.length}`}
+        onClearAll={() => setSearch('')}
+        hasActive={!!search.trim()}
+      >
+        <div style={{ position: 'relative' }}>
+          <Search size={14} style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none' }} />
+          <input
+            className="input"
+            style={{ paddingLeft: 28, width: '100%', minHeight: 44 }}
+            placeholder="Search badge, name or centre…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            aria-label="Search scanners"
+          />
+        </div>
+      </FilterSheet>
+
+      <ExportSheet
+        open={isMobile && exportSheetOpen}
+        onClose={() => { setExportSheetOpen(false); mobileExport.reset() }}
+        filename={exportFilename}
+        file={mobileExport.file?.blob || null}
+        building={mobileExport.building}
+        buildError={mobileExport.buildError}
+        delivering={mobileExport.delivering}
+        deliveredVia={mobileExport.deliveredVia}
+        onDeliver={mobileExport.deliver}
+        onRetry={exportExcel}
+      />
     </div>
   )
 }

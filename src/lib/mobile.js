@@ -6,8 +6,35 @@
  * a missing API degrades to the desktop-equivalent behaviour, never throws.
  */
 
-/** The single mobile breakpoint. Mirrors useMediaQuery's MOBILE_QUERY. */
-export const MOBILE_QUERY = '(max-width: 768px)'
+/** The single mobile query. ≤768px wide, OR a short landscape viewport on a
+ *  coarse pointer (a phone held sideways is ≥769px wide, so width alone
+ *  misses it). The single source of truth — useMediaQuery imports this. */
+export const MOBILE_QUERY = '(max-width: 768px), (max-height: 500px) and (pointer: coarse)'
+
+/**
+ * Ordered device tiers (upper bound, px). Keep in sync with index.css
+ * "Device-tier contract" and useMediaQuery. Pure (testable in node).
+ * T0 ≤359 · T1 360–413 · T2 414–480 · T3 481–640 · T4 641–768 (cards) ·
+ * T5 769–1024 · T6 1025–1440 · T7 ≥1441.
+ */
+export const DEVICE_TIERS = [
+  { name: 'tiny', maxWidth: 359 },
+  { name: 'phone', maxWidth: 413 },
+  { name: 'large-phone', maxWidth: 480 },
+  { name: 'phablet', maxWidth: 640 },
+  { name: 'tablet-portrait', maxWidth: 768 },
+  { name: 'tablet-landscape', maxWidth: 1024 },
+  { name: 'laptop', maxWidth: 1440 },
+  { name: 'desktop', maxWidth: Infinity },
+]
+
+/** Width → tier name. Non-finite input → 'desktop' (safe default). */
+export function tierForWidth(width) {
+  const w = Number(width)
+  if (!Number.isFinite(w)) return 'desktop'
+  const hit = DEVICE_TIERS.find((t) => w <= t.maxWidth)
+  return hit ? hit.name : 'desktop'
+}
 
 /** True on coarse-pointer / touch hardware. False in node/SSR. */
 export function isTouchDevice() {

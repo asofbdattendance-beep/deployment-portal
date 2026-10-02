@@ -22,7 +22,7 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
       // Mobile specs assert phone-width behaviour — they fail by design at
       // 1280px, so desktop never runs them.
-      testIgnore: /mobile-.*\.spec\.js/,
+      testIgnore: /(mobile|pwa)-.*\.spec\.js/,
     },
     // Mobile-first attendance gate: touch + small viewport emulation.
     // Only mobile-*.spec.js runs here; the desktop suite stays on chromium.
@@ -30,6 +30,15 @@ export default defineConfig({
       name: 'mobile-chrome',
       use: { ...devices['Pixel 5'] },
       testMatch: /mobile-.*\.spec\.js/,
+    },
+    // PWA gate: runs against a PRODUCTION preview build, because the service
+    // worker is only emitted by vite-plugin-pwa during `vite build`.
+    {
+      name: 'mobile-pwa',
+      // `vite preview` inherits the repo's local TLS cert (certs/local-cert.pem),
+      // so this project is https + ignoreHTTPSErrors (set globally in `use`).
+      use: { ...devices['Pixel 5'], baseURL: 'https://localhost:5175' },
+      testMatch: /pwa-.*\.spec\.js/,
     },
     {
       name: 'mobile-safari',
@@ -53,6 +62,16 @@ export default defineConfig({
       command: 'npx vite --port 5173 --strictPort',
       port: 5173,
       reuseExistingServer: true,
+      env: {
+        VITE_SUPABASE_URL: 'http://127.0.0.1:54321',
+        VITE_SUPABASE_ANON_KEY: 'e2e-anon-key',
+      },
+    },
+    {
+      command: 'npm run build && npx vite preview --port 5175 --strictPort',
+      port: 5175,
+      reuseExistingServer: true,
+      timeout: 240000,
       env: {
         VITE_SUPABASE_URL: 'http://127.0.0.1:54321',
         VITE_SUPABASE_ANON_KEY: 'e2e-anon-key',

@@ -6,7 +6,10 @@ import { useToast } from '../components/Toast'
 import BarcodeScanner from '../components/scanner/BarcodeScanner'
 import ScanResultPopup from '../components/scanner/ScanResultPopup'
 import RecentScansTable from '../components/scanner/RecentScansTable'
-import { clearFailedQueue, clearLiveQueue, clearOrphanedQueue } from '../lib/offlineQueue'
+import MobileScanFeed from '../components/mobile/MobileScanFeed'
+import ScanModeShell from '../components/mobile/ScanModeShell'
+import { useIsMobile } from '../hooks/useMediaQuery'
+import QueueRecoveryBar from '../components/mobile/QueueRecoveryBar'
 import { todayStrIST } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import { exportWorkbook, fileSlug } from '../lib/excel'
@@ -18,8 +21,6 @@ import { ScanLine, Users, UserX, UserCheck, Search, Clock, AlertTriangle, Downlo
 // null-owner live row is stranded/orphaned (never drained, cleared
 // separately). The live "N queued" count excludes both — same filtered
 // definition as ScannerPage.
-const isFailedQueueRow = (r) => !!r && (r.status === 'failed' || r.failed === true)
-const isOrphanedQueueRow = (r) => !isFailedQueueRow(r) && (r.owner ?? null) === null && !r.synced
 
 // DeptInchargePage — the SCANNING + lists page for a dept_incharge.
 //
@@ -316,14 +317,35 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
   // call and cannot list refreshQueue in its deps.
   useEffect(()=>{ refreshQueue() },[refreshQueue])
 
-  // Unified live/failed queue counts (same filtered definition as
-  // ScannerPage) + the confirmed bulk-delete of live rows only.
-  const pendingCount = queued.filter(q => !q.synced && !isFailedQueueRow(q) && !isOrphanedQueueRow(q)).length
-  const failedCount = queued.filter(isFailedQueueRow).length
-  const clearLive = useCallback(async () => {
-    if (!window.confirm(`Delete ${pendingCount} live queued scan(s)? They have NOT synced — only do this for duplicate or test rows.`)) return
-    await clearLiveQueue(); refreshQueue()
-  }, [refreshQueue, pendingCount])
+  // ONE queue surface for every scanner role (ScannerPage, InchargeScannerPage
+  // and this page): same counts, same failed/orphaned/stranded recoveries,
+  // same confirm before dropping unsynced live rows.
+  const pendingCount = queued.filter((q) => !q.synced && !q.failed).length
+  const isMobile = useIsMobile()
+  const queueBarNode = (
+    <QueueRecoveryBar queued={queued} syncing={syncing} isOnline={isOnline} offline={offline} />
+  )
+  // One popup node, two layouts: the phone shell renders it as a bottom sheet,
+  // the desktop grid renders it centred. Same state, same handlers.
+  const scanPopupNode = (
+    <ScanResultPopup
+      open={!!popup}
+      status={popup?.status}
+      action={popup?.action}
+      badge={popup?.badge}
+      name={popup?.name}
+      centre={popup?.centre}
+      deptName={popup?.deptName}
+      time={popup?.time}
+      message={popup?.message}
+      flag={popup?.flag}
+      openSince={popup?.openSince}
+      outTime={outTime}
+      onOutTimeChange={setOutTime}
+      onClose={closePopup}
+      onConfirm={popup?.status==='forgot' ? confirmForgot : popup?.status==='choose' ? commitScan : closePopup}
+    />
+  )
 
   // Sheet name / filename slug per non-scanning tab. `sheet` labels the export,
   // `slug` names the file — both track the tab so an export is self-describing.
@@ -379,60 +401,7 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
               {isOnline ? 'Online' : 'Offline'}
             </span>
             {offline && <span style={{fontSize:'0.7rem', color:'#b45309'}}>· refresh failed — showing last data</span>}
-            {failedCount > 0 && <button onClick={async ()=>{ await clearFailedQueue(); await clearOrphanedQueue(); refreshQueue() }} style={{fontSize:'0.7rem', color:'#b45309', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear failed scans</button>}
-            {pendingCount > 0 && <button onClick={clearLive} style={{fontSize:'0.7rem', color:'#b45309', background:'none', border:'none', padding:0, cursor:'pointer', textDecoration:'underline'}}>Clear live queued ({pendingCount})</button>}
-            {/* T10 stranded scans: live null-owner rows are invisible to
-                getQueuedScans while logged in and are never drained — surface
-                them here with per-row manual Clear. Never auto-drained or
-                auto-deleted. NOTE: this header block is the only editable
-                region of this file, so the widget is self-contained
-                (callback-ref fetch + dynamic import, no new hooks/imports/
-                state) and re-checks at most every 30s on re-render. */}
-            <span
-              data-t10-stranded
-              ref={(el) => {
-                if (!el) return
-                const last = Number(el.dataset.t10at || 0)
-                if (Date.now() - last < 30000) return
-                el.dataset.t10at = String(Date.now())
-                import('../lib/offlineQueue').then((m) => m.listStrandedQueue()).then((rows) => {
-                  if (!el.isConnected) return
-                  const list = Array.isArray(rows) ? rows : []
-                  el.style.display = list.length ? 'inline-flex' : 'none'
-                  const count = el.querySelector('[data-t10-count]')
-                  if (count) count.textContent = String(list.length)
-                  const box = el.querySelector('[data-t10-rows]')
-                  if (!box) return
-                  while (box.firstChild) box.removeChild(box.firstChild)
-                  const doc = box.ownerDocument
-                  list.forEach((r) => {
-                    const line = doc.createElement('div')
-                    line.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:0.7rem;color:#7f1d1d'
-                    const label = doc.createElement('span')
-                    label.textContent = `${r.badge || '?'} · ${r.action || 'IN'}`
-                    const btn = doc.createElement('button')
-                    btn.textContent = 'Clear'
-                    btn.style.cssText = 'margin-left:auto;font-size:0.7rem;color:#b91c1c;background:none;border:none;padding:0;cursor:pointer;text-decoration:underline'
-                    btn.onclick = async () => {
-                      const mod = await import('../lib/offlineQueue')
-                      await mod.removeQueued(r.id)
-                      line.remove()
-                      const left = box.childElementCount
-                      if (count) count.textContent = String(left)
-                      if (!left) el.style.display = 'none'
-                    }
-                    line.append(label, btn)
-                    box.append(line)
-                  })
-                }).catch(() => {})
-              }}
-              style={{display:'none', flexDirection:'column', gap:4}}
-            >
-              <span className="pill pill-red" style={{fontSize:'0.7rem',display:'inline-flex',alignItems:'center',gap:4}}>
-                <span data-t10-count>0</span>&nbsp;stranded
-              </span>
-              <span data-t10-rows style={{display:'flex', flexDirection:'column', gap:2}} />
-            </span>
+            {queueBarNode}
           </div>
           {myDeptIds.length>1 && <select value={activeDept} onChange={e=>{ setActiveDept(e.target.value); setCentreFilter('') }} className="select" style={{marginTop:6}} aria-label="Filter by department">
             <option value="">All my departments ({myDeptIds.length})</option>
@@ -453,7 +422,23 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
         <button className={`seg-btn ${tab==='absent'?'seg-active':''}`} onClick={()=>setTab('absent')}><UserX size={14}/> Absent ({absentees.length})</button>
       </div>
 
-      {tab==='scan' && (
+      {tab==='scan' && isMobile && (
+        <div className="page" style={{maxWidth:900, margin:'0 auto', padding:0}}>
+          <ScanModeShell
+            title={<><ScanLine size={22}/> Dept Incharge</>}
+            pills={<>{deptLabel} · {schedule?.name||''}</>}
+            camera={<BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />}
+            action={<button onClick={()=>{ handleScan(manualBadge, { manual: true }) }} className="btn btn-primary scan-shell-go" disabled={busy || !manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark</button>}
+            manual={<input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input scan-shell-input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} onKeyDown={e=>{ if(e.key==='Enter'){ handleScan(manualBadge, { manual: true }) } }} />}
+            feedTitle={<div style={{fontWeight:700, display:'flex', alignItems:'center', gap:6}}><Clock size={14}/> My last 10 scans (today)</div>}
+            feed={<MobileScanFeed rows={recentSessions} deptNameById={deptNameById} limit={10} emptyMessage="No scans today" />}
+            queueBar={queueBarNode}
+            popup={scanPopupNode}
+          />
+        </div>
+      )}
+
+      {tab==='scan' && !isMobile && (
         <div style={{display:'grid', gap:12}}>
           <div className="card" style={{padding:'1rem'}}>
             <BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />
@@ -531,23 +516,7 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
         </div>
       )}
 
-      <ScanResultPopup
-        open={!!popup}
-        status={popup?.status}
-        action={popup?.action}
-        badge={popup?.badge}
-        name={popup?.name}
-        centre={popup?.centre}
-        deptName={popup?.deptName}
-        time={popup?.time}
-        message={popup?.message}
-        flag={popup?.flag}
-        openSince={popup?.openSince}
-        outTime={outTime}
-        onOutTimeChange={setOutTime}
-        onClose={closePopup}
-        onConfirm={popup?.status==='forgot' ? confirmForgot : popup?.status==='choose' ? commitScan : closePopup}
-      />
+      {!isMobile && scanPopupNode}
     </div>
   )
 }

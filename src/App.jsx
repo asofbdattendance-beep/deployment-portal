@@ -49,6 +49,9 @@ const InchargeScannerPage = lazy(() => import('./pages/InchargeScannerPage'))
 const ControlPanelPage = lazy(() => import('./pages/ControlPanelPage'))
 const DashboardPage = lazy(() => import('./pages/DashboardPage'))
 const ReportsPage = lazy(() => import('./pages/ReportsPage'))
+// Previously dead code — present in the repo with tests, but neither in PAGES
+// nor in the page switch, so no role could ever open them.
+const LiveScannersPage = lazy(() => import('./pages/LiveScannersPage'))
 const AnomaliesPage = lazy(() => import('./pages/AnomaliesPage'))
 const UsersPage = lazy(() => import('./pages/UsersPage'))
 const PrevisitView = lazy(() => import('./components/PrevisitView'))
@@ -264,7 +267,9 @@ function Dashboard() {
     <div className="app-shell" style={{ display: 'flex', flexDirection: 'column', background: '#f6f7fb' }}>
       {/* ── top bar: brand + schedule dropdown + user ── */}
       <header className="app-header">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', flexShrink: 0, flexWrap: 'wrap' }}>
+        {/* Shrinkable: flexShrink:0 + no min-width made this row refuse to
+            shrink and push the whole document ~64px wide at 320px. */}
+        <div className="app-header-lead">
           <div className="brand-logo">
             <ShieldCheck size={18} />
           </div>
@@ -369,6 +374,7 @@ function Dashboard() {
           {currentPage === 'attendance' && (profile?.role === 'dept_incharge' ? <InchargeScannerPage schedules={schedules} scheduleId={scheduleId} sewaMode={autoSewaMode} /> : sewaMode === SEWA_MODE_PREVISIT ? <PrevisitView schedules={schedules} scheduleId={scheduleId} initialTab="present" /> : <AttendancePage schedules={schedules} scheduleId={scheduleId} />)}
           {currentPage === 'dashboard' && (sewaMode === SEWA_MODE_PREVISIT ? <PrevisitDashboard schedules={schedules} scheduleId={scheduleId} /> : <DashboardPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} />)}
           {currentPage === 'reports' && (sewaMode === SEWA_MODE_PREVISIT ? <PrevisitView schedules={schedules} scheduleId={scheduleId} initialTab="total" /> : <ReportsPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} initialCentre={navFilter?.page === 'reports' ? navFilter?.centre : undefined} />)}
+          {currentPage === 'liveScanners' && <LiveScannersPage schedules={schedules} scheduleId={scheduleId} />}
           {currentPage === 'anomalies' && (sewaMode === SEWA_MODE_PREVISIT ? <PrevisitView schedules={schedules} scheduleId={scheduleId} initialTab="attention" /> : <AnomaliesPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} />)}
           {currentPage === 'control' && <ControlPanelPage schedules={schedules} scheduleId={scheduleId} refreshSchedules={loadSchedules} />}
           {currentPage === 'users' && <UsersPage />}

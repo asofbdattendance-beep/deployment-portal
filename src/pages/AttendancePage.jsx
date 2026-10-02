@@ -13,8 +13,7 @@ import {
   centreOptions,
   deptOptions,
   hasExpectedDays,
-  sessionMinutes,
-  formatDuration,
+  sessionDuration,
   FULL_VISIT_DAYS,
   UNASSIGNED_CENTRE,
   VISIT_DAYS,
@@ -27,6 +26,11 @@ import { useIsMobile } from '../hooks/useMediaQuery'
 import { useExport } from '../hooks/useExport'
 import FilterSheet, { MobileFilterBar } from '../components/mobile/FilterSheet'
 import ExportSheet from '../components/mobile/ExportSheet'
+import PrintPdfButton from '../components/PrintPdfButton'
+import Skeleton from '../components/mobile/Skeleton'
+import PullToRefresh from '../components/mobile/PullToRefresh'
+import VirtualList from '../components/mobile/VirtualList'
+import { SewadarCard, ScannerCard } from '../components/AttendanceCards'
 import {
   ScanLine, Users, Clock, Download, Search, RefreshCw, Loader2,
   AlertTriangle, CheckCircle2, Radio, Lock,
@@ -58,22 +62,6 @@ async function rpcRows(name, params) {
     throw new Error(`${name}: ${msg}`)
   }
   return Array.isArray(data) ? data : []
-}
-
-/**
- * Session duration for a sewadar row: the gap between the first IN and the last
- * OUT across days (L-06: time-only math read Wed 09:00 → Sun 16:00 as "7h").
- * 'still IN' when the last session is open, '—' when there is nothing to
- * measure. This is the consumer that makes `sessionMinutes` / `formatDuration`
- * live code rather than a tested-but-unused pair.
- *
- * @param {object} r a display row from buildSewadarRows
- * @returns {string}
- */
-function sessionDuration(r) {
-  if (!r?.first_in_time) return '—'
-  if (!r.last_out_time) return r.still_open ? 'still IN' : '—'
-  return formatDuration(sessionMinutes(r.first_in_time, r.last_out_time, r.first_in_date, r.last_out_date))
 }
 
 /**
@@ -507,7 +495,13 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   if (loading && !allSewadars.length && !dailyRows.length) {
     return (
       <div className="page" style={{ maxWidth: 1400 }}>
-        <div className="card"><div className="empty"><div className="spin" style={{ width: 24, height: 24, border: '2px solid #e2e8f0', borderTopColor: '#6366f1', borderRadius: '50%', animation: 'spin .6s linear infinite' }} /><div className="empty-text">Loading attendance…</div></div></div>
+        <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', marginBottom: '0.75rem' }}>
+          {[0, 1, 2, 3, 4].map((i) => <Skeleton key={i} variant="kpi" />)}
+        </div>
+        <div className="card" style={{ padding: '1.25rem' }}>
+          <Skeleton variant="table" rows={6} />
+          <div className="empty-text" style={{ marginTop: '0.75rem' }}>Loading attendance…</div>
+        </div>
       </div>
     )
   }
@@ -539,7 +533,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
             may not be permitted to read them. No figures are shown, because none could be loaded.
           </p>
           <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem' }}>
-            <button onClick={load} disabled={loading} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+            <button onClick={load} disabled={loading} className="btn btn-primary">
               {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Retry
             </button>
           </div>
@@ -567,12 +561,13 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
             <span className="pill" title="Attendance is read-only here — scans are recorded on the Scanner and Dept Incharge pages" style={{ background: '#f1f5f9', color: '#64748b', fontWeight: 600 }}>
               <Lock size={12} /> View-only
             </span>
-            <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
+            <button onClick={load} disabled={loading} className="btn btn-ghost">
               {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
             </button>
-            <button onClick={onExportPress} disabled={exporting || mobileExport.building || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+            <button onClick={onExportPress} disabled={exporting || mobileExport.building || !rowsAreCurrent} className="btn btn-primary">
               {exporting || mobileExport.building ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export Excel
             </button>
+            <PrintPdfButton className="btn" />
             {filtering && tab === 'sewadars' && (
               <span className="pill pill-indigo" title="The table and all three Excel sheets show this filtered set">
                 Showing {visible.length} of {allSewadars.length}
@@ -600,7 +595,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
               max={visitWin.end || undefined}
               onChange={(e) => { dateTouchedRef.current = true; setDate(clampDateToWindow(e.target.value, visitWin)) }}
               className="input"
-              style={{ height: 36 }}
+              style={{ minHeight: 44 }}
               aria-label="Scan day"
               aria-invalid={!date || undefined}
             />
@@ -646,6 +641,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
         </div>
       </div>
 
+      <PullToRefresh onRefresh={load} refreshing={loading} disabled={!isMobile}>
       <div className="card" style={{ padding: '1.25rem' }}>
         <div className="section-header" style={{ flexWrap: 'wrap', gap: '0.75rem' }}>
           <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
@@ -657,8 +653,9 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
           </div>
           <div style={{ flex: 1 }} />
           {/* A4: one filter set drives all three tabs, the three tables and all
-              three export sheets, so the tooltip claim can stay honest. */}
-          {filtersNode}
+              three export sheets, so the tooltip claim can stay honest.
+              Mobile shows the sheet version only (no duplicate inline row). */}
+          {!isMobile && filtersNode}
         </div>
         {isMobile && (
           <MobileFilterBar
@@ -680,6 +677,15 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
                 {filtering ? 'Try clearing the filters.' : 'No scans have been recorded for this schedule yet.'}
               </div>
             </div>
+          ) : isMobile ? (
+            // Phone: virtualised cards (same fields as the desktop table).
+            <VirtualList
+              items={visible}
+              estimateSize={132}
+              ariaLabel="Sewadar attendance"
+              empty={null}
+              renderRow={(r) => <SewadarCard r={r} />}
+            />
           ) : (
             <div className="table-wrap table-wrap-sticky">
               <table className="table table-sticky">
@@ -757,7 +763,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
               >
                 <AlertTriangle size={15} />
                 <span><strong>Daily figures</strong> could not be loaded — the Sewadars and Scanner Ops tabs are unaffected.</span>
-                <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.15rem 0.45rem', fontSize: '0.72rem' }}>
+                <button onClick={load} disabled={loading} className="btn btn-ghost">
                   <RefreshCw size={12} /> Retry
                 </button>
               </div>
@@ -809,7 +815,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
                   ))}
                 </tbody>
                 <tfoot>
-                  <tr style={{ fontWeight: 700, background: '#f8fafc' }}>
+                  <tr className="table-total" style={{ fontWeight: 700, background: '#f8fafc' }}>
                     <td data-label="Centre">TOTAL</td>
                     <td data-label="Department">—</td>
                     <td data-label="Expected" style={{ textAlign: 'center' }}>{visibleTotals.expected}</td>
@@ -839,7 +845,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
               >
                 <AlertTriangle size={15} />
                 <span><strong>Scanner activity</strong> could not be loaded — the Sewadars and Daily tabs are unaffected.</span>
-                <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.15rem 0.45rem', fontSize: '0.72rem' }}>
+                <button onClick={load} disabled={loading} className="btn btn-ghost">
                   <RefreshCw size={12} /> Retry
                 </button>
               </div>
@@ -858,6 +864,15 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
                 {filtering ? 'Try clearing the filters.' : `No scans were recorded on ${date}.`}
               </div>
             </div>
+          ) : isMobile ? (
+            // Phone: virtualised cards (same fields as the desktop table).
+            <VirtualList
+              items={visibleScanner}
+              estimateSize={120}
+              ariaLabel="Scanner activity"
+              empty={null}
+              renderRow={(r) => <ScannerCard r={r} />}
+            />
           ) : (
             <div className="table-wrap">
               <table className="table">
@@ -896,6 +911,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
           </>
         )}
       </div>
+      </PullToRefresh>
 
       <FilterSheet
         open={isMobile && filtersOpen}

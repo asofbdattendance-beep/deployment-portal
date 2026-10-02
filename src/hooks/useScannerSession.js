@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase'
 import { getQueuedScans, installDrainListeners } from '../lib/offlineQueue'
 import { useScanHandler } from './useScanHandler'
 import { isDecisionPopup, resolveForgotOutTime } from '../lib/scannerUtils'
+import { vibrate } from '../lib/mobile'
 
 /**
  * useScannerSession — the scan-session bundle shared by ScannerPage and
@@ -50,6 +51,17 @@ export function useScannerSession({
     // instead of hanging until the next scan replaces it (L-48). `error`
     // deliberately stays: those paths ask the operator to retry the scan.
     if (data.status === 'in' || data.status === 'out' || data.status === 'flagged' || data.status === 'queued') {
+      // Haptic confirmation, keyed to the outcome so a glance-free operator
+      // still knows what happened. Skipped when the OS asks for reduced
+      // motion, and a no-op where the Vibration API is absent.
+      try {
+        if (typeof window !== 'undefined'
+          && !(typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches)) {
+          if (data.status === 'flagged') vibrate([30, 40, 30])
+          else if (data.status === 'queued') vibrate(15)
+          else vibrate(40)
+        }
+      } catch { /* ignore */ }
       dismissTimerRef.current = setTimeout(() => setPopup(null), 2500)
     }
   }, [scheduleId])
