@@ -172,7 +172,16 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const engineReadyAtRef = useRef(0)      // when detection first became possible
   const anyDecodeRef = useRef(false)      // has a raw value EVER been decoded?
   const startTimeRef = useRef(Date.now())
-  const pausedRef = useRef(false)
+  // V8: the single paused flag is split in two. A visibility pause (hidden
+  // tab) and a decision pause (confirm/forgot popup via pause()/resume()) are
+  // independent: a visibility resume or a startScanner restart must never clear
+  // a decision pause, and a decision resume must not restart the loop while the
+  // tab is hidden. loopGenRef is the decode-chain generation — pause, restart
+  // and resume bump it so an in-flight decode pass (which captured the old
+  // generation) walks away instead of arming a second permanent chain.
+  const visibilityPausedRef = useRef(false)
+  const decisionPausedRef = useRef(false)
+  const loopGenRef = useRef(0)
   const channelRef = useRef(null)
   const isLeaderRef = useRef(true)
   const leaderClaimRef = useRef(0)
@@ -253,10 +262,15 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
 
       const now = Date.now()
       if (lastScanRef.current.badge === raw && now - lastScanRef.current.time < 2000) break
-      lastScanRef.current = { badge: raw, time: now }
       try { navigator.vibrate?.(80) } catch {}
       pushDebug(`SCAN OK [${engine}]: ${raw}`)
-      onScanRef.current?.(raw)
+      // Camera-suppressor contract (see the busy guard in useScanHandler.js):
+      // the suppressor records only on ACCEPTANCE. A declined scan (the
+      // handler returned exactly `false` — busy or decision-pending) never
+      // ran, so burning the 2s window on it would swallow the retry as a
+      // duplicate. Any other return (undefined, true, a promise) records.
+      const accepted = onScanRef.current?.(raw)
+      if (accepted !== false) lastScanRef.current = { badge: raw, time: now }
       break
     }
   }, [debugOn, pushDebug, updateWindow])
@@ -279,8 +293,9 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   // ─── Detection loop ─────────────────────────────────────────────────
 
   const detectLoop = useCallback(async () => {
-    if (!mountedRef.current || pausedRef.current) return
+    if (!mountedRef.current || visibilityPausedRef.current || decisionPausedRef.current) return
     const session = sessionRef.current
+    const gen = loopGenRef.current
     const video = videoRef.current
     if (!video) return
 
@@ -320,9 +335,13 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     detectMsRef.current.avg = detectMsRef.current.avg ? detectMsRef.current.avg * 0.8 + elapsedMs * 0.2 : elapsedMs
 
     // A newer session took over while we were decoding — drop the result.
+    // A newer generation (pause/restart/resume bumped loopGenRef mid-decode)
+    // means this pass is stale: walk away so only the newest chain arms.
     if (!isCurrent(session) || !mountedRef.current) return
-    // Hidden while decoding: hand control back to the visibility handler.
-    if (pausedRef.current) return
+    if (gen !== loopGenRef.current) return
+    // Paused while decoding (hidden tab or decision popup): hand control back
+    // to whoever owns the pause instead of arming another pass.
+    if (visibilityPausedRef.current || decisionPausedRef.current) return
 
     fpsRef.current.frames++
     if (Date.now() - fpsRef.current.last > 1000) {
@@ -364,12 +383,12 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     // it, a 200ms decode on a slow phone would re-fire the instant it finished
     // and starve the UI thread.
     function scheduleNext(detectMs = 0) {
-      if (!isCurrent(session) || !mountedRef.current || pausedRef.current) return
+      if (!isCurrent(session) || !mountedRef.current || visibilityPausedRef.current || decisionPausedRef.current || gen !== loopGenRef.current) return
       const c = configRef.current
       const wait = Math.max(c.minInterval, Math.min(c.maxInterval, (detectMs || 0) / 0.5))
       frameApiRef.current = 'timeout'
       frameHandleRef.current = setTimeout(() => {
-        if (!isCurrent(session) || !mountedRef.current || pausedRef.current) { frameHandleRef.current = null; return }
+        if (!isCurrent(session) || !mountedRef.current || visibilityPausedRef.current || decisionPausedRef.current || gen !== loopGenRef.current) { frameHandleRef.current = null; return }
         const v = videoRef.current
         if (v && typeof v.requestVideoFrameCallback === 'function') {
           frameApiRef.current = 'rvfc'
@@ -377,14 +396,14 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
           // and this callback would otherwise leave two permanent chains.
           frameHandleRef.current = v.requestVideoFrameCallback(() => {
             frameHandleRef.current = null
-            if (!isCurrent(session) || !mountedRef.current || pausedRef.current) return
+            if (!isCurrent(session) || !mountedRef.current || visibilityPausedRef.current || decisionPausedRef.current || gen !== loopGenRef.current) return
             detectLoop()
           })
         } else {
           frameApiRef.current = 'raf'
           frameHandleRef.current = requestAnimationFrame(() => {
             frameHandleRef.current = null
-            if (!isCurrent(session) || !mountedRef.current || pausedRef.current) return
+            if (!isCurrent(session) || !mountedRef.current || visibilityPausedRef.current || decisionPausedRef.current || gen !== loopGenRef.current) return
             detectLoop()
           })
         }
@@ -561,7 +580,12 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     if (reclaim) isLeaderRef.current = true
     const session = ++sessionRef.current   // any previous run is now stale
     cancelFrame()                          // reclaim the old chain's frame slot
-    pausedRef.current = false
+    loopGenRef.current++                   // invalidate any in-flight decode pass
+    // V8: only the visibility pause is cleared by a (re)start. A decision
+    // pause (confirm/forgot popup open) survives the restart and is re-asserted
+    // after the preview is live, so the restart cannot silently resume scanning
+    // behind the operator's pending question.
+    visibilityPausedRef.current = false
     // Fresh detection state (L-20): a Retry/restart must not inherit the
     // previous run's 2s duplicate-suppressor, its last-raw pill, its sliding
     // window, or its watchdog clock — otherwise the first post-restart scan
@@ -677,6 +701,13 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       await video.play()
     } catch {
       if (!isCurrent(session)) { if (!mountedRef.current) stopStream(stream); return }
+      // V8: a rejected play() leaves the track live with a black preview and
+      // the camera LED on — release the stream through the teardown path
+      // before surfacing the error, so Retry starts from a clean slate.
+      stopStream(stream)
+      streamRef.current = null
+      trackRef.current = null
+      try { video.srcObject = null } catch {}
       setStatus('error'); setErrorMsg('Could not start video playback — tap Retry')
       return
     }
@@ -703,8 +734,14 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       }).catch(() => {})
     }
 
-    // Start looping immediately; the loop waits for the engine on its own.
-    detectLoop()
+    // Start looping immediately — unless a decision popup is open, in which
+    // case re-assert the pause: the preview goes live but no decode chain is
+    // armed until resume() answers the pending question.
+    if (decisionPausedRef.current) {
+      cancelFrame()
+    } else {
+      detectLoop()
+    }
 
     // ── 3. Engines in the background — never block the preview.
     ensureEngines(session)
@@ -726,24 +763,32 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   useEffect(() => {
     const onVisibility = async () => {
       if (document.visibilityState === 'hidden') {
-        pausedRef.current = true
+        visibilityPausedRef.current = true
+        loopGenRef.current++
         cancelFrame()
         return
       }
       if (!mountedRef.current) return
-      pausedRef.current = false
+      visibilityPausedRef.current = false
+      // A decision popup open across the hide/show cycle keeps the loop
+      // halted — the visibility resume must not clear the decision pause.
+      if (decisionPausedRef.current) { cancelFrame(); return }
 
       if (!isStreamLive(streamRef.current)) { startScanner(); return }
 
       // Resume ONLY if no loop is already scheduled. The in-flight pass, if
-      // any, re-arms itself via scheduleNext once pausedRef clears — without
-      // this guard we'd end up with two permanent decode chains.
+      // any, carries the pre-hide generation and walks away once it finishes —
+      // without this guard we'd end up with two permanent decode chains.
       if (frameHandleRef.current != null) return
+      // New generation: any decode pass still in flight from before the hide
+      // captured the old generation and walks away instead of re-arming, so
+      // the chain armed below is the only one.
+      loopGenRef.current++
 
       const video = videoRef.current
       if (video) { try { await video.play() } catch {} }
       if (trackRef.current) { try { await applyFocusConstraints(trackRef.current) } catch {} }
-      if (mountedRef.current && !pausedRef.current && isStreamLive(streamRef.current)) detectLoop()
+      if (mountedRef.current && !visibilityPausedRef.current && !decisionPausedRef.current && isStreamLive(streamRef.current)) detectLoop()
     }
     document.addEventListener('visibilitychange', onVisibility)
     return () => document.removeEventListener('visibilitychange', onVisibility)
@@ -756,16 +801,28 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     // actually halts. pause() stops scheduling (the preview keeps its last
     // frame, the stream stays live); resume() restarts the loop only when no
     // chain is already scheduled, mirroring the visibility handler, and
-    // re-opens the camera when the stream died while paused.
-    pause: () => { pausedRef.current = true; cancelFrame() },
+    // re-opens the camera when the stream died while paused. V8: pause() sets
+    // the DECISION pause only (never the visibility one), and resume() clears
+    // just that flag — resuming while the tab is hidden leaves the loop halted
+    // for the visibility handler. Both bump the loop generation and resume()
+    // re-checks the session token, so an in-flight decode pass can never arm a
+    // second chain alongside the resumed one.
+    pause: () => { decisionPausedRef.current = true; loopGenRef.current++; cancelFrame() },
     resume: () => {
-      pausedRef.current = false
+      const session = sessionRef.current
+      decisionPausedRef.current = false
       if (!mountedRef.current) return
+      if (!isCurrent(session)) return
+      // Hidden tab: leave the loop halted; the visibility handler restarts it
+      // on return (and re-checks the decision flag there).
+      if (visibilityPausedRef.current) return
       if (!isStreamLive(streamRef.current)) { startScanner(); return }
       if (frameHandleRef.current != null) return
+      loopGenRef.current++
+      if (!isCurrent(session) || visibilityPausedRef.current || decisionPausedRef.current) return
       detectLoop()
     },
-  }), [startScanner, teardown, cancelFrame, detectLoop])
+  }), [startScanner, teardown, cancelFrame, detectLoop, isCurrent])
 
   // ─── Error State ────────────────────────────────────────────────────
 

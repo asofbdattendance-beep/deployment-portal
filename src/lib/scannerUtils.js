@@ -222,6 +222,14 @@ const HHMM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/
  *  - malformed value  → `invalid: true`; callers keep their own "Pick a valid
  *                       OUT time" rejection and MUST check it before using `ts`
  *
+ * Cross-midnight: the forgot prompt only fires past 12h and carries no date
+ * input, so an HH:MM earlier than the IN wall-time is the NEXT day's
+ * occurrence — otherwise a true post-midnight OUT is written on the IN's
+ * date, crediting the wrong day under the event-date law. The roll applies
+ * only when that next-day occurrence has already happened (≤ now); a
+ * next-day occurrence still in the future keeps the same-day candidate and
+ * the existing floor/future clamp decides.
+ *
  * When the window is empty (`in_time + 1min > now` — the IN is itself ahead of
  * this device's clock) the floor wins: order-validity is the hard server
  * constraint, while recency only trips the 5-minute DB guard this device is
@@ -232,7 +240,8 @@ const HHMM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/
  * @param {string} [o.inTime] — HH:MM[:SS], the open session's `in_time`
  * @param {string|null} [o.value] — operator-entered "HH:MM"; null = pre-fill
  * @param {number} [o.nowMs]
- * @returns {{value: string, ts: number, clamped: 'future'|'before_in'|null, invalid: boolean}}
+ * @returns {{value: string, ts: number, clamped: 'future'|'before_in'|null, invalid: boolean, outDate: string}}
+ *   `outDate` is the resolved OUT's YYYY-MM-DD in IST (may be inDate + 1).
  */
 export function resolveForgotOutTime({ inDate, inTime = null, value = null, nowMs = Date.now() } = {}) {
   const inTs = inDate && inTime ? Date.parse(`${inDate}T${inTime}+05:30`) : NaN
@@ -245,8 +254,41 @@ export function resolveForgotOutTime({ inDate, inTime = null, value = null, nowM
 
   const m = HHMM_RE.exec(String(value ?? '').trim())
   const invalid = value != null && value !== '' && !m
-  const [ts, clamped] = bound(m && inDate ? Date.parse(`${inDate}T${m[1]}:${m[2]}:00+05:30`) : hi)
-  return { value: hhmmIST(new Date(ts)), ts, clamped, invalid }
+  let cand = m && inDate ? Date.parse(`${inDate}T${m[1]}:${m[2]}:00+05:30`) : NaN
+  if (Number.isFinite(cand) && Number.isFinite(inTs) && cand < inTs && cand + 86400000 <= hi) {
+    cand += 86400000
+  }
+  const [ts, clamped] = bound(Number.isFinite(cand) ? cand : hi)
+  return { value: hhmmIST(new Date(ts)), ts, clamped, invalid, outDate: todayStrIST(new Date(ts)) }
+}
+
+// ─── isTimestampStale (V14: client clock-skew budget) ─────────────────────────
+/**
+ * Server-matching clock-skew budgets. `scan_in`/`scan_out` (v26/v46) raise
+ * 'Timestamp cannot be in the future' past now()+5min and 'Timestamp too old'
+ * before now()-30d — both STRICT comparisons, so the boundary itself is
+ * still accepted server-side and must read as fresh here too.
+ */
+export const CLOCK_SKEW_FUTURE_MS = 5 * 60 * 1000
+export const CLOCK_SKEW_MAX_AGE_MS = 30 * 24 * 3600 * 1000
+
+/**
+ * Is a scan timestamp outside the window the server will accept?
+ *
+ * Pure pre-check used to translate a clock-skew rejection into the
+ * 'Device clock looks wrong' warning (V14) — and to double-check an outgoing
+ * ts against the same budget before it is sent. Warn-only: it never rewrites
+ * the timestamp (unlike resolveForgotOutTime, which clamps operator input
+ * into the legal window). A non-finite ts (unknown, never a skew proof) or
+ * nowMs reads as fresh so a missing value can never strand a scan.
+ *
+ * @param {number} tsMs — epoch ms under test (e.g. Date.parse(ts))
+ * @param {number} [nowMs]
+ * @returns {boolean} true = more than 5 min in the future, or more than 30 days old
+ */
+export function isTimestampStale(tsMs, nowMs = Date.now()) {
+  if (!Number.isFinite(tsMs) || !Number.isFinite(nowMs)) return false
+  return tsMs > nowMs + CLOCK_SKEW_FUTURE_MS || tsMs < nowMs - CLOCK_SKEW_MAX_AGE_MS
 }
 
 // ─── isSecureCameraContext ─────────────────────────────────────────────────────

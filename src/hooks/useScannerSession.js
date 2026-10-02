@@ -41,28 +41,56 @@ export function useScannerSession({
   const closePopup = useCallback(() => setPopup(null), [])
   const showPopup = useCallback((data) => {
     if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current)
-    setPopup(data)
+    // V15: the popup belongs to the schedule it was scanned under — stamping
+    // it lets the confirm paths refuse a stale popup after a schedule switch.
+    // A caller-supplied stamp wins (spread last) so a stale popup keeps its
+    // original schedule instead of being re-keyed to the new one.
+    setPopup(data && typeof data === 'object' ? { scheduleId, ...data } : data)
     // `queued` is a transient ack like in/out/flagged — it dismisses itself
     // instead of hanging until the next scan replaces it (L-48). `error`
     // deliberately stays: those paths ask the operator to retry the scan.
     if (data.status === 'in' || data.status === 'out' || data.status === 'flagged' || data.status === 'queued') {
       dismissTimerRef.current = setTimeout(() => setPopup(null), 2500)
     }
-  }, [])
+  }, [scheduleId])
+
+  // V15: a schedule switch clears a stale decision popup (and any re-scan
+  // timer) so Confirm can never write the old badge against the new schedule.
+  // The confirm paths below re-check the stamp as defense in depth.
+  const scheduleIdRef = useRef(scheduleId)
+  useEffect(() => {
+    if (scheduleIdRef.current === scheduleId) return
+    scheduleIdRef.current = scheduleId
+    if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current)
+    if (followUpRef.current) clearTimeout(followUpRef.current)
+    setPopup(null)
+    setOutTime('')
+  }, [scheduleId])
 
   // L-44: queue progress owns the syncing flag — a draining queue shows the
   // spinner instead of a static WifiOff. Raised here (rows pending), lowered
-  // by onDrainProgress (queue clean).
+  // by onDrainProgress (queue clean). V16: assign the flag from the pending
+  // count (not raise-only) so the spinner reliably clears when the queue
+  // empties instead of sticking on after a drain.
   const refreshQueue = useCallback(() => getQueuedScans()
     .then(q => {
-      setQueued(q || [])
-      if ((q || []).some(x => !x.synced && !x.failed)) setSyncing(true)
+      const list = Array.isArray(q) ? q : []
+      setQueued(list)
+      setSyncing(list.some(x => !x.synced && !x.failed))
     })
     .catch(e => console.warn('[Scanner] queue refresh failed:', e?.message)), [])
 
   const onDrainProgress = useCallback(() => {
-    // Called per queued item — refresh queue count after each sync
-    getQueuedScans().then(q => { setQueued(q); if (!q.some(x => !x.synced && !x.failed)) setSyncing(false) })
+    // Called per queued item — refresh queue count after each sync.
+    // V15: the drain fires per item on a background subscription; a failing
+    // IndexedDB read must not surface as an unhandled rejection.
+    getQueuedScans()
+      .then(q => {
+        const list = Array.isArray(q) ? q : []
+        setQueued(list)
+        if (!list.some(x => !x.synced && !x.failed)) setSyncing(false)
+      })
+      .catch(e => console.warn('[Scanner] drain progress refresh failed:', e?.message))
   }, [])
 
   useEffect(() => {
@@ -74,7 +102,7 @@ export function useScannerSession({
     }
   }, [onDrainProgress])
 
-  const { handleScan: rawHandleScan, busy, resetBusy, submitForgotOut } = useScanHandler({
+  const { handleScan: rawHandleScan, busy, getBusy, resetBusy, submitForgotOut } = useScanHandler({
     scheduleId,
     profile,
     deptName,
@@ -86,6 +114,15 @@ export function useScannerSession({
   })
 
   const handleScan = useCallback(async (badge, scanOpts) => {
+    // V15: a scan (camera OR manual) must not silently replace an open
+    // decision popup — the operator's Confirm click is aimed at the dialog
+    // they see, and swapping it underneath writes the wrong sewadar. Confirmed
+    // follow-ups (confirmScan / confirmForgot's follow-up IN) carry
+    // `confirmed: true` and bypass this gate.
+    if (!scanOpts?.confirmed && isDecisionPopup(popup?.status)) {
+      toast.warning('Answer the pending prompt first — scan paused')
+      return { ok: false, reason: 'decision-pending' }
+    }
     if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current)
     const result = await rawHandleScan(badge, scanOpts)
     if (result?.outTimeDefault) setOutTime(result.outTimeDefault)
@@ -93,21 +130,33 @@ export function useScannerSession({
     // so the user can retry without retyping. A `confirm_required` return is
     // neither: the operator still has a popup to answer.
     if (result?.ok || result?.outTimeDefault) clearManual?.()
-  }, [rawHandleScan, clearManual])
+    // T11(b): the forgot-OUT follow-up inspects this result — a wrapper that
+    // swallows it would turn a busy-dropped re-IN into a silent success.
+    return result
+  }, [rawHandleScan, clearManual, popup, toast])
 
   // The camera fires on its own — a second badge scanned behind an open
   // decision popup must not silently replace the question the operator is
   // answering (their Confirm click is aimed at the dialog they see). While a
   // confirm/forgot popup is open, camera scans are dropped with a hint;
-  // answering it resumes the camera. Manual entry is deliberately NOT gated —
-  // it is a deliberate act, and it stays available as the escape hatch.
+  // answering it resumes the camera. V15: manual entry is gated the same way
+  // (inside handleScan) — it used to be the deliberate escape hatch, but a
+  // manual submit equally swapped the dialog underneath the Confirm click.
   const handleCameraScan = useCallback((code) => {
     if (isDecisionPopup(popup?.status)) {
       toast.warning('Answer the pending prompt first — camera paused')
-      return
+      return false
     }
-    handleScan(code)
-  }, [popup, handleScan, toast])
+    // T11(a) camera-suppressor contract (see the busy guard in
+    // useScanHandler.js): the decline must read as declined SYNCHRONOUSLY —
+    // BarcodeScanner records its 2s suppressor only when this did NOT return
+    // `false`. Anything else (a promise, true) is acceptance.
+    if (getBusy()) {
+      toast.warning('Scanner busy — retry this badge')
+      return false
+    }
+    return handleScan(code)
+  }, [popup, handleScan, toast, getBusy])
 
   // v44 — Confirm on a toggle gate. `confirmFor` scopes the approval to the
   // direction the question was asked about, and `openId` pins an OUT to the
@@ -119,16 +168,30 @@ export function useScannerSession({
   const confirmScan = useCallback(async () => {
     const p = popup
     if (!p) return
+    // V15: a popup that survived a schedule switch must never write against
+    // the new schedule — drop it loudly instead of confirming.
+    if (p.scheduleId && p.scheduleId !== scheduleId) {
+      toast.warning('Schedule changed — scan the badge again')
+      setPopup(null)
+      return
+    }
     await handleScan(p.badge, {
       confirmed: true,
       confirmFor: p.status === 'confirm_out' ? 'OUT' : 'IN',
       openId: p.openId || null,
       display: { name: p.name, centre: p.centre, deptName: p.deptName },
     })
-  }, [popup, handleScan])
+  }, [popup, handleScan, scheduleId, toast])
 
   const confirmForgot = useCallback(async () => {
     if (!popup || popup.status !== 'forgot') return
+    // V15: same schedule-stamp guard as confirmScan — a stale forgot form must
+    // never close a session on the new schedule.
+    if (popup.scheduleId && popup.scheduleId !== scheduleId) {
+      toast.warning('Schedule changed — scan the badge again')
+      setPopup(null)
+      return
+    }
     // Format, then range/order vs IN. The regex alone let a future or pre-IN
     // time through to a scan_out that raises ('OUT time must be after IN time',
     // v41) or writes a session that can never be closed.
@@ -152,10 +215,27 @@ export function useScannerSession({
     // `confirmFor: 'IN'` — the operator already decided this OUT, and the next
     // entry is the fresh IN. Scoped to 'IN' so the approval cannot also
     // authorise closing a session that appeared in the 200ms window.
+    // T11(b): the follow-up result MUST be inspected (see the V7 contract in
+    // useScanHandler.js) — a re-IN racing an inflight scan is dropped as
+    // `{ ok: false, reason: 'busy' }`, and showing nothing would leave the OUT
+    // without its IN while the operator saw success.
     if (followUpRef.current) clearTimeout(followUpRef.current)
     const badge = popup.badge
-    followUpRef.current = setTimeout(() => handleScan(badge, { confirmed: true, confirmFor: 'IN' }), 200)
-  }, [popup, outTime, toast, submitForgotOut, forgotSuccessToast, handleScan])
+    followUpRef.current = setTimeout(() => {
+      ;(async () => {
+        let r
+        try {
+          r = await handleScan(badge, { confirmed: true, confirmFor: 'IN' })
+        } catch {
+          r = { ok: false }
+        }
+        if (r && r.ok === false) {
+          showPopup({ status: 'error', badge, message: 'follow-up IN did not land — re-scan', time: new Date().toLocaleTimeString() })
+          toast.warning('follow-up IN did not land — re-scan')
+        }
+      })()
+    }, 200)
+  }, [popup, outTime, toast, submitForgotOut, forgotSuccessToast, handleScan, scheduleId, showPopup])
 
   // L-46: make "camera paused" true. While a decision prompt is open the
   // decode loop halts (the preview keeps its last frame); resolving the

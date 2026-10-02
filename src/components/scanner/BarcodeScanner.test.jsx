@@ -358,4 +358,106 @@ describe('BarcodeScanner camera session lifecycle', () => {
       vi.useRealTimers()
     }
   })
+
+  // V8(a): a rejected video.play() used to leave the track live with a black
+  // preview and the camera LED on — the error path never released the stream.
+  // The start path must stop the stream (LED releases) before erroring, so a
+  // Retry starts from a clean slate.
+  it('stops the stream when video.play() rejects (no orphaned camera LED)', async () => {
+    const stream = makeStream()
+    mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+    window.HTMLMediaElement.prototype.play.mockRejectedValueOnce(new Error('play failed'))
+
+    const { getByText, getByRole } = render(<BarcodeScanner onScan={vi.fn()} />)
+    await flush()
+
+    expect(stream.track.stop).toHaveBeenCalled()
+    expect(getByText(/could not start video playback/i)).toBeTruthy()
+    expect(getByRole('button', { name: /retry/i })).toBeTruthy()
+  })
+
+  // V8(b): the decision pause (confirm/forgot popup open) must survive a
+  // restart — startScanner and the visibility resume must never clear it, or
+  // the restart silently resumes scanning behind the operator's pending
+  // question. Re-asserted after the restart; resume() releases it.
+  it('a restart while decision-paused stays paused until resume()', async () => {
+    const realSetTimeout = setTimeout
+    const realYield = () => new Promise(r => realSetTimeout(r, 0))
+    vi.useFakeTimers()
+    try {
+      const stream = makeStream()
+      mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+      let decodeCalls = 0
+      window.BarcodeDetector = class {
+        static getSupportedFormats = () => Promise.resolve(['code_39'])
+        detect = () => { decodeCalls++; return Promise.resolve([]) }
+      }
+      let ref = null
+      const { container } = render(<BarcodeScanner ref={(r) => { ref = r }} onScan={vi.fn()} />)
+      const video = container.querySelector('video')
+      Object.defineProperty(video, 'videoWidth', { value: 1280, configurable: true })
+      Object.defineProperty(video, 'videoHeight', { value: 720, configurable: true })
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(800); await realYield() })
+      expect(decodeCalls).toBeGreaterThan(0)
+
+      // Decision popup opens → pause; then a restart (Retry) happens behind it.
+      await act(async () => { ref.pause(); await realYield() })
+      const frozen = decodeCalls
+      await act(async () => { ref.restart(); await vi.advanceTimersByTimeAsync(800); await realYield() })
+      expect(decodeCalls).toBe(frozen)
+
+      // Answering the popup resumes the single chain — no second chain, so the
+      // count grows but a further resume() without pause adds nothing extra.
+      await act(async () => { ref.resume(); await vi.advanceTimersByTimeAsync(800); await realYield() })
+      expect(decodeCalls).toBeGreaterThan(frozen)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// T11(a): the 2s duplicate suppressor records only on handler acceptance.
+// A declined scan (handler returned exactly `false` — busy/decision-pending
+// per the useScanHandler contract) never ran, so the immediate retry must be
+// accepted, not swallowed as a duplicate.
+describe('BarcodeScanner camera suppressor acceptance (T11)', () => {
+  async function renderDetectingBadge(onScan) {
+    const stream = makeStream()
+    mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+    window.BarcodeDetector = class {
+      static getSupportedFormats = () => Promise.resolve(['code_39'])
+      detect = () => Promise.resolve([{ rawValue: 'FB5971GA0001', cornerPoints: [] }])
+    }
+    const view = render(<BarcodeScanner onScan={onScan} />)
+    const video = view.container.querySelector('video')
+    Object.defineProperty(video, 'videoWidth', { value: 1280, configurable: true })
+    Object.defineProperty(video, 'videoHeight', { value: 720, configurable: true })
+    return view
+  }
+
+  it('a declined scan does not arm the suppressor — the retry is accepted', async () => {
+    vi.useFakeTimers()
+    try {
+      const onScan = vi.fn(() => false)
+      renderDetectingBadge(onScan)
+      await act(async () => { await vi.advanceTimersByTimeAsync(800) })
+      // Every confirmed frame re-offers the badge: nothing was ever recorded.
+      expect(onScan.mock.calls.length).toBeGreaterThan(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('an accepted scan still suppresses immediate duplicates', async () => {
+    vi.useFakeTimers()
+    try {
+      const onScan = vi.fn() // undefined return = accepted
+      renderDetectingBadge(onScan)
+      await act(async () => { await vi.advanceTimersByTimeAsync(800) })
+      expect(onScan).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { withTimeout, friendly, todayStrIST, hhmmIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, withinToggleGuard, minutesSince, SCAN_TOGGLE_GUARD_MS, isDecisionPopup, isEdgeDetection } from './scannerUtils'
+import { withTimeout, friendly, todayStrIST, hhmmIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, withinToggleGuard, minutesSince, SCAN_TOGGLE_GUARD_MS, isDecisionPopup, isEdgeDetection, isTimestampStale, CLOCK_SKEW_FUTURE_MS, CLOCK_SKEW_MAX_AGE_MS } from './scannerUtils'
 
 afterEach(() => { vi.useRealTimers() })
 
@@ -175,6 +175,44 @@ describe('resolveForgotOutTime', () => {
       expect(r.ts).toBeGreaterThan(inTs)
       expect(r.ts).toBeLessThanOrEqual(NOW.getTime())
     }
+  })
+  // T7: a true post-midnight OUT must credit the next day, not the IN's date.
+  // IN 2026-10-01 09:00 IST, now 2026-10-02 10:00 IST (forgot context, >12h).
+  // NOTE: the issued spec wrote "enter 18:00" here, but 18:00 is AFTER the
+  // 09:00 IN so it never rolls — it stays on the IN day by design (pinned
+  // below). The roll fires for a wall time BEFORE the IN time: 08:00.
+  it('rolls a pre-IN wall time to the next day, accepted unclamped', () => {
+    const nowMs = Date.parse('2026-10-02T10:00:00+05:30')
+    const r = resolveForgotOutTime({ inDate: '2026-10-01', inTime: '09:00:00', value: '08:00', nowMs })
+    expect(r.invalid).toBe(false)
+    expect(r.clamped).toBeNull()
+    expect(r.outDate).toBe('2026-10-02')
+    expect(r.value).toBe('08:00')
+    expect(r.ts).toBe(Date.parse('2026-10-02T08:00:00+05:30'))
+  })
+  it('keeps an evening wall time on the IN day (after IN — no roll)', () => {
+    const nowMs = Date.parse('2026-10-02T10:00:00+05:30')
+    const r = resolveForgotOutTime({ inDate: '2026-10-01', inTime: '09:00:00', value: '18:00', nowMs })
+    expect(r.invalid).toBe(false)
+    expect(r.clamped).toBeNull()
+    expect(r.outDate).toBe('2026-10-01')
+    expect(r.ts).toBe(Date.parse('2026-10-01T18:00:00+05:30'))
+  })
+  it('clamps before_in when the next-day occurrence has not happened yet', () => {
+    const nowMs = Date.parse('2026-10-01T10:00:00+05:30')
+    const r = resolveForgotOutTime({ inDate: '2026-10-01', inTime: '09:00:00', value: '08:00', nowMs })
+    expect(r.invalid).toBe(false)
+    expect(r.clamped).toBe('before_in')
+    expect(r.value).toBe('09:01')
+    expect(r.outDate).toBe('2026-10-01')
+  })
+  it('clamps a future wall time to now', () => {
+    const nowMs = Date.parse('2026-10-01T10:00:00+05:30')
+    const r = resolveForgotOutTime({ inDate: '2026-10-01', inTime: '09:00:00', value: '18:00', nowMs })
+    expect(r.invalid).toBe(false)
+    expect(r.clamped).toBe('future')
+    expect(r.value).toBe('10:00')
+    expect(r.ts).toBe(nowMs)
   })
 })
 
@@ -448,5 +486,54 @@ describe('isEdgeDetection', () => {
     expect(isEdgeDetection(undefined, full, 1280, 720)).toBe(false)
     expect(isEdgeDetection([{ x: 0, y: 0 }], full, 1280, 720)).toBe(false)
     expect(isEdgeDetection([{ x: 0, y: 200 }, { x: 8, y: 200 }], full, 0, 720)).toBe(false)
+  })
+})
+
+/* ─── isTimestampStale (V14: client clock-skew budget) ─── */
+// Mirrors the server guards (v26/v46: future beyond now()+5min raises
+// 'Timestamp cannot be in the future'; older than now()-30d raises
+// 'Timestamp too old'). The hook uses it to surface 'Device clock looks
+// wrong' instead of the raw server text — without changing sent values.
+describe('isTimestampStale (V14 clock-skew budget)', () => {
+  const NOW = 1_757_000_000_000
+  const MIN = 60_000
+  const DAY = 24 * 3600_000
+
+  it('exposes the server-matching budgets as constants', () => {
+    expect(CLOCK_SKEW_FUTURE_MS).toBe(5 * MIN)
+    expect(CLOCK_SKEW_MAX_AGE_MS).toBe(30 * DAY)
+  })
+
+  it('V14 flags a timestamp more than 5 min in the future as stale', () => {
+    expect(isTimestampStale(NOW + 5 * MIN + 1, NOW)).toBe(true)
+    expect(isTimestampStale(NOW + 3600_000, NOW)).toBe(true)
+  })
+
+  it('V14 accepts exactly +5 min (server leeway is inclusive: only > raises)', () => {
+    expect(isTimestampStale(NOW + 5 * MIN, NOW)).toBe(false)
+    expect(isTimestampStale(NOW, NOW)).toBe(false)
+    expect(isTimestampStale(NOW - 1000, NOW)).toBe(false)
+  })
+
+  it('V14 flags a timestamp more than 30 days old as stale', () => {
+    expect(isTimestampStale(NOW - 30 * DAY - 1, NOW)).toBe(true)
+    expect(isTimestampStale(NOW - 60 * DAY, NOW)).toBe(true)
+  })
+
+  it('V14 accepts exactly -30 days (server floor is inclusive: only < raises)', () => {
+    expect(isTimestampStale(NOW - 30 * DAY, NOW)).toBe(false)
+    expect(isTimestampStale(NOW - 29 * DAY, NOW)).toBe(false)
+  })
+
+  it('V14 never flags an unknown timestamp — a missing ts must not strand a scan', () => {
+    for (const bad of [NaN, undefined, null, Infinity, 'x']) {
+      expect(isTimestampStale(bad, NOW)).toBe(false)
+    }
+    expect(isTimestampStale(NOW, NaN)).toBe(false)
+  })
+
+  it('V14 honours an explicit nowMs instead of the wall clock', () => {
+    expect(isTimestampStale(1_000_000, 2_000_000)).toBe(false)
+    expect(isTimestampStale(2_000_000 + 5 * MIN + 1, 2_000_000)).toBe(true)
   })
 })

@@ -152,7 +152,7 @@ describe('useScannerSession bundle', () => {
   it('forgot confirm online celebrates, closes, and follows up with the IN', async () => {
     vi.useFakeTimers(); vi.setSystemTime(NOW)
     try {
-      rpc.mockResolvedValueOnce({ data: { ok: true }, error: null }) // scan_out
+      rpc.mockResolvedValueOnce({ data: { open: null, last_out: null } }) // scan_out
       rpc.mockResolvedValueOnce({ data: { open: null, last_out: null } }) // follow-up lookup
       rpc.mockResolvedValueOnce({ data: { ok: true }, error: null }) // follow-up scan_in
       const { popup, outTime } = forgotState()
@@ -169,10 +169,68 @@ describe('useScannerSession bundle', () => {
       vi.useRealTimers()
     }
   })
+
+  // T11(b): a follow-up re-IN dropped as busy must surface a warning, never a
+  // silent success. The first scan stays inflight (holds busy) while the
+  // forgot-OUT closes online; the 200ms follow-up then races it and loses.
+  it('a busy follow-up re-IN surfaces a warning and no false IN success', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(NOW)
+    try {
+      let releaseFirst
+      rpc.mockImplementation((fn) =>
+        fn === 'scan_out'
+          ? Promise.resolve({ data: { ok: true }, error: null })
+          : new Promise((res) => { releaseFirst = res })
+      )
+      const { popup, outTime } = forgotState()
+      const { result, toast, unmount } = setup()
+      // Start a scan and leave it inflight — busy is now held.
+      act(() => { result.current.handleScan('FB5971GA0001') })
+      act(() => { result.current.showPopup(popup) })
+      act(() => { result.current.setOutTime(outTime) })
+      await act(async () => { await result.current.confirmForgot() })
+      expect(toast.success).toHaveBeenCalledWith('OUT closed')
+      await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+      expect(toast.warning).toHaveBeenCalledWith('follow-up IN did not land — re-scan')
+      expect(result.current.popup).toMatchObject({ status: 'error', badge: 'FB5971GA0001' })
+      // No false success: the only success toast is the OUT celebration —
+      // no `IN <badge>` was ever shown for the dropped re-IN.
+      expect(toast.success).toHaveBeenCalledTimes(1)
+      await act(async () => { releaseFirst({ data: { open: null, last_out: null }, error: null }) })
+      unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // T11(a) hook side: handleCameraScan declines synchronously while a
+  // decision popup is open or a scan is inflight, so the camera suppressor
+  // is not burned on a scan that never ran.
+  it('handleCameraScan returns false while decision-pending or busy', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(NOW)
+    try {
+      let releaseFirst
+      rpc.mockImplementation(() => new Promise((res) => { releaseFirst = res }))
+      const { result, toast, unmount } = setup()
+      let r
+      act(() => { result.current.showPopup({ status: 'forgot', badge: 'FB5971GA0001', in_date: '2026-09-24', in_time: '17:00:00', openId: 'o-1' }) })
+      act(() => { r = result.current.handleCameraScan('FB5971GA0002') })
+      expect(r).toBe(false)
+      expect(toast.warning).toHaveBeenCalledWith(expect.stringMatching(/pending prompt/i))
+      act(() => { result.current.closePopup() })
+      act(() => { result.current.handleScan('FB5971GA0001') }) // holds busy
+      act(() => { r = result.current.handleCameraScan('FB5971GA0002') })
+      expect(r).toBe(false)
+      expect(toast.warning).toHaveBeenCalledWith(expect.stringMatching(/busy/i))
+      await act(async () => { releaseFirst({ data: { open: null, last_out: null }, error: null }) })
+      unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
-describe('camera pause effect (L-46)', () => {
-  it('pauses while a decision popup is open and resumes when it resolves', () => {
+describe('camera pause effect (L-46)', () => {  it('pauses while a decision popup is open and resumes when it resolves', () => {
     const { result, unmount } = setup()
     const pause = vi.fn(), resume = vi.fn()
     act(() => { result.current.scannerRef.current = { pause, resume } })
@@ -192,6 +250,95 @@ describe('camera pause effect (L-46)', () => {
     act(() => { result.current.closePopup() })
     expect(pause).not.toHaveBeenCalled()
     expect(resume).not.toHaveBeenCalled()
+    unmount()
+  })
+})
+
+describe('useScannerSession V15 hardening', () => {
+  function setupWithSchedule(initial = 'sched-1') {
+    const t = { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }
+    const clearManual = vi.fn()
+    const onAfterScan = vi.fn()
+    const view = renderHook(({ scheduleId }) => useScannerSession({
+      scheduleId,
+      profile: { centre: 'DELHI' },
+      deptName: null,
+      deptNameById: new Map(),
+      toast: t,
+      onAfterScan,
+      forgotSuccessToast: 'OUT closed',
+      clearManual,
+    }), { initialProps: { scheduleId: initial } })
+    return { ...view, toast: t, clearManual, onAfterScan }
+  }
+
+  it('onDrainProgress never rejects when the queue read fails (V15 .catch)', async () => {
+    const { unmount } = setup()
+    const listener = installDrainListeners.mock.calls[0][1]
+    getQueuedScans.mockRejectedValueOnce(new Error('IDB down'))
+    // Without the .catch this rejects and the drain subscription dies loudly.
+    await act(async () => { listener(); await new Promise(r => setTimeout(r, 0)) })
+    unmount()
+  })
+
+  it('refreshQueue lowers syncing once the queue empties (V16)', async () => {
+    getQueuedScans.mockResolvedValue([{ id: 'q-1', synced: false, failed: false }])
+    const { result, unmount } = setup()
+    await act(async () => { await result.current.refreshQueue() })
+    expect(result.current.syncing).toBe(true)
+    getQueuedScans.mockResolvedValue([])
+    await act(async () => { await result.current.refreshQueue() })
+    expect(result.current.syncing).toBe(false)
+    expect(result.current.queued).toEqual([])
+    unmount()
+  })
+
+  it('a schedule switch clears a stale decision popup (V15 schedule key)', () => {
+    const { result, rerender, unmount } = setupWithSchedule('sched-1')
+    act(() => { result.current.showPopup({ status: 'confirm_out', badge: 'FB5971GA0001', openId: 'o-1' }) })
+    expect(result.current.popup).toMatchObject({ status: 'confirm_out', scheduleId: 'sched-1' })
+    rerender({ scheduleId: 'sched-2' })
+    expect(result.current.popup).toBeNull()
+    unmount()
+  })
+
+  it('confirm refuses a popup stamped with the previous schedule (V15 guard)', async () => {
+    rpc.mockResolvedValue({ data: { ok: true }, error: null })
+    const { result, rerender, toast, unmount } = setupWithSchedule('sched-1')
+    act(() => { result.current.showPopup({ status: 'confirm_out', badge: 'FB5971GA0001', openId: 'o-1' }) })
+    // Simulate a popup that survived the switch (e.g. set just before it).
+    rerender({ scheduleId: 'sched-2' })
+    act(() => { result.current.showPopup({ status: 'confirm_out', badge: 'FB5971GA0001', openId: 'o-1', scheduleId: 'sched-1' }) })
+    await act(async () => { await result.current.confirmScan() })
+    expect(rpc).not.toHaveBeenCalledWith('scan_in', expect.anything())
+    expect(rpc).not.toHaveBeenCalledWith('scan_out', expect.anything())
+    expect(toast.warning).toHaveBeenCalledWith(expect.stringMatching(/schedule changed/i))
+    expect(result.current.popup).toBeNull()
+    unmount()
+  })
+
+  it('a manual scan behind an open decision popup is dropped, not swapped in (V15 gate)', async () => {
+    rpc.mockResolvedValue({ data: { ok: true }, error: null })
+    const { result, toast, unmount } = setup()
+    act(() => { result.current.showPopup({ status: 'forgot', badge: 'FB5971GA0001', in_date: '2026-09-24', in_time: '17:00:00', openId: 'o-1' }) })
+    // act() does not propagate the callback's return — capture it outside.
+    let r
+    await act(async () => { r = await result.current.handleScan('FB5971GA0002', { manual: true }) })
+    expect(r).toMatchObject({ ok: false, reason: 'decision-pending' })
+    expect(rpc).not.toHaveBeenCalled()
+    expect(toast.warning).toHaveBeenCalledWith(expect.stringMatching(/pending prompt/i))
+    // The pending question is untouched.
+    expect(result.current.popup).toMatchObject({ badge: 'FB5971GA0001', status: 'forgot' })
+    unmount()
+  })
+
+  it('a confirmed follow-up bypasses the decision gate (V15)', async () => {
+    rpc.mockResolvedValue({ data: { ok: true }, error: null })
+    const { result, unmount } = setup()
+    act(() => { result.current.showPopup({ status: 'confirm_out', badge: 'FB5971GA0001', openId: 'o-1' }) })
+    await act(async () => { await result.current.confirmScan() })
+    // The confirm path reached the server (lookup for the OUT/IN flow).
+    expect(rpc).toHaveBeenCalled()
     unmount()
   })
 })
