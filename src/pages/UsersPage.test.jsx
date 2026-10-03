@@ -25,6 +25,7 @@ function qb(resolveData = []) {
 const fromMock = vi.fn(() => qb())
 const invokeMock = vi.fn()
 const resetPwMock = vi.fn(() => Promise.resolve({ error: null }))
+const getSessionMock = vi.fn()
 
 const noopChannel = () => {
   const ch = { on: () => ch, subscribe: () => ch, unsubscribe: () => ch }
@@ -40,7 +41,10 @@ vi.mock('../lib/supabase', async (importOriginal) => {
       from: (...args) => fromMock(...args),
       channel: () => noopChannel(),
       removeChannel: () => {},
-      auth: { resetPasswordForEmail: (...args) => resetPwMock(...args) },
+      auth: {
+        resetPasswordForEmail: (...args) => resetPwMock(...args),
+        getSession: (...args) => getSessionMock(...args),
+      },
       functions: { invoke: (...args) => invokeMock(...args) },
     },
     fetchAllRows: (table, _select, _filters, stableKey) => {
@@ -81,6 +85,10 @@ beforeEach(() => {
   rpc.mockReset()
   fromMock.mockClear()
   resetPwMock.mockClear()
+  // signed-in by default — the create-login session guard only trips in the
+  // test that explicitly clears the session
+  getSessionMock.mockReset()
+  getSessionMock.mockResolvedValue({ data: { session: { access_token: 'tok' } }, error: null })
   toastError.mockReset()
   toastSuccess.mockReset()
   toastWarning.mockReset()
@@ -272,5 +280,47 @@ describe('UsersPage — direct provisioning', () => {
     ))
     // and the misleading success toast must NOT also have fired
     expect(toastSuccess).not.toHaveBeenCalledWith(expect.stringMatching(/Login created/i))
+  })
+
+  // ── overlap repair: complete existing records, surface REAL errors ────
+  const fillDirectForm = async () => {
+    await renderPage()
+    fireEvent.change(screen.getByLabelText('Search sewadar by badge number or name'), { target: { value: 'FB5971' } })
+    await waitFor(() => expect(within(screen.getByRole('listbox')).getByRole('option')).toBeTruthy())
+    fireEvent.click(within(screen.getByRole('listbox')).getByRole('option'))
+    fireEvent.change(screen.getByPlaceholderText('login@example.com'), { target: { value: 'overlap@example.com' } })
+    fireEvent.change(screen.getByPlaceholderText('Set a password'), { target: { value: 'overlap-1' } })
+  }
+
+  it('refuses to invoke while signed out — never fires a headerless request (401 guard)', async () => {
+    getSessionMock.mockResolvedValue({ data: { session: null }, error: null })
+    await fillDirectForm()
+    fireEvent.click(screen.getByRole('button', { name: /Create login/i }))
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/session/i)))
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
+  it('shows the function’s REAL error body instead of the generic non-2xx text', async () => {
+    invokeMock.mockResolvedValue({
+      data: null,
+      response: { status: 409 },
+      error: Object.assign(new Error('Edge Function returned a non-2xx status code'), {
+        context: { status: 409, json: async () => ({ error: 'A login already exists for this email — edit or reinstate it instead' }) },
+      }),
+    })
+    await fillDirectForm()
+    fireEvent.click(screen.getByRole('button', { name: /Create login/i }))
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith(
+      expect.stringMatching(/edit or reinstate it instead/i)
+    ))
+  })
+
+  it('names the overlap completion when the function reuses an existing record', async () => {
+    invokeMock.mockResolvedValue({ data: { ok: true, user_id: 'u12', mode: 'overlap-completed' }, error: null })
+    await fillDirectForm()
+    fireEvent.click(screen.getByRole('button', { name: /Create login/i }))
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith(
+      expect.stringMatching(/existing portal record completed/i)
+    ))
   })
 })

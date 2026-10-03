@@ -583,6 +583,15 @@ export default function UsersPage() {
     }
     setDirectBusy(true)
     try {
+      // No session → the SDK sends NO Authorization header → the gateway
+      // answers 401 UNAUTHORIZED_NO_AUTH_HEADER before the function ever
+      // runs. Refuse here with a human message instead.
+      const { data: sess } = await supabase.auth.getSession()
+      if (!sess?.session) {
+        toast.error('Your session has expired — refresh the page and sign in again')
+        setDirectBusy(false)
+        return
+      }
       const { data, error } = await supabase.functions.invoke('create-login', {
         body: {
           email,
@@ -601,11 +610,19 @@ export default function UsersPage() {
         },
       })
       if (error) {
-        const msg = String(error.message || '')
-        if (/not found|Failed to fetch|404|TypeError/i.test(msg)) {
+        // FunctionsHttpError.message is always the GENERIC non-2xx text —
+        // the function's real {error} body hides in error.context (the
+        // Response). Parse it, or every refusal reads as a mystery.
+        let body = null
+        try { body = typeof error.context?.json === 'function' ? await error.context.json() : null } catch { body = null }
+        const realMsg = (body && (body.error || body.message)) || ''
+        const status = error.context?.status ?? null
+        if (body?.code === 'UNAUTHORIZED_NO_AUTH_HEADER' || status === 401) {
+          toast.error('Your session is missing or expired — refresh the page and sign in again')
+        } else if (/not found|Failed to fetch|404|TypeError/i.test(String(error.message || ''))) {
           toast.error('Cannot reach the login service — check it is deployed AND its JWT verification is off (details in supabase/functions/create-login/index.ts)')
         } else {
-          toast.error(msg || 'Could not create login')
+          toast.error(realMsg || error.message || 'Could not create login')
         }
         return
       }
@@ -640,6 +657,10 @@ export default function UsersPage() {
       } else if (data?.tempPassword) {
         // Older deployed function that ignored our password and generated one.
         setCreatedCred({ email, tempPassword: data.tempPassword })
+      } else if (data?.mode === 'overlap-completed') {
+        // An existing (attendance-overlap) portal record was completed and
+        // linked — say so; a bare "created" would misdescribe what happened.
+        toast.success(`Existing portal record completed for ${picked.sewadar_name} — they can sign in now`)
       } else {
         toast.success(`Login created for ${picked.sewadar_name} — they can sign in now`)
       }
