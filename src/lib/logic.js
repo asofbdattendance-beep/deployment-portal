@@ -1,4 +1,5 @@
 // Pure domain logic — no Supabase client, so it's unit-testable.
+import { sanitizeBarcode } from './scannerUtils'
 
 export const ELDERLY_BADGE_STATUS = 'ELDERLY'
 export const ELIGIBLE_BADGE_STATUSES = ['OPEN', 'PERMANENT']
@@ -173,6 +174,123 @@ export function isFaridabadBadge(badge) {
 export function isUndeployedScan(badge, deployedSet) {
   if (!badge || !deployedSet) return true
   return !deployedSet.has(String(badge).toUpperCase())
+}
+
+/* ─── Scanned-badge sanitisation ───
+   Barcode decoders hand back exactly the bytes they saw: Code 39 start/stop
+   guards, stray spaces, lower case, and — the expensive kind of noise —
+   character confusions (O↔0, I/l↔1, S↔5, B↔8, Z↔2) that turn a real badge
+   into a string the validator rejects. `sanitizeBarcode` (scannerUtils.js)
+   already fixes the mechanical noise; this function adds the badge-specific
+   recovery on top, deriving every position requirement from the SAME
+   BADGE_REGEX the validator enforces so a repaired value can never drift
+   from what the database will accept. */
+
+// Decoder confusions observed in badge-like alphanumeric codes. Correction is
+// POSITIONAL, never global: letters are load-bearing in these badges (the
+// "FB"/"BH" prefixes, the "GA"/"LA" middle), so a blind S→5 or B→8 would
+// retype a valid badge as a DIFFERENT sewadar's badge — a wrong-but-valid
+// scan is worse than a rejected one.
+const BADGE_LETTER_TO_DIGIT = { O: '0', I: '1', L: '1', S: '5', B: '8', Z: '2' }
+const BADGE_DIGIT_TO_LETTER = { 0: 'O', 1: 'I', 5: 'S', 8: 'B', 2: 'Z' }
+
+// Per-position character-class requirements derived from BADGE_REGEX, keyed
+// by LENGTH: 'D' = digit required, 'L' = letter required. Both 12-char
+// families (FB + 4 digits + GA/LA + 4 digits, and BH + 4 digits + 2 letters +
+// 4 digits) share one class map, so BADGE_REGEX — not the prefix — is the
+// discriminator. Returns null for shapes we cannot derive positions from: VSS
+// accepts anything after "VS" (nothing to repair), and any other length is
+// not a noisy read of a known badge, so we must not guess.
+function badgePositionClasses(value) {
+  if (isVssBadge(value)) return null
+  if (value.length === 12) {
+    return ['L', 'L', 'D', 'D', 'D', 'D', 'L', 'L', 'D', 'D', 'D', 'D']
+  }
+  // The 11-char BH family: BH + 4 digits + 1 letter + 4 digits.
+  if (value.length === 11) {
+    return ['L', 'L', 'D', 'D', 'D', 'D', 'L', 'D', 'D', 'D', 'D']
+  }
+  return null
+}
+
+// Repair positional confusions. A repair is accepted ONLY when the repaired
+// string matches BADGE_REGEX — otherwise the original is returned untouched,
+// so a failed repair can never retype a scan as a different sewadar. Fewer
+// fixes are preferred over more (a value needing many fixes is more likely a
+// genuinely different badge than a noisy read of this one).
+function repairBadgeConfusions(value) {
+  const classes = badgePositionClasses(value)
+  if (!classes) return value
+  // Positions whose character violates the required class AND is a known
+  // confusion of the required class. Anything else is left alone — we do not
+  // invent corrections the decoder-confusion model does not explain.
+  const fixable = []
+  for (let i = 0; i < value.length; i += 1) {
+    const req = classes[i]
+    const ch = value[i]
+    if (req === 'D' && !/[0-9]/.test(ch) && BADGE_LETTER_TO_DIGIT[ch]) fixable.push(i)
+    else if (req === 'L' && !/[A-Z]/.test(ch) && BADGE_DIGIT_TO_LETTER[ch]) fixable.push(i)
+  }
+  if (!fixable.length) return value
+  // Try subsets of increasing size (1 fix, then 2, then 3) and accept the
+  // first candidate that fully matches BADGE_REGEX. Capped at 3 fixes.
+  const MAX_FIXES = 3
+  for (let size = 1; size <= Math.min(MAX_FIXES, fixable.length); size += 1) {
+    const combos = []
+    const walk = (start, chosen) => {
+      if (chosen.length === size) { combos.push(chosen); return }
+      for (let i = start; i < fixable.length; i += 1) walk(i + 1, [...chosen, fixable[i]])
+    }
+    walk(0, [])
+    for (const positions of combos) {
+      const chars = value.split('')
+      for (const pos of positions) {
+        const req = classes[pos]
+        chars[pos] = req === 'D' ? BADGE_LETTER_TO_DIGIT[value[pos]] : BADGE_DIGIT_TO_LETTER[value[pos]]
+      }
+      const candidate = chars.join('')
+      if (BADGE_REGEX.test(candidate)) return candidate
+    }
+  }
+  return value
+}
+
+/**
+ * Recover a real badge from a noisy barcode decode, or return '' when the
+ * input is not a string / is empty. Pure and total: never throws, and
+ * idempotent — sanitising an already-sanitised value is a no-op.
+ *
+ * Pipeline (each step runs only if the previous one did not settle):
+ *   1. Mechanical normalisation via `sanitizeBarcode` (trim, collapse
+ *      whitespace, strip characters that can never appear in a badge, uppercase).
+ *   2. A clean REGULAR badge passes through untouched.
+ *   3. A leading "VS" is stripped ONLY when the remainder matches an accepted
+ *      pattern AND the value does NOT already validate as a VSS badge. The
+ *      guard makes the strip inert for every sanitised value — deliberately:
+ *      isVssBadge() matches ANY "VS…" string, and the VSS seed data
+ *      (sql/vss_sewadars_data.sql) proves legit VSS badges routinely look
+ *      exactly like "VS" + a valid FB badge (e.g. VSFB5971GA2927). A syntactic
+ *      strip cannot tell a spurious prefix from a real VSS badge, and
+ *      stripping a real one scans the wrong sewadar, so the conservative bias
+ *      wins and any value that already validates as VSS is preserved.
+ *   4. Positional confusion repair (see repairBadgeConfusions).
+ *
+ * @param {string|null|undefined|number} raw
+ * @returns {string} the recovered badge, or '' when nothing can be recovered
+ */
+export function sanitizeScannedBadge(raw) {
+  if (typeof raw !== 'string') return ''
+  const value = sanitizeBarcode(raw)
+  if (!value) return ''
+  // Clean regular badge — nothing to recover.
+  if (isValidBadgeFormat(value) && !isVssBadge(value)) return value
+  // Spurious-"VS" recovery. Condition (b) — the value must NOT already
+  // validate as a VSS badge — is what protects legit VSS badges; see the
+  // note above for why it keeps this strip inert on sanitised values.
+  const vsRest = isVssBadge(value) ? value.slice(2) : ''
+  if (vsRest && isValidBadgeFormat(vsRest) && !isVssBadge(value)) return vsRest
+  if (isValidBadgeFormat(value)) return value
+  return repairBadgeConfusions(value)
 }
 
 /* ─── Eligibility ─── */

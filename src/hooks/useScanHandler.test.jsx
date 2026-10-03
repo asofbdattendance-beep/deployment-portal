@@ -85,6 +85,23 @@ describe('badge validation', () => {
     await act(async () => { await result.current.handleScan('VS001') })
     expect(showPopup).toHaveBeenCalled()
   })
+
+  it('accepts a noisy-but-recoverable badge (sanitised before validation)', async () => {
+    rpc.mockResolvedValueOnce({ data: { open: null, last_out: null } })
+    rpc.mockResolvedValueOnce({ data: { ok: true } })
+    const { result, showPopup } = setup()
+    // Code-39 guards + lower case + a positional O→0 confusion — all recovered.
+    await act(async () => { await result.current.handleScan('*fb5978ga00O5*') })
+    expect(rpc).toHaveBeenCalled()
+    expect(showPopup).toHaveBeenCalled()
+  })
+
+  it('rejects a bare number that matches no badge pattern', async () => {
+    const { result, showPopup } = setup()
+    await act(async () => { await result.current.handleScan('982762371') })
+    expect(rpc).not.toHaveBeenCalled()
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error', message: expect.stringContaining('Invalid badge') }))
+  })
 })
 
 // Explicit choice: a plain scan NEVER writes. It resolves state and shows a

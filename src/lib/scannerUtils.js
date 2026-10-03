@@ -368,6 +368,79 @@ export function isEdgeDetection(points, roi, vw, vh) {
   return cx < mx || cx > vw - mx || cy < my || cy > vh - my
 }
 
+// ─── detectionBox ─────────────────────────────────────────────────────────────
+/**
+ * Map a detection's corner points to an aim-overlay box in CONTAINER css px.
+ *
+ * Pure geometry so it can be tested without a browser: two coordinate hops are
+ * needed because the detector never sees the frame the operator sees.
+ *
+ *   1. detect-canvas px → video px — the crop `computeRoi` took is a scaled
+ *      window, so divide by the downscaled size, multiply by the crop, add the
+ *      crop offset (identical to `isEdgeDetection`).
+ *   2. video px → css px — `<video>` renders with `object-fit: cover`, which
+ *      scales by the LARGER of the two axes and centres the overflow, so
+ *      anything derived from videoWidth must pass through that same transform
+ *      or the box drifts off the barcode on non-matching aspect ratios.
+ *
+ * ZXing's 1D readers return only TWO points — the ends of the bar line — so the
+ * raw bbox is a hairline. A 1px line is useless as a target, so the thin axis is
+ * grown toward a barcode-ish ~3.2:1 ratio (and never below 48 css px) around the
+ * original centre. The result is then clamped inside the container, because the
+ * overlay is drawn as an absolutely-positioned sibling of the video.
+ *
+ * This box is FEEDBACK ONLY. It must never gate decoding — a null here just
+ * means no rectangle this frame.
+ *
+ * @param {Array<{x:number,y:number}>} points — detect-canvas coordinates
+ * @param {{sx:number,sy:number,sw:number,sh:number,dw:number,dh:number}} roi
+ * @param {number} vw — video intrinsic width
+ * @param {number} vh — video intrinsic height
+ * @param {{width:number,height:number}} rect — the video's rendered CSS box
+ *   (`getBoundingClientRect()`; only width/height are used, since the overlay is
+ *   positioned relative to that same element)
+ * @returns {{left:number,top:number,width:number,height:number}|null}
+ */
+export function detectionBox(points, roi, vw, vh, rect) {
+  if (!Array.isArray(points) || points.length < 2) return null
+  if (!roi || !roi.dw || !roi.dh || !roi.sw || !roi.sh) return null
+  if (!vw || !vh) return null
+  if (!rect || !rect.width || !rect.height) return null
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const p of points) {
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) continue
+    const vx = (p.x / roi.dw) * roi.sw + roi.sx
+    const vy = (p.y / roi.dh) * roi.sh + roi.sy
+    if (vx < minX) minX = vx
+    if (vy < minY) minY = vy
+    if (vx > maxX) maxX = vx
+    if (vy > maxY) maxY = vy
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minY)) return null
+
+  // video px → css px under object-fit: cover
+  const scale = Math.max(rect.width / vw, rect.height / vh)
+  const offX = (rect.width - vw * scale) / 2
+  const offY = (rect.height - vh * scale) / 2
+  let width = Math.max(0, (maxX - minX) * scale)
+  let height = Math.max(0, (maxY - minY) * scale)
+  const cx = offX + ((minX + maxX) / 2) * scale
+  const cy = offY + ((minY + maxY) / 2) * scale
+
+  const MIN_CSS = 48
+  let w = Math.max(width, MIN_CSS)
+  let h = Math.max(height, MIN_CSS)
+  if (w > h * 3.2) h = w / 3.2
+  else if (h > w * 3.2) w = h / 3.2
+  w = Math.min(w, rect.width)
+  h = Math.min(h, rect.height)
+
+  const left = Math.min(Math.max(0, cx - w / 2), Math.max(0, rect.width - w))
+  const top = Math.min(Math.max(0, cy - h / 2), Math.max(0, rect.height - h))
+  return { left, top, width: w, height: h }
+}
+
 // ─── waitForVideoReady ─────────────────────────────────────────────────────────
 /**
  * Resolve once the <video> actually has frames to paint.
@@ -408,4 +481,201 @@ export function waitForVideoReady(video, ms = 4000) {
     video.addEventListener?.('loadedmetadata', check)
     video.addEventListener?.('canplay', check)
   })
+}
+
+// ─── rotateGray ───────────────────────────────────────────────────────────────
+/**
+ * The three rotation angles worth trying on a missed frame, in order of cost.
+ * 0° is the orientation the frame is already in and is never requested here.
+ */
+export const SCAN_ROTATIONS = [90, 180, 270]
+
+/**
+ * Rotate a 1-byte-per-pixel grayscale buffer by a multiple of 90°.
+ *
+ * WHY: ZXing's 1D readers sample horizontal scanlines only. A badge held
+ * upright in a portrait photo — or simply turned 90° in the hand — has NO
+ * horizontal scanline crossing its bars, so the decoder can never see it no
+ * matter how sharp the frame is. Real cards are handed over rotated, so the
+ * hard path re-tries the same pixels turned upright. A full geometric rotation
+ * (rather than asking the decoder to try "upside-down scanning") is what keeps
+ * `OneDReader`'s row-major assumption intact.
+ *
+ * Pure, allocation-light (one buffer), and a no-op for unsupported angles so a
+ * caller never has to validate before using the result.
+ *
+ * @param {Uint8ClampedArray|Uint8Array} gray — width*height bytes
+ * @param {number} width
+ * @param {number} height
+ * @param {number} deg — 90 | 180 | 270 (anything else returns the input shape)
+ * @returns {{gray: Uint8ClampedArray, width: number, height: number}}
+ */
+export function rotateGray(gray, width, height, deg) {
+  const empty = { gray: new Uint8ClampedArray(0), width: 0, height: 0 }
+  if (!gray || !width || !height || gray.length < width * height) return empty
+
+  const w = width, h = height
+  const a = ((Math.trunc(deg) % 360) + 360) % 360
+
+  if (a === 0) return { gray, width: w, height: h }
+  if (a !== 90 && a !== 180 && a !== 270) return { gray, width: w, height: h }
+
+  const swap = a !== 180
+  const nw = swap ? h : w
+  const nh = swap ? w : h
+  const out = new Uint8ClampedArray(nw * nh)
+
+  for (let y = 0; y < h; y++) {
+    const row = y * w
+    for (let x = 0; x < w; x++) {
+      let dx, dy
+      if (a === 90) { dx = h - 1 - y; dy = x }
+      else if (a === 180) { dx = w - 1 - x; dy = h - 1 - y }
+      else { dx = y; dy = w - 1 - x }
+      out[dy * nw + dx] = gray[row + x]
+    }
+  }
+  return { gray: out, width: nw, height: nh }
+}
+
+// ─── sanitizeBarcode ──────────────────────────────────────────────────────────
+/**
+ * Normalise raw decoded text into the canonical badge form.
+ *
+ * WHY: decoders hand back exactly the bytes they saw, which routinely includes
+ * Code 39's `*` start/stop guards, group separators from OCR-style symbologies,
+ * stray spaces from print noise, and lower case. The badge contract
+ * (`BADGE_REGEX` in logic.js) is uppercase alphanumerics only, so without this
+ * step a perfectly good decode is thrown away and the operator sees "Invalid
+ * badge format" for a badge that read fine.
+ *
+ * Deliberately does NOT touch leading zeros or strip digits — a badge's digit
+ * sequence is identity and over-normalising here silently retypes someone as a
+ * different sewadar.
+ *
+ * @param {string|null|undefined} raw
+ * @returns {string} '' for empty/undefined
+ */
+export function sanitizeBarcode(raw) {
+  if (raw == null) return ''
+  // Uppercase, then drop everything that is not [A-Z0-9]: Code 39 guards,
+  // separators, whitespace and any stray punctuation the print introduced.
+  return String(raw).toUpperCase().replace(/[^A-Z0-9]/g, '')
+}
+
+// ─── scoreSharpness ───────────────────────────────────────────────────────────
+/**
+ * Variance of the Laplacian — the standard no-reference sharpness score.
+ *
+ * WHY: a phone that missed focus hands the decoder a frame that is technically
+ * present but smeared; decoding the blurriest frame of a burst is exactly how a
+ * badge that reads "sometimes" reads "always". `BarcodeScanner` keeps the best
+ * score of a burst and decodes that frame first. Higher = sharper.
+ *
+ * Absolute magnitude scales with overall luminance, so scores are only ever
+ * compared across frames of the SAME roi size (which is how the caller uses
+ * them) — not as a global "is this sharp" constant.
+ *
+ * Pure, no canvas, no DOM: works on a plain buffer in tests.
+ *
+ * @param {Uint8ClampedArray|Uint8Array} gray — width*height bytes
+ * @param {number} width
+ * @param {number} height
+ * @returns {number} 0 when the buffer is too small to convolve
+ */
+export function scoreSharpness(gray, width, height) {
+  if (!gray || !width || !height || width < 3 || height < 3 || gray.length < width * height) return 0
+  let sum = 0
+  let sum2 = 0
+  let n = 0
+  for (let y = 1; y < height - 1; y++) {
+    const row = y * width
+    for (let x = 1; x < width - 1; x++) {
+      const i = row + x
+      // 4-neighbour Laplacian kernel.
+      const v = 4 * gray[i] - gray[i - 1] - gray[i + 1] - gray[i - width] - gray[i + width]
+      sum += v
+      sum2 += v * v
+      n++
+    }
+  }
+  if (!n) return 0
+  const mean = sum / n
+  return sum2 / n - mean * mean
+}
+
+// ─── tileRois ─────────────────────────────────────────────────────────────────
+/**
+ * Split an ROI into an overlapping grid of sub-rects, in SOURCE-video pixels.
+ *
+ * WHY: a card held at an angle sits diagonally across the frame; any single
+ * band either catches only part of the barcode (too few bars to be a code) or
+ * misses it entirely. Decoding overlapping strips means whichever strip the
+ * barcode falls into squarely gets a clean horizontal read, and small tiles cost
+ * far less per pass than one big one.
+ *
+ * Tiles deliberately OVERLAP (`overlap` fraction) so a barcode straddling a
+ * seam still sits fully inside at least one tile. Tiles are clamped inside the
+ * parent roi and skipped when they fall below `minSize` (too small to contain
+ * even a single bar at the current scale).
+ *
+ * @param {{sx:number,sy:number,sw:number,sh:number,dw:number,dh:number,scale:number}} roi
+ * @param {{rows?:number, cols?:number, overlap?:number, minSize?:number}} [opts]
+ * @returns {Array<{sx:number,sy:number,sw:number,sh:number,dw:number,dh:number}>}
+ *   one entry per tile, sized for `surface.grab(video, tile)`
+ */
+export function tileRois(roi, opts = {}) {
+  const { rows = 1, cols = 1, overlap = 0.25, minSize = 8 } = opts
+  if (!roi || !roi.sw || !roi.sh) return []
+
+  const r = Math.max(1, Math.trunc(rows) || 1)
+  const c = Math.max(1, Math.trunc(cols) || 1)
+  const scale = roi.scale > 0 ? roi.scale : 1
+
+  // A single cell is the parent roi itself — the common case (low tier).
+  if (r === 1 && c === 1) {
+    return [{
+      sx: roi.sx, sy: roi.sy, sw: roi.sw, sh: roi.sh,
+      dw: Math.max(1, Math.round(roi.sw * scale)),
+      dh: Math.max(1, Math.round(roi.sh * scale)),
+    }]
+  }
+
+  const tiles = []
+  for (let ry = 0; ry < r; ry++) {
+    for (let cx = 0; cx < c; cx++) {
+      // Base cell, then grown by the overlap on every side.
+      const baseH = roi.sh / r
+      const baseW = roi.sw / c
+      let th = Math.round(baseH * (1 + overlap))
+      let tw = Math.round(baseW * (1 + overlap))
+      th = Math.min(th, roi.sh)
+      tw = Math.min(tw, roi.sw)
+
+      // Position: walk from the first cell's origin to the last cell's extent
+      // so the final tile still ends exactly on the roi edge despite being
+      // larger than a base cell.
+      let ty = r === 1 ? 0 : Math.round((roi.sh - th) * (ry / (r - 1)))
+      let tx = c === 1 ? 0 : Math.round((roi.sw - tw) * (cx / (c - 1)))
+      ty = Math.max(0, Math.min(ty, roi.sh - th))
+      tx = Math.max(0, Math.min(tx, roi.sw - tw))
+
+      const dw = Math.max(1, Math.round(tw * scale))
+      const dh = Math.max(1, Math.round(th * scale))
+      if (dw < minSize || dh < minSize) continue
+
+      tiles.push({ sx: roi.sx + tx, sy: roi.sy + ty, sw: tw, sh: th, dw, dh })
+    }
+  }
+  // Degenerate result (every tile too small) → fall back to the parent roi so
+  // the caller always has something to decode rather than silently doing zero
+  // work on a frame it already decided to spend hard-path effort on.
+  if (!tiles.length) {
+    return [{
+      sx: roi.sx, sy: roi.sy, sw: roi.sw, sh: roi.sh,
+      dw: Math.max(1, Math.round(roi.sw * scale)),
+      dh: Math.max(1, Math.round(roi.sh * scale)),
+    }]
+  }
+  return tiles
 }

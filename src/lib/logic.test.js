@@ -52,6 +52,7 @@ import {
   isValidBadgeFormat,
   isFaridabadBadge,
   isUndeployedScan,
+  sanitizeScannedBadge,
 } from '../lib/logic'
 
 const CENTRES = [
@@ -1308,5 +1309,85 @@ describe('isUuid', () => {
     expect(isUuid('not-a-uuid')).toBe(false)
     expect(isUuid('')).toBe(false)
     expect(isUuid(null)).toBe(false)
+  })
+})
+
+describe('sanitizeScannedBadge', () => {
+  it('returns "" for null, undefined, empty, whitespace and non-string input', () => {
+    expect(sanitizeScannedBadge(null)).toBe('')
+    expect(sanitizeScannedBadge(undefined)).toBe('')
+    expect(sanitizeScannedBadge('')).toBe('')
+    expect(sanitizeScannedBadge('   ')).toBe('')
+    expect(sanitizeScannedBadge(123)).toBe('')
+    expect(sanitizeScannedBadge({})).toBe('')
+  })
+
+  it('normalises mechanical noise (guards, spaces, case) without changing a valid badge', () => {
+    expect(sanitizeScannedBadge('FB5978GA0005')).toBe('FB5978GA0005')
+    expect(sanitizeScannedBadge('  fb5978ga0005  ')).toBe('FB5978GA0005')
+    expect(sanitizeScannedBadge('*FB5978GA0005*')).toBe('FB5978GA0005')
+    expect(sanitizeScannedBadge('FB5978-GA0005')).toBe('FB5978GA0005')
+  })
+
+  it('is idempotent', () => {
+    const samples = [
+      'FB5978GA0005', '  fb5978ga0005 ', '*FB5978GA0005*', 'FB5978GAOO05',
+      'F85978GA0005', 'VSFB5978GA2644', 'VSFB5971GB4629', '982762371',
+      'NOT-A-BADGE', '', '   ',
+    ]
+    for (const s of samples) {
+      const once = sanitizeScannedBadge(s)
+      expect(sanitizeScannedBadge(once)).toBe(once)
+    }
+  })
+
+  it('repairs a positional O→0 confusion in the digit run', () => {
+    expect(sanitizeScannedBadge('FB5978GAOO05')).toBe('FB5978GA0005')
+    expect(sanitizeScannedBadge('FB5978GA00O5')).toBe('FB5978GA0005')
+  })
+
+  it('repairs a positional B→8 confusion in the prefix', () => {
+    expect(sanitizeScannedBadge('F85978GA0005')).toBe('FB5978GA0005')
+  })
+
+  it('repairs a positional 8→B confusion', () => {
+    expect(sanitizeScannedBadge('8H1234A5678')).toBe('BH1234A5678')
+  })
+
+  it('repairs a positional S→5 confusion in a BH digit run', () => {
+    expect(sanitizeScannedBadge('BH1234AS678')).toBe('BH1234A5678')
+  })
+
+  it('repairs multiple positional confusions at once', () => {
+    expect(sanitizeScannedBadge('F85978GAOO05')).toBe('FB5978GA0005')
+  })
+
+  it('does NOT corrupt a clean valid badge (no blind replacement)', () => {
+    // S and B are load-bearing letters — a blind S→5 / B→8 would retype these.
+    expect(sanitizeScannedBadge('FB5978GA0005')).toBe('FB5978GA0005')
+    expect(sanitizeScannedBadge('BH1234AB5678')).toBe('BH1234AB5678')
+  })
+
+  it('does NOT turn an invalid string into a different valid badge', () => {
+    // 5970 is out of the FB centre range — the O→0 repair is rejected because
+    // the result still fails BADGE_REGEX, so the original is returned untouched.
+    expect(sanitizeScannedBadge('FB597OGA0005')).toBe('FB597OGA0005')
+    // A bare number matches nothing and is not a known badge shape.
+    expect(sanitizeScannedBadge('982762371')).toBe('982762371')
+    expect(sanitizeScannedBadge('NOT-A-BADGE')).toBe('NOTABADGE')
+  })
+
+  it('preserves a legit VSS badge (does not strip a load-bearing VS)', () => {
+    expect(sanitizeScannedBadge('VSFB5971GB4629')).toBe('VSFB5971GB4629')
+    expect(sanitizeScannedBadge('VS0001')).toBe('VS0001')
+  })
+
+  it('preserves a VS-prefixed value that already validates as VSS', () => {
+    // The seed data (sql/vss_sewadars_data.sql) proves legit VSS badges look
+    // exactly like "VS" + a valid FB badge (e.g. VSFB5971GA2927), so a
+    // syntactic strip cannot tell a spurious prefix from a real VSS badge —
+    // the conservative bias preserves the value rather than risk scanning the
+    // wrong sewadar.
+    expect(sanitizeScannedBadge('VSFB5978GA2644')).toBe('VSFB5978GA2644')
   })
 })

@@ -29,7 +29,7 @@
  */
 import { useState, useRef, useEffect, forwardRef, useImperativeHandle, useCallback } from 'react'
 import { CameraOff, RefreshCw, Zap, Focus } from 'lucide-react'
-import { withTimeout, CAMERA_INIT_TIMEOUT, computeRoi, waitForVideoReady, isSecureCameraContext, isEdgeDetection } from '../../lib/scannerUtils'
+import { withTimeout, CAMERA_INIT_TIMEOUT, computeRoi, waitForVideoReady, isSecureCameraContext, isEdgeDetection, detectionBox, rgbaToGray } from '../../lib/scannerUtils'
 import {
   openCamera,
   stopStream,
@@ -59,6 +59,16 @@ const DETECT_MAX_WIDTH = 720
 const ROI_WIDEN_AFTER = 15
 // Consecutive misses before a tap-to-focus hint is offered.
 const GUIDANCE_AFTER = 10
+// How long the aim rectangle lingers after the last detection. Short enough to
+// feel attached to the badge, long enough not to blink between frames.
+const AIM_HIDE_MS = 700
+// Minimum ms between two aim-overlay repaints when the box has barely moved.
+const AIM_THROTTLE_MS = 150
+// Consecutive misses before the stripe localizer is asked to point at the
+// barcode, and how often to re-ask afterwards. Both keep the localizer off the
+// path entirely while a badge is reading normally.
+const AIM_HINT_AFTER = 3
+const AIM_HINT_EVERY = 3
 
 // ─── Quality Analysis ─────────────────────────────────────────────────────────
 
@@ -108,6 +118,7 @@ function guidanceFor(reason, elapsed, hasEverDetected, consecutiveFails) {
 }
 
 import { createEnginePool } from './enginePool'
+import { locateBarcode } from './barcodeLocator'
 
 
 // ─── Detection surface ────────────────────────────────────────────────────────
@@ -196,6 +207,9 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const detectMsRef = useRef({ avg: 0, last: 0 })
   const frameCountRef = useRef(0)
   const fpsRef = useRef({ frames: 0, last: Date.now() })
+  // Aim overlay: the last published box (for throttling) and its fade timer.
+  const aimBoxRef = useRef(null)
+  const aimTimerRef = useRef(null)
 
   const [status, setStatus] = useState('starting')
   const [errorMsg, setErrorMsg] = useState('')
@@ -207,6 +221,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const [lastRaw, setLastRaw] = useState(null)
   const [debugLogs, setDebugLogs] = useState([])
   const [tapFocusActive, setTapFocusActive] = useState(false)
+  const [aimBox, setAimBox] = useState(null)
 
   onScanRef.current = onScan
 
@@ -226,6 +241,76 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     guidanceRef.current = msg
     setGuidanceMsg(msg)
   }, [])
+
+  // ─── Aim overlay (Option B: feedback, never a gate) ──────────────────
+  //
+  // The rectangle shows the operator WHERE the decoder just read. It is pure
+  // feedback: `detectionBox` returning null (or being called at all) has no
+  // effect on whether a scan is accepted — decoding always runs on the normal
+  // ROI exactly as before.
+  //
+  // Two things keep it off the hot path: it only runs when a detection
+  // actually succeeds (not every frame), and repaints are throttled so a
+  // stationary badge doesn't re-render the whole tree ~10×/s. The fade timer,
+  // by contrast, is ALWAYS refreshed, so a badge held steady stays boxed
+  // instead of blinking out on the throttle.
+  const publishAim = useCallback((box) => {
+    if (aimTimerRef.current) { clearTimeout(aimTimerRef.current); aimTimerRef.current = null }
+    aimTimerRef.current = setTimeout(() => {
+      aimTimerRef.current = null
+      aimBoxRef.current = null
+      setAimBox(null)
+    }, AIM_HIDE_MS)
+
+    const now = Date.now()
+    const last = aimBoxRef.current
+    if (last && now - last.at < AIM_THROTTLE_MS
+      && Math.abs(last.left - box.left) < 8
+      && Math.abs(last.top - box.top) < 8) return
+    aimBoxRef.current = { ...box, at: now }
+    setAimBox(box)
+  }, [])
+
+  const clearAim = useCallback(() => {
+    if (aimTimerRef.current) { clearTimeout(aimTimerRef.current); aimTimerRef.current = null }
+    aimBoxRef.current = null
+    setAimBox(null)
+  }, [])
+
+  // ─── Localizer aim hint ─────────────────────────────────────────────
+  //
+  // When the DECODER is the thing failing, cornerPoints never exist, so the
+  // rectangle above would have nothing to show — precisely the "it won't catch
+  // the badge" situation this whole change is about. `locateBarcode` can still
+  // find the stripe pattern from geometry alone, so it points at the barcode
+  // while the decoder keeps trying.
+  //
+  // Deliberately conservative, because this runs on the frame loop:
+  //   - only after AIM_HINT_AFTER consecutive misses, and then only every
+  //     AIM_HINT_EVERY-th frame — never while a badge is reading normally;
+  //   - it ONLY publishes an overlay. It never feeds, narrows or suppresses a
+  //     decode, so a null or wrong box can cost at most a misleading rectangle,
+  //     never a missed scan (the non-regression contract: a HINT, not a GATE).
+  // Any throw is swallowed — a hint must never be able to break the loop.
+  const publishLocalizerAim = useCallback((roi, video) => {
+    try {
+      const img = surfaceRef.current?.read?.()
+      if (!img || !video?.videoWidth) return
+      const box = locateBarcode(rgbaToGray(img), img.width, img.height, { minConfidence: 0.55 })
+      if (!box) return
+      // detectionBox speaks in corner points; a rect's four corners are enough
+      // to recover it, and they arrive in the same detect-canvas space the ROI
+      // describes.
+      const corners = [
+        { x: box.x, y: box.y },
+        { x: box.x + box.width, y: box.y },
+        { x: box.x + box.width, y: box.y + box.height },
+        { x: box.x, y: box.y + box.height },
+      ]
+      const css = detectionBox(corners, roi, video.videoWidth, video.videoHeight, video.getBoundingClientRect())
+      if (css) publishAim(css)
+    } catch { /* hint only — never let it touch the loop */ }
+  }, [publishAim])
 
   // Declared before detectLoop, which depends on them (const TDZ).
 
@@ -259,6 +344,16 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         continue
       }
 
+      // Aim feedback over what we just read — placed after the edge reject so
+      // the rectangle never marks a detection we refused to trust. Runs before
+      // the confirm window, because aiming is exactly what an operator needs
+      // while the threshold is still counting up.
+      const v = videoRef.current
+      if (v?.videoWidth) {
+        const box = detectionBox(b.cornerPoints, roi, v.videoWidth, v.videoHeight, v.getBoundingClientRect())
+        if (box) publishAim(box)
+      }
+
       hasEverDetectedRef.current = true
       const { confirmed, count } = updateWindow(raw, cfg)
       if (debugOn) pushDebug(`window ${raw}: ${count}/${cfg.confirmThreshold} ${confirmed ? 'CONFIRMED' : ''}`)
@@ -277,7 +372,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       if (accepted !== false) lastScanRef.current = { badge: raw, time: now }
       break
     }
-  }, [debugOn, pushDebug, updateWindow])
+  }, [debugOn, pushDebug, updateWindow, publishAim])
 
   // ─── Frame scheduling ───────────────────────────────────────────────
 
@@ -362,6 +457,12 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       handleBarcodes(barcodes, roi, engine)
     } else {
       consecutiveFailsRef.current++
+      // Point at the barcode while the DECODER is the thing failing. Throttled
+      // both by miss count and frame number so a hopeless loop never pays the
+      // localizer on every pass. Pure overlay — see publishLocalizerAim.
+      if (consecutiveFailsRef.current >= AIM_HINT_AFTER && frameCountRef.current % AIM_HINT_EVERY === 0) {
+        publishLocalizerAim(roi, video)
+      }
       // Watchdog: a live preview that has never decoded anything is the
       // signature of a broken engine. Say so instead of hinting forever.
       if (engineReadyAtRef.current && !anyDecodeRef.current && Date.now() - engineReadyAtRef.current > 20000) {
@@ -413,7 +514,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         }
       }, wait)
     }
-  }, [debugOn, pushDebug, setGuidance, isCurrent, handleBarcodes])
+  }, [debugOn, pushDebug, setGuidance, isCurrent, handleBarcodes, publishLocalizerAim])
 
   // ─── Tap to Focus ───────────────────────────────────────────────────
 
@@ -574,7 +675,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     // external restart must not inherit the suppressor either.
     lastScanRef.current = { badge: null, time: 0 }
     lastRawRef.current = null
-  }, [cancelFrame])
+    // A rectangle must not outlive the session that drew it — Retry, unmount
+    // and a tab-leader yield all land here.
+    clearAim()
+  }, [cancelFrame, clearAim])
 
   // ─── Start ──────────────────────────────────────────────────────────
 
@@ -605,6 +709,8 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     roiModeRef.current = 'band'
     engineReadyAtRef.current = 0
     anyDecodeRef.current = false
+    // A restart must not inherit the previous run's aim rectangle either.
+    clearAim()
 
     if (!isSecureCameraContext()) {
       setStatus('error')
@@ -766,7 +872,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
 
     // ── 3. Engines in the background — never block the preview.
     ensureEngines(session)
-  }, [debugOn, pushDebug, setGuidance, isCurrent, detectLoop, ensureEngines, teardown, cancelFrame])
+  }, [debugOn, pushDebug, setGuidance, isCurrent, detectLoop, ensureEngines, teardown, cancelFrame, clearAim])
 
   // ─── Lifecycle ──────────────────────────────────────────────────────
 
@@ -961,6 +1067,25 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         pointerEvents: 'none',
         border: '2px solid rgba(255,255,255,0.35)', borderRadius: 12,
       }} />
+
+      {/* Aim rectangle: where the decoder last read. Feedback only — it is
+          published from handleBarcodes AFTER the edge reject and has no say in
+          whether a scan is accepted (see detectionBox). The short transition
+          smooths jitter between frames without feeling detached from the badge. */}
+      {aimBox && (
+        <div data-testid="aim-box" aria-hidden="true" style={{
+          position: 'absolute',
+          left: aimBox.left,
+          top: aimBox.top,
+          width: aimBox.width,
+          height: aimBox.height,
+          border: '2px solid rgba(52,211,153,0.95)',
+          borderRadius: 8,
+          boxShadow: '0 0 0 1px rgba(0,0,0,0.45) inset',
+          pointerEvents: 'none',
+          transition: 'left 90ms linear, top 90ms linear, width 90ms linear, height 90ms linear',
+        }} />
+      )}
 
       {debugOn && (
         <div style={{

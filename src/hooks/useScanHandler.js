@@ -5,7 +5,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
-import { BADGE_REGEX } from '../lib/logic'
+import { BADGE_REGEX, sanitizeScannedBadge } from '../lib/logic'
 import { scanDisplay } from '../lib/scanDisplay'
 import { enqueueScan, getQueuedScans } from '../lib/offlineQueue'
 import {
@@ -395,7 +395,10 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, sh
       toast.warning('Scanner busy — retry this badge')
       return { ok: false, reason: 'busy' }
     }
-    const b = String(badge).trim().toUpperCase()
+    // Sanitise BEFORE validation so a recoverable noisy read (stray guards,
+    // spaces, case, positional confusions) is accepted instead of rejected.
+    // Clean values pass through unchanged (sanitizeScannedBadge is idempotent).
+    const b = sanitizeScannedBadge(badge)
     if (!b) return { ok: false, reason: 'empty' }
     if (!BADGE_REGEX.test(b)) {
       showPopup({ status: 'error', badge: b, message: 'Invalid badge format — check FB/BH/VS', time: new Date().toLocaleTimeString() })
