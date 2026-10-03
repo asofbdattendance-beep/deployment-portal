@@ -2,9 +2,9 @@ import { describe, it, expect } from 'vitest'
 import {
   previsitDates,
   previsitKpis,
-  previsitDeptOptions,
   previsitByDay,
   previsitByDept,
+  previsitCentreMatrix,
   previsitPresentSet,
   previsitPresentMap,
   previsitAttention,
@@ -49,16 +49,6 @@ describe('previsitKpis', () => {
 
   it('is zeroed on empty input', () => {
     expect(previsitKpis([])).toEqual({ sewas: 0, present: 0, openNow: 0 })
-  })
-})
-
-describe('previsitDeptOptions', () => {
-  it('dedups and sorts, keeping the department-less bucket distinct from All', () => {
-    expect(previsitDeptOptions(ROWS)).toEqual([
-      { id: 'd1', name: 'MEDICAL' },
-      { id: '__none__', name: 'No department' },
-      { id: 'd2', name: 'TRAFFIC' },
-    ])
   })
 })
 
@@ -120,12 +110,24 @@ describe('previsitPresentSet', () => {
   })
 
   describe('filterPrevisitTotal', () => {
-    it('filters the deployed list by department and text, badge included', () => {
+    it('filters the deployed list by centre and text, badge included', () => {
       expect(filterPrevisitTotal(DEPLOYED, {}).map((r) => r.badge_number)).toEqual(['B1', 'B2', 'B9'])
-      expect(filterPrevisitTotal(DEPLOYED, { departmentId: 'd1' }).map((r) => r.badge_number)).toEqual(['B1', 'B2'])
+      expect(filterPrevisitTotal(DEPLOYED, { centre: 'CENTRE B' }).map((r) => r.badge_number)).toEqual(['B2'])
+      expect(filterPrevisitTotal(DEPLOYED, { centre: 'CENTRE A' }).map((r) => r.badge_number)).toEqual(['B1', 'B9'])
       expect(filterPrevisitTotal(DEPLOYED, { query: 'b9' }).map((r) => r.badge_number)).toEqual(['B9'])
       expect(filterPrevisitTotal(DEPLOYED, { query: 'zed' }).map((r) => r.badge_number)).toEqual(['B9'])
-      expect(filterPrevisitTotal(DEPLOYED, { departmentId: '__none__' }).map((r) => r.badge_number)).toEqual(['B9'])
+      expect(filterPrevisitTotal(DEPLOYED, { query: 'centre b' }).map((r) => r.badge_number)).toEqual(['B2'])
+      expect(filterPrevisitTotal(DEPLOYED, { centre: 'NOWHERE', query: 'asha' })).toEqual([])
+    })
+
+    it('ignores an unknown centre value only by matching nothing, never by leaking all rows', () => {
+      expect(filterPrevisitTotal(DEPLOYED, { centre: 'GHOST' })).toEqual([])
+    })
+
+    it('reaches rows with no home centre through UNASSIGNED_CENTRE', () => {
+      const withBlank = [...DEPLOYED, { badge_number: 'B7', sewadar_name: 'Dee', sewadar_centre: null, department_id: 'd1', dept_name: 'MEDICAL', is_vss: false }]
+      expect(filterPrevisitTotal(withBlank, { centre: 'Unassigned centre' }).map((r) => r.badge_number)).toEqual(['B7'])
+      expect(filterPrevisitTotal(withBlank, {}).map((r) => r.badge_number)).toEqual(['B1', 'B2', 'B9', 'B7'])
     })
   })
 
@@ -216,16 +218,15 @@ describe('filterPrevisitRows', () => {
     expect(filterPrevisitRows(ROWS, { date: '2026-10-06' })).toHaveLength(2)
   })
 
-  it('filters by department, hiding department-less rows', () => {
-    expect(filterPrevisitRows(ROWS, { departmentId: 'd1' }).map((r) => r.badge_number)).toEqual(['B1'])
+  it('filters by centre, keeping only that centre’s rows', () => {
+    expect(filterPrevisitRows(ROWS, { centre: 'CENTRE B' }).map((r) => r.badge_number)).toEqual(['B2'])
+    expect(filterPrevisitRows(ROWS, { centre: 'CENTRE A' }).map((r) => r.badge_number)).toEqual(['B1', 'B3'])
+    expect(filterPrevisitRows(ROWS, { centre: 'GHOST' })).toEqual([])
   })
 
-  it('selects exactly the department-less rows with the No-department bucket', () => {
-    expect(filterPrevisitRows(ROWS, { departmentId: '__none__' }).map((r) => r.badge_number)).toEqual(['B3'])
-  })
-
-  it('keeps department-less rows when no department is picked', () => {
+  it('keeps every row when no centre is picked', () => {
     expect(filterPrevisitRows(ROWS, {})).toHaveLength(3)
+    expect(filterPrevisitRows(ROWS, { centre: 'all' })).toHaveLength(3)
   })
 
   it('matches badge, name or centre case-insensitively', () => {
@@ -278,5 +279,76 @@ describe('previsitAttentionExportRows', () => {
     expect(out).toHaveLength(2)
     expect(out[0]).toMatchObject({ Badge: 'B2', Flag: 'Open' })
     expect(out[1]).toMatchObject({ Badge: 'B3', Flag: 'Undeployed, Multiple sessions' })
+  })
+})
+
+describe('previsitCentreMatrix', () => {
+  const SUMMARY = [
+    { event_date: '2026-10-06', centre: 'CENTRE A', present: 2 },
+    { event_date: '2026-10-05', centre: 'CENTRE A', present: 1 },
+    { event_date: '2026-10-06', centre: 'CENTRE B', present: 1 },
+  ]
+  const DEPLOYED = [
+    { badge_number: 'B1', sewadar_centre: 'CENTRE A' },
+    { badge_number: 'B2', sewadar_centre: 'CENTRE A' },
+    { badge_number: 'B3', sewadar_centre: 'CENTRE A' },
+    { badge_number: 'B4', sewadar_centre: 'CENTRE B' },
+  ]
+
+  it('builds one row per centre with a present count per sewa day', () => {
+    const m = previsitCentreMatrix(SUMMARY, DEPLOYED)
+    expect(m.columns).toEqual(['2026-10-05', '2026-10-06'])
+    expect(m.rows.map((r) => r.centre)).toEqual(['CENTRE A', 'CENTRE B'])
+    expect(m.rows[0]).toMatchObject({
+      centre: 'CENTRE A',
+      deployed: 3,
+      presentTotal: 3,
+      possible: 6,
+      byDate: { '2026-10-05': 1, '2026-10-06': 2 },
+    })
+    expect(m.rows[1]).toMatchObject({
+      deployed: 1,
+      presentTotal: 1,
+      possible: 2,
+      byDate: { '2026-10-05': 0, '2026-10-06': 1 },
+    })
+  })
+
+  it('totals every centre per day and across the visit', () => {
+    const m = previsitCentreMatrix(SUMMARY, DEPLOYED)
+    expect(m.totals.byDate).toEqual({ '2026-10-05': 1, '2026-10-06': 3 })
+    expect(m.totals).toMatchObject({ present: 4, deployed: 4, possible: 8 })
+  })
+
+  it('falls back to the busiest day as the denominator when no roster arrives', () => {
+    const m = previsitCentreMatrix(SUMMARY, [])
+    // CENTRE A peaked at 2 present → 1/2 and 2/2, never p/0.
+    expect(m.rows[0].deployed).toBe(2)
+    expect(m.rows[0].possible).toBe(4)
+    expect(m.rows[0].byDate).toEqual({ '2026-10-05': 1, '2026-10-06': 2 })
+  })
+
+  it('keeps a deployed centre that never scanned, with zero cells', () => {
+    const m = previsitCentreMatrix([], [{ badge_number: 'B9', sewadar_centre: 'GHOST' }])
+    expect(m.columns).toEqual([])
+    expect(m.rows[0]).toMatchObject({ centre: 'GHOST', deployed: 1, presentTotal: 0, possible: 0 })
+  })
+
+  it('buckets blank centres under UNASSIGNED_CENTRE and sorts them last', () => {
+    const m = previsitCentreMatrix([
+      { event_date: '2026-10-06', centre: '', present: 1 },
+      { event_date: '2026-10-06', centre: '   ', present: 4 },
+      { event_date: '2026-10-06', centre: 'ZED', present: 2 },
+    ], [])
+    expect(m.rows.map((r) => r.centre)).toEqual(['ZED', 'Unassigned centre'])
+    expect(m.rows[1].presentTotal).toBe(5)
+  })
+
+  it('is empty on junk input', () => {
+    expect(previsitCentreMatrix(null, undefined)).toEqual({
+      columns: [],
+      rows: [],
+      totals: { byDate: {}, present: 0, deployed: 0, possible: 0 },
+    })
   })
 })

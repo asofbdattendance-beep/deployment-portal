@@ -8,6 +8,9 @@ import { exportWorkbook, exportWorkbookBlob, fileSlug } from '../lib/excel'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import { useExport } from '../hooks/useExport'
 import ExportSheet from '../components/mobile/ExportSheet'
+import PrintPdfButton from '../components/PrintPdfButton'
+import FilterSheet, { MobileFilterBar } from '../components/mobile/FilterSheet'
+import VirtualList from '../components/mobile/VirtualList'
 import {
   ShieldAlert, Download, Lock, RefreshCw, Loader2, Search, ArrowUpRight,
 } from 'lucide-react'
@@ -246,6 +249,22 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
       })
   }, [base, rule, search])
 
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const clearFilters = () => { setRule('all'); setSearch(''); setDate('') }
+  const filterChips = useMemo(() => {
+    const chips = []
+    if (rule !== 'all') chips.push({ key: 'rule', label: ruleLabel(rule) })
+    if (search.trim()) chips.push({ key: 'search', label: `"${search.trim()}"` })
+    if (date) chips.push({ key: 'date', label: shortDayLabel(date) })
+    return chips
+  }, [rule, search, date])
+  const clearFilterChip = (key) => {
+    if (key === 'rule') setRule('all')
+    else if (key === 'search') setSearch('')
+    else if (key === 'date') setDate('')
+  }
+  const filterResultText = `${visible.length} of ${base.length}`
+
   // ─── Excel ───
   const exportFilename = `${fileSlug(schedule?.name)}_${date || 'visit'}_anomalies.xlsx`
   // Sheet rows are built WITHOUT saving so desktop (direct download) and
@@ -375,6 +394,7 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
             <button onClick={exportExcel} disabled={exporting || mobileExport.building || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export Excel
             </button>
+            <PrintPdfButton className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }} />
             {/* The dashboard deep-links here for a rule; the jump used to be
                 one-way because this page discarded the onNavigate prop. */}
             <button onClick={() => go('dashboard')} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
@@ -397,17 +417,17 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
               max={visitWin.end || undefined}
               onChange={(e) => setDate(clampDateToWindow(e.target.value, visitWin))}
               className="input"
-              style={{ height: 36 }}
+              style={{ minHeight: 44 }}
               aria-label="Anomaly date"
             />
           </div>
           {/* "All dates (visit)" is a real option, not a label: it is the only
               way to reach p_date = null once a date has been picked, and it is
               the active state whenever no date is set. */}
-          <button onClick={() => setDate('')} className={`seg-btn ${date ? '' : 'seg-active'}`} style={{ height: 36 }} aria-pressed={!date}>
+          <button onClick={() => setDate('')} className={`seg-btn ${date ? '' : 'seg-active'}`} style={{ minHeight: 44 }} aria-pressed={!date}>
             All dates (visit)
           </button>
-          <button onClick={() => setDate(clampDateToWindow(todayStrIST(), visitWin))} className={`seg-btn ${date === todayStrIST() ? 'seg-active' : ''}`} style={{ height: 36 }}>
+          <button onClick={() => setDate(clampDateToWindow(todayStrIST(), visitWin))} className={`seg-btn ${date === todayStrIST() ? 'seg-active' : ''}`} style={{ minHeight: 44 }}>
             Today
           </button>
         </div>
@@ -441,8 +461,18 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
       </div>
 
       <div className="card" style={{ padding: '1.25rem' }}>
+        {isMobile && (
+          <MobileFilterBar
+            onOpen={() => setFiltersOpen(true)}
+            chips={filterChips}
+            onClearChip={clearFilterChip}
+            onClearAll={clearFilters}
+            resultText={filterResultText}
+            activeCount={filterChips.length}
+          />
+        )}
         <div className="section-header" style={{ flexWrap: 'wrap', gap: '0.75rem' }}>
-          <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+          <div className={isMobile ? 'anomaly-rules-scroll' : undefined} style={{ display: 'flex', gap: '0.4rem', flexWrap: isMobile ? 'nowrap' : 'wrap', alignItems: 'center' }}>
             <button
               onClick={() => setRule('all')}
               className={`seg-btn ${rule === 'all' ? 'seg-active' : ''}`}
@@ -472,17 +502,19 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
             )}
           </div>
           <div style={{ flex: 1 }} />
-          <div style={{ position: 'relative', minWidth: 200 }}>
-            <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none' }} />
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search badge / name / centre..."
-              className="input"
-              style={{ width: '100%', paddingLeft: 30 }}
-              aria-label="Search anomalies"
-            />
-          </div>
+          {!isMobile && (
+            <div style={{ position: 'relative', minWidth: 200 }}>
+              <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none' }} />
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search badge / name / centre..."
+                className="input"
+                style={{ width: '100%', paddingLeft: 30 }}
+                aria-label="Search anomalies"
+              />
+            </div>
+          )}
         </div>
 
         {visible.length === 0 ? (
@@ -495,6 +527,31 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
                 : `No anomaly rule fired${date ? ` on ${shortDayLabel(date)}` : ' for this visit'}.`}
             </div>
           </div>
+        ) : isMobile ? (
+          <VirtualList
+            items={visible}
+            estimateSize={96}
+            ariaLabel="Attendance anomalies"
+            empty={null}
+            renderRow={(r) => (
+              <div className="att-card">
+                <div className="att-card-top">
+                  <span className={`pill ${rulePill(r.rule)}`} title={ruleText(r.rule)}>{ruleLabel(r.rule)}</span>
+                  <span className="att-card-badge">{r.badge_number}</span>
+                </div>
+                <div className="att-card-name">{r.sewadar_name || '—'}</div>
+                <div className="att-card-meta">
+                  <span>{centreOf(r)}</span>
+                  <span aria-hidden="true">·</span>
+                  <span>{r.dept_name || '—'}</span>
+                </div>
+                <div className="att-card-foot">
+                  <span className="att-card-times">{r.detail || '—'}</span>
+                  <span className="att-card-times">{r.event_date || '—'}</span>
+                </div>
+              </div>
+            )}
+          />
         ) : (
           <div className="table-wrap table-wrap-sticky">
             <table className="table table-sticky">
@@ -524,7 +581,7 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
                     <td data-label="Detail" style={{ color: '#475569', fontSize: '0.82rem' }}>{r.detail || '—'}</td>
                     {/* BAD_STATUS reports the CURRENT badge status, so it is
                         visit-level by design and carries no event date. */}
-                    <td data-label="Date" style={{ fontFamily: 'monospace', fontSize: '0.8rem', whiteSpace: 'nowrap' }}>{r.event_date || '—'}</td>
+                    <td data-label="Date" className="nowrap-cell" style={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{r.event_date || '—'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -538,6 +595,35 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
         An anomaly is cleared by fixing the underlying scan or deployment record — this page never
         writes, and there is no “resolve” action to click.
       </div>
+
+      <FilterSheet
+        open={isMobile && filtersOpen}
+        onClose={() => setFiltersOpen(false)}
+        title="Anomaly filters"
+        resultText={filterResultText}
+        onClearAll={clearFilters}
+        hasActive={filterChips.length > 0}
+      >
+        <div className="previsit-field">
+          <span className="previsit-label">Search</span>
+          <span className="previsit-search">
+            <Search size={14} aria-hidden="true" />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search badge / name / centre..." className="input previsit-control" aria-label="Search anomalies" />
+          </span>
+        </div>
+        <div className="previsit-field">
+          <span className="previsit-label">Anomaly date</span>
+          <input
+            type="date"
+            value={date}
+            min={visitWin.start || undefined}
+            max={visitWin.end || undefined}
+            onChange={(e) => setDate(clampDateToWindow(e.target.value, visitWin))}
+            className="input previsit-control"
+            aria-label="Anomaly date"
+          />
+        </div>
+      </FilterSheet>
 
       <ExportSheet
         open={isMobile && exportSheetOpen}

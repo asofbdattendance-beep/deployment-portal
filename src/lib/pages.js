@@ -1,4 +1,4 @@
-import { Calendar, Users, ClipboardCheck, Star, Tags, SlidersHorizontal, Building2, ScanLine, LayoutDashboard, FileSpreadsheet, Siren, UserPlus } from 'lucide-react'
+import { Calendar, Users, ClipboardCheck, Star, Tags, SlidersHorizontal, Building2, ScanLine, LayoutDashboard, FileSpreadsheet, Siren, UserPlus, Radio } from 'lucide-react'
 
 // ─── Page registry (single source: navbar, document.title, Users matrix) ───
 export const PAGES = {
@@ -20,6 +20,10 @@ export const PAGES = {
   // attendance intelligence suite (v45) — aso/super_admin only, except Reports
   // which dept_incharge also sees as a standalone tab
   reports: { label: 'Reports', icon: FileSpreadsheet, roles: ['dept_incharge', 'aso', 'super_admin'] },
+  // liveScanners (wired 2026-10-03): LiveScannersPage existed but had NO PAGES
+  // key and NO App.jsx branch, so it was unreachable for every role — the
+  // scanner-ops dashboard could never be opened. Part of the attendance group.
+  liveScanners: { label: 'Live Scanners', icon: Radio, roles: ['aso', 'super_admin'], group: 'attendance' },
   anomalies: { label: 'Anomalies', icon: Siren, roles: ['aso', 'super_admin'], group: 'attendance' },
   // phase-2 hardening: per-centre permission overrides — super_admin only
   control: { label: 'Control Panel', icon: SlidersHorizontal, roles: ['super_admin'] },

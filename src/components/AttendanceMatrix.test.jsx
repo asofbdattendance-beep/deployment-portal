@@ -1,81 +1,110 @@
-import { describe, it, expect } from 'vitest'
-import { createElement } from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
+// @vitest-environment jsdom
+// AttendanceMatrix — grid + the phone quick-peek sheet (plan decision D-C).
+//
+// Worth protecting: the grid still renders every day cell with its present /
+// absent meaning; on phones the Badge cell becomes a real button that opens a
+// sheet carrying that sewadar's full breakdown, because a 46rem grid in a
+// 320px viewport can otherwise only be reached by horizontal scroll.
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import AttendanceMatrix from './AttendanceMatrix'
-import { buildAttendanceMatrixFromDayBadges } from '../lib/attendance'
 
-// End-to-end shape test: logic builds the grid, the component renders it.
-// One present sewadar (1 of 2 days) + one absentee over a 2-day strip, built
-// through the dayBadges shaper (present + absent lists per date).
-function fixture() {
-  const columns = ['2026-10-07', '2026-10-08']
-  const dayBadges = {
-    '2026-10-07': {
-      present: [{ badge_number: 'B1', sewadar_name: 'Asha', sewadar_centre: 'DELHI', dept_name: 'Traffic', is_vss: false }],
-      absent: [{ badge_number: 'B2', sewadar_name: 'Zed', sewadar_centre: 'NOIDA', dept_name: 'Medical', is_vss: false }],
-    },
-    '2026-10-08': {
-      present: [],
-      absent: [
-        { badge_number: 'B1', sewadar_name: 'Asha', sewadar_centre: 'DELHI', dept_name: 'Traffic', is_vss: false },
-        { badge_number: 'B2', sewadar_name: 'Zed', sewadar_centre: 'NOIDA', dept_name: 'Medical', is_vss: false },
-      ],
-    },
-  }
-  return buildAttendanceMatrixFromDayBadges(dayBadges, columns)
+const COLUMNS = ['2026-10-07', '2026-10-08', '2026-10-09']
+const ROWS = [
+  {
+    badge_number: 'A1',
+    sewadar_name: 'Ramesh Kumar',
+    centre: 'SECTOR-15-A',
+    dept_name: 'TRAFFIC',
+    presentCount: 2,
+    byDate: { '2026-10-07': true, '2026-10-08': false, '2026-10-09': true },
+  },
+  {
+    badge_number: 'A2',
+    sewadar_name: 'Sita Devi',
+    centre: 'DELHI MC',
+    dept_name: 'KITCHEN',
+    presentCount: 0,
+    byDate: { '2026-10-07': false, '2026-10-08': false, '2026-10-09': false },
+  },
+]
+
+function stubViewport(width) {
+  window.matchMedia = vi.fn((q) => ({
+    matches: q.includes('max-width') ? width <= 768 : false,
+    media: q,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+  }))
 }
 
+afterEach(() => { cleanup(); vi.restoreAllMocks() })
+
 describe('AttendanceMatrix', () => {
-  it('renders one present cell and three absent cells across the 2x2 grid', () => {
-    const { columns, rows } = fixture()
-    const html = renderToStaticMarkup(createElement(AttendanceMatrix, { columns, rows }))
-
-    // 1 present + 3 absent day cells; meaning stays on title + sr-only text.
-    expect(html.match(/att-cell att-present/g) || []).toHaveLength(1)
-    expect(html.match(/att-cell att-absent/g) || []).toHaveLength(3)
-    expect(html.match(/title="Present"/g) || []).toHaveLength(1)
-    expect(html.match(/title="Absent"/g) || []).toHaveLength(3)
+  it('shows the empty state with no rows', () => {
+    stubViewport(1400)
+    render(<AttendanceMatrix columns={COLUMNS} rows={[]} />)
+    expect(screen.getByText(/No sewadars in this department/)).not.toBeNull()
   })
 
-  it('renders both sewadars plus the date headers and a caption', () => {
-    const { columns, rows } = fixture()
-    expect(rows).toHaveLength(2)
-    const html = renderToStaticMarkup(createElement(AttendanceMatrix, { columns, rows }))
-
-    expect(html).toContain('Asha')
-    expect(html).toContain('Zed')
-    // UTC-derived stacked labels (short month over date number) with the
-    // full date on hover.
-    expect(html).toContain('att-day-wd">Oct')
-    expect(html).toContain('att-day-num">7')
-    expect(html).toContain('att-day-num">8')
-    expect(html).toContain('title="2026-10-07"')
-    expect(html).toContain('<caption>')
-    expect(html).toContain('Badge')
+  it('renders a row per sewadar with name, centre and days', () => {
+    stubViewport(1400)
+    render(<AttendanceMatrix columns={COLUMNS} rows={ROWS} />)
+    expect(screen.getByText('Ramesh Kumar')).not.toBeNull()
+    expect(screen.getByText('SECTOR-15-A')).not.toBeNull()
+    expect(screen.getByText('2/3')).not.toBeNull()
+    expect(screen.getByText('0/3')).not.toBeNull()
   })
 
-  it('shows a legend and a Days summary column', () => {
-    const { columns, rows } = fixture()
-    const html = renderToStaticMarkup(createElement(AttendanceMatrix, { columns, rows }))
-
-    expect(html).toContain('att-legend')
-    expect(html).toContain('Days')
-    // B1 present 1 of 2 days, B2 none.
-    expect(html).toContain('>1/2<')
-    expect(html).toContain('>0/2<')
+  it('marks the highlighted day column', () => {
+    stubViewport(1400)
+    const { container } = render(<AttendanceMatrix columns={COLUMNS} rows={ROWS} highlightDate="2026-10-08" />)
+    expect(container.querySelectorAll('.att-today').length).toBeGreaterThan(0)
   })
 
-  it('highlights the selected scan day column', () => {
-    const { columns, rows } = fixture()
-    const html = renderToStaticMarkup(
-      createElement(AttendanceMatrix, { columns, rows, highlightDate: '2026-10-08' }),
+  it('desktop: the badge is plain text, no peek affordance', () => {
+    stubViewport(1400)
+    render(<AttendanceMatrix columns={COLUMNS} rows={ROWS} />)
+    expect(screen.queryByRole('button', { name: /day-by-day attendance/ })).toBeNull()
+  })
+
+  it('phone: tapping a badge opens the day-by-day peek sheet', () => {
+    stubViewport(390)
+    render(<AttendanceMatrix columns={COLUMNS} rows={ROWS} />)
+    const btn = screen.getByRole('button', { name: /day-by-day attendance for Ramesh Kumar/ })
+    fireEvent.click(btn)
+    const dialog = screen.getByRole('dialog')
+    expect(dialog.textContent).toContain('Ramesh Kumar')
+    expect(dialog.textContent).toContain('A1')
+    // every day is spelled out in the sheet
+    expect(dialog.textContent).toContain('Present')
+    expect(dialog.textContent).toContain('Absent')
+  })
+
+  it('phone: the legend advertises the peek', () => {
+    stubViewport(390)
+    render(<AttendanceMatrix columns={COLUMNS} rows={ROWS} />)
+    expect(screen.getByText(/Tap a badge/)).not.toBeNull()
+  })
+
+  it('phone: the peek sheet closes', () => {
+    stubViewport(390)
+    render(<AttendanceMatrix columns={COLUMNS} rows={ROWS} />)
+    fireEvent.click(screen.getByRole('button', { name: /day-by-day attendance for Sita Devi/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('computes presentCount from byDate when absent', () => {
+    stubViewport(1400)
+    render(
+      <AttendanceMatrix
+        columns={COLUMNS}
+        rows={[{ ...ROWS[0], presentCount: undefined }]}
+      />,
     )
-    expect(html.match(/att-today/g) || []).toHaveLength(1)
-  })
-
-  it('renders an empty state instead of a headless table', () => {
-    const html = renderToStaticMarkup(createElement(AttendanceMatrix, { columns: ['2026-10-07'], rows: [] }))
-    expect(html).toContain('att-empty')
-    expect(html).not.toContain('<table')
+    expect(screen.getByText('2/3')).not.toBeNull()
   })
 })

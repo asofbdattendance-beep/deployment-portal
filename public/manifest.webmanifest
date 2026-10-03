@@ -1,11 +1,10 @@
 {
   "name": "Sewadar Deployment Portal",
   "short_name": "Sewadar Portal",
-  "description": "Sewadar consent & deployment portal — capture attendance, view reports, and manage schedules across centres.",
+  "description": "Sewadar consent & deployment portal \u2014 capture attendance, view reports, and manage schedules across centres.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "orientation": "portrait",
   "background_color": "#f6f7fb",
   "theme_color": "#6366f1",
   "icons": [
@@ -27,5 +26,15 @@
       "type": "image/png",
       "purpose": "maskable"
     }
-  ]
+  ],
+  "id": "/",
+  "display_override": [
+    "standalone",
+    "minimal-ui"
+  ],
+  "categories": [
+    "productivity",
+    "utilities"
+  ],
+  "lang": "en"
 }

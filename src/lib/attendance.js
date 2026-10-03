@@ -104,6 +104,27 @@ export function formatDuration(minutes) {
   return `${h}h ${m}m`
 }
 
+/* ─── Duration for one sewadar's visit ─── */
+
+/**
+ * Human duration of a sewadar's visit from its display row: the last
+ * IN→OUT pair, formatted. 'still IN' when the last session is open, '—' when
+ * there is nothing to measure.
+ *
+ * Lives here (not in a page) so the desktop table, the phone card
+ * (AttendanceCards) and the Excel sheet can never disagree on a duration.
+ * This is the consumer that makes `sessionMinutes` / `formatDuration` live
+ * code rather than a tested-but-unused pair.
+ *
+ * @param {object} r a display row from buildSewadarRows
+ * @returns {string}
+ */
+export function sessionDuration(r) {
+  if (!r?.first_in_time) return '—'
+  if (!r.last_out_time) return r.still_open ? 'still IN' : '—'
+  return formatDuration(sessionMinutes(r.first_in_time, r.last_out_time, r.first_in_date, r.last_out_date))
+}
+
 /* ─── Expected vs present ─── */
 
 /**

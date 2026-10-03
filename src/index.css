@@ -5,7 +5,7 @@
   position: fixed;
   top: 1rem;
   right: 1rem;
-  z-index: 200;
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
@@ -27,7 +27,6 @@
 .toast-icon { flex-shrink: 0; display: flex; margin-top: 1px; }
 .toast-message { flex: 1; line-height: 1.45; overflow-wrap: anywhere; }
 .toast-close { background: none; border: none; cursor: pointer; color: var(--text-muted); padding: 0; flex-shrink: 0; display: flex; }
-.toast-close:hover { color: var(--text); }
 .toast-success { border-color: #a7f3d0; }
 .toast-success .toast-icon { color: var(--success); }
 .toast-error { border-color: #fecaca; }
@@ -62,6 +61,15 @@
   --radius: 12px;
   --shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 1px 3px rgba(15, 23, 42, 0.06);
   --shadow-lg: 0 10px 40px rgba(15, 23, 42, 0.12);
+  /* ── Overlay z-index scale (must stay ordered) ──
+     sticky filter 20 < bottom tab bar 40 < centred modal 80
+     < bottom sheet 90 < toast 200 < tooltip 9999 */
+  --z-filter: 20;
+  --z-tabbar: 40;
+  --z-modal: 80;
+  --z-sheet: 90;
+  --z-toast: 200;
+  --z-tooltip: 9999;
 }
 
 body {
@@ -204,7 +212,6 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   box-shadow: var(--shadow);
   transition: box-shadow 0.18s ease, border-color 0.18s ease;
 }
-.stat:hover { box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08); border-color: #cbd5e1; }
 .stat-label { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-sec); }
 .stat-value { font-size: 1.4rem; font-weight: 800; margin-top: 0.15rem; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .stat-sub { font-size: 0.72rem; color: var(--text-muted); margin-top: 0.1rem; }
@@ -280,11 +287,10 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
 }
 .acc-head > span { min-width: 0; overflow-wrap: anywhere; }
 .acc-head .progress { flex-shrink: 0; }
-.acc-head:hover { background: #f1f5f9; }
 .acc-body { border-top: 1px solid var(--border); padding: 0.75rem; }
 
-/* ─── Responsive tables → cards on small screens ─── */
-@media (max-width: 640px) {
+/* ─── Responsive tables → cards on phones/tablets-portrait (T0–T4) ─── */
+@media (max-width: 768px) {
   .page { padding: 1rem; }
   .header-user, .header-centre { display: none; }
   .table thead { display: none; }
@@ -335,10 +341,9 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
 .cluster { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
 
 @media (max-width: 480px) {
-  .stat-row { grid-template-columns: 1fr 1fr; }
+  /* T0–T1 refinements (stat 2-col lives in the ≤768 block) */
   .page-title { font-size: 1.1rem; }
   .modal { padding: 1rem; }
-  .input, .select { font-size: 0.9rem; }
   .stack-label { max-width: 34vw; }
 }
 
@@ -417,7 +422,6 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   transition: all 0.15s;
   flex-shrink: 0;
 }
-.tab-btn:hover { background: #eef2ff; color: #4f46e5; border-color: #c7d2fe; }
 /* navbar group dropdown (e.g. Attendance ▾) — the menu floats above page
    content; the bar itself wraps instead of scrolling pills off-screen */
 .tab-group { position: relative; flex-shrink: 0; }
@@ -452,7 +456,6 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   cursor: pointer;
   text-align: left;
 }
-.tab-menu-item:hover { background: #eef2ff; color: #4f46e5; }
 .tab-menu-item:focus-visible { outline: 2px solid #4f46e5; outline-offset: -2px; }
 .tab-menu-active { background: #eef2ff; color: #4f46e5; font-weight: 700; }
 .tab-active {
@@ -462,7 +465,6 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   font-weight: 700;
   box-shadow: 0 2px 8px rgba(99, 102, 241, 0.35);
 }
-.tab-active:hover { background: linear-gradient(135deg, #4f46e5, #7c3aed); color: #fff; }
 
 /* ─── Inner segment buttons (e.g. VSS page tabs) ─── */
 .seg-btn {
@@ -479,9 +481,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   cursor: pointer;
   transition: all 0.15s;
 }
-.seg-btn:hover { background: #eef2ff; color: #4f46e5; border-color: #c7d2fe; }
 .seg-active { background: var(--primary); color: #fff; border-color: transparent; box-shadow: 0 1px 4px rgba(99, 102, 241, 0.3); }
-.seg-active:hover { background: #4f46e5; color: #fff; }
 
 /* ─── VSS registration form grid — 7 columns; address spans cols 2-7 ─── */
 .vss-reg-grid {
@@ -495,8 +495,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   .vss-reg-grid .addr { grid-column: auto; }
 }
 
-@media (max-width: 640px) {
-  .app-header { padding: 0.55rem 0.75rem; }
+@media (max-width: 768px) {
   .tab-nav { padding: 0.5rem 0.75rem; }
   .tab-btn { padding: 0.55rem 1rem; font-size: 0.88rem; }
   .header-user, .header-centre { display: none; }
@@ -519,15 +518,9 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   transition: all 0.15s ease;
   white-space: nowrap;
 }
-.btn:hover { background: var(--surface-2); color: var(--text); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 /* solid buttons get a subtle lift + press for tactility */
 .btn-primary, .btn-success, .btn-warning, .btn-danger { box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08); }
-.btn-primary:not(:disabled):hover, .btn-success:not(:disabled):hover,
-.btn-warning:not(:disabled):hover, .btn-danger:not(:disabled):hover {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.16);
-}
 .btn:not(:disabled):active { transform: translateY(0); transition-duration: 0.05s; }
 
 .btn-primary {
@@ -535,19 +528,14 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   border-color: var(--primary);
   color: #fff;
 }
-.btn-primary:hover { background: var(--primary-dark); color: #fff; }
 
 .btn-success { background: var(--success); border-color: var(--success); color: #fff; }
-.btn-success:hover { background: #0d9668; color: #fff; }
 
 .btn-warning { background: var(--warning); border-color: var(--warning); color: #fff; }
-.btn-warning:hover { background: #d97706; color: #fff; }
 
 .btn-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
-.btn-danger:hover { background: #dc2626; color: #fff; }
 
 .btn-ghost { background: transparent; border-color: transparent; color: var(--text-sec); }
-.btn-ghost:hover { background: var(--surface-2); color: var(--text); }
 
 /* ─── Inputs ─── */
 .input, .select {
@@ -561,7 +549,6 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
 }
 .input:focus, .select:focus { border-color: var(--primary); }
 /* hover affordance on the idle border */
-.input:not(:disabled):not(:focus):hover, .select:not(:disabled):not(:focus):hover { border-color: #cbd5e1; }
 /* keep browser autofill from painting its yellow over the theme */
 input:-webkit-autofill, input:-webkit-autofill:hover, input:-webkit-autofill:focus {
   -webkit-box-shadow: 0 0 0 1000px var(--surface) inset;
@@ -626,7 +613,7 @@ select.previsit-control { max-width: 15rem; }
    mobile card mode re-allows wrapping (see the ≤640px block) */
 .previsit-table { min-width: 56rem; }
 .previsit-table tbody td { white-space: nowrap; }
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .previsit-card { padding: 0.9rem; }
   .previsit-table tbody td { white-space: normal; }
   .previsit-count { margin-left: 0; width: 100%; text-align: right; }
@@ -676,7 +663,6 @@ select.previsit-control { max-width: 15rem; }
 }
 .table tbody tr:last-child td { border-bottom: none; }
 .table tbody tr { transition: background-color 0.12s ease; }
-.table tbody tr:hover { background: #fafbfd; }
 
 /* sticky header row — lives here (after the base thead rule) so its
    background + border-shadow win the cascade at equal specificity */
@@ -800,11 +786,6 @@ select.previsit-control { max-width: 15rem; }
    block separator so the eye can scan block-to-block */
 .deploy-matrix tbody tr.matrix-block-start td { padding-top: 0.8rem; }
 .deploy-matrix tbody tr:last-child td { border-bottom: 2px solid var(--text-sec); }
-.deploy-matrix tbody tr:hover td { background: #f1f5f9; }
-.deploy-matrix tbody tr:hover .table-sticky-col,
-.deploy-matrix tbody tr:hover .table-sticky-col-2,
-.deploy-matrix tbody tr:hover .table-sticky-col-3,
-.deploy-matrix tbody tr:hover .matrix-total { background: #eef2ff; }
 /* report header strips (COMPLETE REPORT / RATIO) — stronger tint + top rule */
 .deploy-matrix tbody tr.matrix-report-head td {
   background: #f8fafc;
@@ -813,7 +794,6 @@ select.previsit-control { max-width: 15rem; }
 .deploy-matrix tbody tr.matrix-report-head .table-sticky-col,
 .deploy-matrix tbody tr.matrix-report-head .table-sticky-col-2,
 .deploy-matrix tbody tr.matrix-report-head .table-sticky-col-3 { background: #eef2f7; }
-.deploy-matrix tbody tr.matrix-report-head:hover td { background: #f1f5f9; }
 /* full box outline per block: the block-start row carries the top edge and
    the last data column carries the right edge, so each block (COMPLETE
    REPORT / RATIO / department) reads as a closed box — placed after the
@@ -961,8 +941,8 @@ select.previsit-control { max-width: 15rem; }
   top: -6px;
   right: -6px;
 }
-/* responsive scaling for small screens */
-@media (max-width: 640px) {
+/* responsive scaling for T0-T4 */
+@media (max-width: 768px) {
   .deadline-boxes { gap: 0.3rem; padding: 0.7rem 0.7rem 0.55rem; }
   .deadline-boxes .deadline-boxes-row { gap: 0.3rem; }
   .deadline-box { min-width: 46px; padding: 0.38rem 0.35rem 0.32rem; border-radius: 6px; }
@@ -1000,7 +980,6 @@ select.previsit-control { max-width: 15rem; }
 .toggle[aria-checked='true'] .toggle-knob { transform: translateX(20px); }
 
 /* ─── Department dropdown with eligibility reasons ─── */
-.dept-item:hover { background: #f8fafc; }
 
 /* ─── Hover tooltip (Tip component) ─── */
 .tip-host {
@@ -1015,7 +994,7 @@ select.previsit-control { max-width: 15rem; }
   position: fixed;
   /* portalled to <body>, so a very high z-index keeps it above every row,
      accordion card, sticky header and the tab navbar */
-  z-index: 9999;
+  z-index: var(--z-tooltip);
   max-width: min(320px, calc(100vw - 16px));
   padding: 0.5rem 0.7rem;
   font-size: 0.76rem;
@@ -1119,13 +1098,10 @@ select.previsit-control { max-width: 15rem; }
 /* Login-only submit — scoped here so the generic .btn-primary rules above
    (used across the app) never inherit this full-width style. */
 .login-submit { display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; width: 100%; padding: 0.65rem 1.25rem; border: none; border-radius: 10px; font-size: 0.9rem; font-weight: 600; cursor: pointer; background: var(--primary); color: #fff; transition: background 0.15s; }
-.login-submit:hover { background: var(--primary-dark); }
 .login-submit:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .forgot-link { display: block; margin: 1rem auto 0; background: none; border: none; color: var(--primary); font-size: 0.82rem; font-weight: 600; cursor: pointer; }
-.forgot-link:hover { color: var(--primary-dark); text-decoration: underline; }
 .back-to-login { display: inline-flex; align-items: center; gap: 0.35rem; margin-top: 1.1rem; background: none; border: none; color: var(--text-sec); font-size: 0.82rem; font-weight: 600; cursor: pointer; }
-.back-to-login:hover { color: var(--primary); }
 .reset-sent { display: flex; flex-direction: column; align-items: center; gap: 0.6rem; padding: 0.6rem 0.25rem; }
 
 /* ─── Modal ─── */
@@ -1136,8 +1112,9 @@ select.previsit-control { max-width: 15rem; }
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 50;
+  z-index: var(--z-modal);
   padding: 1rem;
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
   backdrop-filter: blur(2px);
   animation: overlay-in 0.18s ease-out;
 }
@@ -1194,7 +1171,6 @@ select.previsit-control { max-width: 15rem; }
   color: var(--text);
   cursor: pointer;
 }
-.control-tree-item:hover { background: var(--surface-2); }
 .control-tree-item svg { flex-shrink: 0; color: #64748b; }
 .control-tree-active { background: #eef2ff !important; color: #4f46e5; }
 .control-tree-active svg { color: #4f46e5; }
@@ -1207,7 +1183,7 @@ select.previsit-control { max-width: 15rem; }
 
 /* ─── Recent scans — compact one-line-per-sewadar table (v43) ───
    Deliberately NOT `.table`. The responsive block at the top of this file
-   (max-width: 640px) forces `.table, .table tbody, .table tr, .table td`
+   (max-width: 768px) forces `.table, .table tbody, .table tr, .table td`
    to `display: block`, collapsing every row into a stacked card. A scanner
    asking "who is still in?" needs one horizontal line per sewadar at EVERY
    viewport, so this table opts out by name: it never carries the `.table`
@@ -1316,7 +1292,7 @@ select.previsit-control { max-width: 15rem; }
 /* Safety net: even if a future edit broadens the small-width card-collapse
    beyond `.table`, this table stays a table. Order matters — base element
    first, then each descendant at its own display level. */
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .scans-table { display: table; }
   .scans-table thead { display: table-header-group; }
   .scans-table tbody { display: table-row-group; }
@@ -1346,12 +1322,20 @@ select.previsit-control { max-width: 15rem; }
 .att-swatch { width: 0.85rem; height: 0.85rem; border-radius: 4px; flex-shrink: 0; }
 .att-swatch.att-present { background: var(--success-soft); border: 1px solid #a7f3d0; }
 .att-swatch.att-absent { background: var(--danger-soft); border: 1px solid #fecaca; }
+.att-swatch.att-partial { background: var(--warning-soft); border: 1px solid #fde3ad; }
 
 /* Scroll box — matches `.table-wrap` (overflow-x, 1px --border, 10px
    radius) but is owned by this component so the sticky rules below can
    rely on it. */
 .att-scroll {
   overflow: auto;
+  /* Positioned so the absolutely-positioned `.sr-only` state labels have
+     their containing block INSIDE the scroller. Without it they resolve
+     against the page, escape the overflow clip, and stretch
+     documentElement.scrollWidth past the viewport — real horizontal page
+     scroll on a phone from labels that are visually 1px. (Pre-existing:
+     it hit AttendanceMatrix the same way.) */
+  position: relative;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface);
@@ -1432,7 +1416,6 @@ select.previsit-control { max-width: 15rem; }
 }
 .att-table tbody tr:last-child td { border-bottom: none; }
 .att-table tbody tr { transition: background-color 0.08s ease; }
-.att-table tbody tr:hover td:not(.att-cell):not(.att-col-badge) { background: #fafbfd; }
 
 /* Day headers — centred two-line stack: weekday over date number. */
 .att-table .att-day { text-align: center; }
@@ -1459,6 +1442,89 @@ select.previsit-control { max-width: 15rem; }
 .att-table .att-absent { background: var(--danger-soft); }
 .att-table .att-absent .att-mark { color: #f87171; }
 
+/* Centre × day heatmap (CentreDayHeatmap): a cell is a ratio, so it needs
+   the rung between "all present" and "none present". The ratio itself sits
+   in the same centred `.att-mark` slot as the ✓/− glyph. */
+.att-table .att-partial { background: var(--warning-soft); }
+.att-table .att-partial .att-mark { color: #b45309; }
+
+/* Pinned first column for centre rows: `th` defaults to centred+bold, and
+   it carries a muted "N sewas" sub-line under the centre name. `tbody td`
+   supplies the ledger padding/hairline rule, so a `th` has to opt back in. */
+.att-table tbody th.att-col-badge {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  white-space: nowrap;
+  text-align: left;
+  font-weight: 600;
+}
+.att-table tbody tr:last-child th.att-col-badge { border-bottom: none; }
+/* The centre grid FILLS its box and splits the space predictably.
+   `.page`/`.card` margins are untouched — the scroller spans them edge to edge.
+
+   `table-layout: fixed` is the standard tool for a matrix like this because
+   auto-layout hands surplus space to the column with the largest preferred
+   width, and here that is the Centre names: a `12/15` cell ended up sharing a
+   card with a 250px name column, which is both unbalanced and (at 46rem) scroll
+   -forced. Fixed layout ignores content when sizing, so the shares are exact:
+   Centre 36% (identity is read first, and it is the one column whose content
+   cannot be re-flowed into something shorter), Total 15%, and the sewa days
+   split the remaining 49% EQUALLY — every day column is identical no matter
+   how many days the visit has, and they auto-adjust whenever either of the
+   other two changes.
+
+   `.att-table`'s `min-width: 46rem` floor is cancelled here; the real floor is
+   set per column count in the component (`min-width` inline) so a long visit
+   scrolls rather than clipping. Scoped so AttendanceMatrix keeps its behaviour. */
+.att-table.att-table-centre {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+}
+.att-table.att-table-centre thead th.att-col-badge { width: 36%; }
+.att-table.att-table-centre thead th.att-days { width: 15%; }
+/* Fixed layout does not measure content, so wrap instead of overflowing.
+   (The `.att-name` ellipsis guard is inert on an inline <span> inside a <th>
+   anyway — max-width/text-overflow are ignored on non-replacement inlines —
+   which is why the name has to be told to be a block here.) */
+.att-table.att-table-centre tbody th.att-col-badge {
+  white-space: normal;
+  overflow-wrap: break-word;
+  line-height: 1.2;
+  vertical-align: top;
+}
+.att-table.att-table-centre .att-name {
+  display: block;
+  max-width: 100%;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+.att-table.att-table-centre th,
+.att-table.att-table-centre td { overflow-wrap: break-word; }
+.att-table tr.att-total-row th.att-col-badge,
+.att-table tr.att-total-row td {
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+  font-weight: 700;
+}
+
+/* ═══ T4 and below (≤768px) — phone sizing ═══
+   The column SHARES are already fixed above and scale with the box; all that
+   is left on a phone is shedding the desktop padding and font so that the
+   shares land on at least ~34px per day cell (the real width of a `12/15`
+   ratio). Centre names are long ("AREA SECRETARY OFFICE") and wrap — never
+   ellipsise — so the identity survives the narrow pane. */
+@media (max-width: 768px) {
+  .att-table.att-table-centre thead th { padding: 0.32rem 0.1rem; }
+  .att-table.att-table-centre tbody th.att-col-badge { padding: 0.4rem 0.35rem; }
+  .att-table.att-table-centre .att-day { white-space: normal; }
+  .att-table.att-table-centre .att-cell { padding: 0.2rem 0.06rem; }
+  .att-table.att-table-centre .att-cell .att-mark { font-size: 0.62rem; }
+  .att-table.att-table-centre .att-days { padding: 0.22rem 0.1rem; font-size: 0.68rem; }
+}
+
 /* Trailing summary column — centred days-present pill. */
 .att-table .att-days { text-align: center; font-variant-numeric: tabular-nums; }
 .att-table .attendance-pill.att-mid { color: var(--primary-dark); background: var(--primary-soft); }
@@ -1481,19 +1547,362 @@ select.previsit-control { max-width: 15rem; }
   .att-scroll { max-height: none; overflow: visible; }
   .att-table .att-present,
   .att-table .att-absent,
+  .att-table .att-partial,
   .att-table .att-today,
+  .att-table tr.att-total-row th,
+  .att-table tr.att-total-row td,
   .att-table thead th { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}
+
+/* ═══ Hover-capable devices only ═══
+   Every interactive :hover rule in the app lives here, gated on
+   (hover: hover) and (pointer: fine). On touch screens a tap used to leave
+   the hover style "stuck" until the next tap elsewhere; gating removes that
+   entirely. :active / :focus-visible styles are untouched and work everywhere.
+   Tier note: T5 (tablet-landscape) and up typically match; T0–T4 do not.
+   (Excluded: ::-webkit-scrollbar hover, autofill, and print — not visual
+   tap states.) */
+@media (hover: hover) and (pointer: fine) {
+  .toast-close:hover { color: var(--text); }
+  .stat:hover { box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08); border-color: #cbd5e1; }
+  .acc-head:hover { background: #f1f5f9; }
+  .tab-btn:hover { background: #eef2ff; color: #4f46e5; border-color: #c7d2fe; }
+  .tab-menu-item:hover { background: #eef2ff; color: #4f46e5; }
+  .tab-active:hover { background: linear-gradient(135deg, #4f46e5, #7c3aed); color: #fff; }
+  .seg-btn:hover { background: #eef2ff; color: #4f46e5; border-color: #c7d2fe; }
+  .seg-active:hover { background: #4f46e5; color: #fff; }
+  .btn:hover { background: var(--surface-2); color: var(--text); }
+  .btn-primary:not(:disabled):hover, .btn-success:not(:disabled):hover,
+  .btn-warning:not(:disabled):hover, .btn-danger:not(:disabled):hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(15, 23, 42, 0.16);
+  }
+  .btn-primary:hover { background: var(--primary-dark); color: #fff; }
+  .btn-success:hover { background: #0d9668; color: #fff; }
+  .btn-warning:hover { background: #d97706; color: #fff; }
+  .btn-danger:hover { background: #dc2626; color: #fff; }
+  .btn-ghost:hover { background: var(--surface-2); color: var(--text); }
+  .input:not(:disabled):not(:focus):hover, .select:not(:disabled):not(:focus):hover { border-color: #cbd5e1; }
+  .table tbody tr:hover { background: #fafbfd; }
+  .deploy-matrix tbody tr:hover td { background: #f1f5f9; }
+  .deploy-matrix tbody tr:hover .table-sticky-col,
+  .deploy-matrix tbody tr:hover .table-sticky-col-2,
+  .deploy-matrix tbody tr:hover .table-sticky-col-3,
+  .deploy-matrix tbody tr:hover .matrix-total { background: #eef2ff; }
+  .deploy-matrix tbody tr.matrix-report-head:hover td { background: #f1f5f9; }
+  .dept-item:hover { background: #f8fafc; }
+  .login-submit:hover { background: var(--primary-dark); }
+  .forgot-link:hover { color: var(--primary-dark); text-decoration: underline; }
+  .back-to-login:hover { color: var(--primary); }
+  .control-tree-item:hover { background: var(--surface-2); }
+  .att-table tbody tr:hover td:not(.att-cell):not(.att-col-badge) { background: #fafbfd; }
+}
+
+/* ═══ Device-tier contract (attendance module) ═══
+   T0 tiny phone †††††††††† ≤359px · mobile shell + card tables
+   T1 phone ††††††††††††† 360–413px · mobile shell + card tables
+   T2 large phone ††††††††† 414–480px · mobile shell + card tables
+   T3 phablet/fold-closed † 481–640px · mobile shell + card tables
+   T4 tablet-portrait ††††† 641–768px · mobile shell + CARD tables (D1 fix)
+   T5 tablet-landscape ††† 769–1024px · desktop nav + tables
+   T6 laptop †††††††††††† 1025–1440px · desktop nav + tables
+   T7 desktop ††††††††††† ≥1441px · desktop nav + tables
+   Chrome switch: ≤768px (useIsMobile). Table-format switch: ≤768px (aligned).
+   Landscape phones (≥769px wide, ≤500px tall, coarse pointer) are mobile too.
+   No other max-width values may be introduced; use these tiers. */
+
+.queue-recovery { display: flex; flex-direction: column; gap: 0.35rem; margin-top: 0.4rem; }
+.queue-recovery-pills { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.queue-pill { font-size: 0.7rem; display: inline-flex; align-items: center; gap: 4px; }
+.queue-stale { font-size: 0.7rem; color: #b45309; }
+.queue-clear-btn { text-decoration: underline; cursor: pointer; }
+.queue-danger { color: #b91c1c; }
+.queue-warn { color: #b45309; }
+.queue-muted { color: #64748b; }
+.queue-stranded { margin-top: 8px; padding: 8px 10px; border: 1px solid #fecaca; border-radius: 8px; background: #fef2f2; }
+.queue-stranded-head { font-size: 0.75rem; font-weight: 700; color: #b91c1c; }
+.queue-stranded-row { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; color: #7f1d1d; margin-top: 4px; }
+.queue-stranded-row .queue-clear-btn { margin-left: auto; }
+
+/* ═══ Offline-queue recovery controls (scanner pages) ═══
+   "Clear failed / live queued / orphaned" and the per-row stranded Clear
+   were raw inline-styled <button>s with padding:0 at 0.7rem — ~0px of
+   padding around 11px text, the ONLY way to recover a stranded scan. They
+   stay compact on desktop and reach 44px on phones. */
+.queue-clear-btn {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0.35rem 0.55rem;
+  font-size: 0.78rem;
+  touch-action: manipulation;
+}
+@media (min-width: 769px) {
+  .queue-clear-btn { min-height: 0; min-width: 0; padding: 0; font-size: 0.7rem; }
+}
+.queue-clear-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+
+/* ═══ AttendanceMatrix phone affordances ═══
+   The grid stays a grid on phones (it IS the view), but the Badge cell becomes
+   a real button that opens the QuickPeekSheet, and the legend says so. The
+   pinned Badge column + sticky day header already come from .att-table. */
+.att-badge-btn {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0.25rem 0;
+  min-height: 44px;
+  min-width: 44px;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.att-legend-hint {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-sec);
+  font-style: italic;
+}
+.peek-meta { display: flex; flex-direction: column; gap: 0.4rem; }
+.peek-meta > div { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
+.att-day-chip-state { font-size: 0.56rem; font-weight: 600; color: var(--text-sec); }
+
+/* ═══ Previsit Total-tab day chips (phone cards) ═══ */
+.att-card-daychips { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+.att-day-chip {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  padding: 0.25rem 0.3rem;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+.att-day-chip.att-present { background: var(--success-soft); border-color: #a7f3d0; }
+.att-day-chip.att-absent { background: var(--danger-soft); border-color: #fecaca; }
+.att-day-chip-wd { font-size: 0.58rem; font-weight: 700; text-transform: uppercase; color: var(--text-sec); }
+.att-day-chip-num { font-size: 0.8rem; font-weight: 700; }
+
+/* ═══ Anomalies phone filters (AnomaliesPage) ═══ */
+/* The six rule chips used to wrap into a 3-line wall at 360px. They scroll
+   horizontally on phones (one swipe per rule) and stay wrapped on desktop. */
+.anomaly-rules-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  padding-bottom: 0.15rem;
+  -webkit-overflow-scrolling: touch;
+}
+.anomaly-rules-scroll > * { flex-shrink: 0; }
+/* Inline white-space:nowrap that survived the ≤768px card collapse — the
+   class lets card mode relax it (a nowrap cell inside a 100%-width flex row
+   pushes the value out of the card). */
+@media (max-width: 768px) {
+  .table tbody td.nowrap-cell { white-space: normal; }
+}
+
+/* ═══ Previsit day strip (PrevisitDashboard) ═══
+   Was gridTemplateColumns '92px 1fr auto' with a minWidth:72 right cell —
+   164px of non-flexible track in a 320px phone, leaving the bar ~90px.
+   Mobile stacks to two rows; the label/count never truncate. */
+.pd-day {
+  display: grid;
+  grid-template-columns: 92px 1fr auto;
+  gap: 0.6rem;
+  align-items: center;
+}
+.pd-day-label {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.pd-day-count {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.82rem;
+  min-width: 72px;
+  text-align: right;
+}
+@media (max-width: 480px) {
+  .pd-day { grid-template-columns: 1fr auto; row-gap: 0.25rem; }
+  .pd-day .progress { grid-column: 1 / -1; order: 3; }
+  .pd-day-count { min-width: 0; }
+}
+
+/* ═══ ASO dashboard (DashboardPage) ═══
+   .dash-rail / .dash-leaderboard carry responsive behaviour that inline
+   flex-basis values cannot (they outrank the stylesheet), so the phone
+   collapse is expressed here against a class. */
+@media (max-width: 1024px) {
+  .dash-rail { flex: 1 1 100% !important; min-width: 0 !important; }
+  .dash-leaderboard { flex: 1 1 100% !important; min-width: 0 !important; }
+}
+@media (max-width: 768px) {
+  /* Leaderboard rows are opened by their centre button (a real button),
+     so the row itself only carries an affordance hint. */
+  .dash-row-link { cursor: pointer; }
+  .dash-row-open { min-height: 44px; }
+}
+/* Trend strip: flexible label/rate columns (were fixed 34/38px, which
+   crushed the bar between them on a 320px phone). */
+.dash-trend-day {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-sec);
+}
+.dash-trend-rate {
+  flex: 0 0 auto;
+  text-align: right;
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ═══ Shared mobile primitives (skeleton / offline / pull-to-refresh /
+   install / virtual list / peek sheet) ═══
+   Base styles work at every width; phones get tighter spacing below. */
+.sk { display: flex; flex-direction: column; gap: 0.5rem; }
+.sk-bar {
+  height: 0.85rem;
+  border-radius: 6px;
+  background: linear-gradient(90deg, #eef2f7 25%, #e2e8f0 50%, #eef2f7 75%);
+  background-size: 200% 100%;
+  animation: sk-shimmer 1.4s ease-in-out infinite;
+}
+.sk-big { height: 1.6rem; }
+.sk-w25 { width: 25%; } .sk-w40 { width: 40%; } .sk-w50 { width: 50%; }
+.sk-w60 { width: 60%; } .sk-w70 { width: 70%; } .sk-w100 { width: 100%; }
+.sk-kpi { padding: 0.85rem 1rem; border: 1px solid var(--border); border-radius: 12px; background: #fff; gap: 0.6rem; }
+.sk-card { padding: 0.85rem 1rem; border: 1px solid var(--border); border-radius: 12px; background: #fff; }
+.sk-table { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: #fff; }
+.sk-table .sk-head { height: 2rem; border-radius: 0; }
+.sk-row { flex-direction: row; align-items: center; padding: 0.4rem 0.6rem; }
+.sk-row .sk-bar { height: 0.85rem; }
+@keyframes sk-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+.offline-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  background: #fffbeb;
+  border-bottom: 1px solid #fde68a;
+  color: #92400e;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0.5rem 1rem;
+  text-align: center;
+}
+
+.ptr { position: relative; }
+.ptr-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-sec);
+  padding: 0.4rem 0 0.1rem;
+  min-height: 28px;
+}
+.ptr-body { transition: transform 0.12s ease-out; }
+
+.install-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: #eef2ff;
+  border-bottom: 1px solid #c7d2fe;
+  color: #3730a3;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0.6rem 0.9rem;
+}
+/* SW update prompt shares the install banner skin (amber variant). */
+.sw-update-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: #fffbeb;
+  border-bottom: 1px solid #fde68a;
+  color: #92400e;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0.6rem 0.9rem;
+}
+.install-text { flex: 1; }
+.install-btn { min-height: 44px; flex-shrink: 0; }
+.install-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  background: none;
+  color: #4338ca;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.virt-list {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  max-height: min(70vh, 640px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  overscroll-behavior: contain;
+}
+.virt-inner { position: relative; width: 100%; }
+.virt-row { border-bottom: 1px solid #f1f5f9; }
+
+.mobile-peek-body { display: flex; flex-direction: column; gap: 0.6rem; margin: 0.5rem 0 0.75rem; }
+
+/* ── Attendance phone cards (virtualised lists; mobile only) ── */
+.att-card {
+  background: #fff;
+  padding: 0.7rem 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.att-card-top { display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
+.att-card-name { font-weight: 700; font-size: 0.95rem; }
+.att-card-badge { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.78rem; color: var(--text-sec); }
+.att-card-meta { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; font-size: 0.8rem; color: var(--text-sec); }
+.att-card-stats { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.att-card-stat { display: inline-flex; align-items: baseline; gap: 0.35rem; font-variant-numeric: tabular-nums; }
+.att-card-k { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+.att-card-v { font-weight: 700; font-size: 0.88rem; }
+.att-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; }
+.att-card-times { font-size: 0.8rem; color: var(--text-sec); font-variant-numeric: tabular-nums; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sk-bar { animation: none; }
+  .ptr-body { transition: none; }
 }
 
 /* ═══ Mobile-first attendance layer (≤768px) — desktop ≥769px untouched ═══
    Everything below activates ONLY on phones/tablets-portrait. The laptop
    renders exactly as before: no rule here may match above 768px. */
 
-/* Belt & braces: even if matchMedia disagrees with CSS, never show the
-   mobile shell on desktop widths. */
-@media (min-width: 769px) {
+/* Belt & braces: never show the mobile shell on a real desktop. The
+   `and (max-height: 500px)` guard is REQUIRED, not decoration: MOBILE_QUERY
+   treats a landscape phone (≥769px wide, ≤500px tall, coarse pointer) as
+   mobile, so a bare `min-width: 769px` rule hid the tab bar on exactly the
+   device the landscape support exists for. Keep these two in sync. */
+@media (min-width: 769px) and (min-height: 501px) {
   .mobile-tabbar,
-  .mobile-sheet-overlay { display: none !important; }
+  .mobile-sheet-overlay,
+  .install-banner { display: none !important; }
 }
 
 @media (max-width: 768px) {
@@ -1503,20 +1912,69 @@ select.previsit-control { max-width: 15rem; }
   /* Compact header: brand + schedule + sign-out fit one row. */
   .app-header { padding: 0.5rem 0.75rem; gap: 0.5rem; }
   .brand-title { font-size: 0.95rem; }
-  .app-header .select { max-width: 40vw; font-size: 16px; }
   .header-user, .header-centre { display: none; }
   .signout-btn { padding: 0.5rem 0.7rem; font-size: 0.78rem; min-height: 44px; }
+
+  /* The lead row must be allowed to shrink. With flex-shrink:0 the brand +
+     schedule select refused to compress and widened the DOCUMENT, which under
+     mobile emulation grows the layout viewport and drags the fixed tab bar
+     out with it — a 64px horizontal scroll at 320px. */
+  .app-header-lead {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    flex-wrap: wrap;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .app-header-lead > * { min-width: 0; }
+  .app-header .select {
+    flex: 1 1 120px;
+    max-width: 40vw;
+    min-width: 0;
+    font-size: 16px;
+  }
+  /* Below 360px the brand word competes with the schedule picker — the word
+     mark is the decorative part. */
+  @media (max-width: 359px) {
+    .brand-title { display: none; }
+    .app-header .select { max-width: none; }
+  }
 
   /* Every tappable control reaches 44px on phones. Desktop keeps its
      compact 27–33px sizing. */
   .btn, .seg-btn, .tab-menu-item { min-height: 44px; }
   .btn { touch-action: manipulation; }
 
-  /* Stop iOS/Android zoom-on-focus: text entry must be ≥16px. */
+  /* Stop iOS/Android zoom-on-focus: text entry must be ≥16px.
+     Covers bare <input>/<select> (no class, no type) and the types the
+     old selector list missed (email/password/tel/datetime-local). */
   .input, .select,
-  input[type="text"], input[type="search"], input[type="date"],
-  input[type="time"], input[type="number"], textarea {
+  input, select, textarea,
+  input[type="text"], input[type="email"], input[type="password"],
+  input[type="tel"], input[type="search"], input[type="date"],
+  input[type="datetime-local"], input[type="time"], input[type="number"] {
     font-size: 16px;
+  }
+
+  /* Tap-target contract (T0–T4): every interactive element ≥44px.
+     - .toggle keeps its 44×24 visual; the ::after expands the HIT area. */
+  .toggle { position: relative; }
+  .toggle::after {
+    content: '';
+    position: absolute;
+    left: 0; right: 0; top: -10px; bottom: -10px;
+  }
+  button.pill { min-height: 44px; }
+  .mobile-chip-x { width: 44px; height: 44px; }
+  .previsit-control { height: auto; min-height: 44px; }
+  /* inline height:36 date/select controls inside collapsed cards */
+  .table tbody td input, .table tbody td select,
+  .previsit-field input, .previsit-field select { min-height: 44px; }
+
+  /* Notch: the app header is the first thing under the status bar. */
+  .app-header {
+    padding-top: max(0.5rem, env(safe-area-inset-top));
   }
 
   /* Tall modals scroll instead of clipping on short phones. */
@@ -1531,7 +1989,7 @@ select.previsit-control { max-width: 15rem; }
   .mobile-tabbar {
     position: fixed;
     left: 0; right: 0; bottom: 0;
-    z-index: 50;
+    z-index: var(--z-tabbar);
     display: flex;
     align-items: stretch;
     gap: 2px;
@@ -1580,7 +2038,7 @@ select.previsit-control { max-width: 15rem; }
   .mobile-sheet-overlay {
     position: fixed;
     inset: 0;
-    z-index: 70;
+    z-index: var(--z-sheet);
     background: rgba(15, 23, 42, 0.45);
     display: flex;
     align-items: flex-end;
@@ -1729,7 +2187,7 @@ select.previsit-control { max-width: 15rem; }
   .mobile-filterbar {
     position: sticky;
     top: 0;
-    z-index: 20;
+    z-index: var(--z-filter);
     display: flex;
     align-items: center;
     gap: 0.5rem;
@@ -1832,6 +2290,7 @@ select.previsit-control { max-width: 15rem; }
     gap: 0.6rem;
     margin-top: 0.75rem;
   }
+  .mobile-filter-fields > div { width: 100%; min-width: 0; }
   .mobile-filter-fields .previsit-field,
   .mobile-filter-fields .previsit-field--search {
     flex: 1 1 100%;
@@ -1845,9 +2304,9 @@ select.previsit-control { max-width: 15rem; }
   }
 }
 
-/* Card-mode hardening (≤640px): stacked rows must never inherit desktop
+/* Card-mode hardening (T0–T4, ≤768px): stacked rows must never inherit desktop
    scroll-table mechanics. Desktop ≥641px untouched. */
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   /* Frozen panes are meaningless in a stacked card — static, or the
      190/280px offsets overlap neighbouring cards. */
   .table-sticky td.table-sticky-col,
@@ -1859,8 +2318,165 @@ select.previsit-control { max-width: 15rem; }
   /* The wide register collapses to labelled cards on phones instead of
      forcing 896px-wide "cards" inside a ~300px viewport. */
   .previsit-table { min-width: 0; }
+  /* TOTAL/summary footer rows render as distinct summary cards, never as
+     another data row. The empty Department cell is noise — hide it. */
+  .table tfoot .table-total {
+    display: block;
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    margin-top: 0.6rem;
+    background: #f8fafc;
+  }
+  .table tfoot .table-total td[data-label="Department"] { display: none; }
   /* Tappable controls inside cards reach 44px. */
   .table tbody td .btn { min-height: 44px; }
+}
+
+/* ═══ Report tables on phones: ROW/COLUMN, not stacked cards ═══
+   The card collapse above (≤768px) is right for wide OPERATIONAL tables, but
+   it is wrong for REPORTS: one 6-column row became a five-line block with a
+   label in front of every value, so a 200-row report ran ~26 screens tall —
+   what the user hit as "the card format is very lengthy".
+
+   `.rows-on-phone` opts a table back into a real grid:
+     • table / table-row / table-cell display is restored (the collapse rules
+       lose on specificity: `.table.rows-on-phone` > `.table`)
+     • the WRAPPER becomes the scroll box — sideways for the wide columns,
+       with the header row pinned (`sticky; top:0`) AND the Badge column
+       pinned (`sticky; left:0`), so you always know which row you are on
+     • cells are compact and nowrap with tabular-nums: a table you can scan
+       rather than a list you have to read
+   Real <table>/<th scope="col"> semantics are untouched, so a screen reader
+   still announces row and column relationships — that is what makes this
+   MORE accessible than the cards, not less.
+
+   Desktop ≥769px is unaffected: everything below lives inside this ≤768px
+   block, and the classes only appear on the report tables. */
+@media (max-width: 768px) {
+  .table.rows-on-phone { display: table; width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; }
+  .table.rows-on-phone thead { display: table-header-group; }
+  .table.rows-on-phone tbody { display: table-row-group; }
+  .table.rows-on-phone tfoot { display: table-row-group; }
+  .table.rows-on-phone tr { display: table-row; padding: 0; border-bottom: 1px solid var(--border); }
+  .table.rows-on-phone tbody tr:last-child { border-bottom: none; }
+  .table.rows-on-phone th,
+  .table.rows-on-phone td {
+    display: table-cell;
+    width: auto;
+    padding: 0.55rem 0.6rem;      /* ≈ the 44px row contract */
+    vertical-align: middle;
+    white-space: nowrap;
+    border-right: 1px solid var(--border);
+    border-bottom: none;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums slashed-zero;
+  }
+  .table.rows-on-phone th:last-child,
+  .table.rows-on-phone td:last-child { border-right: none; white-space: normal; }
+  .table.rows-on-phone td::before { content: none; }   /* no label prefix in a grid */
+  /* header pins inside the wrapper while you scroll both axes */
+  .table.rows-on-phone thead th {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+  }
+  /* Badge pins left so a sideways scroll never orphans the identity column */
+  .table.rows-on-phone th:first-child,
+  .table.rows-on-phone td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: var(--surface);
+    box-shadow: 1px 0 0 var(--border);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.75rem;
+  }
+  .table.rows-on-phone thead th:first-child { z-index: 4; background: var(--surface-2); }
+
+  /* The wrapper must be the scroll container AND be height-capped: an
+     `overflow: auto` with no max-height never scrolls vertically, so
+     `position: sticky` on the header would never actually pin. */
+  .table-wrap-rows { max-height: 70vh; overflow: auto; -webkit-overflow-scrolling: touch; }
+
+  /* card-mode hardening above sets `.previsit-table { min-width: 0 }` — in
+     row/column mode the register needs its real width back. */
+  .table.rows-on-phone.previsit-table { min-width: 56rem; }
+}
+
+/* ═══ Print / "Export PDF" ═══
+   PDF = the browser's Print-to-PDF: no JS PDF engine, no new dependency,
+   works offline, and it honours the page's own layout. Two things it must
+   get right:
+     1. the ≤768 card collapse can still match inside a print page box, which
+        would emit a stack of cards as the "PDF report" — force real tables;
+     2. phone chrome (tab bar, filter bar, sheets, banners) and every on-screen
+        control must not print.
+   Sticky positioning is reset: a sticky column inside a paginated document
+   clips against the page edge. */
+@media print {
+  /* phone chrome + controls */
+  .mobile-tabbar, .mobile-sheet-overlay, .offline-banner, .install-banner,
+  .sw-update-banner, .mobile-filterbar, .filter-sheet, .modal-overlay,
+  .queue-bar, .mobile-more-sheet, .virt-list { display: none !important; }
+  .page-header .btn, .page-header .select, .toolbar .btn, .toolbar .input,
+  .seg-btn, .tab-btn, .tab-menu, .sticky-actions, .att-legend { display: none !important; }
+
+  /* never a stacked card in a printed report */
+  .table { display: table !important; width: 100% !important; border-collapse: collapse !important; }
+  .table thead { display: table-header-group !important; }
+  .table tbody, .table tfoot { display: table-row-group !important; }
+  .table tr { display: table-row !important; padding: 0 !important; }
+  .table th, .table td {
+    display: table-cell !important;
+    position: static !important;
+    box-shadow: none !important;
+    min-width: 0 !important;
+    width: auto !important;
+    font-size: 0.72rem !important;
+    padding: 0.3rem 0.4rem !important;
+    border-bottom: 1px solid #e5e7eb !important;
+    background: #fff !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .table tbody td::before { content: none !important; }
+  .table thead th { background: #f1f5f9 !important; color: #0f172a !important; }
+
+  /* let the whole table lay out; rows must not split across a page */
+  .table-wrap, .table-wrap-sticky, .table-wrap-rows, .att-scroll {
+    max-height: none !important;
+    overflow: visible !important;
+    border: none !important;
+    border-radius: 0 !important;
+  }
+  .table tbody tr, .att-table tbody tr { break-inside: avoid; page-break-inside: avoid; }
+  .table thead { break-after: avoid; page-break-after: avoid; }
+  .table.rows-on-phone { min-width: 0 !important; }
+}
+
+/* ═══ Landscape phones (short viewport) ═══
+   A phone held sideways is ≥769px wide, so width queries miss it — this
+   block keys off height instead. Tighter vertical rhythm, camera yields
+   room to the action button, nested scrollers get more of the viewport. */
+@media (orientation: landscape) and (max-height: 500px) {
+  /* A landscape phone is phone-shaped: the wrapping desktop pill navbar is
+     replaced by the bottom tab bar exactly as in portrait. */
+  .tab-nav { display: none; }
+  .scanner-video { height: clamp(150px, 44dvh, 240px) !important; }
+  .scan-shell { gap: 0.4rem; }
+  .scan-shell-go { min-height: 52px; }
+  .att-scroll, .table-wrap-sticky { max-height: 76vh; }
+  .virt-list { max-height: 76vh; }
+  .mobile-sheet { max-height: 92dvh; }
+  .page { padding: 0.75rem; }
+  .stat-row { grid-template-columns: repeat(4, 1fr) !important; }
 }
 
 /* ═══ Mobile export sheet ═══ */

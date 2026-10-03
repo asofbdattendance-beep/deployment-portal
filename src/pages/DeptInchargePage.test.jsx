@@ -40,6 +40,11 @@ vi.mock('../lib/offlineQueue', () => ({
   clearFailedQueue: vi.fn(async () => {}),
   clearLiveQueue: vi.fn(async () => 0),
   clearOrphanedQueue: vi.fn(async () => {}),
+  listStrandedQueue: vi.fn(async () => []),
+  removeQueued: vi.fn(async () => {}),
+  // Real implementations: QueueRecoveryBar owns the classification now.
+  isFailedQueueRow: (r) => !!r && (r.status === 'failed' || r.failed === true),
+  isOrphanedQueueRow: (r) => !(!!r && (r.status === 'failed' || r.failed === true)) && (r?.owner ?? null) === null && !r?.synced,
 }))
 vi.mock('../lib/excel', () => ({
   exportWorkbook: (...args) => mocks.exportWorkbook(...args),
@@ -564,9 +569,12 @@ describe('DeptInchargePage unified queue count + clear-live', () => {
     try {
       render(<DeptInchargePage schedules={SCHEDULES} scheduleId="sched-1" />)
       await settle()
-      // Header pill + scan-tab pill both read the unified live count.
-      expect(screen.getAllByText('1 queued')).toHaveLength(2)
-      expect(screen.getByRole('button', { name: /clear failed scans/i })).toBeTruthy()
+      // Queue state is rendered by the shared QueueRecoveryBar (the same
+      // surface every scanner role uses), so the counts appear ONCE —
+      // live rows as "1 queued", the failed row with its own recovery action.
+      expect(screen.getAllByText('1 queued')).toHaveLength(1)
+      expect(screen.getByText('1 failed')).toBeTruthy()
+      expect(screen.getByRole('button', { name: /clear failed \(1\)/i })).toBeTruthy()
     } finally { getQueuedScans.mockResolvedValue([]) }
   })
 

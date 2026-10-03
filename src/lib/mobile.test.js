@@ -20,8 +20,8 @@ import {
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('mobile lib', () => {
-  it('exposes the shared breakpoint', () => {
-    expect(MOBILE_QUERY).toBe('(max-width: 768px)')
+  it('exposes the shared mobile query (width + landscape-phone arm)', () => {
+    expect(MOBILE_QUERY).toBe('(max-width: 768px), (max-height: 500px) and (pointer: coarse)')
   })
 
   it('isTouchDevice/isStandalone are false without a window', () => {

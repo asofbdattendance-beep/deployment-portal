@@ -15,6 +15,13 @@ import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/re
 import PrevisitView from './PrevisitView'
 
 const rpc = vi.fn()
+// Delegates to `rpc` fixtures, upholding the real fetchAllRpc contract:
+// a resolved `{ error }` THROWS instead of returning rows.
+const fetchAllRpc = vi.fn(async (name, params) => {
+  const res = await rpc(name, params)
+  if (res?.error) throw res.error
+  return Array.isArray(res?.data) ? res.data : []
+})
 const toastError = vi.fn()
 const toastSuccess = vi.fn()
 
@@ -34,6 +41,7 @@ vi.mock('../lib/supabase', () => ({
     channel: () => noopChannel(),
     removeChannel: () => {},
   },
+  fetchAllRpc: (...args) => fetchAllRpc(...args),
 }))
 
 const toast = { error: toastError, success: toastSuccess, warning: vi.fn(), info: vi.fn() }
@@ -99,6 +107,11 @@ describe('PrevisitView', () => {
     // Newest day 2026-10-06 → Asha + Bina visible, Chand (10-05) hidden.
     expect(screen.queryByText('Chand')).toBeNull()
     expect(screen.getByText('Bina')).toBeTruthy()
+    // Both per-badge feeds paginate; the server-aggregated summary stays
+    // single-shot (routing contract of RPC_PAGE_SPECS).
+    const routed = fetchAllRpc.mock.calls.map(([n]) => n)
+    expect(routed).toEqual(expect.arrayContaining(['previsit_sewadars', 'previsit_deployed']))
+    expect(routed).not.toContain('previsit_summary')
   })
 
   it('switching the sewa day swaps the rows', async () => {
@@ -235,6 +248,38 @@ describe('PrevisitView', () => {
     await waitFor(() => expect(screen.getByText('Nothing matches the current filters.')).toBeTruthy())
     fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }))
     await waitFor(() => expect(screen.getByText('Asha')).toBeTruthy())
+  })
+
+  it('replaces the department dropdown with a centre filter that narrows the rows', async () => {
+    mockRpc()
+    render(<PrevisitView schedules={SCHEDULES} scheduleId="sched-1" />)
+    await waitFor(() => expect(screen.getByText('Asha')).toBeTruthy())
+
+    // The department control is gone; centre sits in its place.
+    expect(screen.queryByLabelText('Department filter')).toBeNull()
+    const centreFilter = screen.getByLabelText('Centre filter')
+    expect(screen.getByRole('option', { name: 'All centres' })).toBeTruthy()
+    // Options come from the rows in hand, so both centres are pickable.
+    expect(screen.getByRole('option', { name: 'CENTRE A' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'CENTRE B' })).toBeTruthy()
+
+    // Both centres have someone on the newest day → both visible at default.
+    expect(screen.getByText('Bina')).toBeTruthy()
+
+    fireEvent.change(centreFilter, { target: { value: 'CENTRE A' } })
+    await waitFor(() => expect(screen.queryByText('Bina')).toBeNull())
+    expect(screen.getByText('Asha')).toBeTruthy()
+
+    fireEvent.change(centreFilter, { target: { value: 'CENTRE B' } })
+    await waitFor(() => expect(screen.queryByText('Asha')).toBeNull())
+    expect(screen.getByText('Bina')).toBeTruthy()
+
+    // Centre + search can empty the view; the escape hatch resets BOTH.
+    fireEvent.change(screen.getByLabelText('Search previsit rows'), { target: { value: 'asha' } })
+    await waitFor(() => expect(screen.getByText('Nothing matches the current filters.')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }))
+    await waitFor(() => expect(screen.getByText('Asha')).toBeTruthy())
+    expect(screen.getByLabelText('Centre filter').value).toBe('all')
   })
 
   it('asks for a schedule when none is selected', () => {

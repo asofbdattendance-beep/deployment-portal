@@ -22,6 +22,13 @@ import { render, screen, waitFor, cleanup, within, fireEvent, act } from '@testi
 import DashboardPage from './DashboardPage'
 
 const rpc = vi.fn()
+// Delegates to `rpc` fixtures, upholding the real fetchAllRpc contract:
+// a resolved `{ error }` THROWS instead of returning rows.
+const fetchAllRpc = vi.fn(async (name, params) => {
+  const res = await rpc(name, params)
+  if (res?.error) throw res.error
+  return Array.isArray(res?.data) ? res.data : []
+})
 const toastError = vi.fn()
 const toastSuccess = vi.fn()
 const toastWarning = vi.fn()
@@ -45,6 +52,7 @@ vi.mock('../lib/supabase', () => ({
     channel: () => noopChannel(),
     removeChannel: () => {},
   },
+  fetchAllRpc: (...args) => fetchAllRpc(...args),
 }))
 
 // A STABLE toast object, deliberately — the real useToast() is useMemo'd in
@@ -363,6 +371,9 @@ describe('DashboardPage — export snapshot accounting', () => {
     await renderPage()
     fireEvent.click(screen.getByText(/Export snapshot/))
     await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith('Present list exported'))
+    // The badge feed goes through the paginating helper (a revert to the
+    // single-shot rpcRows would write 1000-row TOTALs into the workbook).
+    expect(fetchAllRpc.mock.calls.map(([n]) => n)).toContain('attendance_day_badges')
     expect(toastSuccess).toHaveBeenCalledTimes(1)
     // The absent workbook wrote nothing, but present DID — "nothing exported"
     // would be a lie over a workbook that just downloaded.

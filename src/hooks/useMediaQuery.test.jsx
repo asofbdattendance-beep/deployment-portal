@@ -8,7 +8,7 @@
 // - legacy addListener/removeListener path works (old Safari).
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, act, cleanup } from '@testing-library/react'
-import { useMediaQuery, useIsMobile, MOBILE_QUERY } from './useMediaQuery'
+import { useMediaQuery, useIsMobile, useDeviceTier, tierForWidth, MOBILE_QUERY } from './useMediaQuery'
 
 function Probe({ query }) {
   const m = useMediaQuery(query)
@@ -123,5 +123,48 @@ describe('useIsMobile', () => {
     expect(screen.getByTestId('mm').textContent).toBe('no')
     setMatches(store, MOBILE_QUERY, true)
     expect(screen.getByTestId('mm').textContent).toBe('yes')
+  })
+
+  it('catches landscape phones (short viewport + coarse pointer)', () => {
+    expect(MOBILE_QUERY).toContain('max-height')
+    expect(MOBILE_QUERY).toContain('pointer: coarse')
+  })
+})
+
+describe('tierForWidth', () => {
+  it.each([
+    [320, 'tiny'], [359, 'tiny'],
+    [360, 'phone'], [413, 'phone'],
+    [414, 'large-phone'], [480, 'large-phone'],
+    [481, 'phablet'], [640, 'phablet'],
+    [641, 'tablet-portrait'], [768, 'tablet-portrait'],
+    [769, 'tablet-landscape'], [1024, 'tablet-landscape'],
+    [1025, 'laptop'], [1440, 'laptop'],
+    [1441, 'desktop'], [1920, 'desktop'],
+  ])('width %i → tier %s', (width, tier) => {
+    expect(tierForWidth(width)).toBe(tier)
+  })
+
+  it('falls back to desktop for non-finite input', () => {
+    expect(tierForWidth(NaN)).toBe('desktop')
+    expect(tierForWidth(undefined)).toBe('desktop')
+  })
+})
+
+describe('useDeviceTier', () => {
+  function TierProbe() {
+    const t = useDeviceTier()
+    return <div data-testid="tier">{t}</div>
+  }
+
+  it('reports the tier for the current innerWidth and follows resize', () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 390 })
+    render(<TierProbe />)
+    expect(screen.getByTestId('tier').textContent).toBe('phone')
+    act(() => {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 1366 })
+      window.dispatchEvent(new Event('resize'))
+    })
+    expect(screen.getByTestId('tier').textContent).toBe('laptop')
   })
 })

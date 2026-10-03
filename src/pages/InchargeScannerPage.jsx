@@ -8,6 +8,7 @@ import RecentScansTable from '../components/scanner/RecentScansTable'
 import { todayStrIST } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import { useScannerSession } from '../hooks/useScannerSession'
+import QueueRecoveryBar from '../components/mobile/QueueRecoveryBar'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import ScanModeShell from '../components/mobile/ScanModeShell'
 import MobileScanFeed from '../components/mobile/MobileScanFeed'
@@ -147,6 +148,12 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
   useEffect(() => { refreshQueue() }, [refreshQueue])
 
   const pendingCount = queued.filter(q => !q.synced && !q.failed).length
+  // Failed / orphaned / stranded rows used to be invisible AND unrecoverable
+  // for a dept_incharge — they could see "N queued" with no way out. The shared
+  // bar gives this role the same four recoveries the scanner role has.
+  const queueBarNode = (
+    <QueueRecoveryBar queued={queued} syncing={syncing} isOnline={isOnline} offline={offline} />
+  )
   // Mobile capture renders the immersive ScanModeShell below; desktop keeps
   // the cards. The scan state machine above is shared by both.
   const isMobile = useIsMobile()
@@ -158,12 +165,6 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
     {sewaMode && (
       <span className={`pill ${sewaMode === 'previsit' ? 'pill-amber' : 'pill-blue'}`} style={{ fontSize: '0.7rem' }} title="Recording mode is automatic — the scan date decides whether this counts as Previsit sewa or the Bhati visit">
         {sewaMode === 'previsit' ? 'Previsit sewa' : 'Bhati visit'}
-      </span>
-    )}
-    {pendingCount > 0 && (
-      <span className="pill pill-amber" style={{ fontSize: '0.7rem', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-        {syncing ? <RefreshCw size={10} className="spin" /> : <WifiOff size={10} />}
-        {pendingCount} queued
       </span>
     )}
     <span className={`pill ${isOnline ? 'pill-green' : 'pill-red'}`} style={{ fontSize: '0.7rem', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
@@ -205,6 +206,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
           manual={<input value={manualBadge} onChange={e => setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input scan-shell-input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} onKeyDown={e => { if (e.key === 'Enter') { manualSubmit() } }} />}
           feedTitle={<div className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Clock size={14} /> Recent scans (today) {pendingCount ? <span className="pill pill-amber">{pendingCount} queued</span> : null}</div>}
           feed={<MobileScanFeed rows={recentSessions} deptNameById={deptNameById} limit={5} emptyMessage="No scans today" />}
+          queueBar={queueBarNode}
           popup={popupNode}
         />
       </div>
@@ -232,6 +234,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
         </div>
         <div className="card" style={{ padding: '1rem' }}>
           <div className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Clock size={14} /> Recent scans (today) {pendingCount ? <span className="pill pill-amber">{pendingCount} queued</span> : null}</div>
+          {queueBarNode}
           <div style={{ maxHeight: 260, overflow: 'auto', marginTop: 8 }}>
             <RecentScansTable
               rows={recentSessions}

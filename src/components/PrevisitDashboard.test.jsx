@@ -7,6 +7,13 @@ import { render, screen, waitFor, cleanup, fireEvent } from '@testing-library/re
 import PrevisitDashboard from './PrevisitDashboard'
 
 const rpc = vi.fn()
+// Delegates to `rpc` fixtures, upholding the real fetchAllRpc contract:
+// a resolved `{ error }` THROWS instead of returning rows.
+const fetchAllRpc = vi.fn(async (name, params) => {
+  const res = await rpc(name, params)
+  if (res?.error) throw res.error
+  return Array.isArray(res?.data) ? res.data : []
+})
 
 const noopChannel = () => {
   const ch = {
@@ -23,6 +30,7 @@ vi.mock('../lib/supabase', () => ({
     channel: () => noopChannel(),
     removeChannel: () => {},
   },
+  fetchAllRpc: (...args) => fetchAllRpc(...args),
 }))
 
 vi.mock('../lib/realtime', () => ({
@@ -37,11 +45,20 @@ const SUMMARY = [
   { event_date: '2026-10-05', centre: 'CENTRE A', department_id: 'd1', dept_name: 'MEDICAL', present: 1, open_now: 0 },
 ]
 
+// The roster behind the heatmap denominator: 3 deployed in A, 1 in B.
+const DEPLOYED = [
+  { badge_number: 'B1', sewadar_centre: 'CENTRE A' },
+  { badge_number: 'B2', sewadar_centre: 'CENTRE A' },
+  { badge_number: 'B3', sewadar_centre: 'CENTRE A' },
+  { badge_number: 'B4', sewadar_centre: 'CENTRE B' },
+]
+
 beforeEach(() => {
   rpc.mockReset()
   rpc.mockImplementation(async (name) => {
     if (name === 'previsit_summary') return { data: SUMMARY, error: null }
     if (name === 'previsit_sewadars') return { data: [], error: null }
+    if (name === 'previsit_deployed') return { data: DEPLOYED, error: null }
     return { data: [], error: null }
   })
 })
@@ -52,19 +69,50 @@ describe('PrevisitDashboard', () => {
   it('renders KPI tiles from the summary', async () => {
     render(<PrevisitDashboard schedules={SCHEDULES} scheduleId="sched-1" />)
     await waitFor(() => expect(screen.getByText('Sewa days')).toBeTruthy())
+    // Per-badge feeds paginate (denominator completeness); summary doesn't.
+    const routed = fetchAllRpc.mock.calls.map(([n]) => n)
+    expect(routed).toEqual(expect.arrayContaining(['previsit_sewadars', 'previsit_deployed']))
+    expect(routed).not.toContain('previsit_summary')
     // 2 sewa days, 4 present, 1 open, 2 departments — tiles, not a table.
     expect(screen.getByText('Present by sewa day')).toBeTruthy()
     expect(screen.queryByPlaceholderText(/badge/i)).toBeNull()
   })
 
-  it('lists the day strip and the per-department breakdown (no duplicate day table)', async () => {
-    render(<PrevisitDashboard schedules={SCHEDULES} scheduleId="sched-1" />)
-    // The date shows once, short ("6 Oct"), on the strip; the strip + day
-    // table no longer repeat it.
+  it('lists the day strip and the centre heatmap (the old department table is gone)', async () => {
+    const { container } = render(<PrevisitDashboard schedules={SCHEDULES} scheduleId="sched-1" />)
+    // The date shows once, short ("6 Oct"), on the strip; the strip + matrix
+    // header render day + month as separate spans, so it stays unique.
     await waitFor(() => expect(screen.getByText('6 Oct')).toBeTruthy())
     expect(screen.queryByText('By sewa day')).toBeNull()
-    expect(screen.getByText('MEDICAL')).toBeTruthy()
-    expect(screen.getByText('TRAFFIC')).toBeTruthy()
+    expect(screen.queryByText('By department')).toBeNull()
+    expect(screen.queryByText('MEDICAL')).toBeNull()
+    expect(screen.queryByText('TRAFFIC')).toBeNull()
+
+    expect(screen.getByText('Attendance by centre')).toBeTruthy()
+    expect(screen.getByText('Present by centre and sewa day')).toBeTruthy()
+    // Rows: centre name over its deployed count.
+    expect(screen.getByText('CENTRE A')).toBeTruthy()
+    expect(screen.getByText('CENTRE B')).toBeTruthy()
+    // The per-row "N sewas" identity sub-line is gone on purpose: the Total
+    // column already says it, and a second line made every row taller on a
+    // phone. Pinned so it cannot creep back in.
+    expect(container.querySelector('.att-centre-sub')).toBeNull()
+    // Cells are ratios, not booleans: A 6 Oct = 2/3, B 5 Oct = 0/1.
+    expect(screen.getByText('2/3')).toBeTruthy()
+    expect(screen.getByText('0/1')).toBeTruthy()
+    // Total column + the all-centres row.
+    expect(screen.getByText('3/6')).toBeTruthy()
+    expect(screen.getByText('4/8')).toBeTruthy()
+    // Both centred columns are header cells with an explicit scope.
+    expect(container.querySelectorAll('th[scope="col"]').length).toBe(4)
+    expect(container.querySelectorAll('th[scope="row"]').length).toBe(3)
+  })
+
+  it('says the ratio out loud so colour is never the only signal', async () => {
+    render(<PrevisitDashboard schedules={SCHEDULES} scheduleId="sched-1" />)
+    await waitFor(() => expect(screen.getByText('2/3')).toBeTruthy())
+    expect(screen.getByText('2 of 3 present on 2026-10-06')).toBeTruthy()
+    expect(screen.getByText('0 of 1 present on 2026-10-05')).toBeTruthy()
   })
 
   it('shows the empty state when nothing was scanned', async () => {

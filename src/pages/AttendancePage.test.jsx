@@ -20,6 +20,14 @@ import { UNASSIGNED_CENTRE } from '../lib/attendance'
 import AttendancePage from './AttendancePage'
 
 const rpc = vi.fn()
+// fetchAllRpc delegates to the SAME fixture engine as `rpc`, then upholds the
+// real contract: a resolved `{ error }` THROWS (production fetchAllRpc never
+// returns an error object as rows). Page fixtures stay in one place.
+const fetchAllRpc = vi.fn(async (name, params) => {
+  const res = await rpc(name, params)
+  if (res?.error) throw res.error
+  return Array.isArray(res?.data) ? res.data : []
+})
 const toastError = vi.fn()
 const toastSuccess = vi.fn()
 const toastWarning = vi.fn()
@@ -43,6 +51,7 @@ vi.mock('../lib/supabase', () => ({
     channel: () => noopChannel(),
     removeChannel: () => {},
   },
+  fetchAllRpc: (...args) => fetchAllRpc(...args),
 }))
 // A STABLE toast object, deliberately. The real useToast() is useMemo'd in
 // ToastProvider — the provider comments call out that returning a fresh object
@@ -273,6 +282,9 @@ describe('A5 — an empty scan day is never sent to Postgres', () => {
     expect(names).not.toContain('attendance_daily_summary')
     expect(names).not.toContain('attendance_scanner_ops')
     expect(names).toContain('attendance_sewadar_summary')
+    // …and it goes through the PAGINATING helper, not the single-shot wrapper
+    // (a revert to rpcRows would silently re-cap KPIs + export at 1000 rows).
+    expect(fetchAllRpc.mock.calls.map(([n]) => n)).toContain('attendance_sewadar_summary')
   })
 })
 

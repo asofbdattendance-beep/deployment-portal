@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, fetchAllRpc } from '../lib/supabase'
 import { useToast } from '../components/Toast'
 import {
   buildDailyRows,
@@ -21,6 +21,7 @@ import { exportWorkbook, exportWorkbookBlob, fileSlug } from '../lib/excel'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import { useExport } from '../hooks/useExport'
 import ExportSheet from '../components/mobile/ExportSheet'
+import PrintPdfButton from '../components/PrintPdfButton'
 import {
   LayoutDashboard, Users, UserX, Percent, Clock, Radio, AlertTriangle,
   CalendarClock, RefreshCw, Download, FileDown, ArrowUp, ArrowDown,
@@ -441,8 +442,10 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   // delivers one file through the share sheet: the snapshot combines Present
   // + Absent into a single 4-sheet workbook instead of two downloads.
   const fetchDayRows = useCallback(async (mode) => {
+    // Per-badge rows: fetchAllRpc paginates so buildDaySheets' per-centre
+    // counts and TOTAL are complete, never a 1000-row prefix.
     const rows = await withTimeout(
-      rpcRows('attendance_day_badges', { p_schedule: scheduleId, p_date: date, p_mode: mode }),
+      fetchAllRpc('attendance_day_badges', { p_schedule: scheduleId, p_date: date, p_mode: mode }),
       15000,
       'attendance_day_badges'
     )
@@ -619,6 +622,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
             <button onClick={onSnapshotPress} disabled={exporting || mobileExport.building || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               {exporting || mobileExport.building ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export snapshot
             </button>
+            <PrintPdfButton className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }} />
           </div>
         </div>
         <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
@@ -718,7 +722,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
             <table className="table">
               <thead>
                 <tr>
-                  <th style={{ position: 'sticky', left: 0, background: '#fff', zIndex: 1 }}>Department</th>
+                  <th className="table-sticky-col">Department</th>
                   <th style={{ textAlign: 'center' }}>Deployed</th>
                   <th style={{ textAlign: 'center' }}>Ever present</th>
                   <th style={{ textAlign: 'center' }}>Never present</th>
@@ -728,7 +732,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
               <tbody>
                 {deptRows.map((d) => (
                   <tr key={d.deptName}>
-                    <td data-label="Department" style={{ position: 'sticky', left: 0, background: '#fff', zIndex: 1, fontWeight: 600 }}>{d.deptName}</td>
+                    <td data-label="Department" className="table-sticky-col" style={{ fontWeight: 600 }}>{d.deptName}</td>
                     <td data-label="Deployed" style={{ textAlign: 'center' }}>{d.deployed}</td>
                     <td data-label="Ever present" style={{ textAlign: 'center' }}>{d.everPresent}</td>
                     <td data-label="Never present" style={{ textAlign: 'center', color: d.neverPresent ? '#b91c1c' : undefined }}>{d.neverPresent}</td>
@@ -742,7 +746,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
               </tbody>
               <tfoot>
                 <tr style={{ fontWeight: 700, background: '#f8fafc' }}>
-                  <td data-label="Department" style={{ position: 'sticky', left: 0, background: '#f8fafc', zIndex: 1 }}>TOTAL</td>
+                  <td data-label="Department" className="table-sticky-col table-total" style={{ background: '#f8fafc' }}>TOTAL</td>
                   <td data-label="Deployed" style={{ textAlign: 'center' }}>{visit.totals.deployed}</td>
                   <td data-label="Ever present" style={{ textAlign: 'center' }}>{visit.totals.everPresent}</td>
                   <td data-label="Never present" style={{ textAlign: 'center' }}>{visit.totals.neverPresent}</td>
@@ -756,7 +760,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
 
       {/* ── Body: leaderboard + right rail ── */}
       <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start', flexWrap: 'wrap' }}>
-        <div className="card" style={{ flex: '1 1 520px', minWidth: 0, padding: '1.1rem' }}>
+        <div className="card dash-leaderboard" style={{ flex: '1 1 520px', minWidth: 0, padding: '1.1rem' }}>
           <div className="section-header" style={{ flexWrap: 'wrap', gap: '0.75rem' }}>
             <div>
               <div className="section-title"><Building2 size={15} /> Centre leaderboard</div>
@@ -787,7 +791,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
               <table className="table">
                 <thead>
                   <tr>
-                    <th style={{ position: 'sticky', left: 0, background: '#fff', zIndex: 1 }}>Centre</th>
+                    <th className="table-sticky-col">Centre</th>
                     <th style={{ textAlign: 'center' }}>Present</th>
                     <th style={{ textAlign: 'center' }}>Absent</th>
                     <th style={{ textAlign: 'center' }}>Rate</th>
@@ -795,13 +799,14 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
                 </thead>
                 <tbody>
                   {sortedCentres.map((c) => (
-                    <tr
-                      key={c.centre}
-                      onClick={() => go('reports', { centre: c.centre })}
-                      style={{ cursor: 'pointer' }}
-                    >
-                      <td data-label="Centre" style={{ position: 'sticky', left: 0, background: '#fff', zIndex: 1, fontWeight: 600 }}>
-                        <button type="button" className="btn btn-ghost" style={{ padding: 0, fontSize: 'inherit', fontWeight: 700, color: 'inherit', background: 'none', border: 'none' }}>
+                    <tr key={c.centre} className="dash-row-link">
+                      <td data-label="Centre" className="table-sticky-col" style={{ fontWeight: 600 }}>
+                        <button
+                          type="button"
+                          onClick={() => go('reports', { centre: c.centre })}
+                          className="btn btn-ghost dash-row-open"
+                          style={{ padding: 0, fontSize: 'inherit', fontWeight: 700, color: 'inherit', background: 'none', border: 'none' }}
+                        >
                           {c.centre}
                         </button>
                       </td>
@@ -817,7 +822,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
                 </tbody>
                 <tfoot>
                   <tr style={{ fontWeight: 700, background: '#f8fafc' }}>
-                    <td data-label="Centre" style={{ position: 'sticky', left: 0, background: '#f8fafc', zIndex: 1 }}>TOTAL</td>
+                    <td data-label="Centre" className="table-sticky-col table-total" style={{ background: '#f8fafc' }}>TOTAL</td>
                     <td data-label="Present" style={{ textAlign: 'center' }}>{totals.present}</td>
                     <td data-label="Absent" style={{ textAlign: 'center' }}>{totals.absent}</td>
                     <td data-label="Rate" style={{ textAlign: 'center' }}>{totals.expected > 0 ? `${totals.rate}%` : '—'}</td>
@@ -828,7 +833,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
           )}
         </div>
 
-        <div style={{ flex: '0 1 320px', minWidth: 280, display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+        <div className="dash-rail" style={{ flex: '0 1 320px', minWidth: 280, display: 'flex', flexDirection: 'column', gap: '1rem' }}>
           {/* Scanner health */}
           <div className="card" style={{ padding: '1rem' }}>
             <div className="section-header" style={{ flexWrap: 'wrap', gap: '0.5rem' }}>
@@ -870,7 +875,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
                 {scannerHealth.length > 6 && (
                   <div style={{ fontSize: '0.72rem', color: '#64748b' }}>
                     +{scannerHealth.length - 6} more scanners —{' '}
-                    <button onClick={() => go('attendance')} className="btn btn-ghost" style={{ padding: 0, fontSize: '0.72rem', color: '#4f46e5' }}>view all</button>
+                    <button onClick={() => go('attendance')} className="btn btn-ghost" style={{ fontSize: '0.72rem', color: '#4f46e5' }}>view all</button>
                   </div>
                 )}
               </div>
@@ -922,11 +927,11 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
                   const band = rateBand(t.rate)
                   return (
                     <div key={t.day} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      <span style={{ width: 34, fontSize: '0.72rem', fontWeight: 700, color: '#64748b' }}>{dayLabel(t.day)}</span>
+                      <span className="dash-trend-day">{dayLabel(t.day)}</span>
                       <div className="progress" style={{ flex: 1, height: 8 }}>
                         <div className={`progress-bar${bandBar(band)}`} style={{ width: `${t.rate}%` }} />
                       </div>
-                      <span style={{ width: 38, textAlign: 'right', fontSize: '0.72rem', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{t.rate}%</span>
+                      <span className="dash-trend-rate">{t.rate}%</span>
                     </div>
                   )
                 })}

@@ -1,4 +1,5 @@
 import { Share2, Download, FileSpreadsheet, AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react'
+import PrintPdfButton from '../PrintPdfButton'
 import { safeBottom, canShareFiles, fileForShare } from '../../lib/mobile'
 import { useBottomSheet } from './useBottomSheet'
 
@@ -121,6 +122,18 @@ export default function ExportSheet({
             </div>
           </>
         )}
+
+        {/* PDF does not depend on the workbook, so it is offered ALWAYS —
+            including while Excel is still building or after it failed. The
+            sheet unmounts first (`onClose`), otherwise the overlay is what
+            lands in the PDF. */}
+        <div className="mobile-export-actions mobile-export-pdf">
+          <PrintPdfButton
+            className="btn mobile-sheet-close"
+            label="Export PDF"
+            onBeforePrint={onClose}
+          />
+        </div>
 
         <button type="button" onClick={onClose} className="btn mobile-sheet-close">
           Close

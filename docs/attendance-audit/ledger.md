@@ -98,7 +98,7 @@ Bug-hunt 2026-09-28 found 6 Critical (OUT drain p_nonce mismatch; grouped PATCH 
 | L-55 | `sql/v45:594-595` | Global `LIMIT 1000 ORDER BY 1` (rule name) | BAD_STATUS fills all slots, 4 rules vanish |
 | L-56 | `sql/v45:518-527,566-578` + `attendance.js:647` | UNDEPLOYED/STALE per-session, BAD_STATUS per-badge; counts raw rows | 1 person 6 scans = 6 anomalies |
 
-## T2 rig (tasks 15–16) — BUILT 2026-09-29, matrix pending
+## T2 rig (tasks 15–16) — BUILT 2026-09-29; matrix REPAIRED + GREEN 2026-10-03
 
 Run: `npm run test:e2e` (chromium, headless). Config `playwright.config.js`:
 mock on :54321 (`tests/e2e/mock-supabase.mjs`), app on `https://localhost:5173`
@@ -139,8 +139,8 @@ override points supabase-js at the mock. Single worker (mock state shared).
 ## Verification (task 0 gate)
 
 - [x] `docs/attendance-audit/ledger.md` exists, IDs L-01…L-56 present.
-- [ ] `npm test` (643 + new) green — after remediation.
-- [ ] `npx playwright test` against mock — matrix Expected column matches, zero unhandled rejections, zero rows lost.
+- [x] `npm test` green — 48 files / 1187 tests (2026-10-03 release gate; the "643 + new" figure was the task-0 baseline).
+- [x] `npx playwright test` against mock — queue-matrix 12/12 on chromium, full suite 46/46 across chromium + mobile-chrome + mobile-safari + mobile-pwa, zero unhandled rejections, zero rows lost (2026-10-03 release gate).
 
 ## Next
 
@@ -197,3 +197,53 @@ so nobody re-opens it without new facts.
   (v45:301-319). v49 §1-2 fixes both via `badge_eff`.
 - L-07 CLOSED by v50 (`portal_version` + `portal_app_version()`) and the
   client handshake (`src/lib/version.js` + `DbVersionBanner`, App shell).
+
+## Release gate — release/attendance-go-live-2026-10-03 (2026-10-03)
+
+Cut from main @ b225918 (local only, no push). All gate numbers below are
+real command output from the release branch.
+
+- **Queue-matrix repaired (M1/M7/M9/M12)** — `tests/e2e/queue-matrix.spec.js`
+  12/12 green on chromium. M1 now seeds `MAX_QUEUE_SIZE + 1` rows against the
+  exported constant (`src/lib/offlineQueue.js`), because the fixture's hard
+  200 rows never reached the real 2000 cap ("Offline queue is full" could
+  not fire); M7 asserts the session-mismatch quarantine (`failed: true`,
+  `failReason`) with the IN neighbour drained; M9 matches the real recovery
+  label (`Clear failed (n)`); M12 seeds `get_open_session` so the OUT replay
+  succeeds and the row drops.
+- **Retrieval caps (audit R1–R8) closed** — PostgREST `db-max-rows` (1000)
+  truncates SETOF RPC results too, so per-badge feeds silently returned
+  ≤1000-row prefixes (KPIs, expected denominators, workbook sheets, previsit
+  totals). New `fetchAllRpc` + `RPC_PAGE_SPECS` in `src/lib/supabase.js`
+  pages every registered RPC with `count:'exact'`, retries once then throws
+  on count mismatch, throws on unknown spec (fail-closed), and keeps
+  server-aggregated singletons (`previsit_summary`) single-shot. Callers
+  migrated: AttendancePage (sewadar_summary), ReportsPage (both day_badges),
+  DashboardPage (day export), DeptInchargeDashboardPage (badge fan-out),
+  usePrevisitData (previsit_sewadars / previsit_deployed). R5 raced-guard →
+  chunked `fetchAllRows` (500/batch); R6/R7 UsersPage stable keys
+  `created_at → id`; R8 ScannerPage passes the stable key. Pinned by
+  `src/lib/fetchAllRpc.test.js` (9 tests) + per-page routing assertions
+  (a revert to the single-shot path now fails the suites).
+- **dept_incharge Excel export** — `canExport` includes `dept_incharge` on
+  ReportsPage; role tests assert the workbook sheets are non-empty.
+- **CI e2e gate** — new `e2e-desktop` job (`npx playwright test
+  --project=chromium`) gated to this release branch or `workflow_dispatch`;
+  the old "desktop e2e stays out of CI by design" comment updated. Workflow
+  YAML parses: build, e2e-mobile, e2e-desktop, pwa-shell, migration-parity,
+  migration-apply.
+- **Gate results**: lint 0 errors (6 pre-existing fast-refresh warnings in
+  untouched files); `npm test` 48 files / 1187 tests; coverage attendance.js
+  99.3 stmts / 97.9 branch / 100 funcs+lines, logic.js 100 / 99.5 / 100
+  (thresholds ≥95 / ≥90 / ≥95 / ≥95); `npm run build` OK (PWA precache 50
+  entries); playwright 46/46 across all 4 projects (1.4m).
+- **DB go-live check**: the exact CI migration-parity script passes locally
+  (both directions); live `portal_app_version()` returns **v64** =
+  `MIN_SUPPORTED_DB_VERSION` (`src/lib/version.js:18`) = latest migration
+  (`sql/v64_previsit_perf.sql`); `.env` carries both VITE vars; this release
+  changes **zero** `sql/` files → no db push required. `migration-apply` +
+  the call-level scan gates run in CI on push.
+- **Deviations / open gap**: the plan listed
+  `DeploymentAllocationPage.test.jsx` — no such file exists; T8's chunked
+  raced-guard rides on the unit-tested `fetchAllRows` helper but has **no
+  component-level test** (candidate follow-up before the next release).

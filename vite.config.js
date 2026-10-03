@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config'
 import { loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
+import { VitePWA } from 'vite-plugin-pwa'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -17,7 +18,26 @@ export default defineConfig(({ command, mode }) => {
     throw new Error('Missing VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY — set them in .env or Vercel env vars')
   }
   return {
-  plugins: [react()],
+  plugins: [
+    react(),
+    // PWA: injectManifest over src/sw.js (keeps Background Sync + the
+    // conservative posture: precached shell, NetworkOnly everything else).
+    // manifest:false — we ship our own public/manifest.webmanifest.
+    // registerType:'prompt' — updates wait for the user's Reload tap.
+    VitePWA({
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.js',
+      registerType: 'prompt',
+      manifest: false,
+      injectManifest: {
+        maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
+      },
+      devOptions: {
+        enabled: false,
+      },
+    }),
+  ],
   server: {
     host: true,
     port: 5174,
@@ -65,6 +85,14 @@ export default defineConfig(({ command, mode }) => {
         'src/components/scanner/enginePool.js',
         'src/components/scanner/cameraManager.js',
         'src/pages/ScannerPage.jsx',
+        // the mobile layer: the phone surface IS the product now, and the
+        // queue-recovery logic that used to sit inside ScannerPage moved here
+        'src/components/mobile/QueueRecoveryBar.jsx',
+        'src/components/mobile/Skeleton.jsx',
+        'src/components/mobile/OfflineBanner.jsx',
+        'src/components/mobile/QuickPeekSheet.jsx',
+        'src/components/mobile/PullToRefresh.jsx',
+        'src/components/AttendanceCards.jsx',
       ],
       reporter: ['text', 'html'],
       // Aggregate floors are a coarse "did this collapse?" net only, kept low
@@ -166,11 +194,29 @@ export default defineConfig(({ command, mode }) => {
           functions: 71,
           lines: 86,
         },
+        // HONEST NOTE (2026-10-03): the queue predicates, the four recovery
+        // actions and the stranded poll moved out of this page into
+        // QueueRecoveryBar (which now carries its own gate below), so this
+        // file legitimately has fewer covered functions than it did. These
+        // floors pin measured reality; the queue logic is gated where it now
+        // lives rather than being counted twice.
         'src/pages/ScannerPage.jsx': {
-          statements: 79,
-          branches: 58,
-          functions: 68,
-          lines: 91,
+          statements: 78,
+          branches: 45,
+          functions: 60,
+          lines: 95,
+        },
+        'src/components/mobile/QueueRecoveryBar.jsx': {
+          statements: 90,
+          branches: 80,
+          functions: 90,
+          lines: 90,
+        },
+        'src/components/AttendanceCards.jsx': {
+          statements: 90,
+          branches: 75,
+          functions: 90,
+          lines: 90,
         },
       },
     },

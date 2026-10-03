@@ -1,7 +1,9 @@
 import { useMemo, useRef } from 'react'
 import { RefreshCw } from 'lucide-react'
+import Skeleton from './mobile/Skeleton'
+import CentreDayHeatmap from './CentreDayHeatmap'
 import { usePrevisitData } from '../hooks/usePrevisitData'
-import { previsitKpis, previsitByDay, previsitByDept } from '../lib/previsit'
+import { previsitKpis, previsitByDay, previsitByDept, previsitCentreMatrix } from '../lib/previsit'
 import { shortDayLabel } from '../lib/attendance'
 
 /**
@@ -17,13 +19,13 @@ import { shortDayLabel } from '../lib/attendance'
  */
 export default function PrevisitDashboard({ schedules = [], scheduleId }) {
   const schedule = (schedules || []).find((s) => s.id === scheduleId)
-  const { summary, loading, loadError, rowsScheduleId, reload } = usePrevisitData(scheduleId)
+  const { summary, deployed, loading, loadError, rowsScheduleId, reload } = usePrevisitData(scheduleId)
 
   // Hold the last good snapshot while a refresh is in flight (same as
   // PrevisitView): no false-zero tiles, no empty-state flash.
-  const shownRef = useRef({ summary: [], scheduleId: null })
+  const shownRef = useRef({ summary: [], deployed: [], scheduleId: null })
   if (rowsScheduleId === scheduleId) {
-    shownRef.current = { summary, scheduleId }
+    shownRef.current = { summary, deployed, scheduleId }
   }
   const live = useMemo(
     () => (shownRef.current.scheduleId === scheduleId ? shownRef.current.summary : []),
@@ -32,9 +34,18 @@ export default function PrevisitDashboard({ schedules = [], scheduleId }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [rowsScheduleId, scheduleId, summary]
   )
+  // The deployed roster is the DENOMINATOR of the centre heatmap, so it gets
+  // the same last-good treatment: a mid-refresh gap would redraw every cell
+  // as a smaller x/y for no reason.
+  const liveDeployed = useMemo(
+    () => (shownRef.current.scheduleId === scheduleId ? shownRef.current.deployed : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rowsScheduleId, scheduleId, deployed]
+  )
   const kpis = useMemo(() => previsitKpis(live), [live])
   const byDay = useMemo(() => previsitByDay(live), [live])
   const byDept = useMemo(() => previsitByDept(live), [live])
+  const centreMatrix = useMemo(() => previsitCentreMatrix(live, liveDeployed), [live, liveDeployed])
   const deptCount = byDept.length
   const maxPresent = byDay.reduce((m, d) => Math.max(m, d.present), 0)
 
@@ -69,7 +80,13 @@ export default function PrevisitDashboard({ schedules = [], scheduleId }) {
         </div>
       )}
 
-      <div className="stat-row">
+      {loading && live.length === 0 && (
+        <div className="stat-row">
+          {[0, 1, 2, 3].map((i) => <Skeleton key={i} variant="kpi" />)}
+        </div>
+      )}
+
+      <div className="stat-row" style={loading && live.length === 0 ? { display: 'none' } : undefined}>
         <div className="stat">
           <div className="stat-label">Sewa days</div>
           <div className="stat-value" style={{ fontVariantNumeric: 'tabular-nums' }}>{kpis.sewas}</div>
@@ -89,7 +106,10 @@ export default function PrevisitDashboard({ schedules = [], scheduleId }) {
       </div>
 
       {loading && live.length === 0 ? (
-        <div className="card" style={{ marginTop: '0.75rem' }}><div className="empty"><div className="empty-title">Loading previsit sewa…</div></div></div>
+        <div className="card" style={{ marginTop: '0.75rem' }} role="status" aria-label="Loading previsit sewa">
+          <Skeleton variant="text" lines={2} />
+          <div className="empty-text" style={{ marginTop: '0.6rem' }}>Loading previsit sewa…</div>
+        </div>
       ) : byDay.length === 0 ? (
         <div className="card" style={{ marginTop: '0.75rem' }}><div className="empty">
           <div className="empty-title">No previsit sewa recorded</div>
@@ -101,15 +121,15 @@ export default function PrevisitDashboard({ schedules = [], scheduleId }) {
             <div className="card-title">Present by sewa day</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.5rem' }}>
               {byDay.map((d) => (
-                <div key={d.date} style={{ display: 'grid', gridTemplateColumns: '92px 1fr auto', gap: '0.6rem', alignItems: 'center' }}>
-                  <span style={{ fontVariantNumeric: 'tabular-nums', fontSize: '0.82rem', fontWeight: 600 }} title={d.date}>{shortDayLabel(d.date)}</span>
+                <div key={d.date} className="pd-day">
+                  <span className="pd-day-label" title={d.date}>{shortDayLabel(d.date)}</span>
                   <span className="progress" title={`${d.present} present`}>
                     <span
                       className="progress-bar"
                       style={{ width: `${maxPresent > 0 ? Math.round((d.present / maxPresent) * 100) : 0}%` }}
                     />
                   </span>
-                  <span style={{ fontVariantNumeric: 'tabular-nums', fontSize: '0.82rem', minWidth: 72, textAlign: 'right' }}>
+                  <span className="pd-day-count">
                     {d.present} present{d.openNow > 0 ? ` · ${d.openNow} open` : ''}
                   </span>
                 </div>
@@ -118,23 +138,15 @@ export default function PrevisitDashboard({ schedules = [], scheduleId }) {
           </div>
 
           <div className="card previsit-card" style={{ marginTop: '0.75rem' }}>
-            <div className="card-title">By department</div>
-            <div className="table-wrap">
-              <table className="table">
-                <thead>
-                  <tr><th>Department</th><th style={{ textAlign: 'right' }}>Sewas</th><th style={{ textAlign: 'right' }}>Present</th></tr>
-                </thead>
-                <tbody>
-                  {byDept.map((g) => (
-                    <tr key={g.id || 'none'}>
-                      <td data-label="Department">{g.name}</td>
-                      <td data-label="Sewas" style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{g.sewas}</td>
-                      <td data-label="Present" style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{g.present}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="card-title">Attendance by centre</div>
+            <div className="card-sub">
+              Present / deployed for every centre, one column per sewa day
             </div>
+            <CentreDayHeatmap
+              columns={centreMatrix.columns}
+              rows={centreMatrix.rows}
+              totals={centreMatrix.totals}
+            />
           </div>
         </>
       )}

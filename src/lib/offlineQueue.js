@@ -126,7 +126,7 @@ export function __getConsecutiveFailures() {
   return _consecutiveFailures
 }
 
-const MAX_QUEUE_SIZE = 2000
+export const MAX_QUEUE_SIZE = 2000
 
 const DB_NAME = 'sewadar_offline_q'
 const DB_VERSION = 2
@@ -334,6 +334,21 @@ export async function clearOrphanedQueue() {
 // here auto-drains or auto-deletes; the drain keeps skipping null-owner
 // rows (cross-user safety, D1a) and clearOrphanedQueue keeps its
 // logged-out-only bulk-clear semantics.
+/**
+ * Canonical queue-row predicates. These OWN the definitions; the scanner
+ * pages used to carry private copies of both (three of them, drifting).
+ * A failed row carries `failed: true` (v1) or `status: 'failed'` (newer);
+ * an orphaned row is a NON-failed row with a null owner that no drain will
+ * ever consume (see clearOrphanedQueue).
+ */
+export function isFailedQueueRow(r) {
+  return !!r && (r.status === 'failed' || r.failed === true)
+}
+
+export function isOrphanedQueueRow(r) {
+  return !isFailedQueueRow(r) && (r.owner ?? null) === null && !r.synced
+}
+
 export function isStrandedRow(r) {
   return !!r && !isFailedRow(r) && !r.synced && (r.owner ?? null) === null
 }

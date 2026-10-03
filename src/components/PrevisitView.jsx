@@ -1,12 +1,15 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
 import { useToast } from '../components/Toast'
 import { RefreshCw, Download, Search } from 'lucide-react'
-import { fileSlug, exportWorkbook } from '../lib/excel'
-import { shortDayLabel } from '../lib/attendance'
+import { fileSlug, exportWorkbook, exportWorkbookBlob } from '../lib/excel'
+import { useIsMobile } from '../hooks/useMediaQuery'
+import { useExport } from '../hooks/useExport'
+import ExportSheet from './mobile/ExportSheet'
+import PrintPdfButton from '../components/PrintPdfButton'
+import { shortDayLabel, centreOptions } from '../lib/attendance'
 import { usePrevisitData } from '../hooks/usePrevisitData'
 import {
   previsitDates,
-  previsitDeptOptions,
   filterPrevisitRows,
   filterPrevisitTotal,
   previsitPresentMap,
@@ -64,15 +67,16 @@ function AttentionSection({ title, rows, showDate, detail }) {
   return (
     <div className="card" style={{ marginTop: '0.75rem' }}>
       <div className="card-title">{title} ({rows.length})</div>
-      <div className="table-wrap">
-        <table className="table">
+      <div className="table-wrap table-wrap-rows">
+        <table className="table rows-on-phone">
+          <caption className="sr-only">{title}</caption>
           <thead>
             <tr>
-              {showDate && <th>Date</th>}
-              <th>Badge</th>
-              <th>Name</th>
-              <th>Centre</th>
-              <th>Detail</th>
+              {showDate && <th scope="col">Date</th>}
+              <th scope="col">Badge</th>
+              <th scope="col">Name</th>
+              <th scope="col">Centre</th>
+              <th scope="col">Detail</th>
             </tr>
           </thead>
           <tbody>
@@ -102,7 +106,7 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
     if (TABS.includes(initialTab)) setTab(initialTab)
   }, [initialTab])
   const [dateSel, setDateSel] = useState('')
-  const [deptSel, setDeptSel] = useState('')
+  const [centreSel, setCentreSel] = useState('all')
   const [query, setQuery] = useState('')
   const [exporting, setExporting] = useState(false)
 
@@ -122,8 +126,8 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
   const liveDeployed = shown.deployed
   const hasShown = liveRows.length > 0 || liveDeployed.length > 0 || liveSummary.length > 0
   const dates = useMemo(() => previsitDates(liveSummary), [liveSummary])
-  const deptOptions = useMemo(
-    () => previsitDeptOptions([...liveRows, ...liveDeployed]),
+  const centreOpts = useMemo(
+    () => centreOptions([...liveRows, ...liveDeployed]),
     [liveRows, liveDeployed]
   )
   // Newest sewa day by default; DAY_ALL is an explicit choice (the old
@@ -132,18 +136,18 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
   const isAll = dateSel === DAY_ALL
   const presentMap = useMemo(() => previsitPresentMap(liveRows), [liveRows])
 
-  // Tab counts respect the department filter (+ the day for Present /
+  // Tab counts respect the centre filter (+ the day for Present /
   // Attention); the text search narrows only the displayed table.
-  const deptDeployed = useMemo(
-    () => filterPrevisitTotal(liveDeployed, { departmentId: deptSel }),
-    [liveDeployed, deptSel]
+  const centreDeployed = useMemo(
+    () => filterPrevisitTotal(liveDeployed, { centre: centreSel }),
+    [liveDeployed, centreSel]
   )
   const dayRows = useMemo(
-    () => filterPrevisitRows(liveRows, { date: effDate, departmentId: deptSel }),
-    [liveRows, effDate, deptSel]
+    () => filterPrevisitRows(liveRows, { date: effDate, centre: centreSel }),
+    [liveRows, effDate, centreSel]
   )
   const presentBadges = useMemo(() => new Set(dayRows.map((r) => r.badge_number)), [dayRows])
-  const deployedBadges = useMemo(() => new Set(deptDeployed.map((r) => r.badge_number)), [deptDeployed])
+  const deployedBadges = useMemo(() => new Set(centreDeployed.map((r) => r.badge_number)), [centreDeployed])
   const deployedPresent = useMemo(
     () => [...presentBadges].filter((b) => deployedBadges.has(b)).length,
     [presentBadges, deployedBadges]
@@ -155,21 +159,21 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
   const attForCount = useMemo(() => previsitAttention(dayRows), [dayRows])
   const attentionCount = useMemo(() => attentionUnion(attForCount).length, [attForCount])
 
-  const totalCount = deptDeployed.length
+  const totalCount = centreDeployed.length
   const presentCount = presentBadges.size
   const notPresent = Math.max(0, totalCount - deployedPresent)
 
   const totalVisible = useMemo(
-    () => filterPrevisitTotal(liveDeployed, { departmentId: deptSel, query }),
-    [liveDeployed, deptSel, query]
+    () => filterPrevisitTotal(liveDeployed, { centre: centreSel, query }),
+    [liveDeployed, centreSel, query]
   )
   const presentVisible = useMemo(
-    () => filterPrevisitRows(liveRows, { date: effDate, departmentId: deptSel, query }),
-    [liveRows, effDate, deptSel, query]
+    () => filterPrevisitRows(liveRows, { date: effDate, centre: centreSel, query }),
+    [liveRows, effDate, centreSel, query]
   )
   const attVisible = useMemo(
-    () => previsitAttention(filterPrevisitRows(liveRows, { date: effDate, departmentId: deptSel, query })),
-    [liveRows, effDate, deptSel, query]
+    () => previsitAttention(filterPrevisitRows(liveRows, { date: effDate, centre: centreSel, query })),
+    [liveRows, effDate, centreSel, query]
   )
   // Badge × day matrix behind the Total tab: every sewa day as a column.
   const matrixRows = useMemo(
@@ -181,22 +185,41 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
   const totalOfTab = tab === TAB_TOTAL ? liveDeployed.length : tab === TAB_ATTENTION ? attentionUnion(previsitAttention(liveRows)).length : liveRows.length
   const sheetName = tab === TAB_TOTAL ? 'Total' : tab === TAB_ATTENTION ? 'Attention' : 'Present'
 
+  // ONE builder for both delivery paths — desktop downloads the workbook,
+  // phones share it (the only reliable "save" on iOS Safari). They can never
+  // drift because they are the same rows in the same call.
+  const exportFilename = `${fileSlug(schedule?.name || 'schedule')}_previsit_${
+    tab === TAB_TOTAL ? 'total' : tab === TAB_ATTENTION ? 'attention' : (effDate || 'all-days')
+  }.xlsx`
+  const buildExportSheets = () => ([{
+    name: sheetName,
+    rows: tab === TAB_TOTAL
+      ? previsitTotalExportRows(totalVisible, presentMap, dates)
+      : tab === TAB_ATTENTION
+        ? previsitAttentionExportRows(attVisible)
+        : previsitExportRows(presentVisible),
+  }])
+
+  const isMobile = useIsMobile()
+  const mobileExport = useExport()
+  const [exportSheetOpen, setExportSheetOpen] = useState(false)
+
   const exportExcel = async () => {
     if (exporting || visible.length === 0) return
+    // Mobile: build on this tap, deliver on the Share tap inside the sheet
+    // (a share call after an awaited build loses the user gesture).
+    if (isMobile) {
+      setExportSheetOpen(true)
+      await mobileExport.prepare(async () => {
+        const { blob, written } = await exportWorkbookBlob(exportFilename, buildExportSheets())
+        if (!written) return null
+        return { blob, filename: exportFilename }
+      })
+      return
+    }
     setExporting(true)
     try {
-      const kind = tab === TAB_TOTAL ? 'total' : tab === TAB_ATTENTION ? 'attention' : (effDate || 'all-days')
-      const n = await exportWorkbook(
-        `${fileSlug(schedule?.name || 'schedule')}_previsit_${kind}.xlsx`,
-        [{
-          name: sheetName,
-          rows: tab === TAB_TOTAL
-            ? previsitTotalExportRows(totalVisible, presentMap, dates)
-            : tab === TAB_ATTENTION
-              ? previsitAttentionExportRows(attVisible)
-              : previsitExportRows(presentVisible),
-        }]
-      )
+      const n = await exportWorkbook(exportFilename, buildExportSheets())
       if (!n) toast.error('Nothing to export')
       else toast.success('Previsit workbook exported')
     } catch (err) {
@@ -228,9 +251,10 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
           <button onClick={reload} className="btn" disabled={loading} title="Reload">
             <RefreshCw size={14} /> {loading ? 'Loading…' : 'Reload'}
           </button>
-          <button onClick={exportExcel} disabled={exporting || visible.length === 0} className="btn btn-primary" title="Export the visible rows">
-            <Download size={14} /> {exporting ? 'Exporting…' : 'Export Excel'}
+          <button onClick={exportExcel} disabled={exporting || mobileExport.building || visible.length === 0} className="btn btn-primary" title="Export the visible rows">
+            <Download size={14} /> {exporting || mobileExport.building ? 'Exporting…' : 'Export Excel'}
           </button>
+          <PrintPdfButton className="btn" />
         </div>
       </div>
 
@@ -239,6 +263,19 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
           <div style={{ fontSize: '0.85rem', color: '#b91c1c' }}>{loadError}</div>
         </div>
       )}
+
+      <ExportSheet
+        open={isMobile && exportSheetOpen}
+        onClose={() => { setExportSheetOpen(false); mobileExport.reset() }}
+        filename={exportFilename}
+        file={mobileExport.file?.blob || null}
+        building={mobileExport.building}
+        buildError={mobileExport.buildError}
+        delivering={mobileExport.delivering}
+        deliveredVia={mobileExport.deliveredVia}
+        onDeliver={mobileExport.deliver}
+        onRetry={exportExcel}
+      />
 
       <div className="stat-row">
         <div className="stat">
@@ -316,11 +353,11 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
             </div>
           </div>
           <label className="previsit-field">
-            <span className="previsit-label">Department</span>
-            <select value={deptSel} onChange={(e) => setDeptSel(e.target.value)} className="select previsit-control" aria-label="Department filter">
-              <option value="">All departments</option>
-              {deptOptions.map((o) => (
-                <option key={o.id || 'none'} value={o.id}>{o.name}</option>
+            <span className="previsit-label">Centre</span>
+            <select value={centreSel} onChange={(e) => setCentreSel(e.target.value)} className="select previsit-control" aria-label="Centre filter">
+              <option value="all">All centres</option>
+              {centreOpts.map((c) => (
+                <option key={c} value={c}>{c}</option>
               ))}
             </select>
           </label>
@@ -351,15 +388,15 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
             </div>
             <div className="empty-text">
               {tab === TAB_TOTAL
-                ? 'No deployed sewadars found for this schedule and department.'
+                ? 'No deployed sewadars found for this schedule and centre.'
                 : tab === TAB_ATTENTION
                   ? 'No open sessions, undeployed scans or repeat scans match the current filters.'
                   : (liveRows.length === 0
                     ? 'Nobody has scanned outside the visit window for this schedule yet.'
                     : 'Nothing matches the current filters.')}
             </div>
-            {(deptSel || query) && (
-              <button type="button" className="btn" style={{ marginTop: '0.75rem' }} onClick={() => { setDeptSel(''); setQuery('') }}>
+            {(centreSel !== 'all' || query) && (
+              <button type="button" className="btn" style={{ marginTop: '0.75rem' }} onClick={() => { setCentreSel('all'); setQuery('') }}>
                 Clear filters
               </button>
             )}
@@ -377,6 +414,10 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
                   Absent
                 </span>
               </div>
+              {/* Phones render the SAME row/column grid as the laptop: a scroll
+                  box with a pinned Badge column and a pinned header. The stacked
+                  card version ran ~132px per sewadar, so a 200-sewadar list cost
+                  ~26 screens of scrolling for data that is one 6-column row. */}
               <div className="att-scroll" tabIndex={0} role="region" aria-label="Scrollable presence grid">
                 <table className="att-table">
                   <caption>Deployed strength by sewa day</caption>
@@ -475,20 +516,21 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
           </div>
         ) : (
           <div role="tabpanel" aria-label="Present register" aria-busy={loading}>
-            <div className="table-wrap table-wrap-sticky">
-              <table className="table table-sticky previsit-table">
+            <div className="table-wrap table-wrap-sticky table-wrap-rows">
+              <table className="table table-sticky previsit-table rows-on-phone">
+                <caption className="sr-only">Present register</caption>
                 <thead>
                   <tr>
-                    {isAll && <th>Date</th>}
-                    <th>Badge</th>
-                    <th>Name</th>
-                    <th>Centre</th>
-                    <th>Department</th>
-                    <th style={{ textAlign: 'right' }}>First in</th>
-                    <th style={{ textAlign: 'right' }}>Last out</th>
-                    <th style={{ textAlign: 'right' }}>Duration</th>
-                    <th style={{ textAlign: 'right' }}>Sessions</th>
-                    <th>Flags</th>
+                    {isAll && <th scope="col">Date</th>}
+                    <th scope="col">Badge</th>
+                    <th scope="col">Name</th>
+                    <th scope="col">Centre</th>
+                    <th scope="col">Department</th>
+                    <th scope="col" style={{ textAlign: 'right' }}>First in</th>
+                    <th scope="col" style={{ textAlign: 'right' }}>Last out</th>
+                    <th scope="col" style={{ textAlign: 'right' }}>Duration</th>
+                    <th scope="col" style={{ textAlign: 'right' }}>Sessions</th>
+                    <th scope="col">Flags</th>
                   </tr>
                 </thead>
                 <tbody>

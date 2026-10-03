@@ -1,15 +1,17 @@
 import { useState, useEffect } from 'react'
+import { MOBILE_QUERY, DEVICE_TIERS, tierForWidth } from '../lib/mobile'
 
 /**
  * useMediaQuery — SSR-safe matchMedia hook.
  *
- * The mobile-first attendance layer activates at ≤768px; every structural
- * swap (bottom tab bar, scan-mode shell, filter sheet) reads this hook so
- * the desktop DOM at ≥769px is byte-identical to today. Returns false when
- * matchMedia is unavailable (SSR, old webviews) — desktop is the safe
- * default, never mobile.
+ * Device-tier contract (see index.css "Device-tier contract" and
+ * lib/mobile.js DEVICE_TIERS): T0–T4 get the mobile shell + card tables.
+ * Mobile chrome activates at ≤768px OR on a short landscape viewport with
+ * a coarse pointer (a phone held sideways is ≥769px wide, so width alone
+ * misses it). Returns false when matchMedia is unavailable (SSR, old
+ * webviews) — desktop is the safe default, never mobile.
  */
-export const MOBILE_QUERY = '(max-width: 768px)'
+export { MOBILE_QUERY, DEVICE_TIERS, tierForWidth }
 
 function snapshot(query) {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false
@@ -45,7 +47,29 @@ export function useMediaQuery(query) {
   return matches
 }
 
-/** Convenience: true when the viewport is phone-sized (≤768px). */
+/** Convenience: true when the viewport is phone-sized (T0–T4) or a landscape phone. */
 export function useIsMobile(query = MOBILE_QUERY) {
   return useMediaQuery(query)
+}
+
+/**
+ * Current device tier name ('tiny' … 'desktop').
+ * Tracks innerWidth; falls back to 'desktop' (SSR-safe).
+ */
+export function useDeviceTier() {
+  const [tier, setTier] = useState(() =>
+    typeof window === 'undefined' ? 'desktop' : tierForWidth(window.innerWidth),
+  )
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+    const onResize = () => setTier(tierForWidth(window.innerWidth))
+    onResize()
+    window.addEventListener('resize', onResize)
+    window.addEventListener('orientationchange', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      window.removeEventListener('orientationchange', onResize)
+    }
+  }, [])
+  return tier
 }

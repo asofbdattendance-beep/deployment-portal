@@ -13,14 +13,23 @@
 //      via Promise.allSettled, THROWING on a returned `{ error }`;
 //   2. the Complete / Present / Absent tabs render with a Status column;
 //   3. the centre filter narrows every tab;
-//   4. aso/super_admin get "Download Excel" (one sheet per centre), every
-//      other role gets "Print PDF" (window.print + print-only .centre-page
-//      sections) — scope itself is never filtered client-side.
+//   4. aso/super_admin/dept_incharge get "Download Excel" (one sheet per
+//      centre) AND "Export PDF"; the PDF also carries window.print +
+//      the print-only .centre-page sections — scope itself is never
+//      filtered client-side.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, cleanup, fireEvent } from '@testing-library/react'
 import ReportsPage from './ReportsPage'
 
 const rpc = vi.fn()
+// Delegates to `rpc` fixtures, upholding the real fetchAllRpc contract:
+// a resolved `{ error }` THROWS instead of returning rows (the page's error
+// panel tests drive errors through this path exactly as production does).
+const fetchAllRpc = vi.fn(async (name, params) => {
+  const res = await rpc(name, params)
+  if (res?.error) throw res.error
+  return Array.isArray(res?.data) ? res.data : []
+})
 const toastError = vi.fn()
 const toastSuccess = vi.fn()
 const toastWarning = vi.fn()
@@ -29,6 +38,7 @@ vi.mock('../lib/supabase', () => ({
   supabase: {
     rpc: (...args) => rpc(...args),
   },
+  fetchAllRpc: (...args) => fetchAllRpc(...args),
 }))
 
 // Hoisted so tests can switch roles per case (vi.mock factories are hoisted
@@ -192,9 +202,13 @@ describe('ReportsPage — filters narrow every tab', () => {
 describe('ReportsPage — role download', () => {
   it('aso gets Download Excel with one sheet per centre', async () => {
     await renderPage()
+    // The day-badges feed runs through the paginating helper — "Showing N of
+    // M" and every workbook sheet are complete, never a 1000-row prefix.
+    expect(fetchAllRpc.mock.calls.map(([n]) => n)).toContain('attendance_day_badges')
     const btn = screen.getByRole('button', { name: /Download Excel/i })
     expect(btn).toBeTruthy()
-    expect(screen.queryByRole('button', { name: /Print PDF/i })).toBeNull()
+    // PDF is offered BESIDE Excel, not instead of it.
+    expect(screen.getByRole('button', { name: /Export PDF/i })).toBeTruthy()
     fireEvent.click(btn)
     await waitFor(() => expect(exportWorkbook).toHaveBeenCalled())
     const [filename, sheets] = exportWorkbook.mock.calls[0]
@@ -214,14 +228,17 @@ describe('ReportsPage — role download', () => {
     authState.profile = { role: 'super_admin' }
     await renderPage()
     expect(screen.getByRole('button', { name: /Download Excel/i })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: /Print PDF/i })).toBeNull()
+    expect(screen.getByRole('button', { name: /Export PDF/i })).toBeTruthy()
   })
 
-  it('dept_incharge gets Print PDF, per-centre print sections, and no Excel button', async () => {
+  it('dept_incharge gets Download Excel, Export PDF, per-centre print sections', async () => {
     authState.profile = { role: 'dept_incharge' }
     await renderPage()
-    expect(screen.queryByRole('button', { name: /Download Excel/i })).toBeNull()
-    const printBtn = screen.getByRole('button', { name: /Print PDF/i })
+    // Excel is no longer aso-only: dept_incharge exports the SAME workbook
+    // from the same role-scoped RPC rows.
+    const excelBtn = screen.getByRole('button', { name: /Download Excel/i })
+    expect(excelBtn).toBeTruthy()
+    const printBtn = screen.getByRole('button', { name: /Export PDF/i })
     fireEvent.click(printBtn)
     expect(window.print).toHaveBeenCalled()
     // Print-only output: one .centre-page section per centre with the same
@@ -230,6 +247,14 @@ describe('ReportsPage — role download', () => {
     expect(sections).toHaveLength(2)
     const heads = [...sections[0].querySelectorAll('thead th')].map((th) => th.textContent)
     expect(heads).toEqual(['Badge', 'Name', 'Centre', 'Dept', 'Type', 'Status'])
+    // Per-centre sheet assertions: the dept_incharge workbook is non-empty
+    // and split exactly like the ASO one.
+    fireEvent.click(excelBtn)
+    await waitFor(() => expect(exportWorkbook).toHaveBeenCalled())
+    const [filename, sheets] = exportWorkbook.mock.calls.at(-1)
+    expect(filename).toMatch(/October_2026_Visit/)
+    expect(sheets.map((s) => s.name).sort()).toEqual(['DELHI', 'DELHI-1'])
+    expect(sheets.every((s) => s.rows.length > 0)).toBe(true)
   })
 
   it('warns instead of exporting when no rows match', async () => {
