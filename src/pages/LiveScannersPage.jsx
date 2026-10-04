@@ -363,13 +363,13 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
       <div className="page" style={{ maxWidth: 1400 }}>
         <div className="card" style={{ padding: '1.5rem', maxWidth: 720, margin: '0 auto' }} role="alert">
           <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', marginBottom: '0.5rem' }}>
-            <AlertTriangle size={18} style={{ color: '#b91c1c' }} />
+            <AlertTriangle size={18} style={{ color: 'var(--err)' }} />
             <h3 className="empty-title" style={{ margin: 0 }}>Could not load scanner activity</h3>
           </div>
           <p style={{ fontSize: '0.85rem', color: '#475569', margin: 0 }}>
             The scanner activity could not be read from the server.
           </p>
-          <p style={{ fontSize: '0.8rem', color: '#64748b', margin: '0.75rem 0 0' }}>
+          <p style={{ fontSize: '0.8rem', color: 'var(--text-sec)', margin: '0.75rem 0 0' }}>
             The attendance analytics functions may not be installed on this database, or your role
             may not be permitted to read them. No scanners are shown, because none could be loaded —
             this is not a report that scanning is idle.
@@ -438,7 +438,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
               aria-invalid={!date || undefined}
             />
             {!date && (
-              <div role="alert" style={{ fontSize: '0.72rem', color: '#b91c1c', marginTop: '0.25rem', maxWidth: 220 }}>
+              <div role="alert" style={{ fontSize: '0.72rem', color: 'var(--err)', marginTop: '0.25rem', maxWidth: 220 }}>
                 Pick a scan day — the date is empty, so scanner activity cannot load.
               </div>
             )}
@@ -478,7 +478,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
         <div
           role="status"
           className="card"
-          style={{ padding: '0.5rem 0.75rem', marginTop: '0.75rem', display: 'flex', gap: '0.5rem', alignItems: 'center', background: '#fffbeb', borderColor: '#fcd34d' }}
+          style={{ padding: '0.5rem 0.75rem', marginTop: '0.75rem', display: 'flex', gap: '0.5rem', alignItems: 'center', background: 'var(--warning-soft)', borderColor: '#fcd34d' }}
         >
           <AlertTriangle size={15} style={{ color: '#b45309', flexShrink: 0 }} />
           <span style={{ fontSize: '0.8rem', color: '#92400e' }}>
@@ -501,7 +501,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
         )}
         <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
           {isMobile ? <div style={{ flex: 1 }} /> : <div style={{ position: 'relative', flex: '1 1 240px', minWidth: 0 }}>
-            <Search size={14} style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none' }} />
+            <Search size={14} style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }} />
             <input
               className="input"
               style={{ paddingLeft: 28, minHeight: 44 }}
@@ -572,13 +572,13 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
                             aria-label={`Open sessions for ${scannerName(r)} (${r.scanner_badge || 'no badge'})`}
                             style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
                           >
-                            {isOpen ? <ChevronDown size={14} style={{ color: '#94a3b8' }} /> : <ChevronRight size={14} style={{ color: '#94a3b8' }} />}
+                            {isOpen ? <ChevronDown size={14} style={{ color: 'var(--text-muted)' }} /> : <ChevronRight size={14} style={{ color: 'var(--text-muted)' }} />}
                             <span className={`pill ${statusPill(r.status)}`}>{statusLabel(r.status, r.last_scan_time)}</span>
                           </button>
                         </td>
                         <td data-label="Scanner">
                           <div style={{ fontWeight: 600 }}>{scannerName(r)}</div>
-                          <div style={{ fontFamily: 'monospace', fontSize: '0.75rem', color: '#64748b' }}>{r.scanner_badge || '—'}</div>
+                          <div className="mono" style={{ fontSize: '0.75rem', color: 'var(--text-sec)' }}>{r.scanner_badge || '—'}</div>
                         </td>
                         <td data-label="Centre">{r.scanner_centre || UNASSIGNED_CENTRE}</td>
                         <td data-label="Scans In" style={{ textAlign: 'center', fontWeight: 700 }}>{r.scans_in || 0}</td>
@@ -588,7 +588,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
                         <td data-label="First Scan">{clock(r.first_in_time)}</td>
                         <td data-label="Last Scan">
                           <div>{clock(r.last_scan_time)}</div>
-                          <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>{timeAgo(r.lastScanMs, now)}</div>
+                          <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{timeAgo(r.lastScanMs, now)}</div>
                         </td>
                       </tr>
                       {isOpen && (
@@ -599,7 +599,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
                                 <Loader2 size={13} className="spin" /> Loading open sessions…
                               </div>
                             ) : panel.error ? (
-                              <div role="alert" style={{ fontSize: '0.8rem', color: '#b91c1c', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                              <div role="alert" style={{ fontSize: '0.8rem', color: 'var(--err)', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                                 <AlertTriangle size={14} /> {panel.error}
                                 <button onClick={() => fetchOpen(r.scanner_badge)} className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.72rem' }}>
                                   <RefreshCw size={12} /> Retry
@@ -624,7 +624,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
                                   <tbody>
                                     {panel.rows.map((s) => (
                                       <tr key={`${s.badge_number}-${s.in_date}-${s.in_time}`}>
-                                        <td data-label="Badge" style={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{s.badge_number || '—'}</td>
+                                        <td data-label="Badge" className="mono" style={{ fontSize: '0.8rem' }}>{s.badge_number || '—'}</td>
                                         <td data-label="Sewadar" style={{ fontWeight: 500 }}>{s.sewadar_name || '—'}</td>
                                         <td data-label="Home centre">{s.sewadar_centre || UNASSIGNED_CENTRE}</td>
                                         <td data-label="Department">{s.dept_name || '—'}</td>
@@ -669,7 +669,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
         hasActive={!!search.trim()}
       >
         <div style={{ position: 'relative' }}>
-          <Search size={14} style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none' }} />
+          <Search size={14} style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }} />
           <input
             className="input"
             style={{ paddingLeft: 28, width: '100%', minHeight: 44 }}
