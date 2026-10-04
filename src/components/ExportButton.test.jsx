@@ -46,4 +46,21 @@ describe('ExportButton', () => {
     await waitFor(() => expect(screen.getByRole('dialog', { name: /export report/i })).toBeTruthy())
     expect(exportWorkbook).not.toHaveBeenCalled()
   })
+
+  it('reports the desktop row count so the page can announce it', async () => {
+    exportWorkbook.mockResolvedValue(0)
+    const onExported = vi.fn()
+    render(<ExportButton filename="day.xlsx" buildSheets={buildSheets} onExported={onExported} />)
+    fireEvent.click(screen.getByRole('button', { name: /export excel/i }))
+    await waitFor(() => expect(onExported).toHaveBeenCalledWith(0))
+  })
+
+  it('reports desktop failures so the page can announce them', async () => {
+    exportWorkbook.mockRejectedValue(new Error('boom'))
+    const onExportError = vi.fn()
+    render(<ExportButton filename="day.xlsx" buildSheets={buildSheets} onExportError={onExportError} />)
+    fireEvent.click(screen.getByRole('button', { name: /export excel/i }))
+    await waitFor(() => expect(onExportError).toHaveBeenCalled())
+    expect(onExportError.mock.calls[0][0].message).toBe('boom')
+  })
 })

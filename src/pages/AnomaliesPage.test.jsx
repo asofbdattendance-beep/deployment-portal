@@ -138,12 +138,20 @@ const settle = async () => {
 }
 
 /**
- * Render and wait until the loading gate has passed. Content-agnostic on
- * purpose — waiting for a specific string couples the test to the fixture.
+ * Render and wait until the feed has settled. Content-agnostic on purpose —
+ * waiting for a specific string couples the test to the fixture. Loading now
+ * renders skeleton rows (never a spinner), so readiness means table rows, the
+ * empty state, or the error panel — whichever the fixture produces.
  */
 async function renderPage(props = {}) {
   const utils = render(<AnomaliesPage schedules={SCHEDULES} scheduleId="sched-1" {...props} />)
-  await waitFor(() => expect(screen.queryByText('Loading anomalies…')).toBeNull())
+  await waitFor(() => {
+    const ready = document.querySelector('table tbody tr')
+      || screen.queryByRole('alert')
+      || screen.queryByText('No anomalies')
+      || screen.queryByText('No anomalies for this filter')
+    expect(ready).toBeTruthy()
+  })
   return utils
 }
 
@@ -365,9 +373,10 @@ describe('null-safe display — a null centre and a null event date are never bl
   it('shows an unknown server-side rule as a neutral pill rather than dropping it', async () => {
     respondWith({ rows: [{ ...NULL_ROW, rule: 'FUTURE_RULE', sewadar_centre: 'DELHI' }] })
     await renderPage()
-    // The chip keeps the rule reachable, and the row is still shown.
+    // The chip keeps the rule reachable, and the row is still shown. Scoped to
+    // the feed table: the header ViewOnlyPill is also .pill-gray.
     expect(screen.getByText('FUTURE RULE (1)')).toBeTruthy()
-    const pill = document.querySelector('.pill-gray')
+    const pill = document.querySelector('table .pill-gray')
     expect(pill.textContent).toContain('FUTURE RULE')
   })
 })

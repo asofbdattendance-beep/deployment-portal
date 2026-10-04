@@ -4,19 +4,20 @@ import { useToast } from '../components/Toast'
 import { scannerStatus, timeAgo, UNASSIGNED_CENTRE, shortDayLabel } from '../lib/attendance'
 import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
 import { todayStrIST } from '../lib/scannerUtils'
-import { exportWorkbook, exportWorkbookBlob, fileSlug } from '../lib/excel'
+import { fileSlug } from '../lib/excel'
 import { useIsMobile } from '../hooks/useMediaQuery'
-import { useExport } from '../hooks/useExport'
-import ExportSheet from '../components/mobile/ExportSheet'
+import ExportButton from '../components/ExportButton'
 import PrintPdfButton from '../components/PrintPdfButton'
+import PageHeader, { ViewOnlyPill } from '../components/PageHeader'
+import KpiTile from '../components/KpiTile'
+import EmptyState from '../components/EmptyState'
+import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
 import FilterSheet, { MobileFilterBar } from '../components/mobile/FilterSheet'
 import Skeleton from '../components/mobile/Skeleton'
-import VirtualList from '../components/mobile/VirtualList'
 import {
-  Radio, Users, ScanLine, Clock, Download, Search, RefreshCw, Loader2,
-  AlertTriangle, Lock, ChevronRight, ChevronDown, ArrowLeft,
+  Radio, Users, ScanLine, Clock, Search, RefreshCw, Loader2,
+  AlertTriangle, ChevronRight, ChevronDown, ArrowLeft,
 } from 'lucide-react'
-import { reportRealtimeStatus } from '../lib/realtime'
 
 // Live-scanner verdict → pill colour. One place, used by the table and the
 // export so the sheet can never disagree with the screen. 'scanned' is a valid
@@ -91,7 +92,6 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
   useEffect(() => { setDate((d) => clampDateToWindow(d, visitWin)) }, [visitWin])
   const [raw, setRaw] = useState([])
   const [loading, setLoading] = useState(true)
-  const [exporting, setExporting] = useState(false)
   const [search, setSearch] = useState('')
   // A failed FIRST load has nothing to fall back on → full error panel. A failed
   // REFRESH keeps the rows we already have and sets `stale`; see the catch.
@@ -247,29 +247,18 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
   // Realtime: a scan landing mid-visit should show up without a manual refresh.
   // Debounced so a burst of scans triggers ONE reload, not dozens. This page is
   // read-only, so there is no write to echo and no self-suppression to do.
-  useEffect(() => {
-    if (!scheduleId) return
-    let alive = true
-    let timer = null
-    const reload = () => {
-      if (!alive) return
-      if (timer) clearTimeout(timer)
-      timer = setTimeout(() => { if (alive) load().catch(() => {}) }, 400)
-    }
-    const channel = supabase
-      .channel(`live-scanners-${scheduleId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'dp_attendance_sessions', filter: `schedule_id=eq.${scheduleId}` }, reload)
-      // L-34: deployments changes (ASO finalizes, rows become deployed)
-      // move the expected denominators behind these numbers — sessions
-      // alone leave them stale until a manual refresh.
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${scheduleId}` }, reload)
-      // L-40: realtime membership is not guaranteed — a dead channel
-      // used to fail silently. Name the state so it lands in devtools.
-      .subscribe((status) => {
-        reportRealtimeStatus('live-scanners', status, alive)
-      })
-    return () => { alive = false; if (timer) clearTimeout(timer); supabase.removeChannel(channel) }
-  }, [scheduleId, load])
+  // L-34/L-40 preserved: deployments changes move the expected denominators,
+  // and the hook names the channel state for devtools.
+  useRealtimeRefresh({
+    scheduleId,
+    channelName: `live-scanners-${scheduleId}`,
+    subscriptions: [
+      { table: 'dp_attendance_sessions', filter: `schedule_id=eq.${scheduleId}` },
+      { table: 'deployments', filter: `schedule_id=eq.${scheduleId}` },
+    ],
+    onReload: () => load().catch(() => {}),
+    label: 'live-scanners',
+  })
 
   // LAZY: the second RPC is not called for a row until that row is actually
   // opened, so the page costs one round trip rather than one per scanner. A
@@ -337,9 +326,11 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
   const isToday = date === todayStrIST()
 
   // ─── Export — one sheet, honouring the active search, built through the
-  // shared excel.js driver (L-24/L-25) like every other reports surface. ───
+  // shared excel.js driver (L-24/L-25) like every other reports surface.
+  // Delivered by <ExportButton>: anchor download on desktop (page toasts
+  // preserved verbatim via the callbacks), share sheet on phones. ───
   const exportFilename = `${fileSlug(schedule?.name)}_${date || 'no-date'}_scanners.xlsx`
-  const buildExportSheets = () => ([
+  const buildExportSheets = useCallback(() => ([
     {
       name: `Scanners ${date || 'no date'}`,
       rows: visible.map((r) => ({
@@ -355,35 +346,10 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
         'Last Scan': clock(r.last_scan_time),
       })),
     },
-  ])
+  ]), [visible, date])
 
-  // Phones deliver through the share sheet — a direct .xlsx download is
-  // unreliable on iOS Safari, and this page had NO mobile export path at all.
   const isMobile = useIsMobile()
-  const mobileExport = useExport()
-  const [exportSheetOpen, setExportSheetOpen] = useState(false)
   const [filtersOpen, setFiltersOpen] = useState(false)
-  const exportExcel = async () => {
-    if (isMobile) {
-      setExportSheetOpen(true)
-      await mobileExport.prepare(async () => {
-        const { blob, written } = await exportWorkbookBlob(exportFilename, buildExportSheets())
-        if (!written) return null
-        return { blob, filename: exportFilename }
-      })
-      return
-    }
-    setExporting(true)
-    try {
-      const written = await exportWorkbook(exportFilename, buildExportSheets())
-      if (written === 0) toast.warning('Nothing to export')
-      else toast.success('Scanner activity exported')
-    } catch (e) {
-      toast.error(e?.message || 'Export failed')
-    } finally {
-      setExporting(false)
-    }
-  }
 
   if (!schedules?.length) {
     return <div className="page"><div className="card" style={{ padding: '2rem', textAlign: 'center' }}>No schedules</div></div>
@@ -430,34 +396,44 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
 
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
-      <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
-        <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
-          <h2 className="page-title"><Radio size={22} /> Live Scanners</h2>
-          <div className="page-sub">Who is scanning right now, and who still has a session open</div>
-          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-            <span className="pill" title="Read-only — scans are recorded on the Scanner and Dept Incharge pages" style={{ background: '#f1f5f9', color: '#64748b', fontWeight: 600 }}>
-              <Lock size={12} /> View-only
-            </span>
+      <PageHeader
+        icon={<Radio size={22} />}
+        title="Live Scanners"
+        sub="Who is scanning right now, and who still has a session open"
+        pills={
+          <>
+            <ViewOnlyPill title="Read-only — scans are recorded on the Scanner and Dept Incharge pages" />
+            {term && (
+              <span className="pill pill-indigo" title="The table and the Excel sheet show this filtered set">
+                Showing {visible.length} of {all.length}
+              </span>
+            )}
+          </>
+        }
+        actions={
+          <>
             <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
               {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
             </button>
-            <button onClick={exportExcel} disabled={exporting || !rowsAreCurrent} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-              {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export Excel
-            </button>
+            <ExportButton
+              filename={exportFilename}
+              buildSheets={buildExportSheets}
+              disabled={!rowsAreCurrent}
+              onExported={(written) => {
+                if (written === 0) toast.warning('Nothing to export')
+                else toast.success('Scanner activity exported')
+              }}
+              onExportError={(e) => toast.error(e?.message || 'Export failed')}
+            />
             <PrintPdfButton className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }} />
             {onNavigate && (
               <button onClick={() => onNavigate?.()} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
                 <ArrowLeft size={13} /> Back to Scanner
               </button>
             )}
-            {term && (
-              <span className="pill pill-indigo" title="The table and the Excel sheet show this filtered set">
-                Showing {visible.length} of {all.length}
-              </span>
-            )}
-          </div>
-        </div>
-        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          </>
+        }
+        aside={
           <div>
             <div className="stat-label" style={{ marginBottom: '0.2rem' }}>Scan day</div>
             <input
@@ -477,30 +453,32 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
               </div>
             )}
           </div>
-        </div>
-      </div>
+        }
+      />
 
       <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-        <div className="stat">
-          <div className="stat-label">Active now</div>
-          <div className="stat-value" style={{ color: stats.active ? '#16a34a' : undefined }}>{stats.active}</div>
-          <div className="stat-sub">{isToday ? 'scanned in the last 15 min' : `last scan ${timeAgo(latestScanMs, now)}`}</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Scanners today</div>
-          <div className="stat-value">{stats.scanners}</div>
-          <div className="stat-sub">on {shortDayLabel(date) || 'no scan day'}</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Scans in</div>
-          <div className="stat-value">{stats.scansIn}</div>
-          <div className="stat-sub">entry scans recorded</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Open sessions</div>
-          <div className="stat-value" style={{ color: stats.open ? '#b45309' : undefined }}>{stats.open}</div>
-          <div className="stat-sub">IN with no OUT yet</div>
-        </div>
+        <KpiTile
+          label="Active now"
+          value={stats.active}
+          sub={isToday ? 'scanned in the last 15 min' : `last scan ${timeAgo(latestScanMs, now)}`}
+          tone={stats.active ? '#16a34a' : undefined}
+        />
+        <KpiTile
+          label="Scanners today"
+          value={stats.scanners}
+          sub={`on ${shortDayLabel(date) || 'no scan day'}`}
+        />
+        <KpiTile
+          label="Scans in"
+          value={stats.scansIn}
+          sub="entry scans recorded"
+        />
+        <KpiTile
+          label="Open sessions"
+          value={stats.open}
+          sub="IN with no OUT yet"
+          tone={stats.open ? '#b45309' : undefined}
+        />
       </div>
 
       {/* Staleness, not blankness: a failed refresh keeps the rows above, which
@@ -551,19 +529,17 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
         </div>
 
         {!date ? (
-          <div className="empty">
-            <div className="empty-icon"><Radio size={22} /></div>
-            <div className="empty-title">No scan day selected</div>
-            <div className="empty-text">Pick a scan day above to load scanner activity.</div>
-          </div>
+          <EmptyState
+            title="No scan day selected"
+            hint="Pick a scan day above to load scanner activity."
+          />
         ) : visible.length === 0 ? (
-          <div className="empty">
-            <div className="empty-icon"><Radio size={22} /></div>
-            <div className="empty-title">No scanner activity</div>
-            <div className="empty-text">
-              {term ? 'Try clearing the search.' : `No scans were recorded on ${shortDayLabel(date)}.`}
-            </div>
-          </div>
+          <EmptyState
+            title="No scanner activity"
+            hint={term ? 'Try clearing the search.' : `No scans were recorded on ${shortDayLabel(date)}.`}
+            actionLabel={term ? 'Clear search' : undefined}
+            onAction={term ? () => setSearch('') : undefined}
+          />
         ) : (
           <div className="table-wrap">
             <table className="table">
@@ -714,19 +690,6 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
           />
         </div>
       </FilterSheet>
-
-      <ExportSheet
-        open={isMobile && exportSheetOpen}
-        onClose={() => { setExportSheetOpen(false); mobileExport.reset() }}
-        filename={exportFilename}
-        file={mobileExport.file?.blob || null}
-        building={mobileExport.building}
-        buildError={mobileExport.buildError}
-        delivering={mobileExport.delivering}
-        deliveredVia={mobileExport.deliveredVia}
-        onDeliver={mobileExport.deliver}
-        onRetry={exportExcel}
-      />
     </div>
   )
 }
