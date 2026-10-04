@@ -342,9 +342,9 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
         pills={(
           <>
             <span
-              className="pill"
+              className="pill pill-green"
               title={lastRefreshAt ? `Last successful reload at ${new Date(lastRefreshAt).toLocaleTimeString('en-IN')}${failedSources ? ` · ${failedSources} of 3 sources failed` : ''}` : 'Not loaded yet'}
-              style={{ background: 'var(--success-soft)', color: '#047857', fontWeight: 600 }}
+              style={{ fontWeight: 600 }}
             >
               <LiveDot /> LIVE · updated {timeAgo(lastRefreshAt, now)}
             </span>
