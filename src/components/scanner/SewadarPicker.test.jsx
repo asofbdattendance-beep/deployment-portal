@@ -53,4 +53,28 @@ describe('SewadarPicker', () => {
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'ZZ' } })
     expect(await screen.findByText(/Type the badge above/)).toBeTruthy()
   })
+
+  it('supports full keyboard operation: input → rows → Escape back', async () => {
+    const onPick = vi.fn()
+    render(<SewadarPicker scheduleId="sched-1" onPick={onPick} />)
+    const input = screen.getByRole('searchbox')
+    fireEvent.change(input, { target: { value: 'FB' } })
+    await screen.findByText('FB001')
+    // ArrowDown from the input enters the list on the first row.
+    fireEvent.keyDown(input, { key: 'ArrowDown' })
+    expect(document.activeElement.textContent).toContain('FB001')
+    // ArrowDown steps to the second row; activating the focused row picks it.
+    fireEvent.keyDown(document.activeElement, { key: 'ArrowDown' })
+    expect(document.activeElement.textContent).toContain('VS009')
+    document.activeElement.click()
+    expect(onPick).toHaveBeenCalledWith('VS009')
+    // ArrowUp steps back; from the first row it wraps to the last row.
+    fireEvent.keyDown(document.activeElement, { key: 'ArrowUp' })
+    expect(document.activeElement.textContent).toContain('FB001')
+    fireEvent.keyDown(document.activeElement, { key: 'ArrowUp' })
+    expect(document.activeElement.textContent).toContain('VS009')
+    // Escape returns focus to the input.
+    fireEvent.keyDown(document.activeElement, { key: 'Escape' })
+    expect(document.activeElement).toBe(input)
+  })
 })
