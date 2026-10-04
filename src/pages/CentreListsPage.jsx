@@ -4,7 +4,12 @@ import { getRootCentre, isVssBadge } from '../lib/logic'
 import { isVssRow, deploymentCounts, verifyDeploymentCounts, reportCountProblems } from '../lib/counts'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
-import { Building2, Users, Search, Download, Filter, X, Star, CheckCircle2, ShieldCheck, Lock, Unlock, Crown } from 'lucide-react'
+import { Building2, Users, Search, Filter, X, Star, CheckCircle2, ShieldCheck, Lock, Unlock, Crown } from 'lucide-react'
+import PageHeader from '../components/PageHeader'
+import KpiTile from '../components/KpiTile'
+import EmptyState from '../components/EmptyState'
+import ExportButton from '../components/ExportButton'
+import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
 
 const ROW_H = 44
 
@@ -24,8 +29,6 @@ export default function CentreListsPage({ schedules, scheduleId }) {
   const [locksRaw, setLocksRaw] = useState([])
   const [selectionsRaw, setSelectionsRaw] = useState([])
   const [loading, setLoading] = useState(true)
-  const [exporting, setExporting] = useState(false)
-  const exportingRef = useRef(false)
   const [selCentre, setSelCentre] = useState('')
   const [selDept, setSelDept] = useState('')
   const [sel1, setSel1] = useState('')
@@ -108,26 +111,21 @@ export default function CentreListsPage({ schedules, scheduleId }) {
   useEffect(() => { loadData() }, [loadData])
 
   // realtime: refresh on deployments / consents / department_incharges / locks / selections
-  useEffect(() => {
-    if (!selectedScheduleId) return
-    let mounted = true
-    let timer = null
-    const scheduleReload = () => {
-      if (!mounted) return
-      if (timer) clearTimeout(timer)
-      timer = setTimeout(() => { if (mounted) loadData() }, 500)
-    }
-    const channel = supabase
-      .channel(`centre-lists-${selectedScheduleId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployment_departments' }, scheduleReload)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'department_incharges', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'department_incharge_selections', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
-      .subscribe()
-    return () => { mounted = false; if (timer) clearTimeout(timer); supabase.removeChannel(channel) }
-  }, [selectedScheduleId, loadData])
+  useRealtimeRefresh({
+    scheduleId: selectedScheduleId,
+    channelName: `centre-lists-${selectedScheduleId}`,
+    subscriptions: [
+      { table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` },
+      { table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` },
+      { table: 'deployment_departments' },
+      { table: 'department_incharges', filter: `schedule_id=eq.${selectedScheduleId}` },
+      { table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` },
+      { table: 'department_incharge_selections', filter: `schedule_id=eq.${selectedScheduleId}` },
+    ],
+    onReload: () => loadData().catch(() => {}),
+    label: 'centre-lists',
+    debounceMs: 500,
+  })
 
   // reset filters only on schedule switch
   const prevScheduleRef = useRef(selectedScheduleId)
@@ -437,17 +435,12 @@ export default function CentreListsPage({ schedules, scheduleId }) {
     return [...ids].map(id => deptMap.get(id)).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name))
   }, [activeTab, inchargesRows, activeBaseRows, deptMap])
 
-  const exportExcel = useCallback(async () => {
-    if (exportingRef.current) return
+  // Sheet rows for ExportButton (desktop download + mobile share sheet).
+  // Empty export → driver writes 0 sheets → onExported(0) → 'Nothing to export'.
+  const buildExportSheets = useCallback(() => {
     const isIncharge = activeTab === 'incharges'
     const exportRows = isIncharge ? filteredIncharges : filtered
-    if (!exportRows.length) { toast.info('Nothing to export'); return }
-    exportingRef.current = true
-    setExporting(true)
-    try {
-      const XLSX = await import('xlsx')
-      const wb = XLSX.utils.book_new()
-      if (isIncharge) {
+    if (isIncharge) {
         const rows = exportRows.map((r, idx) => ({
           'S.No.': idx + 1,
           'Centre': r.centre,
@@ -460,7 +453,6 @@ export default function CentreListsPage({ schedules, scheduleId }) {
           'Locked By': r.locked_by || '—',
           'Locked At': r.locked_at ? new Date(r.locked_at).toLocaleString() : '—',
         }))
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Centre Incharges')
         // per-centre summary
         const byCentre = {}
         exportRows.forEach(r => {
@@ -476,8 +468,8 @@ export default function CentreListsPage({ schedules, scheduleId }) {
             'Locked': v.locked,
             'Unlocked': v.total - v.locked,
           }))
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summary), 'Centre Summary')
-      } else {
+        return [{ name: 'Centre Incharges', rows }, { name: 'Centre Summary', rows: summary }]
+      }
         const rows = exportRows.map((r, idx) => ({
           'S.No.': idx + 1,
           'Centre': r.centre,
@@ -493,7 +485,6 @@ export default function CentreListsPage({ schedules, scheduleId }) {
           'Deployed Department': r.effective_name || '—',
           'Status': r.is_overridden ? 'Overridden' : r.is_finalized ? 'Finalized' : 'Deployed',
         }))
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), activeTab === 'vss' ? 'VSS Lists' : 'Sewadar Lists')
         const byCentre = {}
         exportRows.forEach(r => {
           if (!byCentre[r.centre]) byCentre[r.centre] = { total: 0, finalized: 0, vss: 0 }
@@ -509,7 +500,6 @@ export default function CentreListsPage({ schedules, scheduleId }) {
             'Finalized': v.finalized,
             'Pending': v.total - v.finalized,
           }))
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summary), 'Centre Summary')
         const byDept = {}
         exportRows.forEach(r => {
           const name = r.effective_name || '—'
@@ -524,18 +514,15 @@ export default function CentreListsPage({ schedules, scheduleId }) {
             'Deployed': v.total,
             'Finalized': v.finalized,
           }))
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(deptSummary), 'Department Summary')
-      }
-      const name = (schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')
-      const suffix = activeTab === 'incharges' ? 'centre_incharges' : activeTab === 'vss' ? 'vss_lists' : 'centre_lists'
-      XLSX.writeFile(wb, `${name}_${suffix}.xlsx`)
-    } catch (err) {
-      toast.error(err?.message || 'Export failed')
-    } finally {
-      exportingRef.current = false
-      setExporting(false)
-    }
-  }, [filtered, filteredIncharges, activeTab, schedule, toast, centreOrder])
+        return [
+          { name: activeTab === 'vss' ? 'VSS Lists' : 'Sewadar Lists', rows },
+          { name: 'Centre Summary', rows: summary },
+          { name: 'Department Summary', rows: deptSummary },
+        ]
+  }, [filtered, filteredIncharges, activeTab, centreOrder])
+
+  const exportSuffix = activeTab === 'incharges' ? 'centre_incharges' : activeTab === 'vss' ? 'vss_lists' : 'centre_lists'
+  const exportFilename = `${(schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')}_${exportSuffix}.xlsx`
 
   if (!schedules.length) {
     return (
@@ -552,23 +539,31 @@ export default function CentreListsPage({ schedules, scheduleId }) {
 
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
-      <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
-        <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
-          <h2 className="page-title"><Building2 size={22} /> Centre Lists</h2>
-          <div className="page-sub">Deployed sewadars by centres · {schedule?.name || ''} · read-only directory for ASO</div>
-          <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap' }}>
+      <PageHeader
+        icon={<Building2 size={22} />}
+        title="Centre Lists"
+        sub={`Deployed sewadars by centres · ${schedule?.name || ''} · read-only directory for ASO`}
+        pills={
+          <>
             <span className="pill pill-indigo" style={{ fontSize: '0.72rem' }}><Filter size={11} /> Deployed only</span>
             {hasActiveFilters && (
               <button onClick={clearAllFilters} className="btn btn-ghost" style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem' }}>
                 <X size={12} /> Clear filters
               </button>
             )}
-            <button onClick={exportExcel} disabled={exporting || loading} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-              <Download size={13} /> {exporting ? 'Exporting…' : 'Export Excel'}
-            </button>
-          </div>
-        </div>
-      </div>
+          </>
+        }
+        actions={
+          <ExportButton
+            filename={exportFilename}
+            buildSheets={buildExportSheets}
+            label="Export Excel"
+            disabled={loading}
+            onExported={(written) => { if (written === 0) toast.info('Nothing to export') }}
+            onExportError={(err) => toast.error(err?.message || 'Export failed')}
+          />
+        }
+      />
 
       {/* tabs */}
       <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
@@ -589,49 +584,17 @@ export default function CentreListsPage({ schedules, scheduleId }) {
       {/* stats strip — tab-specific */}
       {isSewadarLike ? (
         <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-          <div className="stat">
-            <div className="stat-label">{activeTab === 'vss' ? 'VSS Deployed' : 'Deployed'}</div>
-            <div className="stat-value">{tabStats.total}</div>
-            <div className="stat-sub">across {tabStats.centresCount} centres</div>
-          </div>
-          <div className="stat">
-            <div className="stat-label">Finalized</div>
-            <div className="stat-value" style={{ color: tabStats.finalized ? '#10b981' : '#64748b' }}>{tabStats.finalized}</div>
-            <div className="stat-sub">{tabStats.notFinalized} awaiting finalize</div>
-          </div>
-          <div className="stat">
-            <div className="stat-label">Overridden</div>
-            <div className="stat-value" style={{ color: tabStats.overridden ? '#b45309' : '#64748b' }}>{tabStats.overridden}</div>
-            <div className="stat-sub">final dept ≠ requested</div>
-          </div>
-          <div className="stat">
-            <div className="stat-label">Showing</div>
-            <div className="stat-value" style={{ color: '#4f46e5' }}>{filtered.length}</div>
-            <div className="stat-sub">after filters</div>
-          </div>
+          <KpiTile label={activeTab === 'vss' ? 'VSS Deployed' : 'Deployed'} value={tabStats.total} sub={`across ${tabStats.centresCount} centres`} />
+          <KpiTile label="Finalized" value={tabStats.finalized} tone={tabStats.finalized ? '#10b981' : '#64748b'} sub={`${tabStats.notFinalized} awaiting finalize`} />
+          <KpiTile label="Overridden" value={tabStats.overridden} tone={tabStats.overridden ? '#b45309' : '#64748b'} sub="final dept ≠ requested" />
+          <KpiTile label="Showing" value={filtered.length} tone="#4f46e5" sub="after filters" />
         </div>
       ) : (
         <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-          <div className="stat">
-            <div className="stat-label">Incharges</div>
-            <div className="stat-value">{inchargesStats.total}</div>
-            <div className="stat-sub">across {inchargesStats.centresWithIncharge} centres</div>
-          </div>
-          <div className="stat">
-            <div className="stat-label">Locked</div>
-            <div className="stat-value" style={{ color: inchargesStats.locked ? '#10b981' : '#64748b' }}>{inchargesStats.locked}</div>
-            <div className="stat-sub">{inchargesStats.totalLocks} centres locked · {inchargesStats.lockedCentres} with incharges</div>
-          </div>
-          <div className="stat">
-            <div className="stat-label">Unlocked</div>
-            <div className="stat-value" style={{ color: inchargesStats.unlocked ? '#f59e0b' : '#64748b' }}>{inchargesStats.unlocked}</div>
-            <div className="stat-sub">awaiting lock or without lock</div>
-          </div>
-          <div className="stat">
-            <div className="stat-label">Showing</div>
-            <div className="stat-value" style={{ color: '#4f46e5' }}>{filteredIncharges.length}</div>
-            <div className="stat-sub">after filters</div>
-          </div>
+          <KpiTile label="Incharges" value={inchargesStats.total} sub={`across ${inchargesStats.centresWithIncharge} centres`} />
+          <KpiTile label="Locked" value={inchargesStats.locked} tone={inchargesStats.locked ? '#10b981' : '#64748b'} sub={`${inchargesStats.totalLocks} centres locked · ${inchargesStats.lockedCentres} with incharges`} />
+          <KpiTile label="Unlocked" value={inchargesStats.unlocked} tone={inchargesStats.unlocked ? '#f59e0b' : '#64748b'} sub="awaiting lock or without lock" />
+          <KpiTile label="Showing" value={filteredIncharges.length} tone="#4f46e5" sub="after filters" />
         </div>
       )}
 
@@ -735,14 +698,14 @@ export default function CentreListsPage({ schedules, scheduleId }) {
           </div>
         ) : isSewadarLike ? (
           filtered.length === 0 ? (
-            <div className="card" style={{ border: 'none', boxShadow: 'none', background: '#f8fafc' }}>
-              <div className="empty">
-                <div className="empty-icon"><Users size={22} /></div>
-                <div className="empty-title">{activeBaseRows.length === 0 ? (activeTab === 'vss' ? 'No VSS deployments yet' : 'No deployments yet') : 'No matches'}</div>
-                <div className="empty-text">{activeBaseRows.length === 0 ? 'No sewadars have been deployed for this schedule yet.' : 'Try clearing filters or searching differently.'}</div>
-                {hasActiveFilters && <button onClick={clearAllFilters} className="btn btn-primary" style={{ marginTop: '0.85rem' }}><X size={14} /> Clear filters</button>}
-              </div>
-            </div>
+          <div className="card" style={{ border: 'none', boxShadow: 'none', background: '#f8fafc' }}>
+            <EmptyState
+              title={activeBaseRows.length === 0 ? (activeTab === 'vss' ? 'No VSS deployments yet' : 'No deployments yet') : 'No matches'}
+              hint={activeBaseRows.length === 0 ? 'No sewadars have been deployed for this schedule yet.' : 'Try clearing filters or searching differently.'}
+              actionLabel={hasActiveFilters ? 'Clear filters' : undefined}
+              onAction={hasActiveFilters ? clearAllFilters : undefined}
+            />
+          </div>
           ) : (
             <div
               ref={tableWrapRef}
@@ -834,12 +797,12 @@ export default function CentreListsPage({ schedules, scheduleId }) {
           )
         ) : filteredIncharges.length === 0 ? (
           <div className="card" style={{ border: 'none', boxShadow: 'none', background: '#f8fafc' }}>
-            <div className="empty">
-              <div className="empty-icon"><ShieldCheck size={22} /></div>
-              <div className="empty-title">{inchargesRows.length === 0 ? 'No incharges yet' : 'No matches'}</div>
-              <div className="empty-text">{inchargesRows.length === 0 ? 'Centres have not locked deployments or set incharges for this schedule yet. Each CENTRE sets one incharge per allocated department before locking.' : 'Try clearing filters or searching differently.'}</div>
-              {hasActiveFilters && <button onClick={clearAllFilters} className="btn btn-primary" style={{ marginTop: '0.85rem' }}><X size={14} /> Clear filters</button>}
-            </div>
+            <EmptyState
+              title={inchargesRows.length === 0 ? 'No incharges yet' : 'No matches'}
+              hint={inchargesRows.length === 0 ? 'Centres have not locked deployments or set incharges for this schedule yet. Each CENTRE sets one incharge per allocated department before locking.' : 'Try clearing filters or searching differently.'}
+              actionLabel={hasActiveFilters ? 'Clear filters' : undefined}
+              onAction={hasActiveFilters ? clearAllFilters : undefined}
+            />
           </div>
         ) : (
           <div

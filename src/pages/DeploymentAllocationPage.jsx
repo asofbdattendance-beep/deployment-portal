@@ -4,9 +4,13 @@ import { eligibleBadgeStatusFilter, notElderlyFilter, isVssBadge, DEFAULT_AVAILA
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import {
-  Save, CheckCircle2, Search, ClipboardCheck, Users,
-  Download, Pencil, Lock,
+  Save, CheckCircle2, Search, ClipboardCheck,
+  Pencil, Lock,
 } from 'lucide-react'
+import PageHeader, { ViewOnlyPill } from '../components/PageHeader'
+import KpiTile from '../components/KpiTile'
+import EmptyState from '../components/EmptyState'
+import ExportButton from '../components/ExportButton'
 
 /* ─── ASO / super_admin: assign the FINAL (deployed) department ───
    Centres record a REQUESTED department; aso/super_admin confirm or
@@ -107,8 +111,6 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [savedAt, setSavedAt] = useState(null)
-  const [exporting, setExporting] = useState(false)
-  const exportingRef = useRef(false)
   const [editMode, setEditMode] = useState(false)
   const [search, setSearch] = useState('')
   const [filterCentre, setFilterCentre] = useState('all')
@@ -718,14 +720,10 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
       .sort((a, b) => a.name.localeCompare(b.name))
   }, [all, allocations, filterCentre, centres, deptMap])
 
-  // ── Excel export ──
-  const exportExcel = useCallback(async () => {
-    if (exportingRef.current) return
-    exportingRef.current = true
-    setExporting(true)
-    try {
-      const XLSX = await import('xlsx') // lazy — keeps xlsx (~400 kB) out of the main bundle
-    const wb = XLSX.utils.book_new()
+  // ── Excel export — same sheets the hand-rolled exporter wrote, now via
+  // the shared ExportButton (desktop anchor download + mobile share sheet).
+  // Always writes (keepEmpty): the old exporter wrote even with zero rows.
+  const buildExportSheets = useCallback(() => {
     const main = visible.map(r => {
       const autoAssigned = r.deployed_dept_id && r.deployed_dept_id === r.requested_dept_id
       const overridden = r.deployed_dept_id && r.deployed_dept_id !== r.requested_dept_id
@@ -745,7 +743,6 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
         'Assignment Status': autoAssigned ? 'Auto (deployment)' : overridden ? 'Overridden' : (r.consent_given ? 'Not assigned' : 'No consent'),
       }
     })
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(main), 'Assignments')
 
     // per-department tally: what was requested vs what was deployed
     const tally = {}
@@ -774,76 +771,63 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
         })
       })
     })
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summary), 'Department Summary')
 
-    const name = (schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')
-    XLSX.writeFile(wb, `${name}_finalize_deployment.xlsx`)
-    } catch (err) {
-      toast.error(err?.message || 'Export failed')
-    } finally {
-      exportingRef.current = false
-      setExporting(false)
-    }
-  }, [visible, deptNameOf, schedule, toast])
+    return [
+      { name: 'Assignments', rows: main },
+      { name: 'Department Summary', rows: summary },
+    ]
+  }, [visible, deptNameOf])
+  const exportFilename = `${(schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')}_finalize_deployment.xlsx`
 
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
-      <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
-        <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
-          <h2 className="page-title"><ClipboardCheck size={22} /> Finalize Deployment</h2>
-          <div className="page-sub">Set the Finalized Deployment · ASO · defaults to each sewadar's request</div>
-          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+      <PageHeader
+        icon={<ClipboardCheck size={22} />}
+        title="Finalize Deployment"
+        sub="Set the Finalized Deployment · ASO · defaults to each sewadar's request"
+        pills={(
+          <>
             {saving ? <span className="pill pill-amber"><Save size={12} /> Saving...</span> : savedAt ? <span className="pill pill-green"><CheckCircle2 size={12} /> Saved {savedAt.toLocaleTimeString()}</span> : null}
             {isSuperAdmin ? (
-              <>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer', padding: '0.3rem 0.6rem', borderRadius: 8, background: editMode ? '#eef2ff' : '#f1f5f9', border: `1px solid ${editMode ? '#c7d2fe' : '#e2e8f0'}` }}>
-                  <input type="checkbox" checked={editMode} onChange={e => setEditMode(e.target.checked)} style={{ accentColor: '#6366f1' }} />
-                  {editMode ? <Pencil size={13} style={{ color: '#4f46e5' }} /> : <Lock size={13} style={{ color: '#94a3b8' }} />}
-                  Enable editing
-                </label>
-                <button onClick={saveDraft} className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-                  <Save size={13} /> Save Draft
-                </button>
-              </>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer', padding: '0.3rem 0.6rem', borderRadius: 8, background: editMode ? '#eef2ff' : '#f1f5f9', border: `1px solid ${editMode ? '#c7d2fe' : '#e2e8f0'}` }}>
+                <input type="checkbox" checked={editMode} onChange={e => setEditMode(e.target.checked)} style={{ accentColor: '#6366f1' }} />
+                {editMode ? <Pencil size={13} style={{ color: '#4f46e5' }} /> : <Lock size={13} style={{ color: '#94a3b8' }} />}
+                Enable editing
+              </label>
             ) : (
-              <span className="pill" title="View-only access — downloads are available, changes are not (v20)" style={{ background: '#f1f5f9', color: '#64748b', fontWeight: 600 }}>
-                <Lock size={12} /> View-only
-              </span>
+              <ViewOnlyPill title="View-only access — downloads are available, changes are not (v20)" />
             )}
-            <button onClick={exportExcel} disabled={exporting} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-              <Download size={13} /> {exporting ? 'Exporting…' : 'Export Excel'}
-            </button>
             {(filterCentre !== 'all' || filterStatus !== 'all' || search.trim()) && (
               <span className="pill pill-indigo" title="The table and the Excel export show this filtered set; header chips show the full schedule">
                 Showing {visible.length} of {all.length}
               </span>
             )}
-          </div>
-        </div>
-      </div>
+          </>
+        )}
+        actions={(
+          <>
+            {isSuperAdmin && (
+              <button onClick={saveDraft} className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+                <Save size={13} /> Save Draft
+              </button>
+            )}
+            <ExportButton
+              filename={exportFilename}
+              buildSheets={buildExportSheets}
+              keepEmpty
+              label="Export Excel"
+              onExportError={(err) => toast.error(err?.message || 'Export failed')}
+            />
+          </>
+        )}
+      />
 
 
       <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-        <div className="stat">
-          <div className="stat-label">Sewadars</div>
-          <div className="stat-value">{all.length}</div>
-          <div className="stat-sub">across {new Set(all.map(r => r.centre)).size} centres</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Deployment</div>
-          <div className="stat-value" style={{ color: '#4f46e5' }}>{requestedAll}</div>
-          <div className="stat-sub">auto-assigned by request</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Overridden</div>
-          <div className="stat-value" style={{ color: overriddenAll ? '#b45309' : '#64748b' }}>{overriddenAll}</div>
-          <div className="stat-sub">final dept differs from request</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Awaiting request</div>
-          <div className="stat-value" style={{ color: awaitingAll ? '#dc2626' : '#64748b' }}>{awaitingAll}</div>
-          <div className="stat-sub">consented, no dept requested</div>
-        </div>
+        <KpiTile label="Sewadars" value={all.length} sub={`across ${new Set(all.map(r => r.centre)).size} centres`} />
+        <KpiTile label="Deployment" value={requestedAll} sub="auto-assigned by request" tone="#4f46e5" />
+        <KpiTile label="Overridden" value={overriddenAll} sub="final dept differs from request" tone={overriddenAll ? '#b45309' : '#64748b'} />
+        <KpiTile label="Awaiting request" value={awaitingAll} sub="consented, no dept requested" tone={awaitingAll ? '#dc2626' : '#64748b'} />
       </div>
 
       {quotaStrip.length > 0 && (
@@ -910,11 +894,10 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
           </div>
         ) : visible.length === 0 ? (
           <div className="card">
-            <div className="empty">
-              <div className="empty-icon"><Users size={22} /></div>
-              <div className="empty-title">No sewadars found</div>
-              <div className="empty-text">{search || filterCentre !== 'all' || filterStatus !== 'all' ? 'Try clearing the filters.' : 'No sewadars exist for this schedule yet.'}</div>
-            </div>
+            <EmptyState
+              title="No sewadars found"
+              hint={search || filterCentre !== 'all' || filterStatus !== 'all' ? 'Try clearing the filters.' : 'No sewadars exist for this schedule yet.'}
+            />
           </div>
         ) : (
           /* fieldset lets editMode disable every control in one attribute —

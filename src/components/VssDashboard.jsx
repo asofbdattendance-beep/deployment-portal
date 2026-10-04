@@ -1,10 +1,15 @@
-import { useState, useEffect } from 'react'
-import { supabase, fetchCentres, fetchAllRows, fetchPortalSettings, setPortalSetting, getCount } from '../lib/supabase'
+import { useState, useEffect, useCallback } from 'react'
+import { fetchCentres, fetchAllRows, fetchPortalSettings, setPortalSetting, getCount } from '../lib/supabase'
 import { isVssBadge } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from './Toast'
 import MasterSwitch from './MasterSwitch'
-import { BarChart3, Building2, Users, Download, AlertTriangle, Lock } from 'lucide-react'
+import PageHeader, { ViewOnlyPill } from './PageHeader'
+import KpiTile from './KpiTile'
+import EmptyState from './EmptyState'
+import ExportButton from './ExportButton'
+import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
+import { BarChart3, Building2, Users, AlertTriangle, Lock } from 'lucide-react'
 
 /* ─── Super admin / ASO: read-only VSS consent dashboard + master switch ─── */
 export default function VssDashboard({ schedules, scheduleId }) {
@@ -83,25 +88,22 @@ export default function VssDashboard({ schedules, scheduleId }) {
 
   // realtime: refresh live while centres edit. Coalesced (400ms) so a burst of
   // changes (e.g. a centre bulk-assign) causes one reload instead of dozens.
-  useEffect(() => {
-    if (!selectedScheduleId) return
-    let mounted = true
-    let reloadTimer = null
-    const scheduleReload = () => {
-      if (!mounted) return
-      if (reloadTimer) clearTimeout(reloadTimer)
-      reloadTimer = setTimeout(() => { if (mounted) load(selectedScheduleId).then(d => setData(d)).catch(() => {}) }, 400)
-    }
-    const channel = supabase
-      .channel(`vss-dash-${selectedScheduleId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_settings' }, () => {
-        fetchPortalSettings().then(setSettings).catch(() => {})
-      })
-      .subscribe()
-    return () => { mounted = false; if (reloadTimer) clearTimeout(reloadTimer); supabase.removeChannel(channel) }
-  }, [selectedScheduleId])
+  // The portal_settings binding folds into the same reload (one extra cheap
+  // RPC per burst, invisible) instead of its own refetch path.
+  useRealtimeRefresh({
+    scheduleId: selectedScheduleId,
+    channelName: `vss-dash-${selectedScheduleId}`,
+    subscriptions: [
+      { table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` },
+      { table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` },
+      { table: 'portal_settings' },
+    ],
+    onReload: () => {
+      load(selectedScheduleId).then(d => setData(d)).catch(() => {})
+      fetchPortalSettings().then(setSettings).catch(() => {})
+    },
+    label: 'vss-dashboard',
+  })
 
   const toggleVss = async () => {
     if (busy) return
@@ -160,10 +162,10 @@ export default function VssDashboard({ schedules, scheduleId }) {
   const maleCount = (data?.vss || []).filter(v => v.gender === 'MALE').length
   const femaleCount = (data?.vss || []).filter(v => v.gender === 'FEMALE').length
 
-  const deptName = (id) => data?.deptNameMap?.[id] || '—'
-
-  const exportExcel = async () => {
-    const XLSX = await import('xlsx') // lazy — keeps xlsx (~400 kB) out of the main bundle
+  // Single-sheet builder for the shared ExportButton. The excel driver skips
+  // empty sheets unless keepEmpty — this page always wrote the (possibly
+  // empty) sheet, so keepEmpty is passed at the call site.
+  const buildSheets = useCallback(() => {
     const rows = (data?.vss || []).map(sw => {
       const key = `${sw.centre}|${sw.badge_number}`
       const c = data?.consentMap[key]
@@ -179,49 +181,47 @@ export default function VssDashboard({ schedules, scheduleId }) {
         'Days': c?.consent_given ? c.available_days_count : '',
         'Stay at Bhati': c?.stay_at_bhati ? 'Yes' : 'No',
         'Chair Pass': c?.chair_pass ? 'Yes' : 'No',
-        'Deployment': deptName(data?.deployMap[key]),
+        'Deployment': (data?.deptNameMap?.[data?.deployMap[key]] || '—'),
       }
     })
-    const ws = XLSX.utils.json_to_sheet(rows)
-    const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, ws, 'VSS Deployment')
-    const name = (schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')
-    XLSX.writeFile(wb, `VSS_${name}.xlsx`)
-  }
+    return [{ name: 'VSS Deployment', rows }]
+  }, [data])
+
+  const exportFilename = `VSS_${(schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')}.xlsx`
 
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
-      <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
-        <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
-          <h2 className="page-title"><BarChart3 size={22} /> VSS Deployment Dashboard</h2>
-          <div className="page-sub">Collective VSS overview across every centre · visit-time sewadars</div>
-          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-            {isSuperAdmin ? (
-              <>
-                <MasterSwitch
-                  label="VSS Deployment"
-                  open={settings.vss_deployment_open}
-                  onToggle={toggleVss}
-                  busy={busy}
-                />
-                <MasterSwitch
-                  label="Add VSS"
-                  open={settings.vss_creation_open}
-                  onToggle={toggleCreation}
-                  busy={busyCreation}
-                />
-              </>
-            ) : (
-              <span className="pill" title="View-only access — changes are not permitted for ASO accounts (v20)" style={{ background: '#f1f5f9', color: '#64748b', fontWeight: 600 }}>
-                <Lock size={12} /> View-only
-              </span>
-            )}
-            <button onClick={exportExcel} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-              <Download size={13} /> Export Excel
-            </button>
-          </div>
-        </div>
-      </div>
+      <PageHeader
+        icon={<BarChart3 size={22} />}
+        title="VSS Deployment Dashboard"
+        sub="Collective VSS overview across every centre · visit-time sewadars"
+        pills={isSuperAdmin ? (
+          <>
+            <MasterSwitch
+              label="VSS Deployment"
+              open={settings.vss_deployment_open}
+              onToggle={toggleVss}
+              busy={busy}
+            />
+            <MasterSwitch
+              label="Add VSS"
+              open={settings.vss_creation_open}
+              onToggle={toggleCreation}
+              busy={busyCreation}
+            />
+          </>
+        ) : (
+          <ViewOnlyPill title="View-only access — changes are not permitted for ASO accounts (v20)" />
+        )}
+        actions={(
+          <ExportButton
+            filename={exportFilename}
+            buildSheets={buildSheets}
+            keepEmpty
+            label="Export Excel"
+          />
+        )}
+      />
 
       {!settings.vss_deployment_open && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.75rem', fontSize: '0.85rem', color: '#b91c1c', marginBottom: '1rem' }}>
@@ -248,54 +248,29 @@ export default function VssDashboard({ schedules, scheduleId }) {
         </div>
       ) : total === 0 ? (
         <div className="card">
-          <div className="empty">
-            <div className="empty-icon"><Users size={22} /></div>
-            <div className="empty-title">No VSS sewadars yet</div>
-            <div className="empty-text">Import the VSS roster (vss_sewadars_data.sql) and they will appear here.</div>
-          </div>
+          <EmptyState
+            title="No VSS sewadars yet"
+            hint="Import the VSS roster (vss_sewadars_data.sql) and they will appear here."
+          />
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
           <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-            <div className="stat">
-              <div className="stat-label">VSS sewadars</div>
-              <div className="stat-value">{total}</div>
-              <div className="stat-sub">across {allCentreNames.length} centres</div>
-            </div>
-            <div className="stat">
-              <div className="stat-label">Active</div>
-              <div className="stat-value" style={{ color: '#10b981' }}>{active}</div>
-              <div className="stat-sub">{inactive} inactive</div>
-            </div>
-            <div className="stat">
-              <div className="stat-label">Consented (Yes)</div>
-              <div className="stat-value" style={{ color: '#6366f1' }}>{consented}</div>
-              <div className="stat-sub">of {total}</div>
-            </div>
-            <div className="stat">
-              <div className="stat-label">Consent rate</div>
-              <div className="stat-value" style={{ fontSize: '1.1rem', paddingTop: '0.35rem' }}>
+            <KpiTile label="VSS sewadars" value={total} sub={`across ${allCentreNames.length} centres`} />
+            <KpiTile label="Active" value={active} sub={`${inactive} inactive`} tone="#10b981" />
+            <KpiTile label="Consented (Yes)" value={consented} sub={`of ${total}`} tone="#6366f1" />
+            <KpiTile
+              label="Consent rate"
+              value={(
                 <div className="progress" style={{ height: 10 }}>
                   <div className="progress-bar" style={{ width: `${pct}%` }} />
                 </div>
-              </div>
-              <div className="stat-sub">{pct}% consented</div>
-            </div>
-            <div className="stat">
-              <div className="stat-label">Deployment</div>
-              <div className="stat-value" style={{ color: '#8b5cf6' }}>{requestedCount}</div>
-              <div className="stat-sub">of {consented} consented</div>
-            </div>
-            <div className="stat">
-              <div className="stat-label">Stay at Bhati</div>
-              <div className="stat-value" style={{ color: '#0ea5e9' }}>{bhatiCount}</div>
-              <div className="stat-sub">of {consented} consented</div>
-            </div>
-            <div className="stat">
-              <div className="stat-label">Initiated</div>
-              <div className="stat-value" style={{ color: '#f59e0b' }}>{initiatedCount}</div>
-              <div className="stat-sub">of {consented} consented</div>
-            </div>
+              )}
+              sub={`${pct}% consented`}
+            />
+            <KpiTile label="Deployment" value={requestedCount} sub={`of ${consented} consented`} tone="#8b5cf6" />
+            <KpiTile label="Stay at Bhati" value={bhatiCount} sub={`of ${consented} consented`} tone="#0ea5e9" />
+            <KpiTile label="Initiated" value={initiatedCount} sub={`of ${consented} consented`} tone="#f59e0b" />
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.25rem' }}>
