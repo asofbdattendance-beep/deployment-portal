@@ -10,6 +10,8 @@ import { deptNameMap } from '../lib/scanDisplay'
 import { useScannerSession } from '../hooks/useScannerSession'
 import { useSewadarDirectory } from '../hooks/useSewadarDirectory'
 import { useDeptNames } from '../hooks/useDeptNames'
+import PageHeader from '../components/PageHeader'
+import KpiTile from '../components/KpiTile'
 import QueueRecoveryBar from '../components/mobile/QueueRecoveryBar'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import ScanModeShell from '../components/mobile/ScanModeShell'
@@ -235,17 +237,19 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
 
   return (
     <div className="page" style={{ maxWidth: 900, margin: '0 auto' }}>
-      <div className="page-header" style={{ alignItems: 'center', gap: '1rem' }}>
-        <div style={{ flex: '1 1 auto' }}>
-          <h2 className="page-title"><ScanLine size={22} /> Attendance</h2>
-          <div className="page-sub" style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-            {pillsNode}
-          </div>
-        </div>
+      <PageHeader
+        icon={<ScanLine size={22} />}
+        title="Attendance"
+        pills={pillsNode}
+      />
+      <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
+        <KpiTile label="Scans today" value={sessions.length} sub="last 5 shown" />
+        <KpiTile label="Queued scans" value={queued.length} sub={syncing ? 'syncing…' : queued.length ? 'waiting for network' : 'nothing waiting'} tone={queued.length ? '#b45309' : undefined} />
       </div>
 
       <div style={{ display: 'grid', gap: 12 }}>
         <div className="card" style={{ padding: '1rem' }}>
+          <div className="card-title" style={{ marginBottom: '0.75rem' }}>New scan</div>
           <BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />
           <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
             <input value={manualBadge} onChange={e => setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} style={{ flex: 1 }} onKeyDown={e => { if (e.key === 'Enter') { manualSubmit() } }} />
@@ -253,7 +257,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
           </div>
         </div>
         <div className="card" style={{ padding: '1rem' }}>
-          <div className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Clock size={14} /> Recent scans (today) {pendingCount ? <span className="pill pill-amber">{pendingCount} queued</span> : null}</div>
+          <div className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}><Clock size={14} /> Recent scans (today) {pendingCount ? <span className="pill pill-amber">{pendingCount} queued</span> : null}</div>
           {queueBarNode}
           <div style={{ maxHeight: 260, overflow: 'auto', marginTop: 8 }}>
             <RecentScansTable
