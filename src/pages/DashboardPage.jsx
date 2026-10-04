@@ -62,7 +62,7 @@ function LiveDot() {
       aria-hidden="true"
       style={{
         display: 'inline-block', width: 7, height: 7, borderRadius: '50%',
-        background: '#10b981', boxShadow: '0 0 0 3px rgba(16,185,129,0.16)',
+        background: 'var(--success)', boxShadow: '0 0 0 3px var(--success-soft)',
         opacity: lit ? 1 : 0.3, transition: 'opacity 0.6s ease-in-out',
       }}
     />
@@ -317,7 +317,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
       <div className="page" style={{ maxWidth: 1400 }}>
         <div className="card">
           <div className="empty">
-            <div className="spin" style={{ width: 24, height: 24, border: '2px solid #e2e8f0', borderTopColor: '#6366f1', borderRadius: '50%', animation: 'spin .6s linear infinite' }} />
+            <div className="spin" style={{ width: 24, height: 24, border: '2px solid var(--border)', borderTopColor: 'var(--primary)', borderRadius: '50%', animation: 'spin .6s linear infinite' }} />
             <div className="empty-text">Loading dashboard…</div>
           </div>
         </div>
@@ -327,8 +327,8 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
 
   const go = (target, payload) => onNavigate?.(target, payload)
   const alertSkin = {
-    red: { background: '#fef2f2', border: '1px solid #fecaca', color: '#b91c1c' },
-    amber: { background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e' },
+    red: { background: 'var(--danger-soft)', border: '1px solid #fecaca', color: 'var(--err)' },
+    amber: { background: 'var(--warning-soft)', border: '1px solid #fde68a', color: '#92400e' },
   }
 
   return (
@@ -343,7 +343,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
             <span
               className="pill"
               title={lastRefreshAt ? `Last successful reload at ${new Date(lastRefreshAt).toLocaleTimeString('en-IN')}${failedSources ? ` · ${failedSources} of 3 sources failed` : ''}` : 'Not loaded yet'}
-              style={{ background: '#ecfdf5', color: '#047857', fontWeight: 600 }}
+              style={{ background: 'var(--success-soft)', color: '#047857', fontWeight: 600 }}
             >
               <LiveDot /> LIVE · updated {timeAgo(lastRefreshAt, now)}
             </span>
@@ -381,7 +381,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
             <div
               key={a.key}
               role="status"
-              style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', borderRadius: 10, padding: '0.6rem 0.75rem', fontSize: '0.82rem', ...alertSkin[a.tone] }}
+              style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', borderRadius: 'var(--radius-md)', padding: '0.6rem 0.75rem', fontSize: '0.82rem', ...alertSkin[a.tone] }}
             >
               {a.icon}
               <span style={{ fontWeight: 600 }}>{a.text}</span>
@@ -445,7 +445,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
           label="Anomalies"
           value={sec.anom.error ? <span title="Anomalies could not be loaded">—</span> : anomalyTotal}
           sub={sec.anom.error ? 'could not be loaded' : (anomalyTotal ? `${Object.keys(counts).length} rules flagged` : 'nothing flagged')}
-          tone={sec.anom.error ? '#b45309' : (anomalyTotal ? '#b91c1c' : undefined)}
+          tone={sec.anom.error ? '#b45309' : (anomalyTotal ? 'var(--err)' : undefined)}
           onPress={() => go('anomalies')}
           title="Open Attendance Anomalies"
         />
