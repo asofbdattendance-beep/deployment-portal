@@ -19,7 +19,7 @@ import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
 import { todayStrIST, withTimeout } from '../lib/scannerUtils'
 import {
   FileText, Search,
-  RefreshCw, Loader2, AlertTriangle, Users,
+  RefreshCw, Loader2, AlertTriangle,
 } from 'lucide-react'
 
 /**
@@ -376,11 +376,10 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
     return (
       <div className="page" style={{ maxWidth: 1400 }}>
         <div className="card">
-          <div className="empty">
-            <div className="empty-icon"><Users size={22} /></div>
-            <div className="empty-title">No schedule selected</div>
-            <div className="empty-text">Pick a schedule to view its day-wise reports.</div>
-          </div>
+          <EmptyState
+            title="No schedule selected"
+            hint="Pick a schedule to view its day-wise reports."
+          />
         </div>
       </div>
     )
