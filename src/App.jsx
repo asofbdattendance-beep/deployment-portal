@@ -1,4 +1,4 @@
-import { useState, lazy, Suspense, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, lazy, Suspense, useEffect, useCallback, useMemo } from 'react'
 import { usePortalAuth } from './context/PortalAuthContext'
 import { supabase } from './lib/supabase'
 import { useToast } from './components/Toast'
@@ -6,8 +6,10 @@ import LoginPage from './pages/LoginPage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
 import { ROLE_LABELS, ROLE_COLORS } from './lib/supabase'
 import DbVersionBanner from './components/DbVersionBanner'
-import { ShieldCheck, ScanLine, RefreshCw, AlertTriangle, Wrench, ChevronDown, Check } from 'lucide-react'
-import { PAGES } from './lib/pages'
+import { ShieldCheck, RefreshCw, AlertTriangle, Wrench } from 'lucide-react'
+import { PAGES, PHASES } from './lib/pages'
+import PhaseSwitch from './components/PhaseSwitch'
+import { phasesForRole, resolveActivePhase, readStoredPhase, storeActivePhase, pagesForRolePhase } from './lib/phase'
 import { useIsMobile } from './hooks/useMediaQuery'
 import MobileTabBar, { flattenNavItems, splitBarItems } from './components/mobile/MobileTabBar'
 import MoreSheet from './components/mobile/MoreSheet'
@@ -60,108 +62,8 @@ const PrevisitDashboard = lazy(() => import('./components/PrevisitDashboard'))
 // Exported for UsersPage's permission matrix (single source: page → roles).
 export { PAGES } from './lib/pages';
 
-const GROUPS = {
-  attendance: { label: 'Attendance', icon: ScanLine },
-}
-
-// One navbar dropdown for a page group. A group with a single visible page
-// (e.g. Attendance for centre roles) renders as a plain tab — never a
-// one-item menu. Keyboard: Escape closes (focus returns to the button),
-// arrows/Home/End move between items, Tab leaves naturally.
-function NavGroup({ id, label, icon: Icon, items, currentPage, onSelect }) {
-  const [open, setOpen] = useState(false)
-  const wrapRef = useRef(null)
-  // The trigger, so the fixed-position menu can anchor to its viewport rect
-  // (the single-row navbar clips anything absolutely positioned inside it).
-  const btnRef = useRef(null)
-  const menuRef = useRef(null)
-  // Measured once open so the right-edge clamp uses the menu's REAL width —
-  // labels grow, and a hardcoded guess would silently push it off-screen.
-  const [menuW, setMenuW] = useState(246)
-  useLayoutEffect(() => {
-    if (open && menuRef.current) setMenuW(menuRef.current.offsetWidth || 246)
-  }, [open])
-  const active = items.some(([k]) => k === currentPage)
-  useEffect(() => {
-    if (!open) return
-    const onPointer = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false) }
-    const onKey = (e) => {
-      if (e.key === 'Escape') {
-        setOpen(false)
-        wrapRef.current?.querySelector(':scope > button')?.focus()
-      }
-    }
-    // The menu is fixed to the trigger's rect: any scroll (including the
-    // navbar's own sideways scroll) or resize would detach it, so close.
-    const onMove = () => setOpen(false)
-    document.addEventListener('mousedown', onPointer)
-    document.addEventListener('keydown', onKey)
-    window.addEventListener('scroll', onMove, true)
-    window.addEventListener('resize', onMove)
-    return () => {
-      document.removeEventListener('mousedown', onPointer)
-      document.removeEventListener('keydown', onKey)
-      window.removeEventListener('scroll', onMove, true)
-      window.removeEventListener('resize', onMove)
-    }
-  }, [open ])
-  const moveFocus = (e) => {
-    const menuItems = [...(wrapRef.current?.querySelectorAll('[role="menuitem"]') || [])]
-    if (!menuItems.length) return
-    const i = menuItems.indexOf(document.activeElement)
-    if (e.key === 'ArrowDown') { e.preventDefault(); (menuItems[i + 1] || menuItems[0]).focus() }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); (menuItems[i - 1] || menuItems[menuItems.length - 1]).focus() }
-    else if (e.key === 'Home') { e.preventDefault(); menuItems[0].focus() }
-    else if (e.key === 'End') { e.preventDefault(); menuItems[menuItems.length - 1].focus() }
-  }
-  // Anchor the menu to the trigger's viewport rect, clamped so a right-edge
-  // group's menu never runs off the screen (the bar scrolls horizontally,
-  // so triggers can sit anywhere along it).
-  const rect = open && btnRef.current ? btnRef.current.getBoundingClientRect() : null
-  const menuStyle = rect
-    ? { position: 'fixed', top: rect.bottom + 6, left: Math.max(8, Math.min(rect.left, window.innerWidth - menuW - 8)) }
-    : undefined
-  return (
-    <div className="tab-group" ref={wrapRef}>
-      <button
-        type="button"
-        ref={btnRef}
-        onClick={() => setOpen(o => !o)}
-        className={`tab-btn${active ? ' tab-active' : ''}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={`nav-menu-${id}`}
-        title={items.map(([, c]) => c.label).join(' · ')}
-      >
-        <Icon size={17} />
-        <span>{label}</span>
-        <ChevronDown size={14} style={{ opacity: 0.7, transform: open ? 'rotate(180deg)' : undefined, transition: 'transform 0.15s' }} />
-      </button>
-      {open && (
-        <div id={`nav-menu-${id}`} role="menu" aria-label={`${label} pages`} className="tab-menu" style={menuStyle} onKeyDown={moveFocus} ref={menuRef}>
-          {items.map(([key, cfg]) => {
-            const itemActive = currentPage === key
-            const ItemIcon = cfg.icon
-            return (
-              <button
-                key={key}
-                type="button"
-                role="menuitem"
-                aria-current={itemActive ? 'page' : undefined}
-                onClick={() => { setOpen(false); onSelect(key) }}
-                className={`tab-menu-item${itemActive ? ' tab-menu-active' : ''}`}
-              >
-                <ItemIcon size={16} />
-                <span>{cfg.label}</span>
-                {itemActive && <Check size={14} style={{ marginLeft: 'auto' }} />}
-              </button>
-            )
-          })}
-        </div>
-      )}
-    </div>
-  )
-}
+// The old `group` dropdown mechanism is retired with the two-phase IA — the
+// navbar renders one phase's pages as flat tabs, switched by PhaseSwitch.
 
 function PageFallback() {
   return (
@@ -174,8 +76,19 @@ function PageFallback() {
 function Dashboard() {
   const { profile, signOut } = usePortalAuth()
   const toast = useToast()
-  const visiblePages = Object.entries(PAGES).filter(([, cfg]) => cfg.roles.includes(profile?.role))
-  const [activePage, setActivePage] = useState(visiblePages[0]?.[0] || 'consent')
+  // ── Two-phase IA: the navbar shows one phase at a time. Landing = first
+  // visible page of the active phase; the stored preference wins when the
+  // role can still see it, otherwise the role default (Phase 1 for centre /
+  // ASO roles, Phase 2 for dept_incharge / scanner).
+  const availablePhases = useMemo(() => phasesForRole(profile?.role), [profile?.role])
+  const [activePhase, setActivePhase] = useState(() => resolveActivePhase(profile?.role, readStoredPhase()))
+  useEffect(() => {
+    setActivePhase((prev) => (phasesForRole(profile?.role).includes(prev)
+      ? prev
+      : resolveActivePhase(profile?.role, readStoredPhase())))
+  }, [profile?.role])
+  const phasePages = useMemo(() => pagesForRolePhase(profile?.role, activePhase), [profile?.role, activePhase])
+  const [activePage, setActivePage] = useState(phasePages[0]?.[0] || 'consent')
   const [schedules, setSchedules] = useState([])
   const [scheduleId, setScheduleId] = useState('')
   // ── Global sewa mode: Previsit vs Bhati Visit. Calendar auto-view for
@@ -235,12 +148,27 @@ function Dashboard() {
   // dept_incharge identity: assigned department names shown next to the role
   // badge. Fail-silent — the badge hides on any error or empty grant.
   const [deptNames, setDeptNames] = useState([])
+  // Cross-phase aware: dashboard tiles and page links can target a page in
+  // the other phase — the shell switches phase first so the target is visible.
   const handleNavigate = useCallback((page, filter) => {
+    const targetPhase = PAGES[page]?.phase
+    if ((targetPhase === 1 || targetPhase === 2) && targetPhase !== activePhase && phasesForRole(profile?.role).includes(targetPhase)) {
+      storeActivePhase(targetPhase)
+      setActivePhase(targetPhase)
+    }
     setNavFilter({ page, ...(filter || {}) })
     setActivePage(page)
-  }, [])
+  }, [activePhase, profile?.role])
+  const selectPhase = useCallback((phase) => {
+    if (!phasesForRole(profile?.role).includes(phase)) return
+    storeActivePhase(phase)
+    setActivePhase(phase)
+    setNavFilter(null)
+    const first = pagesForRolePhase(profile?.role, phase)[0]?.[0]
+    if (first) setActivePage(first)
+  }, [profile?.role])
 
-  const currentPage = visiblePages.some(([k]) => k === activePage) ? activePage : (visiblePages[0]?.[0] || 'consent')
+  const currentPage = phasePages.some(([k]) => k === activePage) ? activePage : (phasePages[0]?.[0] || 'consent')
 
   // ── Mobile shell (≤768px): bottom tab bar + More sheet replace the
   // wrapping desktop pill navbar. Desktop renders neither (useIsMobile is
@@ -248,13 +176,19 @@ function Dashboard() {
   // single source — the bar flattens the same visiblePages the navbar uses.
   const isMobile = useIsMobile()
   const [moreOpen, setMoreOpen] = useState(false)
-  const mobileItems = useMemo(() => flattenNavItems(visiblePages), [visiblePages])
+  const mobileItems = useMemo(() => flattenNavItems(phasePages), [phasePages])
   const mobileOverflow = useMemo(() => splitBarItems(mobileItems).overflow, [mobileItems])
+  // Full sitemap for the More sheet, sectioned by phase (the bar itself only
+  // carries the active phase — the sheet is where cross-phase jumps happen).
+  const mobileSections = useMemo(() => availablePhases.map((p) => ({
+    phase: p,
+    label: PHASES[p],
+    items: flattenNavItems(pagesForRolePhase(profile?.role, p)),
+  })), [availablePhases, profile?.role])
   const handleMobileSelect = useCallback((key) => {
-    setNavFilter(null)
     setMoreOpen(false)
-    setActivePage(key)
-  }, [])
+    handleNavigate(key, null)
+  }, [handleNavigate])
 
   // keep the browser tab title in sync with the visible page
   useEffect(() => {
@@ -374,49 +308,28 @@ function Dashboard() {
       {/* L-07 handshake: warn when the database predates this frontend. */}
       <DbVersionBanner />
 
-      {/* ── separate tab navbar ── */}
+      {/* ── phase switch + single-phase tab navbar ── */}
+      {availablePhases.length > 1 && (
+        <div className="phase-row" style={{ display: 'flex', padding: '0.6rem 1rem 0' }}>
+          <PhaseSwitch activePhase={activePhase} availablePhases={availablePhases} onChange={selectPhase} />
+        </div>
+      )}
       <nav className="tab-nav" aria-label="Primary">
-        {(() => {
-          const items = []
-          const seenGroups = new Set()
-          visiblePages.forEach(([key, cfg]) => {
-            if (!cfg.group) { items.push({ type: 'page', key, cfg }); return }
-            if (seenGroups.has(cfg.group)) return
-            seenGroups.add(cfg.group)
-            const groupItems = visiblePages.filter(([, c]) => c.group === cfg.group)
-            // single visible child → plain tab, never a one-item menu
-            if (groupItems.length === 1) items.push({ type: 'page', key: groupItems[0][0], cfg: groupItems[0][1] })
-            else items.push({ type: 'group', id: cfg.group, items: groupItems })
-          })
-          return items.map((item) => {
-            if (item.type === 'group') {
-              const g = GROUPS[item.id] || { label: item.id, icon: ScanLine }
-              return (
-                <NavGroup
-                  key={`group-${item.id}`}
-                  id={item.id}
-                  label={g.label}
-                  icon={g.icon}
-                  items={item.items}
-                  currentPage={currentPage}
-                  onSelect={(key) => { setNavFilter(null); setActivePage(key) }}
-                />
-              )
-            }
-            const active = currentPage === item.key
-            return (
-              <button
-                key={item.key}
-                onClick={() => { setNavFilter(null); setActivePage(item.key) }}
-                className={`tab-btn ${active ? 'tab-active' : ''}`}
-                aria-current={active ? 'page' : undefined}
-              >
-                <item.cfg.icon size={17} />
-                <span>{item.cfg.label}</span>
-              </button>
-            )
-          })
-        })()}
+        {phasePages.map(([key, cfg]) => {
+          const active = currentPage === key
+          const Icon = cfg.icon
+          return (
+            <button
+              key={key}
+              onClick={() => { setNavFilter(null); setActivePage(key) }}
+              className={`tab-btn ${active ? 'tab-active' : ''}`}
+              aria-current={active ? 'page' : undefined}
+            >
+              <Icon size={17} />
+              <span>{cfg.label}</span>
+            </button>
+          )
+        })}
       </nav>
 
       <main style={{ flex: 1, paddingBottom: isMobile ? 'calc(84px + env(safe-area-inset-bottom, 0px))' : undefined }}>
@@ -451,6 +364,10 @@ function Dashboard() {
       <MoreSheet
         open={isMobile && moreOpen}
         items={mobileOverflow}
+        sections={mobileSections}
+        phaseHeader={availablePhases.length > 1 ? (
+          <PhaseSwitch compact activePhase={activePhase} availablePhases={availablePhases} onChange={selectPhase} />
+        ) : null}
         currentPage={currentPage}
         onSelect={handleMobileSelect}
         onClose={() => setMoreOpen(false)}

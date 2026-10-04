@@ -5,6 +5,9 @@ import { safeBottom } from '../../lib/mobile'
 /**
  * MoreSheet — bottom sheet listing the overflow pages behind MobileTabBar's
  * More button. Rendered ONLY on mobile (useIsMobile gate in App.jsx).
+ * Optional `sections` ([{ label, items }]) renders phase-headed groups with
+ * an optional `phaseHeader` node (the PhaseSwitch) above them; otherwise the
+ * flat `items` list renders exactly as before (back-compat for tests).
  *
  * A11y contract (mirrors ScanResultPopup's dialog discipline):
  * - role="dialog" aria-modal, labelled by the heading.
@@ -13,7 +16,7 @@ import { safeBottom } from '../../lib/mobile'
  * - Body scroll locks while mounted (restored on unmount).
  * - 150ms slide-up; disabled entirely under prefers-reduced-motion (CSS).
  */
-export default function MoreSheet({ open, items, currentPage, onSelect, onClose, label = 'More pages' }) {
+export default function MoreSheet({ open, items, sections, phaseHeader, currentPage, onSelect, onClose, label = 'More pages' }) {
   const sheetRef = useRef(null)
   const prevFocusRef = useRef(null)
 
@@ -63,26 +66,32 @@ export default function MoreSheet({ open, items, currentPage, onSelect, onClose,
       >
         <div className="mobile-sheet-handle" aria-hidden="true" />
         <h2 className="mobile-sheet-title">{label}</h2>
-        <ul className="mobile-sheet-list">
-          {(items || []).map((item) => {
-            const active = currentPage === item.key
-            const Icon = item.icon
-            return (
-              <li key={item.key}>
-                <button
-                  type="button"
-                  onClick={() => { onSelect(item.key) }}
-                  className={`mobile-sheet-item${active ? ' mobile-sheet-item-active' : ''}`}
-                  aria-current={active ? 'page' : undefined}
-                >
-                  {Icon ? <Icon size={19} aria-hidden="true" /> : null}
-                  <span>{item.label}</span>
-                  {active && <Check size={16} style={{ marginLeft: 'auto' }} aria-hidden="true" />}
-                </button>
-              </li>
-            )
-          })}
-        </ul>
+        {phaseHeader ? <div className="mobile-sheet-phase">{phaseHeader}</div> : null}
+        {(sections && sections.length > 0 ? sections : [{ label: null, items: items || [] }]).map((section, si) => (
+          <div key={section.label || `all-${si}`} className="mobile-sheet-section">
+            {section.label ? <h3 className="mobile-sheet-heading">{section.label}</h3> : null}
+            <ul className="mobile-sheet-list">
+              {(section.items || []).map((item) => {
+                const active = currentPage === item.key
+                const Icon = item.icon
+                return (
+                  <li key={item.key}>
+                    <button
+                      type="button"
+                      onClick={() => { onSelect(item.key) }}
+                      className={`mobile-sheet-item${active ? ' mobile-sheet-item-active' : ''}`}
+                      aria-current={active ? 'page' : undefined}
+                    >
+                      {Icon ? <Icon size={19} aria-hidden="true" /> : null}
+                      <span>{item.label}</span>
+                      {active && <Check size={16} style={{ marginLeft: 'auto' }} aria-hidden="true" />}
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
+          </div>
+        ))}
         <button type="button" onClick={onClose} className="btn mobile-sheet-close">
           Close
         </button>
