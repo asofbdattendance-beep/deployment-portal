@@ -16,6 +16,8 @@ import { useSewadarDirectory } from '../hooks/useSewadarDirectory'
 import { useDeptNames, refreshDeptNames } from '../hooks/useDeptNames'
 import RecentScansTable from '../components/scanner/RecentScansTable'
 import SewadarPicker from '../components/scanner/SewadarPicker'
+import PageHeader from '../components/PageHeader'
+import KpiTile from '../components/KpiTile'
 
 
 export default function ScannerPage({ schedules, scheduleId, sewaMode }){
@@ -204,19 +206,26 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
 
   return (
     <div className="page" style={{maxWidth:900, margin:'0 auto'}}>
-      <div className="page-header"><div><h2 className="page-title"><ScanLine size={22}/> Scanner</h2><div className="page-sub" style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
-        {profile?.centre} · {schedule?.name||''}
-        {pillsNode}
-      </div></div></div>
+      <PageHeader
+        icon={<ScanLine size={22} />}
+        title="Scanner"
+        sub={`${profile?.centre || ''} · ${schedule?.name || ''}`}
+        pills={pillsNode}
+      />
+      <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
+        <KpiTile label="Scans today" value={sessions.length} sub="your last 10 shown" />
+        <KpiTile label="Queued scans" value={queued.length} sub={syncing ? 'syncing…' : queued.length ? 'waiting for network' : 'nothing waiting'} tone={queued.length ? '#b45309' : undefined} />
+      </div>
       <div className="card" style={{padding:'1rem', marginBottom:12}}>
+        <div className="card-title" style={{ marginBottom: '0.75rem' }}>New scan</div>
         <BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />
         <div style={{display:'flex', gap:8, marginTop:10}}><input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Manual FB/BH/VS badge" className="input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ manualSubmit() }}}/><button onClick={manualSubmit} className="btn btn-primary" disabled={busy||!manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark In/Out</button></div>
       </div>
       {canPick && <div style={{marginBottom:12}}><SewadarPicker scheduleId={scheduleId} onPick={pickSubmit} /></div>}
       <div className="card" style={{padding:'1rem'}}>
-        <div style={{fontWeight:700, display:'flex', alignItems:'center', gap:6, flexWrap:'wrap'}}>
+        <div className="card-title" style={{display:'flex', alignItems:'center', gap:6, flexWrap:'wrap'}}>
           <Clock size={14}/> My last 10 scans (today, any dept incl. VSS)
-          <span style={{fontWeight:400, fontSize:'0.75rem', color:'#64748b'}}>by you{myBadge?` · ${myBadge}`:''}</span>
+          <span style={{fontWeight:400, fontSize:'0.75rem', color:'var(--text-sec)'}}>by you{myBadge?` · ${myBadge}`:''}</span>
           {/* V16: failed/orphaned rows get their own counted clear actions —
               previously only a single uncounted "Clear failed scans" link. */}
         </div>
