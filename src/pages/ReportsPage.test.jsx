@@ -257,6 +257,38 @@ describe('ReportsPage — role download', () => {
     expect(sheets.every((s) => s.rows.length > 0)).toBe(true)
   })
 
+  it('print output is a report, not a screen dump: masthead, hidden table, per-centre counts', async () => {
+    authState.profile = { role: 'dept_incharge' }
+    await renderPage()
+
+    // The on-screen results card printed alongside the per-centre sections,
+    // so every row appeared twice in the PDF. It must be print-hidden.
+    expect(document.querySelector('.card.print-hide')).toBeTruthy()
+
+    // Masthead: what, when and how much, before any rows.
+    const masthead = document.querySelector('.print-only .print-report')
+    expect(masthead).toBeTruthy()
+    expect(masthead.querySelector('.print-report-title').textContent).toMatch(/Attendance Report/)
+    const meta = masthead.querySelector('.print-report-meta').textContent
+    expect(meta).toMatch(/Date/)
+    expect(meta).toMatch(/List/)
+    expect(meta).toMatch(/Sewadars/)
+    expect(masthead.querySelector('.print-report-sub').textContent).toMatch(/complete list/i)
+
+    // One section per centre, each headed by name + its own row count, and
+    // every row reports status as a styled chip.
+    const sections = [...document.querySelectorAll('.print-only .centre-page')]
+    expect(sections).toHaveLength(2)
+    for (const s of sections) {
+      expect(s.querySelector('h3 .centre-count').textContent).toMatch(/\d+\s+Complete List ·/)
+      expect(s.querySelector('.print-status')).toBeTruthy()
+    }
+
+    // Footer summarises the export.
+    expect(document.querySelector('.print-only .print-report-foot').textContent)
+      .toMatch(/sewadars across 2 centres/)
+  })
+
   it('warns instead of exporting when no rows match', async () => {
     await renderPage()
     fireEvent.change(screen.getByLabelText('Search reports'), { target: { value: 'ZZZ-no-such-place' } })
@@ -319,5 +351,29 @@ describe('ReportsPage — layout contract', () => {
     await waitFor(() => expect(screen.getByText(/No attendance records/i)).toBeTruthy())
     fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }))
     await waitFor(() => expect(tableBody().some((t) => t.includes('RAM'))).toBe(true))
+  })
+})
+
+describe('ReportsPage — the mount/focus "today" sync clamps into the visit window', () => {
+  // 2026-10-07 → 2026-10-11, entirely AFTER the faked "today" (2026-09-23),
+  // so the sync must clamp forward to the window's first day.
+  const WINDOWED = [
+    { id: 'sched-1', name: 'October 2026 Visit', visit_start_date: '2026-10-07', visit_end_date: '2026-10-11' },
+    { id: 'sched-2', name: 'November 2026 Visit' },
+  ]
+
+  it('opens on the window edge, never on the raw previsit today', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-09-23T04:30:00Z')) // 2026-09-23 10:00 IST
+    try {
+      await renderPage({ schedules: WINDOWED })
+      // The regression: useState's init clamped today, but the focus-sync
+      // effect then wrote the RAW today, and the page silently flipped to a
+      // previsit date the operator never picked.
+      expect(rpc).toHaveBeenCalledWith('attendance_day_badges', expect.objectContaining({ p_schedule: 'sched-1', p_date: '2026-10-07' }))
+      expect(rpc).not.toHaveBeenCalledWith('attendance_day_badges', expect.objectContaining({ p_date: '2026-09-23' }))
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

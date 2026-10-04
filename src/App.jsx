@@ -1,4 +1,4 @@
-import { useState, lazy, Suspense, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, lazy, Suspense, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react'
 import { usePortalAuth } from './context/PortalAuthContext'
 import { supabase } from './lib/supabase'
 import { useToast } from './components/Toast'
@@ -71,6 +71,16 @@ const GROUPS = {
 function NavGroup({ id, label, icon: Icon, items, currentPage, onSelect }) {
   const [open, setOpen] = useState(false)
   const wrapRef = useRef(null)
+  // The trigger, so the fixed-position menu can anchor to its viewport rect
+  // (the single-row navbar clips anything absolutely positioned inside it).
+  const btnRef = useRef(null)
+  const menuRef = useRef(null)
+  // Measured once open so the right-edge clamp uses the menu's REAL width —
+  // labels grow, and a hardcoded guess would silently push it off-screen.
+  const [menuW, setMenuW] = useState(246)
+  useLayoutEffect(() => {
+    if (open && menuRef.current) setMenuW(menuRef.current.offsetWidth || 246)
+  }, [open])
   const active = items.some(([k]) => k === currentPage)
   useEffect(() => {
     if (!open) return
@@ -81,11 +91,18 @@ function NavGroup({ id, label, icon: Icon, items, currentPage, onSelect }) {
         wrapRef.current?.querySelector(':scope > button')?.focus()
       }
     }
+    // The menu is fixed to the trigger's rect: any scroll (including the
+    // navbar's own sideways scroll) or resize would detach it, so close.
+    const onMove = () => setOpen(false)
     document.addEventListener('mousedown', onPointer)
     document.addEventListener('keydown', onKey)
+    window.addEventListener('scroll', onMove, true)
+    window.addEventListener('resize', onMove)
     return () => {
       document.removeEventListener('mousedown', onPointer)
       document.removeEventListener('keydown', onKey)
+      window.removeEventListener('scroll', onMove, true)
+      window.removeEventListener('resize', onMove)
     }
   }, [open ])
   const moveFocus = (e) => {
@@ -97,10 +114,18 @@ function NavGroup({ id, label, icon: Icon, items, currentPage, onSelect }) {
     else if (e.key === 'Home') { e.preventDefault(); menuItems[0].focus() }
     else if (e.key === 'End') { e.preventDefault(); menuItems[menuItems.length - 1].focus() }
   }
+  // Anchor the menu to the trigger's viewport rect, clamped so a right-edge
+  // group's menu never runs off the screen (the bar scrolls horizontally,
+  // so triggers can sit anywhere along it).
+  const rect = open && btnRef.current ? btnRef.current.getBoundingClientRect() : null
+  const menuStyle = rect
+    ? { position: 'fixed', top: rect.bottom + 6, left: Math.max(8, Math.min(rect.left, window.innerWidth - menuW - 8)) }
+    : undefined
   return (
     <div className="tab-group" ref={wrapRef}>
       <button
         type="button"
+        ref={btnRef}
         onClick={() => setOpen(o => !o)}
         className={`tab-btn${active ? ' tab-active' : ''}`}
         aria-haspopup="menu"
@@ -113,7 +138,7 @@ function NavGroup({ id, label, icon: Icon, items, currentPage, onSelect }) {
         <ChevronDown size={14} style={{ opacity: 0.7, transform: open ? 'rotate(180deg)' : undefined, transition: 'transform 0.15s' }} />
       </button>
       {open && (
-        <div id={`nav-menu-${id}`} role="menu" aria-label={`${label} pages`} className="tab-menu" onKeyDown={moveFocus}>
+        <div id={`nav-menu-${id}`} role="menu" aria-label={`${label} pages`} className="tab-menu" style={menuStyle} onKeyDown={moveFocus} ref={menuRef}>
           {items.map(([key, cfg]) => {
             const itemActive = currentPage === key
             const ItemIcon = cfg.icon
@@ -236,14 +261,47 @@ function Dashboard() {
     document.title = `${PAGES[currentPage]?.label || 'Deployment Portal'} · Deployment Portal`
   }, [currentPage])
 
+  // Single-row navbar: a tab switch to an off-screen-right tab would look
+  // like a no-op, so the active pill is always scrolled into the bar's view
+  // (same idiom MobileTabBar uses for the bottom bar).
+  useEffect(() => {
+    try {
+      document.querySelector('.tab-nav .tab-active')?.scrollIntoView?.({ block: 'nearest', inline: 'center' })
+    } catch { /* jsdom has no layout scrolling */ }
+  }, [currentPage])
+
   // ONE schedule dropdown drives the query on every page below. ScheduleMakerPage
   // mutates schedules (create/status/deadline/delete), so it reports back via
   // refreshSchedules to keep this list (and the Consent page's deadline pill) fresh.
+  // Offline boot cache: the list is pure reference data, so an offline reload
+  // hydrates the last known schedules (and selection) instead of landing the
+  // scanner on "No schedules" with no camera. Keyed as one object so the
+  // selection can never point at a schedule that is not in the list.
   const loadSchedules = useCallback(async () => {
+    const readSchedulesCache = () => {
+      try {
+        const parsed = JSON.parse(localStorage.getItem('portal_schedules_cache') || 'null')
+        if (parsed && Array.isArray(parsed.rows)) return parsed
+      } catch { /* corrupted cache reads as absent */ }
+      return null
+    }
     const { data, error } = await supabase.from('deployment_schedules').select('id, name, status, deadline, visit_start_date, visit_end_date').order('created_at', { ascending: false })
-    if (error) { toast.error(error.message); return }
+    if (error) {
+      const cached = readSchedulesCache()
+      if (cached && cached.rows.length > 0) {
+        setSchedules(cached.rows)
+        setScheduleId(prev => (prev && cached.rows.some(s => s.id === prev)) ? prev : (cached.selectedId && cached.rows.some(s => s.id === cached.selectedId)) ? cached.selectedId : (cached.rows[0]?.id || ''))
+        toast.warning('Offline — showing saved schedules')
+        return
+      }
+      toast.error(error.message); return
+    }
     setSchedules(data || [])
-    setScheduleId(prev => (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || ''))
+    setScheduleId(prev => {
+      const next = (prev && (data || []).some(s => s.id === prev)) ? prev : (data?.[0]?.id || '')
+      try { localStorage.setItem('portal_schedules_cache', JSON.stringify({ rows: data || [], selectedId: next, at: Date.now() })) } catch { /* persistence best-effort */ }
+      return next
+    })
   }, [toast])
 
   useEffect(() => { loadSchedules() }, [loadSchedules])
@@ -274,7 +332,7 @@ function Dashboard() {
             <ShieldCheck size={18} />
           </div>
           <h1 className="brand-title">Deployment Portal</h1>
-          <select value={scheduleId} onChange={e => { setSewaModeOverride(null); setScheduleId(e.target.value) }} className="select" aria-label="Select schedule" style={{ marginLeft: '0.35rem', maxWidth: 260 }}>
+            <select value={scheduleId} onChange={e => { setSewaModeOverride(null); setScheduleId(e.target.value); try { const cached = JSON.parse(localStorage.getItem('portal_schedules_cache') || 'null'); if (cached) localStorage.setItem('portal_schedules_cache', JSON.stringify({ ...cached, selectedId: e.target.value })) } catch { /* best-effort */ } }} className="select" aria-label="Select schedule" style={{ marginLeft: '0.35rem', maxWidth: 260 }}>
             {schedules.map(s => (
               <option key={s.id} value={s.id}>{s.name}</option>
             ))}

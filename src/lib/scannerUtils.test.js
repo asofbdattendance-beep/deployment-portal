@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { withTimeout, friendly, todayStrIST, hhmmIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, isDecisionPopup, isEdgeDetection, detectionBox, isTimestampStale, CLOCK_SKEW_FUTURE_MS, CLOCK_SKEW_MAX_AGE_MS, rotateGray, SCAN_ROTATIONS, sanitizeBarcode, scoreSharpness, tileRois } from './scannerUtils'
+import { withTimeout, friendly, todayStrIST, hhmmIST, hmsIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, isDecisionPopup, isEdgeDetection, detectionBox, isTimestampStale, CLOCK_SKEW_FUTURE_MS, CLOCK_SKEW_MAX_AGE_MS, rotateGray, SCAN_ROTATIONS, sanitizeBarcode, scoreSharpness, tileRois } from './scannerUtils'
 
 afterEach(() => { vi.useRealTimers() })
 
@@ -121,6 +121,27 @@ describe('hhmmIST', () => {
   })
   it('never emits the h24 "24:00" midnight form', () => {
     expect(hhmmIST(new Date('2026-09-24T18:05:00Z'))).toBe('23:35')  // 00:05 IST
+  })
+})
+
+/* ─── hmsIST — the seconds-precision sibling, for the popup event stamp ─── */
+describe('hmsIST', () => {
+  it('formats HH:MM:SS in IST regardless of the device zone', () => {
+    expect(hmsIST(new Date('2026-09-24T12:00:00Z'))).toBe('17:30:00')
+    expect(hmsIST(new Date('2026-09-24T04:05:07Z'))).toBe('09:35:07')
+    // Keeps seconds — the `in_time`/`out_time` columns are stored at second
+    // resolution, so a minute-only stamp would disagree with the record.
+    expect(hmsIST(new Date('2026-09-27T12:34:56Z'))).toBe('18:04:56')
+  })
+  it('rolls over midnight into a zero-padded IST second day', () => {
+    // UTC 18:30 == IST 00:00 next day — the h23 rollover the h24 quirk hides.
+    expect(hmsIST(new Date('2026-09-24T18:30:09Z'))).toBe('00:00:09')
+    expect(hmsIST(new Date('2026-09-24T18:35:59Z'))).toBe('00:05:59')
+  })
+  it('never emits the h24 "24:00" form and always pads to 8 chars', () => {
+    expect(hmsIST(new Date('2026-09-24T17:30:00Z'))).toBe('23:00:00')
+    expect(hmsIST(new Date('2026-09-24T18:30:00Z'))).toBe('00:00:00')
+    expect(hmsIST(new Date('2026-09-24T12:00:03Z'))).toMatch(/^.{2}:\d{2}:\d{2}$/)
   })
 })
 

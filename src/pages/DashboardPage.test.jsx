@@ -9,6 +9,10 @@
 //   2. It calls EXACTLY the five v45 RPCs it is contracted to call, and never
 //      reads a table directly. Scope is enforced inside the RPCs, so a direct
 //      table read here would be both a contract break and a security regression.
+//      One documented exception: dp_centres (reference data — v28's
+//      centres_read policy lets every authenticated user read the full
+//      list — read by every page) feeds the centre × department matrix's
+//      parent rollup — attendance FACTS still come only from the five RPCs.
 //   3. The IST wall-clock round trip actually works: a scanner_ops row whose
 //      last_scan_time is "now" in IST must count as ACTIVE. Getting the +05:30
 //      combination wrong is silent — the scanner simply reads as offline.
@@ -53,6 +57,8 @@ vi.mock('../lib/supabase', () => ({
     removeChannel: () => {},
   },
   fetchAllRpc: (...args) => fetchAllRpc(...args),
+  // Reference data for the matrix's parent-centre rollup (see header note 2).
+  fetchCentres: () => Promise.resolve(CENTRES),
 }))
 
 // A STABLE toast object, deliberately — the real useToast() is useMemo'd in
@@ -83,6 +89,13 @@ const DAILY = [
 ]
 const VISIT = [
   { centre: 'DELHI', department_id: 'd1', dept_name: 'MEDICAL', deployed: 12, ever_present: 9, never_present: 3, open_now: 1 },
+  { centre: 'DELHI-1', department_id: 'd1', dept_name: 'MEDICAL', deployed: 4, ever_present: 4, never_present: 0, open_now: 0 },
+]
+// dp_centres fixture: DELHI-1 is DELHI's sub-centre, so the matrix rolls it
+// up under a collapsed DELHI parent row.
+const CENTRES = [
+  { id: 'c1', name: 'DELHI', parent_centre: '' },
+  { id: 'c2', name: 'DELHI-1', parent_centre: 'DELHI' },
 ]
 const SCANNER = [
   {
@@ -155,6 +168,23 @@ describe('DashboardPage — renders', () => {
     expect(within(card).getAllByRole('row')).toHaveLength(3) // header + MEDICAL + TOTAL
   })
 
+  it('renders the centre × department matrix from the same visit summary', async () => {
+    await renderPage()
+    expect(screen.getByText('Centre × department matrix')).toBeTruthy()
+    const matrix = screen.getByTestId('matrix-table')
+    // DELHI-1 (4/4) rolls up under its DELHI parent: the collapsed row shows
+    // the SUBTREE aggregate (9+4 of 12+4), and the (+1) badge counts the
+    // hidden child. This rollup is why the page fetches dp_centres.
+    const parentRow = within(matrix).getByText('DELHI').closest('tr')
+    expect(parentRow.textContent).toContain('13/16')
+    expect(parentRow.textContent).toContain('(+1)')
+    expect(within(matrix).getByText('MEDICAL')).toBeTruthy()
+    // Expanding reveals the sub-centre's own row.
+    fireEvent.click(screen.getByLabelText('Expand DELHI'))
+    const childRow = within(matrix).getByText('DELHI-1').closest('tr')
+    expect(childRow.textContent).toContain('4/4')
+  })
+
   it('counts a scanner whose last scan is now in IST as active', async () => {
     await renderPage({ schedules: NOWINDOW_SCHEDULES })
     // 1/1 — the +05:30 combination with todayStrIST() has to line up, or the
@@ -220,11 +250,14 @@ describe('DashboardPage — one failed RPC degrades one section', () => {
     expect(screen.getByText('Centre leaderboard')).toBeTruthy()
     expect(screen.getByText('DELHI')).toBeTruthy()
 
-    // Only the department snapshot is blanked, and it offers its own retry.
+    // Both consumers of the failed visit feed — the department snapshot AND
+    // the matrix — are blanked, each with its own alert and retry. DOM order:
+    // the snapshot card precedes the matrix card.
     const alerts = screen.getAllByRole('alert')
-    expect(alerts).toHaveLength(1)
+    expect(alerts).toHaveLength(2)
     expect(alerts[0].textContent).toMatch(/department snapshot/i)
-    expect(screen.getByText('Retry')).toBeTruthy()
+    expect(alerts[1].textContent).toMatch(/centre × department matrix/i)
+    expect(screen.getAllByText('Retry')).toHaveLength(2)
   })
 
   it('never shows the raw backend text to the operator', async () => {
@@ -241,9 +274,11 @@ describe('DashboardPage — a failed section renders "—", never a healthy 0', 
     respondWith({ fail: ['attendance_daily_summary'] })
     await renderPage({ schedules: NOWINDOW_SCHEDULES })
     // "—" says unknown; a 0 here would claim nobody came. Scoped per tile:
-    // the em-dash also appears in empty states elsewhere on the page.
+    // the em-dash also appears in empty states elsewhere on the page, and
+    // 'Open now' also heads a matrix column — so scope to the KPI row.
+    const kpiRow = within(document.querySelector('.stat-row'))
     for (const label of ['Present today', 'Attendance %', 'Absent today', 'Open now']) {
-      const tile = screen.getByText(label).closest('button')
+      const tile = kpiRow.getByText(label).closest('button')
       expect(tile.textContent).toContain('—')
     }
     expect(screen.getByTitle('Present today could not be loaded')).toBeTruthy()
@@ -332,7 +367,9 @@ describe('DashboardPage — a hung RPC degrades its section instead of latching 
       expect(screen.queryByText('Loading dashboard…')).toBeNull()
       expect(screen.getByText('Dashboard')).toBeTruthy()
       expect(screen.getByText('Present today')).toBeTruthy()
-      expect(screen.getByText('DELHI')).toBeTruthy()
+      // DELHI also names a matrix row — scope to the centre leaderboard.
+      const leaderboard = screen.getByText('Centre leaderboard').closest('.card')
+      expect(within(leaderboard).getByText('DELHI')).toBeTruthy()
       const alerts = screen.getAllByRole('alert')
       expect(alerts).toHaveLength(1)
       expect(alerts[0].textContent).toMatch(/5-day trend/i)

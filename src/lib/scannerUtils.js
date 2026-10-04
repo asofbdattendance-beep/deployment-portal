@@ -7,7 +7,9 @@
 export const SCAN_RPC_TIMEOUT = 8000   // ms — scan_in / scan_out
 export const SESSION_RPC_TIMEOUT = 5000 // ms — get_open_session
 export const CAMERA_INIT_TIMEOUT = 10000 // ms — getUserMedia + play
-export const BUSY_SAFETY_TIMEOUT = 15000 // ms — auto-reset stuck busy flag (default; override via getBusySafetyTimeout)
+export const BUSY_SAFETY_TIMEOUT = 25000 // ms — auto-reset stuck busy flag (default; override via getBusySafetyTimeout)
+// 25s covers the worst-case serial chain: 5s get_scan_state + 8s scan_in +
+// 5s Already-IN refetch + headroom. The old 15s cleared mid-transaction.
 export function getBusySafetyTimeout() {
   const g = typeof globalThis !== 'undefined' ? globalThis : {}
   const v = Number(g.__BUSY_SAFETY_TIMEOUT__ ?? BUSY_SAFETY_TIMEOUT)
@@ -161,6 +163,31 @@ export function hhmmIST(d = new Date()) {
   const parts = IST_TIME_FMT.formatToParts(d)
   const part = (type) => parts.find((p) => p.type === type)?.value ?? '00'
   return `${String(part('hour')).padStart(2, '0')}:${String(part('minute')).padStart(2, '0')}`
+}
+
+// ─── hmsIST ───────────────────────────────────────────────────────────────────
+const IST_TIME_HMS_FMT = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Kolkata',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+})
+
+/**
+ * Wall-clock HH:MM:SS in IST, independent of the DEVICE's timezone.
+ *
+ * The seconds-precision sibling of `hhmmIST`, used for the scan popup's event
+ * stamp: `in_date`/`in_time` are stored at second resolution
+ * (`(p_ts AT TIME ZONE 'Asia/Kolkata')::time`), so the date/time row the
+ * popup renders must agree with those columns rather than the device's own
+ * zone or a minute-only rounding. Same `formatToParts` + explicit padding
+ * technique, for the same h24-midnight and locale-padding reasons.
+ *
+ * @param {Date} [d]
+ * @returns {string} "HH:MM:SS", 00:00:00–23:59:59
+ */
+export function hmsIST(d = new Date()) {
+  const parts = IST_TIME_HMS_FMT.formatToParts(d)
+  const part = (type) => parts.find((p) => p.type === type)?.value ?? '00'
+  return `${String(part('hour')).padStart(2, '0')}:${String(part('minute')).padStart(2, '0')}:${String(part('second')).padStart(2, '0')}`
 }
 
 // ─── resolveForgotOutTime ──────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ import ScanModeShell from '../components/mobile/ScanModeShell'
 import MobileScanFeed from '../components/mobile/MobileScanFeed'
 import { todayStrIST } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
+import { useSewadarDirectory } from '../hooks/useSewadarDirectory'
 import RecentScansTable from '../components/scanner/RecentScansTable'
 
 
@@ -91,6 +92,11 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
 
   const deptNameById = useMemo(() => deptNameMap(depts), [depts])
 
+  // Mobile offline-first directory: cached identity (name/centre/dept) so
+  // the popup names the sewadar with no network and resolves instantly.
+  // Desktop stays RPC-only (empty Map — zero behavior change).
+  const directoryByBadge = useSewadarDirectory({ scheduleId, enabled: isMobile })
+
   const clearManual = useCallback(() => setManualBadge(''), [])
 
   const {
@@ -103,6 +109,7 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
     profile,
     deptName: null,
     deptNameById,
+    directoryByBadge,
     toast,
     onAfterScan: refresh,
     forgotSuccessToast: 'OUT closed',
@@ -151,6 +158,8 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
       centre={popup?.centre}
       deptName={popup?.deptName}
       time={popup?.time}
+      eventDate={popup?.eventDate}
+      eventTime={popup?.eventTime}
       message={popup?.message}
       flag={popup?.flag}
       openSince={popup?.openSince}

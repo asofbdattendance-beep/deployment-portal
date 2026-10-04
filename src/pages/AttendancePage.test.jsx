@@ -606,3 +606,27 @@ describe('a hung RPC degrades its tab instead of latching loading', () => {
     }
   })
 })
+
+describe('AttendancePage — the mount/focus "today" sync clamps into the visit window', () => {
+  // 2026-10-07 → 2026-10-11, entirely AFTER the faked "today" (2026-09-23),
+  // so the sync must clamp forward to the window's first day.
+  const WINDOWED = [
+    { id: 'sched-1', name: 'October 2026 Visit', visit_start_date: '2026-10-07', visit_end_date: '2026-10-11' },
+    { id: 'sched-2', name: 'November 2026 Visit' },
+  ]
+
+  it('opens on the window edge, never on the raw previsit today', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-09-23T04:30:00Z')) // 2026-09-23 10:00 IST
+    try {
+      await renderPage({ schedules: WINDOWED })
+      // The regression: useState's init clamped today, but the focus-sync
+      // effect then wrote the RAW today, and the page silently flipped to a
+      // previsit date the operator never picked.
+      expect(rpc).toHaveBeenCalledWith('attendance_daily_summary', { p_schedule: 'sched-1', p_date: '2026-10-07' })
+      expect(rpc).not.toHaveBeenCalledWith('attendance_daily_summary', { p_schedule: 'sched-1', p_date: '2026-09-23' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

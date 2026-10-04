@@ -395,6 +395,10 @@ export async function cacheSet(key, value) {
     tx.objectStore(CACHE).put({ key, value, at: Date.now() })
     tx.oncomplete = () => resolve()
     tx.onerror = () => reject(tx.error)
+    // Quota breaches fire `abort`, not `error` — without this the promise
+    // never settles and the caller hangs (the directory write would stall
+    // a scan). Reject so callers can skip the cache and continue.
+    tx.onabort = () => reject(tx.error || new Error('cache write aborted'))
   })
 }
 export async function cacheDelete(key) {
@@ -514,10 +518,13 @@ export async function drainQueue(supabase, onProgress) {
             if (error) throw error
           } else {
             const { error } = await withTimeout(
-              // scan_out declares (p_badge, p_schedule, p_ts, p_open_id) only —
-              // an extra p_nonce makes PostgREST return PGRST202 and the row
-              // below is marked failed + head-of-line-blocks the queue.
-              supabase.rpc('scan_out', { p_badge: q.badge, p_schedule: q.schedule_id, p_ts: ts, p_open_id: q.open_id || null }),
+              // scan_out declares (p_badge, p_schedule, p_ts, p_open_id,
+              // p_is_manual) since v67 — an extra p_nonce makes PostgREST
+              // return PGRST202 and the row below is marked failed +
+              // head-of-line-blocks the queue.
+              // v67: queued OUTs keep their audit flag end to end (M8 covers
+              // IN; the OUT half was structurally unrecoverable before).
+              supabase.rpc('scan_out', { p_badge: q.badge, p_schedule: q.schedule_id, p_ts: ts, p_open_id: q.open_id || null, p_is_manual: q.is_manual || false }),
               10000,
               `Drain OUT`
             )
@@ -563,7 +570,7 @@ export async function drainQueue(supabase, onProgress) {
                 const openRow = Array.isArray(openData) ? openData[0] : openData
                 if (!openRow?.id) throw new Error('No open session to close', { cause: e })
                 const { error: outError } = await withTimeout(
-                  supabase.rpc('scan_out', { p_badge: q.badge, p_schedule: q.schedule_id, p_ts: ts, p_open_id: openRow.id }),
+                  supabase.rpc('scan_out', { p_badge: q.badge, p_schedule: q.schedule_id, p_ts: ts, p_open_id: openRow.id, p_is_manual: q.is_manual || false }),
                   10000,
                   'Drain OUT'
                 )

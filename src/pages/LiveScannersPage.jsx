@@ -84,6 +84,10 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
   // Bhati Visit shows visit-days data only: pin the picker inside the
   // window (windowless schedules pass through untouched).
   const visitWin = useMemo(() => scheduleWindow(schedule), [schedule])
+  // The focus-sync effect below closes over the window once, so it reads the
+  // CURRENT window through this ref (same pattern as DashboardPage.jsx:192).
+  const winRef = useRef(visitWin)
+  winRef.current = visitWin
   useEffect(() => { setDate((d) => clampDateToWindow(d, visitWin)) }, [visitWin])
   const [raw, setRaw] = useState([])
   const [loading, setLoading] = useState(true)
@@ -128,7 +132,10 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
   useEffect(() => {
     const sync = () => {
       if (dateTouchedRef.current) return
-      const today = todayStrIST()
+      // Clamp "today" into the visit window: outside it the unclamped today
+      // is a previsit date, and the whole page would report a day the
+      // operator never picked (windowless schedules pass through untouched).
+      const today = clampDateToWindow(todayStrIST(), winRef.current)
       setDate((d) => (d === today ? d : today))
     }
     sync()
@@ -684,7 +691,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
 
       <div className="page-sub" style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
         <Users size={13} />
-        Active = a scan in the last 15 minutes · scope is enforced by the database for your role
+        Active = a scan in the last 15 minutes
       </div>
 
       <FilterSheet

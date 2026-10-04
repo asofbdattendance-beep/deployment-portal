@@ -56,7 +56,9 @@ const ENGINE_LABELS = { Native: 'Optimized', ZXing: 'Universal' }
 // Max detection surface width. Lower = faster on weak hardware.
 const DETECT_MAX_WIDTH = 720
 // Consecutive misses before the crop widens from the band to the whole frame.
-const ROI_WIDEN_AFTER = 15
+// 25 (was 15): full-frame costs ~1.75x pixels for the same 1D-only hints, so
+// widen later — the hard-pass second look below buys capability instead.
+const ROI_WIDEN_AFTER = 25
 // Consecutive misses before a tap-to-focus hint is offered.
 const GUIDANCE_AFTER = 10
 // How long the aim rectangle lingers after the last detection. Short enough to
@@ -67,8 +69,23 @@ const AIM_THROTTLE_MS = 150
 // Consecutive misses before the stripe localizer is asked to point at the
 // barcode, and how often to re-ask afterwards. Both keep the localizer off the
 // path entirely while a badge is reading normally.
-const AIM_HINT_AFTER = 3
-const AIM_HINT_EVERY = 3
+// 8/6 (was 3/3): the localizer costs a full extra getImageData + gray pass +
+// locateBarcode on the decode thread for overlay only — engaging during normal
+// initial aiming taxed every badge wave.
+const AIM_HINT_AFTER = 8
+const AIM_HINT_EVERY = 6
+// Consecutive misses before the hard-pass second look runs, and its stride.
+// hardPass tries every ready engine x normal+inverted (+ widened 2D for ZXing)
+// so it buys capability the base pass lacks — but at ~2-4x frame cost, hence
+// gated well behind the cheap passes.
+const HARD_PASS_AFTER = 10
+const HARD_PASS_EVERY = 10
+// Ms a busy/decision-declined badge stays damped. The 2s duplicate suppressor
+// records only on ACCEPTANCE (a declined scan never ran, so its retry must not
+// be swallowed) — but without any damp the same badge re-fires vibrate +
+// onScan every frame for the whole RPC. 1500ms damps the storm while the
+// operator's retry after ~1.5s still goes through.
+const DECLINED_DAMP_MS = 1500
 
 // ─── Quality Analysis ─────────────────────────────────────────────────────────
 
@@ -173,6 +190,12 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const engineLoadingRef = useRef(false)
   const onScanRef = useRef(onScan)
   const lastScanRef = useRef({ badge: null, time: 0 })
+  // Busy-decline damp: a scan the handler declined (busy / decision-pending,
+  // returns exactly false) never ran, so the 2s suppressor must NOT record it —
+  // but re-firing vibrate + onScan every frame for the whole RPC storms the
+  // main thread. This short damp (DECLINED_DAMP_MS) is separate from the
+  // acceptance suppressor above.
+  const lastDeclinedRef = useRef({ badge: null, time: 0 })
   const slidingWindowRef = useRef([])
   const configRef = useRef(DEVICE_PROFILES.medium)
   const surfaceRef = useRef(null)
@@ -361,15 +384,26 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
 
       const now = Date.now()
       if (lastScanRef.current.badge === raw && now - lastScanRef.current.time < 2000) break
-      try { navigator.vibrate?.(80) } catch {}
+      // Declined-vibrate damp: a badge declined moments ago (busy /
+      // decision-pending) keeps re-offering onScan every confirmed frame per
+      // the T11 contract — but the per-frame vibrate is pure storm, so damp
+      // vibrate only, never the offer itself.
+      const declinedDamped = lastDeclinedRef.current.badge === raw && now - lastDeclinedRef.current.time < DECLINED_DAMP_MS
+      if (!declinedDamped) { try { navigator.vibrate?.(80) } catch {} }
       pushDebug(`SCAN OK [${engine}]: ${raw}`)
       // Camera-suppressor contract (see the busy guard in useScanHandler.js):
       // the suppressor records only on ACCEPTANCE. A declined scan (the
       // handler returned exactly `false` — busy or decision-pending) never
       // ran, so burning the 2s window on it would swallow the retry as a
       // duplicate. Any other return (undefined, true, a promise) records.
+      // Declined scans record into the short damp above instead.
       const accepted = onScanRef.current?.(raw)
-      if (accepted !== false) lastScanRef.current = { badge: raw, time: now }
+      if (accepted !== false) {
+        lastScanRef.current = { badge: raw, time: now }
+        lastDeclinedRef.current = { badge: null, time: 0 }
+      } else {
+        lastDeclinedRef.current = { badge: raw, time: now }
+      }
       break
     }
   }, [debugOn, pushDebug, updateWindow, publishAim])
@@ -469,6 +503,24 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         setStatus('error')
         setErrorMsg('This browser cannot read badges — try Chrome or Edge')
         return
+      }
+      // Hard-pass second look: base detect() runs ONE engine with 1D-only
+      // hints. hardPass tries every ready engine x normal+inverted (+ widened
+      // 2D for ZXing) — the only path that reads inverted/2D badges. Gated by
+      // miss count + stride so its ~2-4x cost never taxes normal reads.
+      if (consecutiveFailsRef.current >= HARD_PASS_AFTER && frameCountRef.current % HARD_PASS_EVERY === 0) {
+        try {
+          const hard = await engineRef.current?.hardPass?.(surfaceRef.current)
+          if (!isCurrent(session) || !mountedRef.current) return
+          if (gen !== loopGenRef.current) return
+          if (visibilityPausedRef.current || decisionPausedRef.current) return
+          if (hard?.barcodes?.length) {
+            consecutiveFailsRef.current = 0
+            anyDecodeRef.current = true
+            if (roiModeRef.current === 'full') roiModeRef.current = 'band'
+            handleBarcodes(hard.barcodes, roi, hard.engine || 'hard')
+          }
+        } catch { /* hardPass never throws by contract; belt-and-braces */ }
       }
       if (roiModeRef.current === 'band' && consecutiveFailsRef.current >= ROI_WIDEN_AFTER) {
         roiModeRef.current = 'full'
@@ -910,9 +962,16 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       }
       if (!mountedRef.current) return
       visibilityPausedRef.current = false
-      // A decision popup open across the hide/show cycle keeps the loop
-      // halted — the visibility resume must not clear the decision pause.
-      if (decisionPausedRef.current) { cancelFrame(); return }
+      // A decision popup open across the hide/show cycle keeps the LOOP
+      // halted — but the STREAM must still be re-acquired: the hidden branch
+      // stops every track, and returning here with a dead stream left a
+      // permanent black preview with no error and no Retry. Preview live,
+      // decode still paused — the guards below re-arm nothing while decided.
+      if (decisionPausedRef.current) {
+        if (!isStreamLive(streamRef.current)) { startScanner(); }
+        else { cancelFrame(); }
+        return
+      }
 
       if (!isStreamLive(streamRef.current)) { startScanner(); return }
 
@@ -933,6 +992,20 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     document.addEventListener('visibilitychange', onVisibility)
     return () => document.removeEventListener('visibilitychange', onVisibility)
   }, [cancelFrame, detectLoop, startScanner, isCurrent])
+
+  // Offline engine retry: the ZXing chunk is lazily imported, so an uncached
+  // first load with no network leaves a live preview that can never decode —
+  // and nothing re-ran ensureEngines on reconnect. Retry once per reconnect.
+  useEffect(() => {
+    const onOnline = () => {
+      if (!mountedRef.current) return
+      if (!engineRef.current?.isReady() && !engineLoadingRef.current) {
+        ensureEngines(sessionRef.current)
+      }
+    }
+    window.addEventListener('online', onOnline)
+    return () => window.removeEventListener('online', onOnline)
+  }, [ensureEngines])
 
   useImperativeHandle(ref, () => ({
     restart: startScanner,

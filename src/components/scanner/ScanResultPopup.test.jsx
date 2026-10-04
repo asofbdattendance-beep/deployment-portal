@@ -184,3 +184,60 @@ describe('ScanResultPopup — ack statuses render one button (L-12)', () => {
     expect(screen.queryByText('Cancel')).toBeNull()
   })
 })
+
+describe('ScanResultPopup — date + time (in/out) event stamp', () => {
+  // The operator's "when?" question. The row is an OWN block (not inside the
+  // name/centre/dept <dl>) precisely so a badge the server cannot name still
+  // shows when it was scanned — which is the blank-popup failure mode.
+  it('shows Date and Time (IN) on an IN moment', () => {
+    open('choose', { action: 'IN', eventDate: '2026-10-04', eventTime: '14:03:11' })
+    expect(screen.getByText('Date')).toBeTruthy()
+    expect(screen.getByText('2026-10-04')).toBeTruthy()
+    expect(screen.getByText('Time (IN)')).toBeTruthy()
+    expect(screen.getByText('14:03:11')).toBeTruthy()
+  })
+
+  it('labels the OUT moment Time (OUT)', () => {
+    open('choose', { action: 'OUT', eventDate: '2026-10-04', eventTime: '18:22:09' })
+    expect(screen.getByText('Time (OUT)')).toBeTruthy()
+    expect(screen.getByText('18:22:09')).toBeTruthy()
+    // The OUT choice still carries its history line alongside the new stamp.
+    expect(screen.queryByText(/Currently IN since/)).toBeNull() // no openSince passed
+  })
+
+  it('labels the result popups by their own direction, not the choice', () => {
+    open('in', { eventDate: '2026-10-04', eventTime: '09:00:00' })
+    expect(screen.getByText('Time (IN)')).toBeTruthy()
+    cleanup()
+    open('out', { eventDate: '2026-10-04', eventTime: '17:45:02' })
+    expect(screen.getByText('Time (OUT)')).toBeTruthy()
+  })
+
+  it('falls back to a bare "Time" when the popup has no direction', () => {
+    open('queued', { eventDate: '2026-10-04', eventTime: '09:00:00' })
+    expect(screen.getByText('Time')).toBeTruthy()
+    expect(screen.queryByText(/Time \(/)).toBeNull()
+  })
+
+  it('omits the whole row when no event stamp is passed (error/busy paths)', () => {
+    open('error', { message: 'Scanner busy' })
+    expect(screen.queryByText('Date')).toBeNull()
+    expect(screen.queryByText('Time')).toBeNull()
+  })
+
+  it('shows identity AND the event stamp together — the fresh-badge report', () => {
+    open('choose', {
+      action: 'IN',
+      name: 'Sita Devi',
+      centre: 'DELHI-9',
+      deptName: 'Traffic',
+      eventDate: '2026-10-04',
+      eventTime: '14:03:11',
+    })
+    expect(screen.getByText('Sita Devi')).toBeTruthy()
+    expect(screen.getByText('DELHI-9')).toBeTruthy()
+    expect(screen.getByText('Traffic')).toBeTruthy()
+    expect(screen.getByText('2026-10-04')).toBeTruthy()
+    expect(screen.getByText('Time (IN)')).toBeTruthy()
+  })
+})

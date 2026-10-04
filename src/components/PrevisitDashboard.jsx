@@ -1,10 +1,27 @@
-import { useMemo, useRef } from 'react'
+import { useMemo, useRef, useState, useEffect, useCallback } from 'react'
 import { RefreshCw } from 'lucide-react'
 import Skeleton from './mobile/Skeleton'
 import CentreDayHeatmap from './CentreDayHeatmap'
+import CentreDeptMatrixCard from './CentreDeptMatrixCard'
 import { usePrevisitData } from '../hooks/usePrevisitData'
+import { usePortalAuth } from '../context/PortalAuthContext'
+import { supabase, fetchCentres } from '../lib/supabase'
 import { previsitKpis, previsitByDay, previsitByDept, previsitCentreMatrix } from '../lib/previsit'
 import { shortDayLabel } from '../lib/attendance'
+
+/**
+ * Single-shot RPC returning rows, throwing on error — the same local helper
+ * DashboardPage uses (aggregate RPCs like attendance_visit_summary are not
+ * per-badge feeds, so they must NOT go through the paged fetchAllRpc).
+ */
+async function rpcRows(name, params) {
+  const { data, error } = await supabase.rpc(name, params)
+  if (error) {
+    const msg = error.message || error.code || 'Unknown error'
+    throw new Error(`${name}: ${msg}`)
+  }
+  return Array.isArray(data) ? data : []
+}
 
 /**
  * PrevisitDashboard — the SUMMARY half of the previsit surface, mounted on
@@ -19,7 +36,40 @@ import { shortDayLabel } from '../lib/attendance'
  */
 export default function PrevisitDashboard({ schedules = [], scheduleId }) {
   const schedule = (schedules || []).find((s) => s.id === scheduleId)
-  const { summary, deployed, loading, loadError, rowsScheduleId, reload } = usePrevisitData(scheduleId)
+  const { summary, deployed, loading, loadError, rowsScheduleId, lastRefreshAt, reload } = usePrevisitData(scheduleId)
+  const { profile } = usePortalAuth()
+  // The centre × department matrix is the aso/super_admin overview — the
+  // same card the Bhati-visit dashboard mounts, fed by the same
+  // attendance_visit_summary RPC. dept_incharge keeps the previsit-only
+  // surface: the matrix is the one piece it does not get.
+  const isAso = profile?.role === 'aso' || profile?.role === 'super_admin'
+  const [matrix, setMatrix] = useState({ rows: [], centres: [], error: null, scheduleId: null })
+  const matrixMountedRef = useRef(true)
+  useEffect(() => {
+    matrixMountedRef.current = true
+    return () => { matrixMountedRef.current = false }
+  }, [])
+  const fetchMatrix = useCallback(async () => {
+    if (!isAso || !scheduleId) return
+    try {
+      const [rows, centres] = await Promise.all([
+        rpcRows('attendance_visit_summary', { p_schedule: scheduleId }),
+        // Reference data for the parent-centre rollup; degrades to a flat grid.
+        fetchCentres().catch(() => []),
+      ])
+      if (matrixMountedRef.current) setMatrix({ rows, centres, error: null, scheduleId })
+    } catch (e) {
+      if (matrixMountedRef.current) setMatrix({ rows: [], centres: [], error: e?.message || 'could not be loaded', scheduleId })
+    }
+  }, [isAso, scheduleId])
+  // Mount + every successful previsit reload. lastRefreshAt is the hook's
+  // own refresh marker — bumped by the Reload button AND by the debounced
+  // realtime listener — so the matrix can never disagree with the KPIs,
+  // the day strip and the heatmap it shares the dashboard with.
+  useEffect(() => { fetchMatrix() }, [fetchMatrix, lastRefreshAt])
+  // A stale fetch must never show under a freshly picked schedule.
+  const matrixRows = matrix.scheduleId === scheduleId ? matrix.rows : []
+  const matrixError = matrix.scheduleId === scheduleId ? matrix.error : null
 
   // Hold the last good snapshot while a refresh is in flight (same as
   // PrevisitView): no false-zero tiles, no empty-state flash.
@@ -64,7 +114,7 @@ export default function PrevisitDashboard({ schedules = [], scheduleId }) {
         <div>
           <h2 className="page-title">Previsit Sewa Dashboard{schedule ? ` · ${schedule.name}` : ''}</h2>
           <div className="page-sub">
-            One day is one sewa · scope is enforced by the database for your role
+            One day is one sewa
           </div>
         </div>
         <div className="cluster">
@@ -149,6 +199,16 @@ export default function PrevisitDashboard({ schedules = [], scheduleId }) {
             />
           </div>
         </>
+      )}
+
+      {isAso && (
+        <CentreDeptMatrixCard
+          rows={matrixRows}
+          centres={matrix.centres}
+          error={matrixError}
+          onRetry={fetchMatrix}
+          style={{ marginTop: '0.75rem' }}
+        />
       )}
     </div>
   )

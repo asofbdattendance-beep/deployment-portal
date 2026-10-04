@@ -45,6 +45,22 @@ const state = {
   seed: {}, // rpcName -> 'error' | 'hang' | { data, error }
 }
 
+// ── opt-in rig variation ─────────────────────────────────────────────
+// Print/PDF specs need (a) a role that owns the Reports tab — `scanner`
+// has none, so the tab never renders — and (b) a schedule with a visit
+// window, or `resolveSewaMode` reports PREVISIT and the app renders
+// PrevisitView instead of ReportsPage. Both are driven from the
+// environment so they are OFF by default: CI never sets them and every
+// existing spec keeps its current behaviour byte-for-byte.
+if (process.env.MOCK_ROLE) PROFILE.role = process.env.MOCK_ROLE
+if (process.env.MOCK_VISIT_WINDOW) {
+  const [start, end] = process.env.MOCK_VISIT_WINDOW.split('/')
+  Object.assign(TABLES.deployment_schedules[0], {
+    visit_start_date: start,
+    visit_end_date: end,
+  })
+}
+
 function json(res, status, obj, extraHeaders = {}) {
   const body = JSON.stringify(obj)
   res.writeHead(status, {

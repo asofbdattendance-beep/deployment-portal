@@ -88,6 +88,10 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
   // Bhati Visit shows visit-days data only: pin the picker inside the
   // window (windowless schedules pass through untouched).
   const visitWin = useMemo(() => scheduleWindow(schedule), [schedule])
+  // The focus-sync effect below closes over the window once, so it reads the
+  // CURRENT window through this ref (same pattern as DashboardPage.jsx:192).
+  const winRef = useRef(visitWin)
+  winRef.current = visitWin
   useEffect(() => { setDate((d) => clampDateToWindow(d, visitWin)) }, [visitWin])
   const [presentRaw, setPresentRaw] = useState([])
   const [absentRaw, setAbsentRaw] = useState([])
@@ -129,7 +133,10 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
   useEffect(() => {
     const sync = () => {
       if (dateTouchedRef.current) return
-      const today = todayStrIST()
+      // Clamp "today" into the visit window: outside it the unclamped today
+      // is a previsit date, and the whole page would report a day the
+      // operator never picked (windowless schedules pass through untouched).
+      const today = clampDateToWindow(todayStrIST(), winRef.current)
       setDate((d) => (d === today ? d : today))
     }
     sync()
@@ -437,7 +444,7 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
       <div className="page-header print-hide" style={{ alignItems: 'center', gap: '1.25rem' }}>
         <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
           <h2 className="page-title"><FileText size={22} /> Reports</h2>
-          <div className="page-sub">Day-wise present / absent lists{schedule ? ` · ${schedule.name}` : ''} · scope is enforced by the database for your role</div>
+          <div className="page-sub">Day-wise present / absent lists{schedule ? ` · ${schedule.name}` : ''}</div>
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
             <span className="pill" title="Read-only — this page never writes attendance" style={{ background: '#f1f5f9', color: '#64748b', fontWeight: 600 }}>
               <Lock size={12} /> View-only
@@ -506,7 +513,10 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
         </div>
       )}
 
-      <div className="card">
+      {/* On-screen table is print-hidden: the `.print-only` document below is
+          the ONLY table in the PDF. Without this the same rows printed twice
+          — once as this card, once per centre section. */}
+      <div className="card print-hide">
         <div className="previsit-count" style={{ marginBottom: '0.5rem' }} aria-live="polite">
           Showing {activeRows.length} of {complete.length} sewadars
         </div>
@@ -530,15 +540,37 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
         )}
       </div>
 
-      {/* Print-only paged output for roles without the Excel export: one
-          page per centre (`.centre-page` page-breaks live in index.css), so
-          "Print PDF" from the browser dialog yields a per-centre workbook. */}
+      {/* Print-only paged output: one sheet per centre (`.centre-page`
+          page-breaks live in index.css), so "Export PDF" yields a real
+          report — masthead first, then one centre per page. The on-screen
+          card above is print-hidden, so nothing here is duplicated. */}
       <div className="print-only">
+        <div className="print-report">
+          <div className="print-report-title">Sewadar Attendance Report</div>
+          <p className="print-report-sub">
+            {schedule?.name ? `${schedule.name} — ` : ''}day-wise {tabLabel.toLowerCase()} list for {date}
+          </p>
+          <div className="print-report-meta">
+            <span>Date <b>{shortDayLabel(date)}</b></span>
+            <span>Schedule <b>{schedule?.name || '—'}</b></span>
+            <span>List <b>{tabLabel}</b></span>
+            <span>Centres <b>{groupsByCentre.length}</b></span>
+            <span>Sewadars <b>{activeRows.length}</b></span>
+          </div>
+        </div>
+
+        {groupsByCentre.length === 0 && (
+          <p className="print-report-foot">No rows to print for this day and list.</p>
+        )}
+
         {groupsByCentre.map(([centre, rows]) => (
           <section key={centre} className="centre-page">
-            <h3>{centre} — {tabLabel} — {shortDayLabel(date)}</h3>
+            <h3>
+              <span>{centre}</span>
+              <span className="centre-count">{rows.length} {tabLabel} · {shortDayLabel(date)}</span>
+            </h3>
             <table className="table">
-              <caption className="sr-only">Report rows</caption>
+              <caption className="sr-only">{centre} — {tabLabel} — {shortDayLabel(date)}</caption>
               <thead>
                 <tr>
                   <th>Badge</th>
@@ -557,13 +589,23 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
                     <td data-label="Centre">{r.centre || '—'}</td>
                     <td data-label="Dept">{r.dept || '—'}</td>
                     <td data-label="Type">{r.is_vss ? 'VSS' : 'Regular'}</td>
-                    <td data-label="Status">{r.status}</td>
+                    <td data-label="Status">
+                      <span className={`print-status ${r.status === 'Present' ? 'is-present' : 'is-absent'}`}>
+                        {r.status}
+                      </span>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </section>
         ))}
+
+        <div className="print-report-foot">
+          Generated {todayStrIST()} · {schedule?.name || '—'} · {tabLabel} ·{' '}
+          {activeRows.length} sewadars across {groupsByCentre.length}{' '}
+          {groupsByCentre.length === 1 ? 'centre' : 'centres'}. Read-only export.
+        </div>
       </div>
 
       <FilterSheet

@@ -358,21 +358,22 @@ describe('session lookup timeout (D-1)', () => {
   // Falling through to scan_in produces the 'Already IN' dead end.
   it('does NOT fall through to scan_in when the lookup times out', async () => {
     rpc.mockRejectedValueOnce(new Error('Session lookup timed out after 5000ms'))
-    const { result, showPopup, toast } = setup()
+    const { result, showPopup } = setup()
     await act(async () => { await result.current.handleScan(BADGE) })
     expect(rpc).toHaveBeenCalledTimes(1)
     expect(rpc).toHaveBeenCalledWith('get_scan_state', { p_badge: BADGE, p_schedule: 'sched-1' })
     expect(rpc).not.toHaveBeenCalledWith('scan_in', expect.anything())
-    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error', message: expect.stringContaining('timed out') }))
-    expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('timed out'))
+    // Jammer-safe: a timeout offers the queueable choice (never a dead-end),
+    // since link state stays true while nothing completes.
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'IN' }))
   })
 
-  it('reports a distinct reason so the caller can offer a retry', async () => {
+  it('reports confirm_required so the tap queues offline or writes online', async () => {
     rpc.mockRejectedValueOnce(new Error('Session lookup timed out after 5000ms'))
     const { result } = setup()
     let out
     await act(async () => { out = await result.current.handleScan(BADGE) })
-    expect(out).toEqual({ ok: false, reason: 'session_lookup_timeout' })
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'IN' })
   })
 
   it('still queues when the device is genuinely offline (timeout while offline)', async () => {
@@ -566,6 +567,10 @@ describe('return contract (D-4)', () => {
     {
       name: 'busy (a scan is already in flight)',
       async drive({ result, first }) {
+        // The busy exit needs a pending RPC: force online, because the
+        // offline short-circuit answers without touching the network and
+        // can never be "in flight".
+        Object.defineProperty(navigator, 'onLine', { value: true, configurable: true })
         let release
         rpc.mockImplementationOnce(() => new Promise((res) => { release = res }))
         let inflight
@@ -959,6 +964,105 @@ describe('explicit IN/OUT choice', () => {
       expect(p.centre).not.toBe('Bhati - Delhi MC')
     })
 
+    // ── v65: identity from the SOURCE TABLES, not session history ────────────
+    // THE bug behind "my popup shows nothing": a badge that has never scanned
+    // in this schedule has NO session row, so `last_out` was null and the IN
+    // prompt resolved identity from a null payload — badge + clock, no name,
+    // no centre, no department. `get_scan_state` now carries a `sewadar` key
+    // read from `get_sewadar_by_badge` + `deployments`, which is available
+    // with ZERO sessions.
+    describe('v65 sewadar identity (fresh badge — the blank popup)', () => {
+      const fresh = (extra = {}) => ({
+        open: null,
+        last_out: null,
+        sewadar: {
+          sewadar_name: 'Sita Devi',
+          sewadar_centre: 'DELHI-9',
+          sewadar_dept: 'uuid-1',
+          dept_name: 'Traffic',
+          is_vss: false,
+          ...extra,
+        },
+      })
+
+      it('shows name/centre/dept for a badge with NO sessions at all', async () => {
+        rpc.mockResolvedValueOnce({ data: fresh() })
+        const { result, showPopup } = setup()
+        await act(async () => { await result.current.handleScan(BADGE) })
+        const p = showPopup.mock.calls[0][0]
+        expect(p.status).toBe('choose')
+        expect(p.action).toBe('IN')
+        expect(p.name).toBe('Sita Devi')
+        expect(p.centre).toBe('DELHI-9')
+        expect(p.deptName).toBe('Traffic')
+        expect(p.centre).not.toBe('Bhati - Delhi MC')
+      })
+
+      it('stamps the moment with an IST date + HH:MM:SS on the IN choice', async () => {
+        rpc.mockResolvedValueOnce({ data: fresh() })
+        const { result, showPopup } = setup()
+        await act(async () => { await result.current.handleScan(BADGE) })
+        const p = showPopup.mock.calls[0][0]
+        // FIXED_NOW = 2026-09-27T12:00:00Z = 17:30:00 IST
+        expect(p.eventDate).toBe('2026-09-27')
+        expect(p.eventTime).toBe('17:30:00')
+      })
+
+      it('stamps the OUT choice too, alongside its existing IN history line', async () => {
+        rpc.mockResolvedValueOnce({ data: openSession(2, { sewadar_name: 'Ramesh Lal', sewadar_centre: 'DELHI-7', sewadar_dept: 'uuid-1' }) })
+        const { result, showPopup } = setup({ deptNameById: new Map([['uuid-1', 'Traffic']]) })
+        await act(async () => { await result.current.handleScan(BADGE) })
+        const p = showPopup.mock.calls[0][0]
+        expect(p.action).toBe('OUT')
+        expect(p.openId).toBe('open-1')
+        expect(p.openSince).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/) // the IN date+time
+        expect(p.eventDate).toBe('2026-09-27')
+        expect(p.eventTime).toBe('17:30:00')
+      })
+
+      it('prefers the live sewadar row over the session snapshot', async () => {
+        // The open session was stamped with an older name; the live row wins,
+        // so both directions name the sewadar the same way.
+        rpc.mockResolvedValueOnce({
+          data: {
+            ...openSession(2, { sewadar_name: 'OLD NAME', sewadar_centre: 'OLD-CENTRE' }),
+            sewadar: { sewadar_name: 'Sita Devi', sewadar_centre: 'DELHI-9', dept_name: 'Traffic' },
+          },
+        })
+        const { result, showPopup } = setup()
+        await act(async () => { await result.current.handleScan(BADGE) })
+        const p = showPopup.mock.calls[0][0]
+        expect(p.action).toBe('OUT')
+        expect(p.name).toBe('Sita Devi')
+        expect(p.centre).toBe('DELHI-9')
+      })
+
+      it('degrades to null identity when the key is absent (pre-v65 function)', async () => {
+        // No `sewadar` key at all: the popup must still fire with the right
+        // status/action rather than throwing — blank-but-present, not dead.
+        rpc.mockResolvedValueOnce({ data: { open: null, last_out: null } })
+        const { result, showPopup } = setup()
+        await act(async () => { await result.current.handleScan(BADGE) })
+        const p = showPopup.mock.calls[0][0]
+        expect(p.status).toBe('choose')
+        expect(p.action).toBe('IN')
+        expect(p.name ?? null).toBeNull()
+        expect(p.centre ?? null).toBeNull()
+        expect(p.eventDate).toBe('2026-09-27')
+      })
+
+      it('yields null identity for an unknown badge (three JSON nulls), not a crash', async () => {
+        rpc.mockResolvedValueOnce({ data: { open: null, last_out: null, sewadar: null } })
+        const { result, showPopup } = setup()
+        await act(async () => { await result.current.handleScan(BADGE) })
+        const p = showPopup.mock.calls[0][0]
+        expect(p.status).toBe('choose')
+        expect(p.name ?? null).toBeNull()
+        expect(p.centre ?? null).toBeNull()
+        expect(p.deptName ?? null).toBeNull()
+      })
+    })
+
     it('commits the IN when the last OUT was 3h ago only after the tap', async () => {
       rpc.mockResolvedValueOnce({ data: closedSession(3) })
       rpc.mockResolvedValueOnce({ data: { ok: true } })
@@ -1264,8 +1368,8 @@ describe('V11 resolved-error and real timeout format', () => {
     await act(async () => { out = await result.current.handleScan(BADGE) })
     expect(rpc).toHaveBeenCalledTimes(1)
     expect(rpc).not.toHaveBeenCalledWith('scan_in', expect.anything())
-    expect(out).toEqual({ ok: false, reason: 'session_lookup_timeout' })
-    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error' }))
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'IN' })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose' }))
   })
 })
 
@@ -1396,5 +1500,101 @@ describe('offline uncertainty flag + schedule-keyed dupe + full-queue banner (C6
     expect(out).toEqual({ ok: false, reason: 'offline_queue_full' })
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'error', message: expect.stringContaining('2000') }))
     expect(toast.error).toHaveBeenCalledWith('Offline queue is full')
+  })
+})
+
+// ─── Mobile directory: offline-first identity (sewadarDirectory) ───
+// The directory answers IDENTITY only — live RPC wins online, the cache
+// fills offline gaps, and a definitely-offline scan never waits on the net.
+describe('mobile directory identity', () => {
+  const DIR = new Map([['FB5971GA0001', { badge: 'FB5971GA0001', name: 'Asha Verma', centre: 'DELHI-7', deptId: null }]])
+
+  it('offline skips the lookup entirely — instant choose, zero RPC', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    const { result, showPopup } = setup({ directoryByBadge: DIR })
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(rpc).not.toHaveBeenCalled()
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'IN' })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'choose', name: 'Asha Verma', centre: 'DELHI-7',
+    }))
+  })
+
+  it('offline with a pending queued IN offers OUT (never a duplicate IN)', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    getQueuedScans.mockResolvedValue([{ action: 'IN', badge: BADGE, schedule_id: 'sched-1' }])
+    const { result, showPopup } = setup({ directoryByBadge: DIR })
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'OUT' })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'OUT' }))
+  })
+
+  it('online timeout still names the sewadar from the directory', async () => {
+    rpc.mockRejectedValueOnce(new Error('Session lookup timed out after 5000ms'))
+    const { result, showPopup } = setup({ directoryByBadge: DIR })
+    await act(async () => { await result.current.handleScan(BADGE) })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'choose', name: 'Asha Verma', centre: 'DELHI-7',
+    }))
+  })
+
+  it('live RPC identity beats the directory when both exist', async () => {
+    rpc.mockResolvedValueOnce({ data: {
+      open: null,
+      last_out: null,
+      sewadar: { sewadar_name: 'Live Name', sewadar_centre: 'LIVE-C', sewadar_dept: null, dept_name: null, is_vss: false },
+    } })
+    const { result, showPopup } = setup({ directoryByBadge: DIR })
+    await act(async () => { await result.current.handleScan(BADGE) })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'choose', name: 'Live Name', centre: 'LIVE-C',
+    }))
+  })
+
+  it('no directory configured behaves exactly as before (null-safe)', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    const { result, showPopup } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
+    expect(rpc).not.toHaveBeenCalled()
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', name: null }))
+  })
+})
+
+// Branch-C + queued identity: same DIR fixture, separate block so each
+// identity-carrying popup is pinned where it is produced.
+describe('offline popup identity (branches C + queued)', () => {
+  const DIR = new Map([['FB5971GA0001', { badge: 'FB5971GA0001', name: 'Asha Verma', centre: 'DELHI-7', deptId: null, deptName: null }]])
+
+  it('names the sewadar on the error branch too (jammer with link up)', async () => {
+    rpc.mockRejectedValueOnce(new Error('Failed to fetch'))
+    const { result, showPopup } = setup({ directoryByBadge: DIR })
+    await act(async () => { await result.current.handleScan(BADGE) })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'choose', name: 'Asha Verma', centre: 'DELHI-7',
+    }))
+  })
+
+  it('queued IN ack carries the confirmed identity (no blank offline ack)', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    rpc.mockRejectedValue(new Error('Failed to fetch'))
+    enqueueScan.mockResolvedValue({ ok: true, id: 'q-1' })
+    const { result, showPopup } = setup({ directoryByBadge: DIR })
+    await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'queued', action: 'IN', name: 'Asha Verma', centre: 'DELHI-7',
+    }))
+  })
+
+  it('queued OUT ack carries the prior popup identity', async () => {
+    // Confirmed OUT writes scan_out directly (no lookup) — fail that write.
+    rpc.mockRejectedValueOnce(new Error('Failed to fetch'))
+    const { result, showPopup } = setup()
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: 'open-1', display: { name: 'Prior Name', centre: 'PRIOR-C', deptName: null } }) })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'queued', action: 'OUT', name: 'Prior Name', centre: 'PRIOR-C',
+    }))
   })
 })

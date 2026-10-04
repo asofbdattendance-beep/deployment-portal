@@ -3,7 +3,7 @@
 // the dashboard tabs show KPIs + breakdowns (not the register table) and
 // that both halves read through the same hook data.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor, cleanup, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, cleanup, fireEvent, within } from '@testing-library/react'
 import PrevisitDashboard from './PrevisitDashboard'
 
 const rpc = vi.fn()
@@ -31,6 +31,14 @@ vi.mock('../lib/supabase', () => ({
     removeChannel: () => {},
   },
   fetchAllRpc: (...args) => fetchAllRpc(...args),
+  // Reference data for the matrix's parent-centre rollup.
+  fetchCentres: () => Promise.resolve(CENTRES),
+}))
+
+// The centre × department matrix is gated to aso/super_admin — the role is a
+// mutable binding so a single suite can walk both sides of that gate.
+vi.mock('../context/PortalAuthContext', () => ({
+  usePortalAuth: () => ({ profile: { role: mockRole } }),
 }))
 
 vi.mock('../lib/realtime', () => ({
@@ -38,6 +46,22 @@ vi.mock('../lib/realtime', () => ({
 }))
 
 const SCHEDULES = [{ id: 'sched-1', name: 'October 2026 Visit' }]
+
+// Role behind the PortalAuthContext mock (see above); reset per test.
+let mockRole = 'super_admin'
+
+// dp_centres fixture: CENTRE A-1 is CENTRE A's sub-centre, so the matrix
+// rolls it up under a collapsed CENTRE A parent row.
+const CENTRES = [
+  { id: 'c1', name: 'CENTRE A', parent_centre: '' },
+  { id: 'c2', name: 'CENTRE A-1', parent_centre: 'CENTRE A' },
+]
+
+// attendance_visit_summary feed for the matrix (aso/super_admin only).
+const VISIT = [
+  { centre: 'CENTRE A', department_id: 'd1', dept_name: 'MEDICAL', deployed: 5, ever_present: 2, never_present: 3, open_now: 0 },
+  { centre: 'CENTRE A-1', department_id: 'd1', dept_name: 'MEDICAL', deployed: 1, ever_present: 1, never_present: 0, open_now: 0 },
+]
 
 const SUMMARY = [
   { event_date: '2026-10-06', centre: 'CENTRE A', department_id: 'd1', dept_name: 'MEDICAL', present: 2, open_now: 1 },
@@ -55,6 +79,7 @@ const DEPLOYED = [
 
 beforeEach(() => {
   rpc.mockReset()
+  mockRole = 'super_admin'
   rpc.mockImplementation(async (name) => {
     if (name === 'previsit_summary') return { data: SUMMARY, error: null }
     if (name === 'previsit_sewadars') return { data: [], error: null }
@@ -103,9 +128,12 @@ describe('PrevisitDashboard', () => {
     // Total column + the all-centres row.
     expect(screen.getByText('3/6')).toBeTruthy()
     expect(screen.getByText('4/8')).toBeTruthy()
-    // Both centred columns are header cells with an explicit scope.
-    expect(container.querySelectorAll('th[scope="col"]').length).toBe(4)
-    expect(container.querySelectorAll('th[scope="row"]').length).toBe(3)
+    // Both centred columns are header cells with an explicit scope. Scoped
+    // to the heatmap: the aso/super_admin matrix card below legitimately
+    // adds its own col headers to the document.
+    const heatmap = container.querySelector('.att-matrix')
+    expect(heatmap.querySelectorAll('th[scope="col"]').length).toBe(4)
+    expect(heatmap.querySelectorAll('th[scope="row"]').length).toBe(3)
   })
 
   it('says the ratio out loud so colour is never the only signal', async () => {
@@ -124,7 +152,11 @@ describe('PrevisitDashboard', () => {
   it('a failed RPC shows an error, never a clean empty view', async () => {
     rpc.mockResolvedValue({ data: null, error: { message: 'function previsit_summary does not exist' } })
     render(<PrevisitDashboard schedules={SCHEDULES} scheduleId="sched-1" />)
-    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/^previsit_summary: function previsit_summary does not exist$/)).toBeTruthy())
+    // The aso/super_admin matrix reads attendance_visit_summary, which fails
+    // here too — both surfaces must alert, neither may feign a clean empty.
+    expect(screen.getByText(/^attendance_visit_summary: function previsit_summary does not exist$/)).toBeTruthy()
+    expect(screen.getAllByRole('alert')).toHaveLength(2)
   })
 
   it('reloads on demand', async () => {
@@ -133,5 +165,56 @@ describe('PrevisitDashboard', () => {
     const calls = rpc.mock.calls.length
     fireEvent.click(screen.getByText('Reload'))
     await waitFor(() => expect(rpc.mock.calls.length).toBeGreaterThan(calls))
+  })
+})
+
+describe('PrevisitDashboard — centre × department matrix (aso/super_admin)', () => {
+  it('shows the visit matrix to super_admin, fed by attendance_visit_summary', async () => {
+    rpc.mockImplementation(async (name) => {
+      if (name === 'attendance_visit_summary') return { data: VISIT, error: null }
+      if (name === 'previsit_summary') return { data: SUMMARY, error: null }
+      if (name === 'previsit_sewadars') return { data: [], error: null }
+      if (name === 'previsit_deployed') return { data: DEPLOYED, error: null }
+      return { data: [], error: null }
+    })
+    render(<PrevisitDashboard schedules={SCHEDULES} scheduleId="sched-1" />)
+    await waitFor(() => expect(screen.getByText('Centre × department matrix')).toBeTruthy())
+    expect(rpc.mock.calls.some(([n]) => n === 'attendance_visit_summary')).toBe(true)
+    const matrix = screen.getByTestId('matrix-table')
+    // CENTRE A-1 (1/1) rolls up under its CENTRE A parent: 3/6 collapsed.
+    const parentRow = within(matrix).getByText('CENTRE A').closest('tr')
+    expect(parentRow.textContent).toContain('3/6')
+    // MEDICAL is the single department column (strip card + table header).
+    expect(within(matrix).getAllByText('MEDICAL').length).toBeGreaterThan(0)
+    // The expand toggle reveals the sub-centre row.
+    fireEvent.click(screen.getByLabelText('Expand CENTRE A'))
+    expect(within(matrix).getByText('CENTRE A-1')).toBeTruthy()
+  })
+
+  it('shows the matrix to aso as well', async () => {
+    mockRole = 'aso'
+    render(<PrevisitDashboard schedules={SCHEDULES} scheduleId="sched-1" />)
+    await waitFor(() => expect(screen.getByText('Centre × department matrix')).toBeTruthy())
+  })
+
+  it('hides the matrix from dept_incharge and never fires the visit RPC', async () => {
+    mockRole = 'dept_incharge'
+    render(<PrevisitDashboard schedules={SCHEDULES} scheduleId="sched-1" />)
+    await waitFor(() => expect(screen.getByText('Sewa days')).toBeTruthy())
+    expect(screen.queryByText('Centre × department matrix')).toBeNull()
+    expect(rpc.mock.calls.some(([n]) => n === 'attendance_visit_summary')).toBe(false)
+  })
+
+  it('renders the error state — never a healthy zero — when the visit feed fails', async () => {
+    rpc.mockImplementation(async (name) => {
+      if (name === 'attendance_visit_summary') return { data: null, error: { message: 'permission denied' } }
+      if (name === 'previsit_summary') return { data: SUMMARY, error: null }
+      if (name === 'previsit_sewadars') return { data: [], error: null }
+      if (name === 'previsit_deployed') return { data: DEPLOYED, error: null }
+      return { data: [], error: null }
+    })
+    render(<PrevisitDashboard schedules={SCHEDULES} scheduleId="sched-1" />)
+    await waitFor(() => expect(screen.getByText('The centre × department matrix could not be loaded')).toBeTruthy())
+    expect(screen.queryByText('No deployed sewadars for this schedule yet.')).toBeNull()
   })
 })

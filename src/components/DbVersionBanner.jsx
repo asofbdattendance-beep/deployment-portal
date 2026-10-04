@@ -30,6 +30,7 @@ export default function DbVersionBanner() {
   return (
     <div
       role="alert"
+      className="db-version-banner"
       style={{
         background: '#fffbeb', borderBottom: '1px solid #fcd34d',
         color: '#92400e', fontSize: '0.8rem', padding: '0.45rem 1rem',

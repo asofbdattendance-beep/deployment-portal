@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import React from 'react'
-import { render, act, cleanup, screen } from '@testing-library/react'
+import { render, act, cleanup, screen, fireEvent } from '@testing-library/react'
 import { todayStrIST } from '../lib/scannerUtils'
 import ScannerPage from './ScannerPage'
 
@@ -240,6 +240,65 @@ describe('ScannerPage desktop layout + stale-data paths', () => {
         input.dispatchEvent(new Event('input', { bubbles: true }))
       })
       expect(input.value).toBe('FB5971GA0001')
+    } finally {
+      restore()
+    }
+  })
+
+  // THE repro for "the after popup isn't working": a fresh badge — zero
+  // attendance sessions — must still open a dialog carrying name, centre,
+  // department, the event date/time and the single valid button. Previously
+  // the popup opened (so it never "failed" loudly) but rendered a badge
+  // number and a clock and nothing else, because identity was resolved from
+  // `last_out`, which is null when there is no history at all. This drives
+  // the REAL hook stack — no mocks between the input and the dialog.
+  it('fresh-badge manual scan opens the popup WITH identity, event date and direction', async () => {
+    const restore = useDesktopMatchMedia()
+    try {
+      // get_scan_state (v65): no sessions, but the sewadar is known.
+      mocks.rpc.mockResolvedValueOnce({
+        data: {
+          open: null,
+          last_out: null,
+          sewadar: {
+            sewadar_name: 'Sita Devi',
+            sewadar_centre: 'DELHI-9',
+            sewadar_dept: 'uuid-1',
+            dept_name: 'Traffic',
+            is_vss: false,
+          },
+        },
+      })
+
+      render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+      await settle()
+
+      const input = screen.getByPlaceholderText('Manual FB/BH/VS badge')
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        setter.call(input, 'FB5971GA0001')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByText('Mark In/Out'))
+        await new Promise(r => setTimeout(r, 50))
+      })
+
+      // 1. The dialog is actually on screen.
+      const dialog = screen.getByRole('dialog')
+      expect(dialog).toBeTruthy()
+      // 2. The identity the old code could never resolve for a fresh badge.
+      expect(screen.getByText('Sita Devi')).toBeTruthy()
+      expect(screen.getByText('DELHI-9')).toBeTruthy()
+      expect(screen.getByText('Traffic')).toBeTruthy()
+      // 3. The event stamp, labelled with the direction of the moment.
+      expect(screen.getByText(todayStrIST())).toBeTruthy()
+      expect(screen.getByText(/^Time \(IN\)$/)).toBeTruthy()
+      // 4. The ONE valid action — Mark IN, since nothing is open.
+      expect(screen.getByText('Mark IN')).toBeTruthy()
+      expect(screen.queryByText('Mark OUT')).toBeNull()
+      // 5. It is a real scan question, so a second badge must not slip past it.
+      expect(mocks.rpc).toHaveBeenCalledTimes(1)
     } finally {
       restore()
     }

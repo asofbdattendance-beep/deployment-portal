@@ -383,7 +383,7 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
       <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
         <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
           <h2 className="page-title"><ShieldAlert size={22} /> Anomalies</h2>
-          <div className="page-sub">Read-only — no resolve actions in v1 · scope is enforced by the database for your role</div>
+          <div className="page-sub">Read-only — no resolve actions in v1</div>
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
             <span className="pill" title="Anomalies are computed by the database — there is nothing to change here. Fix the scan or the deployment record itself." style={{ background: '#f1f5f9', color: '#64748b', fontWeight: 600 }}>
               <Lock size={12} /> View-only

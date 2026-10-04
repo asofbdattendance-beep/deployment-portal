@@ -267,6 +267,11 @@ describe('scanDisplay — isVss / undeployed flags', () => {
     expect(scanDisplay({ undeployed_scan: false }).undeployed).toBe(false)
   })
 
+  it('also accepts the scan_in RPC key undeployed (v43/v57)', () => {
+    expect(scanDisplay({ undeployed: true }).undeployed).toBe(true)
+    expect(scanDisplay({ undeployed: false }).undeployed).toBe(false)
+  })
+
   it('defaults undeployed to false when the RPC omits the flag', () => {
     expect(scanDisplay({ sewadar_name: 'Asha' }).undeployed).toBe(false)
     expect(scanDisplay(null).undeployed).toBe(false)
