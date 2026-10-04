@@ -407,7 +407,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
       {depts.map((d) => <option key={d} value={d}>{d}</option>)}
     </select>
     <div style={{ position: 'relative', minWidth: 200 }}>
-      <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none' }} />
+      <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }} />
       <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name / badge / centre..." className="input" style={{ width: '100%', paddingLeft: 30 }} aria-label="Search attendance" />
     </div>
   </>)
@@ -563,13 +563,13 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
       <div className="page" style={{ maxWidth: 1400 }}>
         <div className="card" style={{ padding: '1.5rem', maxWidth: 720, margin: '0 auto' }} role="alert">
           <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', marginBottom: '0.5rem' }}>
-            <AlertTriangle size={18} style={{ color: '#b91c1c' }} />
+            <AlertTriangle size={18} style={{ color: 'var(--err)' }} />
             <h3 className="empty-title" style={{ margin: 0 }}>Could not load attendance</h3>
           </div>
           <p style={{ fontSize: '0.85rem', color: '#475569', margin: 0 }}>
             The attendance figures could not be read from the server.
           </p>
-          <p style={{ fontSize: '0.8rem', color: '#64748b', margin: '0.75rem 0 0' }}>
+          <p style={{ fontSize: '0.8rem', color: 'var(--text-sec)', margin: '0.75rem 0 0' }}>
             The attendance analytics functions may not be installed on this database, or your role
             may not be permitted to read them. No figures are shown, because none could be loaded.
           </p>
@@ -647,7 +647,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     { key: 'present', label: 'Present', numeric: true, render: (r) => r.present },
     {
       key: 'absent', label: 'Absent', numeric: true,
-      render: (r) => (<span style={r.absent ? { color: '#b91c1c', fontWeight: 700 } : undefined}>{r.absent}</span>),
+      render: (r) => (<span style={r.absent ? { color: 'var(--err)', fontWeight: 700 } : undefined}>{r.absent}</span>),
     },
     { key: 'open', label: 'Open', numeric: true, render: (r) => r.open_now },
     {
@@ -687,7 +687,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
       render: (r) => (
         <span style={{ whiteSpace: 'nowrap' }}>
           <strong>{(r.in_time || '').slice(0, 5) || '—'}</strong>{' '}
-          <span style={{ color: '#64748b', fontSize: '0.78rem' }}>by {r.in_by || '—'}</span>
+          <span style={{ color: 'var(--text-sec)', fontSize: '0.78rem' }}>by {r.in_by || '—'}</span>
         </span>
       ),
     },
@@ -696,7 +696,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
       render: (r) => (
         <span style={{ whiteSpace: 'nowrap' }}>
           <strong>{(r.out_time || '').slice(0, 5) || (r.status === 'OPEN' ? 'open' : '—')}</strong>{' '}
-          <span style={{ color: '#64748b', fontSize: '0.78rem' }}>by {r.out_time ? (r.out_by || '—') : '—'}</span>
+          <span style={{ color: 'var(--text-sec)', fontSize: '0.78rem' }}>by {r.out_time ? (r.out_by || '—') : '—'}</span>
         </span>
       ),
     },
@@ -782,7 +782,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
               aria-invalid={!date || undefined}
             />
             {!date && (
-              <div role="alert" style={{ fontSize: '0.72rem', color: '#b91c1c', marginTop: '0.25rem', maxWidth: 220 }}>
+              <div role="alert" style={{ fontSize: '0.72rem', color: 'var(--err)', marginTop: '0.25rem', maxWidth: 220 }}>
                 Pick a scan day — the date is empty, so the Daily and Scanner tabs cannot load.
               </div>
             )}
@@ -802,7 +802,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
           sub={`every expected day${stats.full !== stats.full5 ? ` · ${stats.full5} on ${FULL_VISIT_DAYS}-day depts` : ''}`}
         />
         <KpiTile label="Open now" value={stats.openNow} tone={stats.openNow ? '#b45309' : undefined} sub="IN, not yet OUT" />
-        <KpiTile label="Undeployed" value={stats.flagged} tone={stats.flagged ? '#b91c1c' : undefined} sub="scanned but not deployed" />
+        <KpiTile label="Undeployed" value={stats.flagged} tone={stats.flagged ? 'var(--err)' : undefined} sub="scanned but not deployed" />
       </div>
 
       <PullToRefresh onRefresh={load} refreshing={loading} disabled={!isMobile}>
@@ -872,8 +872,8 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
                 role="alert"
                 style={{
                   display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap',
-                  background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10,
-                  padding: '0.6rem 0.75rem', fontSize: '0.8rem', color: '#b91c1c', marginBottom: '0.75rem',
+                  background: 'var(--danger-soft)', border: '1px solid #fecaca', borderRadius: 10,
+                  padding: '0.6rem 0.75rem', fontSize: '0.8rem', color: 'var(--err)', marginBottom: '0.75rem',
                 }}
               >
                 <AlertTriangle size={15} />
@@ -910,7 +910,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
               <div className="table-wrap" style={{ marginTop: '0.5rem' }}>
                 <table className="table" aria-label="Daily totals">
                   <tfoot>
-                    <tr className="table-total" style={{ fontWeight: 700, background: '#f8fafc' }}>
+                    <tr className="table-total" style={{ fontWeight: 700, background: 'var(--surface-2)' }}>
                       <td data-label="Centre">TOTAL</td>
                       <td data-label="Department">—</td>
                       <td data-label="Expected" style={{ textAlign: 'center' }}>{visibleTotals.expected}</td>
@@ -935,8 +935,8 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
                 role="alert"
                 style={{
                   display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap',
-                  background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10,
-                  padding: '0.6rem 0.75rem', fontSize: '0.8rem', color: '#b91c1c', marginBottom: '0.75rem',
+                  background: 'var(--danger-soft)', border: '1px solid #fecaca', borderRadius: 10,
+                  padding: '0.6rem 0.75rem', fontSize: '0.8rem', color: 'var(--err)', marginBottom: '0.75rem',
                 }}
               >
                 <AlertTriangle size={15} />
@@ -988,8 +988,8 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
                 role="alert"
                 style={{
                   display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap',
-                  background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10,
-                  padding: '0.6rem 0.75rem', fontSize: '0.8rem', color: '#b91c1c', marginBottom: '0.75rem',
+                  background: 'var(--danger-soft)', border: '1px solid #fecaca', borderRadius: 10,
+                  padding: '0.6rem 0.75rem', fontSize: '0.8rem', color: 'var(--err)', marginBottom: '0.75rem',
                 }}
               >
                 <AlertTriangle size={15} />
