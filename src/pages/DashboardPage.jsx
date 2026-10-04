@@ -16,6 +16,7 @@ import { todayStrIST, withTimeout } from '../lib/scannerUtils'
 import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
 import PageHeader, { ViewOnlyPill } from '../components/PageHeader'
 import KpiTile from '../components/KpiTile'
+import EmptyState from '../components/EmptyState'
 import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
 import {
   LayoutDashboard, Users, Clock, AlertTriangle, ArrowUpRight,
@@ -310,7 +311,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
 
   // ─── Guards ───
   if (!schedules.length) {
-    return <div className="page"><div className="card" style={{ padding: '2rem', textAlign: 'center' }}>No schedules</div></div>
+    return <div className="page"><div className="card"><EmptyState title="No schedules" hint="Ask an ASO to create a deployment schedule to begin tracking attendance." /></div></div>
   }
   if (loading && !rowsAreCurrent) {
     return (
