@@ -1,28 +1,25 @@
 import { useState, useEffect, useCallback } from 'react'
-import { fetchCentres, fetchAllRows, fetchPortalSettings, setPortalSetting, getCount } from '../lib/supabase'
+import { fetchCentres, fetchAllRows, fetchPortalSettings, getCount } from '../lib/supabase'
 import { isVssBadge } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from './Toast'
-import MasterSwitch from './MasterSwitch'
 import PageHeader, { ViewOnlyPill } from './PageHeader'
 import KpiTile from './KpiTile'
 import EmptyState from './EmptyState'
 import ExportButton from './ExportButton'
 import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
-import { BarChart3, Building2, Users, AlertTriangle, Lock } from 'lucide-react'
+import { BarChart3, Building2, Users, AlertTriangle, Lock, Unlock } from 'lucide-react'
 
-/* ─── Super admin / ASO: read-only VSS consent dashboard + master switch ─── */
+/* ─── Super admin / ASO: read-only VSS consent dashboard ─── */
 export default function VssDashboard({ schedules, scheduleId }) {
   const { profile } = usePortalAuth()
-  // phase-2 hardening: aso is view/download-only — the master switches are
-  // super_admin actions now (DB: v20; Control Panel also has per-centre overrides).
+  // phase-2 hardening: aso is view/download-only (DB: v20) — the master
+  // switches live in the Control Panel, which also has per-centre overrides.
   const isSuperAdmin = profile?.role === 'super_admin'
   const toast = useToast()
   const selectedScheduleId = scheduleId
   const [data, setData] = useState(null)
   const [settings, setSettings] = useState({ vss_deployment_open: false, vss_creation_open: false })
-  const [busy, setBusy] = useState(false)
-  const [busyCreation, setBusyCreation] = useState(false)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -105,34 +102,6 @@ export default function VssDashboard({ schedules, scheduleId }) {
     label: 'vss-dashboard',
   })
 
-  const toggleVss = async () => {
-    if (busy) return
-    setBusy(true)
-    const next = !settings.vss_deployment_open
-    try {
-      await setPortalSetting('vss_deployment_open', next, profile?.name || null)
-      setSettings(s => ({ ...s, vss_deployment_open: next }))
-      toast.success(next ? 'VSS deployment is now OPEN' : 'VSS deployment is now CLOSED')
-    } catch (err) {
-      toast.error(err.message || 'Could not update setting')
-    } finally { setBusy(false) }
-  }
-
-  // "Add VSS" master switch — centres cannot create VSS registrations until
-  // this is open (deadline gate applies separately; v19)
-  const toggleCreation = async () => {
-    if (busyCreation) return
-    setBusyCreation(true)
-    const next = !settings.vss_creation_open
-    try {
-      await setPortalSetting('vss_creation_open', next, profile?.name || null)
-      setSettings(s => ({ ...s, vss_creation_open: next }))
-      toast.success(next ? 'Add VSS is now OPEN — centres can create VSS records' : 'Add VSS is now CLOSED')
-    } catch (err) {
-      toast.error(err.message || 'Could not update setting')
-    } finally { setBusyCreation(false) }
-  }
-
   const schedule = schedules.find(s => s.id === selectedScheduleId)
   const allCentreNames = (data?.centres || []).map(c => c.name)
   const consentedList = (data?.vss || []).filter(sw => data?.consentMap[`${sw.centre}|${sw.badge_number}`]?.consent_given)
@@ -197,18 +166,21 @@ export default function VssDashboard({ schedules, scheduleId }) {
         sub="Collective VSS overview across every centre · visit-time sewadars"
         pills={isSuperAdmin ? (
           <>
-            <MasterSwitch
-              label="VSS Deployment"
-              open={settings.vss_deployment_open}
-              onToggle={toggleVss}
-              busy={busy}
-            />
-            <MasterSwitch
-              label="Add VSS"
-              open={settings.vss_creation_open}
-              onToggle={toggleCreation}
-              busy={busyCreation}
-            />
+            <span
+              className={`pill ${settings.vss_deployment_open ? 'pill-green' : 'pill-red'}`}
+              title="VSS deployment status — the master switch lives in the Control Panel"
+            >
+              {settings.vss_deployment_open ? <Unlock size={12} aria-hidden="true" /> : <Lock size={12} aria-hidden="true" />}
+              {' '}VSS Deployment: {settings.vss_deployment_open ? 'Open' : 'Closed'}
+            </span>
+            <span
+              className={`pill ${settings.vss_creation_open ? 'pill-green' : 'pill-red'}`}
+              title="Add VSS status — the master switch lives in the Control Panel"
+            >
+              {settings.vss_creation_open ? <Unlock size={12} aria-hidden="true" /> : <Lock size={12} aria-hidden="true" />}
+              {' '}Add VSS: {settings.vss_creation_open ? 'Open' : 'Closed'}
+            </span>
+            <span style={{ fontSize: '0.72rem', color: '#64748b' }}>Master switches live in Control Panel</span>
           </>
         ) : (
           <ViewOnlyPill title="View-only access — changes are not permitted for ASO accounts (v20)" />

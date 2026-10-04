@@ -1,10 +1,9 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { supabase, fetchCentres, fetchAllRows, fetchPortalSettings, setPortalSetting } from '../lib/supabase'
+import { supabase, fetchCentres, fetchAllRows, fetchPortalSettings } from '../lib/supabase'
 import { getSubtreeCentres, getRootCentre } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from './Toast'
-import MasterSwitch from './MasterSwitch'
-import { BarChart3, Users, AlertTriangle, Building2, LayoutGrid, Lock, History } from 'lucide-react'
+import { BarChart3, Users, AlertTriangle, Building2, LayoutGrid, Lock, Unlock, History } from 'lucide-react'
 import PageHeader, { ViewOnlyPill } from './PageHeader'
 import KpiTile from './KpiTile'
 import EmptyState from './EmptyState'
@@ -32,7 +31,6 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
   const [settings, setSettings] = useState({ sewadar_deployment_open: true })
   const [locks, setLocks] = useState([])
   const [activity, setActivity] = useState([])
-  const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -105,19 +103,6 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
     if (error) { toast.error(error.message); return }
     setLocks(prev => prev.filter(l => l.id !== id))
     toast.success('Deployment reopened — the centre can edit again')
-  }
-
-  const toggleSewadars = async () => {
-    if (busy) return
-    setBusy(true)
-    const next = !settings.sewadar_deployment_open
-    try {
-      await setPortalSetting('sewadar_deployment_open', next, profile?.name || null)
-      setSettings(s => ({ ...s, sewadar_deployment_open: next }))
-      toast.success(next ? 'Sewadar deployment is now OPEN' : 'Sewadar deployment is now CLOSED')
-    } catch (err) {
-      toast.error(err.message || 'Could not update setting')
-    } finally { setBusy(false) }
   }
 
   const schedule = schedules.find(s => s.id === selectedScheduleId)
@@ -255,12 +240,16 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
         title="Consent Dashboard"
         sub="CENTRE consent & allocated-seat matrices"
         pills={isSuperAdmin ? (
-          <MasterSwitch
-            label="Sewadar Deployment"
-            open={settings.sewadar_deployment_open}
-            onToggle={toggleSewadars}
-            busy={busy}
-          />
+          <>
+            <span
+              className={`pill ${settings.sewadar_deployment_open ? 'pill-green' : 'pill-red'}`}
+              title="Sewadar deployment status — the master switch lives in the Control Panel"
+            >
+              {settings.sewadar_deployment_open ? <Unlock size={12} aria-hidden="true" /> : <Lock size={12} aria-hidden="true" />}
+              {' '}Sewadar Deployment: {settings.sewadar_deployment_open ? 'Open' : 'Closed'}
+            </span>
+            <span style={{ fontSize: '0.72rem', color: '#64748b' }}>Master switches live in Control Panel</span>
+          </>
         ) : (
           <ViewOnlyPill title="View-only access — changes are not permitted for ASO accounts (v20)" />
         )}

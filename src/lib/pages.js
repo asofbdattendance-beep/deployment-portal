@@ -9,7 +9,7 @@ export const PHASES = { 1: 'Deployment', 2: 'Attendance' }
 
 export const PAGES = {
   // Command Center first: aso/super_admin land here (first visible key wins).
-  dashboard: { label: 'Dashboard', icon: LayoutDashboard, roles: ['aso', 'super_admin'], phase: 2 },
+  dashboard: { label: 'Home', icon: LayoutDashboard, roles: ['aso', 'super_admin'], phase: 2 },
   schedule: { label: 'Schedule', icon: Calendar, roles: ['aso', 'super_admin'], phase: 1 },
   consent: { label: 'Consent & Deploy', icon: ClipboardCheck, roles: ['centre_user', 'centre_admin', 'aso', 'super_admin', 'vss_operator'], phase: 1 },
   vss: { label: 'VSS', icon: Star, roles: ['centre_user', 'centre_admin', 'aso', 'super_admin', 'vss_operator'], phase: 1 },

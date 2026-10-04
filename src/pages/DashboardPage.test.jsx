@@ -6,23 +6,24 @@
 // inputs, so the failure modes worth pinning are narrow and structural:
 //
 //   1. It renders at all — title, the LIVE freshness pill, and a KPI tile.
-//   2. It calls EXACTLY the five v45 RPCs it is contracted to call, and never
+//   2. It calls EXACTLY the three v45 RPCs it is contracted to call, and never
 //      reads a table directly. Scope is enforced inside the RPCs, so a direct
 //      table read here would be both a contract break and a security regression.
-//      One documented exception: dp_centres (reference data — v28's
-//      centres_read policy lets every authenticated user read the full
-//      list — read by every page) feeds the centre × department matrix's
-//      parent rollup — attendance FACTS still come only from the five RPCs.
 //   3. The IST wall-clock round trip actually works: a scanner_ops row whose
 //      last_scan_time is "now" in IST must count as ACTIVE. Getting the +05:30
 //      combination wrong is silent — the scanner simply reads as offline.
-//   4. ONE failed RPC blanks ONE section. A dashboard that refuses to render
+//   4. ONE failed RPC dashes its tiles. A dashboard that refuses to render
 //      because a single function is missing is indistinguishable from a broken
 //      one, and that is precisely the bug this asserts against.
 //
+// THIN LAUNCHER (Phase 4): the page keeps KPI tiles + alerts only — every
+// tile navigates to its single-owner detail page. The department snapshot,
+// centre × department matrix, leaderboard, scanner feed, trend strip and
+// snapshot export were deleted, so this file asserts none of them.
+//
 // The mock setup mirrors src/pages/AttendancePage.test.jsx.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor, cleanup, within, fireEvent, act } from '@testing-library/react'
+import { render, screen, waitFor, cleanup, within, act } from '@testing-library/react'
 import DashboardPage from './DashboardPage'
 
 const rpc = vi.fn()
@@ -33,9 +34,6 @@ const fetchAllRpc = vi.fn(async (name, params) => {
   if (res?.error) throw res.error
   return Array.isArray(res?.data) ? res.data : []
 })
-const toastError = vi.fn()
-const toastSuccess = vi.fn()
-const toastWarning = vi.fn()
 
 // Supabase realtime is inert here: a chainable no-op that satisfies
 // channel().on(...).on(...).subscribe() and removeChannel(). Handlers are
@@ -57,18 +55,6 @@ vi.mock('../lib/supabase', () => ({
     removeChannel: () => {},
   },
   fetchAllRpc: (...args) => fetchAllRpc(...args),
-  // Reference data for the matrix's parent-centre rollup (see header note 2).
-  fetchCentres: () => Promise.resolve(CENTRES),
-}))
-
-// A STABLE toast object, deliberately — the real useToast() is useMemo'd in
-// ToastProvider and a fresh object per render() would re-trigger the page's
-// load effect forever and hang every test here for a reason that does not exist
-// in production.
-const toast = { error: toastError, success: toastSuccess, warning: toastWarning, info: vi.fn() }
-
-vi.mock('../components/Toast', () => ({
-  useToast: () => toast,
 }))
 
 const SCHEDULES = [{ id: 'sched-1', name: 'October 2026 Visit', status: 'open', visit_start_date: '2026-10-07', visit_end_date: '2026-10-11' }]
@@ -87,16 +73,6 @@ const NOW_IST_TIME = istNow.slice(11, 19)
 const DAILY = [
   { centre: 'DELHI', department_id: 'd1', dept_name: 'MEDICAL', expected: 10, present: 8, absent: 2, open_now: 1 },
 ]
-const VISIT = [
-  { centre: 'DELHI', department_id: 'd1', dept_name: 'MEDICAL', deployed: 12, ever_present: 9, never_present: 3, open_now: 1 },
-  { centre: 'DELHI-1', department_id: 'd1', dept_name: 'MEDICAL', deployed: 4, ever_present: 4, never_present: 0, open_now: 0 },
-]
-// dp_centres fixture: DELHI-1 is DELHI's sub-centre, so the matrix rolls it
-// up under a collapsed DELHI parent row.
-const CENTRES = [
-  { id: 'c1', name: 'DELHI', parent_centre: '' },
-  { id: 'c2', name: 'DELHI-1', parent_centre: 'DELHI' },
-]
 const SCANNER = [
   {
     scanner_badge: 'SC01', scanner_name: 'Scanner One', scanner_centre: 'DELHI',
@@ -104,20 +80,14 @@ const SCANNER = [
     first_in_time: '08:00:00', last_scan_time: NOW_IST_TIME,
   },
 ]
-const TREND = [
-  { day: '2026-10-07', present: 8, absent: 2 },
-  { day: '2026-10-08', present: 5, absent: 5 },
-]
 
 /** Queue one resolved result per RPC, or an error for anything in `fail`. */
-function respondWith({ daily = DAILY, visit = VISIT, ops = SCANNER, anomalies = [], trend = TREND, fail = [] } = {}) {
+function respondWith({ daily = DAILY, ops = SCANNER, anomalies = [], fail = [] } = {}) {
   rpc.mockImplementation((name) => {
     if (fail.includes(name)) return Promise.resolve({ data: null, error: { message: `${name} does not exist`, code: 'PGRST202' } })
     if (name === 'attendance_daily_summary') return Promise.resolve({ data: daily, error: null })
-    if (name === 'attendance_visit_summary') return Promise.resolve({ data: visit, error: null })
     if (name === 'attendance_scanner_ops') return Promise.resolve({ data: ops, error: null })
     if (name === 'attendance_anomalies') return Promise.resolve({ data: anomalies, error: null })
-    if (name === 'attendance_trend') return Promise.resolve({ data: trend, error: null })
     return Promise.resolve({ data: [], error: null })
   })
 }
@@ -135,9 +105,6 @@ async function renderPage(props = {}) {
 beforeEach(() => {
   rpc.mockReset()
   pgHandlers.length = 0
-  toastError.mockReset()
-  toastSuccess.mockReset()
-  toastWarning.mockReset()
   respondWith()
 })
 
@@ -149,40 +116,24 @@ afterEach(() => { cleanup() })
 describe('DashboardPage — renders', () => {
   it('shows the title, the LIVE freshness pill and the KPI row', async () => {
     await renderPage()
-    expect(screen.getByText('Dashboard')).toBeTruthy()
+    expect(screen.getByText('Home')).toBeTruthy()
     // Anchored both ends: the pill's own text is exactly this, while every
     // ancestor's textContent carries the title and buttons as well.
     expect(screen.getByText(/^LIVE · updated \d+s ago$/)).toBeTruthy()
     expect(screen.getByText('Present today')).toBeTruthy()
   })
 
-  it('puts the department-wise table above the centre leaderboard', async () => {
-    await renderPage()
-    const dept = screen.getByText('Department snapshot')
-    const centre = screen.getByText('Centre leaderboard')
-    // strict document order: the department block precedes the centre block
-    expect(dept.compareDocumentPosition(centre) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    // the department block is a real table carrying the visit fixture's row
-    const card = dept.closest('.card')
-    expect(within(card).getByText('MEDICAL')).toBeTruthy()
-    expect(within(card).getAllByRole('row')).toHaveLength(3) // header + MEDICAL + TOTAL
-  })
-
-  it('renders the centre × department matrix from the same visit summary', async () => {
-    await renderPage()
-    expect(screen.getByText('Centre × department matrix')).toBeTruthy()
-    const matrix = screen.getByTestId('matrix-table')
-    // DELHI-1 (4/4) rolls up under its DELHI parent: the collapsed row shows
-    // the SUBTREE aggregate (9+4 of 12+4), and the (+1) badge counts the
-    // hidden child. This rollup is why the page fetches dp_centres.
-    const parentRow = within(matrix).getByText('DELHI').closest('tr')
-    expect(parentRow.textContent).toContain('13/16')
-    expect(parentRow.textContent).toContain('(+1)')
-    expect(within(matrix).getByText('MEDICAL')).toBeTruthy()
-    // Expanding reveals the sub-centre's own row.
-    fireEvent.click(screen.getByLabelText('Expand DELHI'))
-    const childRow = within(matrix).getByText('DELHI-1').closest('tr')
-    expect(childRow.textContent).toContain('4/4')
+  it('links every KPI tile out to its owner page', async () => {
+    const onNavigate = vi.fn()
+    await renderPage({ onNavigate })
+    const kpiRow = within(document.querySelector('.stat-row'))
+    // Present / % / Absent / Open → Reports; Scanners → Attendance; Anomalies → Anomalies.
+    kpiRow.getByText('Present today').closest('button').click()
+    kpiRow.getByText('Scanners active').closest('button').click()
+    kpiRow.getByText('Anomalies').closest('button').click()
+    expect(onNavigate).toHaveBeenNthCalledWith(1, 'reports', undefined)
+    expect(onNavigate).toHaveBeenNthCalledWith(2, 'attendance', undefined)
+    expect(onNavigate).toHaveBeenNthCalledWith(3, 'anomalies', undefined)
   })
 
   it('counts a scanner whose last scan is now in IST as active', async () => {
@@ -191,40 +142,16 @@ describe('DashboardPage — renders', () => {
     // scanner silently reads as offline.
     expect(screen.getByText('1/1')).toBeTruthy()
   })
-
-  it('renders both trend days from attendance_trend', async () => {
-    await renderPage()
-    // Scoped to the trend card: 80% also appears as the DELHI leaderboard rate
-    // (8 of 10 expected), and the two agreeing is the point — asserting the
-    // bare string would match both and hide which one broke.
-    const trendCard = screen.getByText('5-day trend').closest('.card')
-    // buildTrendRows maps 8/10 → 80% and 5/10 → 50%.
-    expect(within(trendCard).getByText('80%')).toBeTruthy()
-    expect(within(trendCard).getByText('50%')).toBeTruthy()
-  })
-
-  it('never places a previsit scan under a visit weekday in the trend strip', async () => {
-    // The reported bug on the dept-incharge matrix, same root cause here: an
-    // Oct 2 scan (a Friday) must not render as the FRI visit slot.
-    respondWith({ trend: [...TREND, { day: '2026-10-02', present: 10, absent: 0 }] })
-    await renderPage()
-    const trendCard = screen.getByText('5-day trend').closest('.card')
-    expect(within(trendCard).queryByText('100%')).toBeNull()
-    expect(within(trendCard).getByText('80%')).toBeTruthy()
-    expect(within(trendCard).getByText('50%')).toBeTruthy()
-  })
 })
 
 describe('DashboardPage — RPC contract', () => {
-  it('calls exactly the five documented RPCs, all against this schedule', async () => {
+  it('calls exactly the three documented RPCs, all against this schedule', async () => {
     await renderPage()
     const names = rpc.mock.calls.map((c) => c[0])
     expect(names.slice().sort()).toEqual([
       'attendance_anomalies',
       'attendance_daily_summary',
       'attendance_scanner_ops',
-      'attendance_trend',
-      'attendance_visit_summary',
     ])
     for (const [, params] of rpc.mock.calls) {
       expect(params.p_schedule).toBe('sched-1')
@@ -239,32 +166,15 @@ describe('DashboardPage — RPC contract', () => {
   })
 })
 
-describe('DashboardPage — one failed RPC degrades one section', () => {
-  it('keeps the page and the other sections live when attendance_visit_summary fails', async () => {
-    respondWith({ fail: ['attendance_visit_summary'] })
+describe('DashboardPage — one failed RPC dashes its tiles', () => {
+  it('keeps the page live when a feed fails and never shows raw backend text', async () => {
+    respondWith({ fail: ['attendance_anomalies'] })
     await renderPage()
-
     // The page and the sections that DID load are still on screen.
-    expect(screen.getByText('Dashboard')).toBeTruthy()
+    expect(screen.getByText('Home')).toBeTruthy()
     expect(screen.getByText('Present today')).toBeTruthy()
-    expect(screen.getByText('Centre leaderboard')).toBeTruthy()
-    expect(screen.getByText('DELHI')).toBeTruthy()
-
-    // Both consumers of the failed visit feed — the department snapshot AND
-    // the matrix — are blanked, each with its own alert and retry. DOM order:
-    // the snapshot card precedes the matrix card.
-    const alerts = screen.getAllByRole('alert')
-    expect(alerts).toHaveLength(2)
-    expect(alerts[0].textContent).toMatch(/department snapshot/i)
-    expect(alerts[1].textContent).toMatch(/centre × department matrix/i)
-    expect(screen.getAllByText('Retry')).toHaveLength(2)
-  })
-
-  it('never shows the raw backend text to the operator', async () => {
-    respondWith({ fail: ['attendance_trend'] })
-    await renderPage()
     expect(screen.queryByText(/PGRST202/)).toBeNull()
-    expect(screen.queryByText(/attendance_trend/)).toBeNull()
+    expect(screen.queryByText(/attendance_anomalies/)).toBeNull()
     expect(screen.queryByText(/does not exist/)).toBeNull()
   })
 })
@@ -273,9 +183,7 @@ describe('DashboardPage — a failed section renders "—", never a healthy 0', 
   it('dashes the four daily-backed tiles when attendance_daily_summary fails', async () => {
     respondWith({ fail: ['attendance_daily_summary'] })
     await renderPage({ schedules: NOWINDOW_SCHEDULES })
-    // "—" says unknown; a 0 here would claim nobody came. Scoped per tile:
-    // the em-dash also appears in empty states elsewhere on the page, and
-    // 'Open now' also heads a matrix column — so scope to the KPI row.
+    // "—" says unknown; a 0 here would claim nobody came. Scoped to the KPI row.
     const kpiRow = within(document.querySelector('.stat-row'))
     for (const label of ['Present today', 'Attendance %', 'Absent today', 'Open now']) {
       const tile = kpiRow.getByText(label).closest('button')
@@ -299,7 +207,6 @@ describe('DashboardPage — a failed section renders "—", never a healthy 0', 
   it('dashes Anomalies when attendance_anomalies fails', async () => {
     respondWith({ fail: ['attendance_anomalies'] })
     await renderPage()
-    // 'Anomalies' also heads the feed card below — scope to the KPI row.
     const tile = within(document.querySelector('.stat-row')).getByText('Anomalies').closest('button')
     expect(tile.textContent).toContain('—')
     expect(screen.getByTitle('Anomalies could not be loaded')).toBeTruthy()
@@ -307,8 +214,8 @@ describe('DashboardPage — a failed section renders "—", never a healthy 0', 
 })
 
 describe('DashboardPage — freshness accounting', () => {
-  it('leaves the LIVE pill un-advanced when all five RPCs fail', async () => {
-    respondWith({ fail: ['attendance_daily_summary', 'attendance_visit_summary', 'attendance_scanner_ops', 'attendance_anomalies', 'attendance_trend'] })
+  it('leaves the LIVE pill un-advanced when all three RPCs fail', async () => {
+    respondWith({ fail: ['attendance_daily_summary', 'attendance_scanner_ops', 'attendance_anomalies'] })
     await renderPage()
     // timeAgo(null) is '—': no successful reload ever happened, so the pill
     // must not present a fresh timestamp.
@@ -317,10 +224,10 @@ describe('DashboardPage — freshness accounting', () => {
   })
 
   it('counts failed sources in the LIVE pill tooltip on partial failure', async () => {
-    respondWith({ fail: ['attendance_daily_summary', 'attendance_trend'] })
+    respondWith({ fail: ['attendance_daily_summary', 'attendance_anomalies'] })
     await renderPage()
     const pill = screen.getByText(/LIVE · updated \d+s ago/)
-    expect(pill.closest('span').title).toMatch(/2 of 5 sources failed/)
+    expect(pill.closest('span').title).toMatch(/2 of 3 sources failed/)
   })
 
   it('reports no failures in the tooltip when everything loaded', async () => {
@@ -335,101 +242,47 @@ describe('DashboardPage — realtime max-wait', () => {
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => 1_000_000)
     try {
       await renderPage()
-      expect(rpc).toHaveBeenCalledTimes(5)
+      expect(rpc).toHaveBeenCalledTimes(3)
       expect(pgHandlers.length).toBeGreaterThan(0)
       const reload = pgHandlers[0]
 
       // 500ms after the load: inside the window → trailing 400ms debounce.
       nowSpy.mockImplementation(() => 1_000_500)
       reload()
-      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(10))
+      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(6))
 
       // 5s after the last load: past max-wait → immediate, no timer wait.
       nowSpy.mockImplementation(() => 1_010_000)
       reload()
-      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(15))
+      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(9))
     } finally {
       nowSpy.mockRestore()
     }
   })
 })
 
-describe('DashboardPage — a hung RPC degrades its section instead of latching loading', () => {
-  it('times out attendance_trend and keeps the other sections live', async () => {
+describe('DashboardPage — a hung RPC degrades its tiles instead of latching loading', () => {
+  it('times out attendance_scanner_ops and keeps the other tiles live', async () => {
     respondWith()
     const baseImpl = rpc.getMockImplementation()
-    rpc.mockImplementation((...args) => (args[0] === 'attendance_trend' ? new Promise(() => {}) : baseImpl(...args)))
+    rpc.mockImplementation((...args) => (args[0] === 'attendance_scanner_ops' ? new Promise(() => {}) : baseImpl(...args)))
     vi.useFakeTimers()
     try {
       render(<DashboardPage schedules={SCHEDULES} scheduleId="sched-1" />)
       // The 15s withTimeout abort is a timer: advance past it and flush.
       await act(async () => { await vi.advanceTimersByTimeAsync(16000) })
       expect(screen.queryByText('Loading dashboard…')).toBeNull()
-      expect(screen.getByText('Dashboard')).toBeTruthy()
+      expect(screen.getByText('Home')).toBeTruthy()
       expect(screen.getByText('Present today')).toBeTruthy()
-      // DELHI also names a matrix row — scope to the centre leaderboard.
-      const leaderboard = screen.getByText('Centre leaderboard').closest('.card')
-      expect(within(leaderboard).getByText('DELHI')).toBeTruthy()
-      const alerts = screen.getAllByRole('alert')
+      // The scanner tile dashed; the daily tiles still carry the fixture.
+      expect(screen.getByText('Scanners active').closest('button').textContent).toContain('—')
+      expect(screen.getByText('Present today').closest('button').textContent).toContain('8')
+      // The DAILY fixture has one open session, so exactly one alert fires.
+      const alerts = screen.getAllByRole('status')
       expect(alerts).toHaveLength(1)
-      expect(alerts[0].textContent).toMatch(/5-day trend/i)
+      expect(alerts[0].textContent).toMatch(/stale open sessions/i)
     } finally {
       vi.useRealTimers()
     }
-  })
-})
-
-vi.mock('xlsx', () => ({
-  utils: {
-    book_new: vi.fn(() => ({})),
-    json_to_sheet: vi.fn((rows) => ({ rows })),
-    book_append_sheet: vi.fn(),
-  },
-  writeFile: vi.fn(),
-  write: vi.fn(() => new Uint8Array([1, 2, 3])),
-}))
-
-describe('DashboardPage — export snapshot accounting', () => {
-  const PRESENT_BADGE = [{ sewadar_centre: 'DELHI', badge_number: 'B1', sewadar_name: 'RAM', is_vss: false, dept_name: 'MEDICAL' }]
-
-  /** The five page-load RPCs succeed; attendance_day_badges answers per mode. */
-  function respondBadges({ present = PRESENT_BADGE, absent = [] } = {}) {
-    respondWith()
-    const base = rpc.getMockImplementation()
-    rpc.mockImplementation((name, params) => (
-      name === 'attendance_day_badges'
-        ? Promise.resolve({ data: params?.p_mode === 'present' ? present : absent, error: null })
-        : base(name, params)
-    ))
-  }
-
-  it('toasts success per written workbook and never warns on a half-success', async () => {
-    respondBadges({ present: PRESENT_BADGE, absent: [] })
-    await renderPage()
-    fireEvent.click(screen.getByText(/Export snapshot/))
-    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith('Present list exported'))
-    // The badge feed goes through the paginating helper (a revert to the
-    // single-shot rpcRows would write 1000-row TOTALs into the workbook).
-    expect(fetchAllRpc.mock.calls.map(([n]) => n)).toContain('attendance_day_badges')
-    expect(toastSuccess).toHaveBeenCalledTimes(1)
-    // The absent workbook wrote nothing, but present DID — "nothing exported"
-    // would be a lie over a workbook that just downloaded.
-    expect(toastWarning).not.toHaveBeenCalled()
-  })
-
-  it('warns "nothing exported" only when neither workbook was written', async () => {
-    respondBadges({ present: [], absent: [] })
-    await renderPage()
-    fireEvent.click(screen.getByText(/Export snapshot/))
-    await waitFor(() => expect(toastWarning).toHaveBeenCalledWith(expect.stringMatching(/nothing exported/)))
-    expect(toastSuccess).not.toHaveBeenCalled()
-  })
-
-  it('toasts both workbooks when both have rows', async () => {
-    respondBadges({ present: PRESENT_BADGE, absent: PRESENT_BADGE })
-    await renderPage()
-    fireEvent.click(screen.getByText(/Export snapshot/))
-    await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(2))
-    expect(toastWarning).not.toHaveBeenCalled()
   })
 })
