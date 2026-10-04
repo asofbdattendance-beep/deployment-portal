@@ -277,14 +277,25 @@ vi.mock('xlsx', () => ({
   write: vi.fn(() => new Uint8Array([1, 2, 3])),
 }))
 
-describe('Live Scanners — the mount/focus "today" sync clamps into the visit window', () => {
-  it('opens on the window edge, never on the raw previsit today', async () => {
+describe('Live Scanners — the date picker is never clamped into the visit window', () => {
+  it('opens on raw today even when the schedule is windowed after it', async () => {
     await renderPage({ schedules: WINDOWED_SCHEDULES })
-    // The regression: useState's init clamped today, but the focus-sync
-    // effect then wrote the RAW today (2026-09-23, a previsit date), and
-    // the whole page silently flipped to a day the operator never picked.
-    expect(rpc).toHaveBeenCalledWith('attendance_scanner_ops', { p_schedule: 'sched-1', p_date: '2026-10-07' })
-    expect(rpc).not.toHaveBeenCalledWith('attendance_scanner_ops', { p_schedule: 'sched-1', p_date: DATE })
+    // The operator asked for history, not just visit days: a previsit today
+    // must stay selectable, so the mount opens on it instead of clamping
+    // forward to the window edge.
+    expect(rpc).toHaveBeenCalledWith('attendance_scanner_ops', { p_schedule: 'sched-1', p_date: DATE })
+    expect(rpc).not.toHaveBeenCalledWith('attendance_scanner_ops', { p_schedule: 'sched-1', p_date: '2026-10-07' })
+  })
+
+  it('loads a previous/previsit day exactly as picked, with no min/max on the input', async () => {
+    await renderPage({ schedules: WINDOWED_SCHEDULES })
+    const input = screen.getByLabelText('Scan day')
+    expect(input.getAttribute('min')).toBeNull()
+    expect(input.getAttribute('max')).toBeNull()
+    fireEvent.change(input, { target: { value: '2026-09-20' } })
+    await waitFor(() => {
+      expect(rpc).toHaveBeenCalledWith('attendance_scanner_ops', { p_schedule: 'sched-1', p_date: '2026-09-20' })
+    })
   })
 })
 

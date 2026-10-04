@@ -35,7 +35,6 @@ vi.mock('../context/PortalAuthContext', () => ({
 vi.mock('../components/Toast', () => ({ useToast: () => mocks.toast }))
 vi.mock('../lib/offlineQueue', () => ({
   getQueuedScans: vi.fn(async () => []),
-  installDrainListeners: vi.fn(() => vi.fn()),
   preloadDeployed: vi.fn(async () => {}),
   clearFailedQueue: vi.fn(async () => {}),
   clearLiveQueue: vi.fn(async () => 0),
@@ -45,6 +44,8 @@ vi.mock('../lib/offlineQueue', () => ({
   // Real implementations: QueueRecoveryBar owns the classification now.
   isFailedQueueRow: (r) => !!r && (r.status === 'failed' || r.failed === true),
   isOrphanedQueueRow: (r) => !(!!r && (r.status === 'failed' || r.failed === true)) && (r?.owner ?? null) === null && !r?.synced,
+  // The app-level sync engine subscribes to this event name.
+  QUEUE_CHANGED_EVENT: 'portal-queue-changed',
 }))
 vi.mock('../lib/excel', () => ({
   exportWorkbook: (...args) => mocks.exportWorkbook(...args),
@@ -168,8 +169,21 @@ describe('DeptInchargePage — sewadar profile fetches are scoped to deployed ba
     await settle()
     const tables = mocks.fetchAllRows.mock.calls.map(c => c[0])
     expect(tables).toContain('deployments')
-    expect(tables).not.toContain('dp_s ewadars')
-    expect(tables).not.toContain('vss_sewadars')
+    // Profile fetches are the badge-CHUNKED reads (`.in('badge_number',
+    // [...])`). The offline directory's best-effort VSS roster read carries
+    // a null filter and is not a profile fetch.
+    const chunked = []
+    for (const c of mocks.fetchAllRows.mock.calls) {
+      if ((c[0] === 'vss_sewadars' || c[0] === 'dp_sewadars') && typeof c[2] === 'function') {
+        const fake = {
+          in: (col, vals) => { chunked.push([c[0], col, vals]); return fake },
+          eq: () => fake,
+          order: () => fake,
+        }
+        try { c[2](fake) } catch { /* predicate shape only */ }
+      }
+    }
+    expect(chunked).toEqual([])
   })
 })
 

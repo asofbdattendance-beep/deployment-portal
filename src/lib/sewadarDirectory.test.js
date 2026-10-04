@@ -125,3 +125,29 @@ describe('writeDirectory / readDirectory', () => {
     expect(await writeDirectory('s', null)).toBe(false)
   })
 })
+
+/* ─── dept map cache (offline popup Dept pill) ─── */
+describe('dept map cache', () => {
+  it('round-trips a department list', async () => {
+    const { writeDeptMap, readDeptMap } = await import('./sewadarDirectory')
+    expect(await writeDeptMap([{ id: 'd1', name: 'MEDICAL' }, { id: 'd2', name: 'TRAFFIC' }])).toBe(true)
+    expect(await readDeptMap()).toEqual([{ id: 'd1', name: 'MEDICAL' }, { id: 'd2', name: 'TRAFFIC' }])
+  })
+
+  it('refuses empty writes so a scoped-out fetch never poisons the cache', async () => {
+    const { writeDeptMap, readDeptMap } = await import('./sewadarDirectory')
+    await writeDeptMap([{ id: 'd1', name: 'MEDICAL' }])
+    expect(await writeDeptMap([])).toBe(false)
+    expect(await writeDeptMap(null)).toBe(false)
+    expect(await readDeptMap()).toEqual([{ id: 'd1', name: 'MEDICAL' }])
+  })
+
+  it('reads a foreign value as empty, never throws', async () => {
+    const { readDeptMap } = await import('./sewadarDirectory')
+    const { cacheSet } = await import('./offlineQueue')
+    await cacheSet('dept_map', { not: 'a list' })
+    expect(await readDeptMap()).toEqual([])
+    await cacheSet('dept_map', [{ id: '  ', name: 'Blank' }, null, 'x', { id: 'd9', name: 'OK' }])
+    expect(await readDeptMap()).toEqual([{ id: 'd9', name: 'OK' }])
+  })
+})

@@ -22,6 +22,34 @@ const fetchAllRpc = vi.fn(async (name, params) => {
   if (res?.error) throw res.error
   return Array.isArray(res?.data) ? res.data : []
 })
+// The Logs tab reads the session table directly (complete-or-throw paging);
+// the trail popup reads three tables through `from`. Both ride canned
+// per-table fixtures, keyed by table name.
+const LOGSESSIONS = [
+  {
+    id: 'log-1', badge_number: 'B1', sewadar_name: 'Asha', sewadar_centre: 'CENTRE A',
+    sewadar_dept: 'd1', is_vss: false, status: 'CLOSED', centre: 'Bhati - Delhi MC',
+    in_date: '2026-10-06', in_time: '09:00:00', in_scanner_badge: 'SC01', in_scanner_name: 'Scanner One',
+    is_manual: false, undeployed_scan: false,
+    out_date: '2026-10-06', out_time: '18:00:00', out_scanner_badge: 'SC02', out_scanner_name: 'Scanner Two',
+  },
+  {
+    id: 'log-2', badge_number: 'B2', sewadar_name: 'Bina', sewadar_centre: 'CENTRE B',
+    sewadar_dept: 'd1', is_vss: false, status: 'OPEN', centre: 'Bhati - Delhi MC',
+    in_date: '2026-10-06', in_time: '08:00:00', in_scanner_badge: 'SC01', in_scanner_name: 'Scanner One',
+    is_manual: true, undeployed_scan: false,
+    out_date: null, out_time: null, out_scanner_badge: null, out_scanner_name: null,
+  },
+]
+const fetchAllRows = vi.fn(async (table) => (table === 'dp_attendance_sessions' ? LOGSESSIONS : []))
+const fromMock = vi.fn()
+function chainable(rows) {
+  const q = {
+    select: () => q, eq: () => q, order: () => q, limit: () => q, range: () => q,
+    then: (resolve) => Promise.resolve(resolve({ data: rows, error: null, count: rows.length })),
+  }
+  return q
+}
 const toastError = vi.fn()
 const toastSuccess = vi.fn()
 
@@ -38,10 +66,12 @@ const noopChannel = () => {
 vi.mock('../lib/supabase', () => ({
   supabase: {
     rpc: (...args) => rpc(...args),
+    from: (...args) => fromMock(...args),
     channel: () => noopChannel(),
     removeChannel: () => {},
   },
   fetchAllRpc: (...args) => fetchAllRpc(...args),
+  fetchAllRows: (...args) => fetchAllRows(...args),
 }))
 
 const toast = { error: toastError, success: toastSuccess, warning: vi.fn(), info: vi.fn() }
@@ -95,6 +125,10 @@ beforeEach(() => {
   toastError.mockClear()
   toastSuccess.mockClear()
   pgHandlers.length = 0
+  fetchAllRows.mockReset()
+  fetchAllRows.mockImplementation(async (table) => (table === 'dp_attendance_sessions' ? LOGSESSIONS : []))
+  fromMock.mockReset()
+  fromMock.mockImplementation(() => chainable([]))
 })
 
 afterEach(() => { cleanup() })
@@ -286,5 +320,102 @@ describe('PrevisitView', () => {
     render(<PrevisitView schedules={SCHEDULES} scheduleId="" />)
     expect(screen.getByText('No schedule selected')).toBeTruthy()
     expect(rpc).not.toHaveBeenCalled()
+  })
+})
+
+describe('PrevisitView drill-in + Logs', () => {
+  const TRAIL = {
+    dp_attendance_sessions: [{
+      id: 's1', badge_number: 'B2', sewadar_name: 'Bina', sewadar_centre: 'CENTRE B',
+      sewadar_dept: 'd1', is_vss: false, status: 'OPEN', centre: 'Bhati - Delhi MC',
+      in_date: '2026-10-06', in_time: '09:05:00',
+      in_scanner_badge: 'SC01', in_scanner_name: 'Scanner One', in_scanner_centre: 'CENTRE B',
+      is_manual: false, undeployed_scan: false,
+      out_date: null, out_time: null, out_scanner_badge: null, out_scanner_name: null, out_scanner_centre: null,
+    }],
+    deployments: [{
+      id: 'd1', badge_number: 'B2', sewadar_name: 'Bina', centre: 'CENTRE B',
+      department_id: 'd1', deployed_department_id: 'd1', status: 'requested',
+    }],
+    sewadar_consents: [{
+      id: 'c1', badge_number: 'B2', sewadar_name: 'Bina', centre: 'CENTRE B',
+      consent_given: true, available_days_count: 5, stay_at_bhati: true, chair_pass: false,
+    }],
+  }
+
+  function respondTrail() {
+    fromMock.mockImplementation((table) => chainable(TRAIL[table] ?? []))
+  }
+
+  async function openRow(nameRe) {
+    const buttons = screen.getAllByRole('button', { name: nameRe })
+    expect(buttons.length).toBeGreaterThan(0)
+    fireEvent.click(buttons[0])
+    await waitFor(() => {
+      expect(screen.getByRole('dialog')).toBeTruthy()
+    })
+  }
+
+  it('attention rows open the scan-trail popup with the trail and related info', async () => {
+    mockRpc()
+    respondTrail()
+    render(<PrevisitView schedules={SCHEDULES} scheduleId="sched-1" initialTab="attention" />)
+    await waitFor(() => expect(screen.getByText('Bina')).toBeTruthy())
+    await openRow(/Open details for B2/)
+    expect(screen.getByText(/Scanner One/)).toBeTruthy()
+    expect(screen.getByText(/5 day\(s\)/)).toBeTruthy()
+    fireEvent.click(screen.getByLabelText('Close anomaly details'))
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+  })
+
+  it('present rows open the popup too', async () => {
+    mockRpc()
+    respondTrail()
+    render(<PrevisitView schedules={SCHEDULES} scheduleId="sched-1" />)
+    await waitFor(() => expect(screen.getByText('Asha')).toBeTruthy())
+    await openRow(/Open details for B1/)
+    expect(screen.getByRole('dialog').textContent).toContain('B1')
+  })
+
+  it('drops the popup selection on schedule change', async () => {
+    mockRpc()
+    respondTrail()
+    const both = [...SCHEDULES, { id: 'sched-2', name: 'November 2026 Visit' }]
+    const utils = render(<PrevisitView schedules={both} scheduleId="sched-1" />)
+    await waitFor(() => expect(screen.getByText('Asha')).toBeTruthy())
+    await openRow(/Open details for B1/)
+    utils.rerender(<PrevisitView schedules={both} scheduleId="sched-2" />)
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+  })
+
+  it('the Logs tab shows the whole-schedule record with IN/IN-by and OUT/OUT-by', async () => {
+    mockRpc()
+    render(<PrevisitView schedules={SCHEDULES} scheduleId="sched-1" />)
+    await waitFor(() => expect(screen.getByText('Asha')).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: /Logs/ }))
+    const table = await waitFor(() => screen.getByRole('table', { name: 'Scan log — one line per session' }))
+    expect(table.textContent).toContain('Scanner One')
+    expect(table.textContent).toContain('Scanner Two')
+    expect(table.textContent).toContain('09:00')
+    expect(table.textContent).toContain('18:00')
+    expect(table.textContent).toContain('still IN')
+    // Department names resolve through the previsit feeds, not the raw id.
+    expect(table.textContent).toContain('MEDICAL')
+  })
+
+  it('a failed log read shows an error with a retry, never a clean empty view', async () => {
+    mockRpc()
+    fetchAllRows.mockRejectedValueOnce(new Error('boom'))
+    render(<PrevisitView schedules={SCHEDULES} scheduleId="sched-1" />)
+    await waitFor(() => expect(screen.getByText('Asha')).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: /Logs/ }))
+    expect(await screen.findByText('Scan log could not be loaded')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry log' }))
+    await waitFor(() => screen.getByRole('table', { name: 'Scan log — one line per session' }))
+    expect(screen.getByRole('table', { name: 'Scan log — one line per session' }).textContent).toContain('Scanner One')
   })
 })

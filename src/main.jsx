@@ -8,8 +8,10 @@ import App from './App'
 // are offline" also shows on the login screen and on the profile-load
 // failure screen — exactly when a phone user most needs to know.
 import OfflineBanner from './components/mobile/OfflineBanner'
+import OfflineSyncStatus from './components/mobile/OfflineSyncStatus'
 import InstallPrompt from './components/mobile/InstallPrompt'
 import SwUpdatePrompt from './components/mobile/SwUpdatePrompt'
+import { installOfflineSync } from './lib/offlineSync'
 import './index.css'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
@@ -18,6 +20,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
       <PortalAuthProvider>
         <ToastProvider>
           <OfflineBanner />
+          <OfflineSyncStatus />
           <InstallPrompt />
           <SwUpdatePrompt />
           <App />
@@ -26,6 +29,16 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     </ErrorBoundary>
   </React.StrictMode>
 )
+// App-level offline sync: ONE drain loop for the whole portal, installed
+// once at boot. It survives page navigation (the old per-scanner-page
+// drainer died on unmount) and kicks a drain immediately — queued scans
+// sync even if the operator never opens a scanner page. Idempotent and
+// exception-proof: a sync engine must never break app boot.
+try {
+  installOfflineSync()
+} catch {
+  // Sync stays best-effort; the app boots without it.
+}
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').then((reg) => {

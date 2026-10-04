@@ -6,64 +6,55 @@ const VARIANT = {
   in: {
     label: 'Checked In',
     icon: CheckCircle2,
-    accent: '#10b981',
-    bg: '#ecfdf5',
+    accent: 'var(--success)',
+    bg: 'var(--success-soft)',
     border: '#a7f3d0',
-    iconBg: '#ecfdf5',
+    iconBg: 'var(--success-soft)',
     iconColor: '#059669',
   },
   out: {
     label: 'Checked Out',
     icon: LogOut,
-    accent: '#6366f1',
-    bg: '#eef2ff',
+    accent: 'var(--primary)',
+    bg: 'var(--primary-soft)',
     border: '#c7d2fe',
-    iconBg: '#eef2ff',
-    iconColor: '#4f46e5',
+    iconBg: 'var(--primary-soft)',
+    iconColor: 'var(--primary-dark)',
   },
   flagged: {
     label: 'Flagged',
     icon: AlertTriangle,
-    accent: '#f59e0b',
-    bg: '#fffbeb',
+    accent: 'var(--warning)',
+    bg: 'var(--warning-soft)',
     border: '#fde68a',
-    iconBg: '#fffbeb',
+    iconBg: 'var(--warning-soft)',
     iconColor: '#b45309',
   },
   queued: {
     label: 'Queued offline',
     icon: WifiOff,
-    accent: '#f59e0b',
-    bg: '#fffbeb',
+    accent: 'var(--warning)',
+    bg: 'var(--warning-soft)',
     border: '#fde68a',
-    iconBg: '#fffbeb',
-    iconColor: '#b45309',
-  },
-  offline: {
-    label: 'Queued offline',
-    icon: WifiOff,
-    accent: '#f59e0b',
-    bg: '#fffbeb',
-    border: '#fde68a',
-    iconBg: '#fffbeb',
+    iconBg: 'var(--warning-soft)',
     iconColor: '#b45309',
   },
   error: {
     label: 'Scan failed',
     icon: XCircle,
-    accent: '#ef4444',
-    bg: '#fef2f2',
+    accent: 'var(--danger)',
+    bg: 'var(--danger-soft)',
     border: '#fecaca',
-    iconBg: '#fef2f2',
+    iconBg: 'var(--danger-soft)',
     iconColor: '#dc2626',
   },
   forgot: {
     label: 'Forgot OUT?',
     icon: Clock,
-    accent: '#f59e0b',
-    bg: '#fffbeb',
+    accent: 'var(--warning)',
+    bg: 'var(--warning-soft)',
     border: '#fde68a',
-    iconBg: '#fffbeb',
+    iconBg: 'var(--warning-soft)',
     iconColor: '#b45309',
   },
   // Explicit IN/OUT choice — a scan only resolves the sewadar's state and
@@ -73,10 +64,10 @@ const VARIANT = {
   choose: {
     label: 'Choose action',
     icon: Clock,
-    accent: '#f59e0b',
-    bg: '#fffbeb',
+    accent: 'var(--warning)',
+    bg: 'var(--warning-soft)',
     border: '#fde68a',
-    iconBg: '#fffbeb',
+    iconBg: 'var(--warning-soft)',
     iconColor: '#b45309',
   },
   // v44 confirm gates — RETIRED (the explicit choice above subsumes them: the
@@ -86,22 +77,26 @@ const VARIANT = {
   confirm_out: {
     label: 'Mark OUT?',
     icon: Clock,
-    accent: '#f59e0b',
-    bg: '#fffbeb',
+    accent: 'var(--warning)',
+    bg: 'var(--warning-soft)',
     border: '#fde68a',
-    iconBg: '#fffbeb',
+    iconBg: 'var(--warning-soft)',
     iconColor: '#b45309',
   },
   confirm_in: {
     label: 'Mark IN?',
     icon: Clock,
-    accent: '#f59e0b',
-    bg: '#fffbeb',
+    accent: 'var(--warning)',
+    bg: 'var(--warning-soft)',
     border: '#fde68a',
-    iconBg: '#fffbeb',
+    iconBg: 'var(--warning-soft)',
     iconColor: '#b45309',
   },
 }
+
+// `offline` is the same state as `queued` (kept as an alias so callers
+// passing either status render identically instead of drifting apart).
+VARIANT.offline = VARIANT.queued
 
 /**
  * ScanResultPopup — centered modal with backdrop-blur.
@@ -290,7 +285,7 @@ export default function ScanResultPopup({
       style={{
         position: 'fixed',
         inset: 0,
-        zIndex: 90, // --z-sheet: above the bottom tab bar (40)
+        zIndex: 'var(--z-sheet)', // bottom sheet: above the bottom tab bar (40)
         display: 'flex',
         alignItems: isMobileScan ? 'flex-end' : 'center',
         justifyContent: 'center',
@@ -327,8 +322,11 @@ export default function ScanResultPopup({
           overflowY: 'auto',
           WebkitOverflowScrolling: 'touch',
           overscrollBehavior: 'contain',
-          background: '#fff',
-          borderRadius: isMobileScan ? '16px 16px 0 0' : 16,
+          // relative: anchors the absolutely-positioned close X to this card
+          // (without it the X resolved against the fixed overlay instead).
+          position: 'relative',
+          background: 'var(--surface)',
+          borderRadius: isMobileScan ? 'var(--radius-lg) var(--radius-lg) 0 0' : 'var(--radius-lg)',
           border: '1px solid var(--border)',
           borderBottom: isMobileScan ? 'none' : '1px solid var(--border)',
           boxShadow: visible
@@ -344,7 +342,7 @@ export default function ScanResultPopup({
         {/* accent hairline */}
         <div style={{ height: 3, background: cfg.accent }} />
         {isMobileScan && (
-          <div style={{ width: 40, height: 4, borderRadius: 999, background: '#cbd5e1', margin: '0.5rem auto 0' }} aria-hidden="true" />
+          <div style={{ width: 40, height: 4, borderRadius: 999, background: 'var(--border)', margin: '0.5rem auto 0' }} aria-hidden="true" />
         )}
 
         {/* close X — hidden for forgot unless dismissible explicitly */}
@@ -360,7 +358,7 @@ export default function ScanResultPopup({
               height: isMobileScan ? 44 : 30,
               borderRadius: 999,
               border: '1px solid var(--border)',
-              background: '#fff',
+              background: 'var(--surface)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -373,9 +371,9 @@ export default function ScanResultPopup({
           </button>
         )}
 
-        <div style={{ padding: '1.35rem 1.35rem 1.1rem' }}>
+        <div style={{ padding: '1.25rem 1.25rem 1rem' }}>
           {/* icon + title */}
-          <div style={{ display: 'flex', gap: '0.85rem', alignItems: 'flex-start' }}>
+          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start' }}>
             <div
               style={{
                 width: 44,
@@ -395,7 +393,7 @@ export default function ScanResultPopup({
             </div>
             <div style={{ flex: 1, minWidth: 0, paddingRight: canBackdropClose ? 28 : 0 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <h3 id="scan-popup-title" style={{ fontSize: '1.06rem', fontWeight: 800, letterSpacing: '-0.02em', lineHeight: 1.2, color: 'var(--text)' }}>
+                <h3 id="scan-popup-title" style={{ fontSize: '0.95rem', fontWeight: 700, letterSpacing: '-0.01em', lineHeight: 1.2, color: 'var(--text)' }}>
                   {title}
                 </h3>
                 {/* status pill */}
@@ -430,8 +428,8 @@ export default function ScanResultPopup({
                       letterSpacing: '0.02em',
                       background: 'var(--surface-2)',
                       border: '1px solid var(--border)',
-                      borderRadius: 8,
-                      padding: '0.28rem 0.65rem',
+                      borderRadius: 'var(--radius)',
+                      padding: '0.25rem 0.625rem',
                       color: 'var(--text)',
                     }}
                   >
@@ -486,7 +484,7 @@ export default function ScanResultPopup({
                     padding: '0.55rem 0.75rem',
                     background: 'var(--surface-2)',
                     border: '1px solid var(--border)',
-                    borderRadius: 10,
+                    borderRadius: 'var(--radius-md)',
                   }}
                 >
                   {eventDate && (
@@ -531,9 +529,9 @@ export default function ScanResultPopup({
                         fontSize: '0.84rem',
                         fontWeight: 700,
                         color: '#b45309',
-                        background: '#fffbeb',
+                        background: 'var(--warning-soft)',
                         border: '1px solid #fde68a',
-                        borderRadius: 8,
+                        borderRadius: 'var(--radius)',
                         padding: '0.45rem 0.65rem',
                       }}
                     >
@@ -541,7 +539,7 @@ export default function ScanResultPopup({
                     </div>
                   )}
                   {message && !flag && (
-                    <div style={{ fontSize: '0.88rem', color: key === 'error' ? '#b91c1c' : 'var(--text-sec)', lineHeight: 1.5 }}>
+                    <div style={{ fontSize: '0.88rem', color: key === 'error' ? 'var(--err)' : 'var(--text-sec)', lineHeight: 1.5 }}>
                       {message}
                     </div>
                   )}
@@ -562,7 +560,7 @@ export default function ScanResultPopup({
 
           {/* Forgot OUT — open since + time input */}
           {isForgot && (
-            <div style={{ marginTop: 14, background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 12, padding: '0.85rem' }}>
+            <div style={{ marginTop: 14, background: 'var(--warning-soft)', border: '1px solid #fde68a', borderRadius: 'var(--radius-md)', padding: '0.75rem' }}>
               <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--text)', marginBottom: 6 }}>
                 Open since <span style={{ fontFamily: 'ui-monospace, monospace', fontWeight: 700 }}>{openSince || '—'}</span>
               </div>
@@ -593,11 +591,11 @@ export default function ScanResultPopup({
             display: 'flex',
             gap: 8,
             flexWrap: 'wrap',
-            padding: '0.85rem 1.1rem',
+            padding: '0.75rem 1rem',
             paddingBottom: isMobileScan
               // clear the bottom tab bar (84px) + safe area on phones
-              ? 'calc(84px + max(0.85rem, env(safe-area-inset-bottom)))'
-              : 'max(0.85rem, env(safe-area-inset-bottom))',
+              ? 'calc(84px + max(0.75rem, env(safe-area-inset-bottom)))'
+              : 'max(0.75rem, env(safe-area-inset-bottom))',
             background: 'var(--surface-2)',
             borderTop: '1px solid var(--border)',
             justifyContent: 'flex-end',

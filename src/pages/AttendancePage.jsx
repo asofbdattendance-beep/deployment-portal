@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { supabase, fetchAllRpc } from '../lib/supabase'
+import { supabase, fetchAllRpc, fetchAllRows } from '../lib/supabase'
 import { useToast } from '../components/Toast'
 import {
   buildSewadarRows,
   buildDailyRows,
   buildScannerRows,
+  buildLogRows,
+  SCAN_LOG_SESSION_COLS,
   dailyTotals,
   attendanceStats,
   searchRows,
@@ -14,6 +16,8 @@ import {
   deptOptions,
   hasExpectedDays,
   sessionDuration,
+  sessionMinutes,
+  formatDuration,
   FULL_VISIT_DAYS,
   UNASSIGNED_CENTRE,
   VISIT_DAYS,
@@ -21,21 +25,24 @@ import {
 } from '../lib/attendance'
 import { todayStrIST, withTimeout } from '../lib/scannerUtils'
 import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
-import { exportWorkbook, exportWorkbookBlob, fileSlug } from '../lib/excel'
+import { fileSlug } from '../lib/excel'
 import { useIsMobile } from '../hooks/useMediaQuery'
-import { useExport } from '../hooks/useExport'
+import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
+import PageHeader, { ViewOnlyPill } from '../components/PageHeader'
+import DataTable from '../components/DataTable'
+import EmptyState from '../components/EmptyState'
+import KpiTile from '../components/KpiTile'
+import ExportButton from '../components/ExportButton'
 import FilterSheet, { MobileFilterBar } from '../components/mobile/FilterSheet'
-import ExportSheet from '../components/mobile/ExportSheet'
 import PrintPdfButton from '../components/PrintPdfButton'
 import Skeleton from '../components/mobile/Skeleton'
 import PullToRefresh from '../components/mobile/PullToRefresh'
 import VirtualList from '../components/mobile/VirtualList'
 import { SewadarCard, ScannerCard } from '../components/AttendanceCards'
 import {
-  ScanLine, Users, Clock, Download, Search, RefreshCw, Loader2,
-  AlertTriangle, CheckCircle2, Radio, Lock,
+  ScanLine, Clock, Search, RefreshCw, Loader2,
+  AlertTriangle, CheckCircle2,
 } from 'lucide-react'
-import { reportRealtimeStatus } from '../lib/realtime'
 
 // Rate band → pill colour. One place, used by both the sewadar and daily tables.
 const BAND_PILL = { full: 'pill-green', partial: 'pill-blue', low: 'pill-amber', none: 'pill-gray' }
@@ -55,6 +62,11 @@ const bandPill = (band) => BAND_PILL[band] || BAND_PILL.none
  * @param {object} params RPC arguments
  * @returns {Promise<Array<object>>}
  */
+// Columns read for the scan log: shared SCAN_LOG_SESSION_COLS
+// (src/lib/attendance.js) — one compact line per session (IN/OUT with
+// by-whom), so the select stays narrow on wide schedules.
+const LOG_SESSION_COLS = SCAN_LOG_SESSION_COLS
+
 async function rpcRows(name, params) {
   const { data, error } = await supabase.rpc(name, params)
   if (error) {
@@ -79,7 +91,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   const toast = useToast()
   const schedule = schedules.find((s) => s.id === scheduleId)
 
-  const [tab, setTab] = useState('sewadars') // sewadars | daily | scanners
+  const [tab, setTab] = useState('sewadars') // sewadars | daily | scanners | logs
   const [date, setDate] = useState(() => clampDateToWindow(todayStrIST(), scheduleWindow(schedule)))
   // Bhati Visit shows visit-days data only: pin the picker inside the
   // window (windowless schedules pass through untouched).
@@ -92,8 +104,8 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   const [sewadarRaw, setSewadarRaw] = useState([])
   const [dailyRaw, setDailyRaw] = useState([])
   const [scannerRaw, setScannerRaw] = useState([])
+  const [logRaw, setLogRaw] = useState([])
   const [loading, setLoading] = useState(true)
-  const [exporting, setExporting] = useState(false)
   const [search, setSearch] = useState('')
   const [filterCentre, setFilterCentre] = useState('all')
   const [filterDept, setFilterDept] = useState('all')
@@ -109,6 +121,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   const [sewErr, setSewErr] = useState(null)
   const [dayErr, setDayErr] = useState(null)
   const [opsErr, setOpsErr] = useState(null)
+  const [logErr, setLogErr] = useState(null)
   // A13: which schedule the rows in state actually belong to. Rows from the
   // previous schedule must never be shown (or exported) under the new one.
   const [rowsScheduleId, setRowsScheduleId] = useState(null)
@@ -119,9 +132,6 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   // A12: once the operator picks a scan day by hand, window-focus must stop
   // moving it.
   const dateTouchedRef = useRef(false)
-  // Max-wait for the realtime debounce below: the timestamp of the last load
-  // that actually fired, so a sustained burst cannot starve the reload.
-  const lastReloadAt = useRef(0)
 
   // A12: `todayStrIST()` was evaluated once at mount, so a page left open across
   // IST midnight showed yesterday until a manual refresh. Re-sync on mount and
@@ -141,13 +151,14 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     return () => window.removeEventListener('focus', sync)
   }, [])
 
-  // ─── Load. The three RPCs are independent, so fire them together. ───
+  // ─── Load. The RPCs and the log read are independent, so fire them
+  // together. The log is NOT date-gated: it is the whole-schedule,
+  // searchable record ("logs ... and all"), while Daily/Scanner stay day views.
   const load = useCallback(async () => {
     // Clear the spinner on the no-schedule path too. Leaving `loading` true
     // here latched the page on its spinner with no timeout and no error.
     if (!scheduleId) { setLoading(false); return }
     const seq = ++seqRef.current
-    lastReloadAt.current = Date.now()
     setLoading(true)
     try {
       // A5: never send an empty p_date — Postgres rejects '' with
@@ -162,12 +173,15 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
             withTimeout(rpcRows('attendance_scanner_ops', { p_schedule: scheduleId, p_date: date }), 15000, 'attendance_scanner_ops'),
           ]
         : [Promise.resolve([]), Promise.resolve([])]
-      const [sewR, dayR, opsR] = await Promise.allSettled([
+      const [sewR, dayR, opsR, logR] = await Promise.allSettled([
         // one row PER BADGE across ~3597 sewadars — must paginate, or the
         // KPI tiles and the Excel export silently read only the first 1000.
         withTimeout(fetchAllRpc('attendance_sewadar_summary', { p_schedule: scheduleId }), 15000, 'attendance_sewadar_summary'),
         dayCalls[0],
         dayCalls[1],
+        // the scan log: every session for the schedule, complete-or-throw
+        // paging (RLS scopes each role to its own rows).
+        withTimeout(fetchAllRows('dp_attendance_sessions', LOG_SESSION_COLS, (q) => q.eq('schedule_id', scheduleId), 'id'), 20000, 'attendance_scan_log'),
       ])
       // A3: drop a stale response that landed after a newer one.
       if (!mountedRef.current || seq !== seqRef.current) return
@@ -200,6 +214,13 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
         console.error('[Attendance] scanner-ops load failed:', opsR.reason)
         setOpsErr(opsR.reason?.message || 'Unknown error')
       }
+      if (logR.status === 'fulfilled') {
+        setLogRaw(logR.value)
+        setLogErr(null)
+      } else {
+        console.error('[Attendance] scan-log load failed:', logR.reason)
+        setLogErr(logR.reason?.message || 'Unknown error')
+      }
       setRowsScheduleId(scheduleId)
     } finally {
       if (mountedRef.current && seq === seqRef.current) setLoading(false)
@@ -229,38 +250,23 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   }, [scheduleId])
 
   // Realtime: a scan landing mid-visit should show up without a manual refresh.
-  // Debounced so a burst of scans triggers ONE reload, not dozens.
-  useEffect(() => {
-    if (!scheduleId) return
-    let alive = true
-    let timer = null
-    const reload = () => {
-      if (!alive) return
-      // Max-wait: the 400ms trailing debounce coalesces bursts, but a
-      // sustained burst would re-arm it forever and starve the reload. Fire
-      // immediately when the last actual load is more than 2000ms old.
-      if (Date.now() - lastReloadAt.current > 2000) {
-        if (timer) clearTimeout(timer)
-        if (alive) load().catch(() => {})
-        return
-      }
-      if (timer) clearTimeout(timer)
-      timer = setTimeout(() => { if (alive) load().catch(() => {}) }, 400)
-    }
-    const channel = supabase
-      .channel(`attendance-${scheduleId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'dp_attendance_sessions', filter: `schedule_id=eq.${scheduleId}` }, reload)
-      // L-34: deployments changes (ASO finalizes, rows become deployed)
-      // move the expected denominators behind these numbers — sessions
-      // alone leave them stale until a manual refresh.
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${scheduleId}` }, reload)
-      // L-40: realtime membership is not guaranteed — a dead channel
-      // used to fail silently. Name the state so it lands in devtools.
-      .subscribe((status) => {
-        reportRealtimeStatus('attendance', status, alive)
-      })
-    return () => { alive = false; if (timer) clearTimeout(timer); supabase.removeChannel(channel) }
-  }, [scheduleId, load])
+  // Shared hook — same channel, same bindings, same 400ms trailing debounce
+  // with a 2000ms max-wait, so a burst of scans triggers ONE reload, never
+  // dozens, and a sustained burst can never starve it.
+  // L-34: the deployments binding stays — ASO finalizes move the expected
+  // denominators behind these numbers, and sessions alone leave them stale
+  // until a manual refresh.
+  // L-40: membership reporting stays inside the hook (silent teardown).
+  useRealtimeRefresh({
+    scheduleId,
+    channelName: `attendance-${scheduleId}`,
+    subscriptions: [
+      { table: 'dp_attendance_sessions', filter: `schedule_id=eq.${scheduleId}` },
+      { table: 'deployments', filter: `schedule_id=eq.${scheduleId}` },
+    ],
+    onReload: load,
+    label: 'attendance',
+  })
 
   // ─── Derived rows ───
   // A13: until the in-flight load for THIS schedule lands, there are no rows.
@@ -270,6 +276,16 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   const allSewadars = useMemo(() => buildSewadarRows(rowsAreCurrent ? sewadarRaw : []), [sewadarRaw, rowsAreCurrent])
   const dailyRows = useMemo(() => buildDailyRows((rowsAreCurrent ? dailyRaw : []).map((r) => ({ ...r, centre: r?.centre || UNASSIGNED_CENTRE }))), [dailyRaw, rowsAreCurrent])
   const scannerRows = useMemo(() => buildScannerRows(rowsAreCurrent ? scannerRaw : []), [scannerRaw, rowsAreCurrent])
+  // Log rows resolve their department NAME through the sewadar summary
+  // (session rows carry only the department id).
+  const badgeDeptNames = useMemo(() => {
+    const m = new Map()
+    for (const r of allSewadars) {
+      if (r?.badge_number && !m.has(r.badge_number)) m.set(r.badge_number, r.dept_name || '')
+    }
+    return m
+  }, [allSewadars])
+  const logRows = useMemo(() => buildLogRows(rowsAreCurrent ? logRaw : [], badgeDeptNames), [logRaw, rowsAreCurrent, badgeDeptNames])
 
   const centres = useMemo(() => {
     // Union the sewadar rows AND the daily rows: a centre that is deployed
@@ -358,6 +374,18 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scannerRows, filterCentre, search, filtering])
 
+  // The Logs tab answers "who scanned what, when, by whom" for the whole
+  // schedule: same centre/dept/search controls, plus the scanner identities.
+  const visibleLog = useMemo(() => {
+    if (!filtering) return logRows
+    return logRows.filter(
+      (r) => centreMatches(r.sewadar_centre)
+        && (filterDept === 'all' || r.dept_name === filterDept)
+        && matchText(search, r.badge_number, r.sewadar_name, r.sewadar_centre, r.dept_name, r.in_by, r.out_by)
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [logRows, filterCentre, filterDept, search, filtering])
+
   // A4: every sheet title states the active filter, so a filtered export can
   // never be mistaken for a full one.
   const filterLabel = useMemo(() => {
@@ -379,7 +407,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
       {depts.map((d) => <option key={d} value={d}>{d}</option>)}
     </select>
     <div style={{ position: 'relative', minWidth: 200 }}>
-      <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none' }} />
+      <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }} />
       <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name / badge / centre..." className="input" style={{ width: '100%', paddingLeft: 30 }} aria-label="Search attendance" />
     </div>
   </>)
@@ -399,7 +427,9 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     ? `${visible.length} of ${allSewadars.length}`
     : tab === 'daily'
       ? `${visibleDaily.length} of ${dailyRows.length}`
-      : `${visibleScanner.length} of ${scannerRows.length}`
+      : tab === 'logs'
+        ? `${visibleLog.length} of ${logRows.length}`
+        : `${visibleScanner.length} of ${scannerRows.length}`
   const centreSearchLabel = useMemo(() => {
     const parts = []
     if (filterCentre !== 'all') parts.push(filterCentre)
@@ -418,7 +448,10 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   const exportFilename = `${fileSlug(schedule?.name)}_${date || 'no-date'}_attendance.xlsx`
   // Sheet rows are built WITHOUT saving so desktop (direct download) and
   // mobile (share sheet) share one builder — the two paths can never drift.
-  const buildExportSheets = () => ([
+  // A9: the two "Attendance %" columns measure different things — the Sewadars
+  // one is the whole-visit rate (days_present / expected_days), the Daily one
+  // is a single day's rate. Distinct names, so nobody reads them as one.
+  const buildExportSheets = useCallback(() => ([
           {
             name: `Sewadars${filterLabel}`,
             rows: visible.map((r, i) => ({
@@ -462,46 +495,45 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
               'Manual Scans': r.manual_scans, 'First Scan': (r.first_in_time || '').slice(0, 5), 'Last Scan': (r.last_scan_time || '').slice(0, 5),
             })),
           },
+          {
+            name: `Logs${filterLabel}`,
+            rows: visibleLog.map((r, i) => {
+              const mins = sessionMinutes(r.in_time, r.out_time, r.in_date, r.out_date)
+              return {
+                'S.No.': i + 1,
+                Badge: r.badge_number, Name: r.sewadar_name || '—',
+                Centre: r.sewadar_centre || UNASSIGNED_CENTRE, Department: r.dept_name || '—',
+                Date: r.in_date || '—',
+                'IN': (r.in_time || '').slice(0, 5) || '—', 'IN By': r.in_by || '—',
+                'OUT': (r.out_time || '').slice(0, 5) || (r.status === 'OPEN' ? 'open' : '—'),
+                'OUT By': r.out_time ? (r.out_by || '—') : '—',
+                Duration: mins == null ? (r.status === 'OPEN' ? 'still IN' : '—') : formatDuration(mins),
+                Status: r.status || '—', Manual: r.is_manual ? 'yes' : 'no',
+                Undeployed: r.undeployed_scan ? 'yes' : 'no',
+              }
+            }),
+          },
         ]
-  )
+  ), [visible, visibleDaily, visibleTotals, visibleScanner, visibleLog, filterLabel, centreSearchLabel, date])
 
-  const exportExcel = async () => {
-    setExporting(true)
-    try {
-      // A9: the two "Attendance %" columns measure different things — this one
-      // is the whole-visit rate (days_present / expected_days), the Daily one
-      // is a single day's rate. Distinct names, so nobody reads them as one.
-      const written = await exportWorkbook(exportFilename, buildExportSheets())
-      // The driver skips empty sheets and writes nothing when all of them
-      // are empty, returning 0 — which is the "nothing to export" case.
-      if (written === 0) toast.warning('Nothing to export')
-      else toast.success('Attendance exported')
-    } catch (e) {
-      toast.error(e?.message || 'Export failed')
-    } finally {
-      setExporting(false)
-    }
+  // Export through the shared <ExportButton>: desktop writes the file directly
+  // (anchor download); phones open the ExportSheet and build the Blob on the
+  // Export tap, so the sheet's Share/Save tap carries a live user gesture (a
+  // share issued after an awaited workbook build is silently blocked on iOS).
+  // Toasts stay in the page — the component reports the count, the page
+  // announces. The driver skips empty sheets and writes nothing when all of
+  // them are empty, returning 0 — which is the "nothing to export" case.
+  const onExported = (written) => {
+    if (written === 0) toast.warning('Nothing to export')
+    else toast.success('Attendance exported')
   }
-
-  // Mobile export: same builder, delivered through the share sheet (the only
-  // reliable "save" on iOS Safari) with an anchor-download fallback.
-  const mobileExport = useExport()
-  const [exportSheetOpen, setExportSheetOpen] = useState(false)
-  const onExportPress = async () => {
-    if (!isMobile) { await exportExcel(); return }
-    setExportSheetOpen(true)
-    await mobileExport.prepare(async () => {
-      const { blob, written } = await exportWorkbookBlob(exportFilename, buildExportSheets())
-      if (!written) return null
-      return { blob, filename: exportFilename }
-    })
-  }
+  const onExportError = (e) => { toast.error(e?.message || 'Export failed') }
 
   // ─── Guards (early returns, so no hooks run after them) ───
   if (!schedules.length) {
     return <div className="page"><div className="card" style={{ padding: '2rem', textAlign: 'center' }}>No schedules</div></div>
   }
-  if (loading && !allSewadars.length && !dailyRows.length) {
+  if (loading && !allSewadars.length && !dailyRows.length && !logRows.length) {
     return (
       <div className="page" style={{ maxWidth: 1400 }}>
         <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', marginBottom: '0.75rem' }}>
@@ -531,13 +563,13 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
       <div className="page" style={{ maxWidth: 1400 }}>
         <div className="card" style={{ padding: '1.5rem', maxWidth: 720, margin: '0 auto' }} role="alert">
           <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', marginBottom: '0.5rem' }}>
-            <AlertTriangle size={18} style={{ color: '#b91c1c' }} />
+            <AlertTriangle size={18} style={{ color: 'var(--err)' }} />
             <h3 className="empty-title" style={{ margin: 0 }}>Could not load attendance</h3>
           </div>
           <p style={{ fontSize: '0.85rem', color: '#475569', margin: 0 }}>
             The attendance figures could not be read from the server.
           </p>
-          <p style={{ fontSize: '0.8rem', color: '#64748b', margin: '0.75rem 0 0' }}>
+          <p style={{ fontSize: '0.8rem', color: 'var(--text-sec)', margin: '0.75rem 0 0' }}>
             The attendance analytics functions may not be installed on this database, or your role
             may not be permitted to read them. No figures are shown, because none could be loaded.
           </p>
@@ -558,43 +590,184 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     { key: 'sewadars', label: 'Sewadars' },
     { key: 'daily', label: 'Daily' },
     { key: 'scanners', label: 'Scanner Ops' },
+    { key: 'logs', label: 'Logs' },
+  ]
+
+  // ─── Shared-table columns. Cell content is identical to the hand-rolled
+  // tables these replace; DataTable owns the wrapper, sticky header,
+  // data-labels (the ≤768px card CSS reads them) and numeric right-align.
+  // data-label strings are unchanged — the mobile card CSS depends on them.
+  const sewadarColumns = [
+    { key: 'centre', label: 'Centre', render: (r) => r.sewadar_centre || UNASSIGNED_CENTRE },
+    {
+      key: 'badge', label: 'Badge', mono: true,
+      render: (r) => (<>{r.badge_number}{' '}{r.is_vss && <span className="pill pill-amber" style={{ fontSize: '0.6rem' }}>VSS</span>}</>),
+    },
+    { key: 'name', label: 'Name', render: (r) => r.sewadar_name },
+    { key: 'dept', label: 'Department', render: (r) => r.dept_name || '—' },
+    {
+      key: 'days', label: 'Days', numeric: true,
+      // A6: no department = no expected days. Showing "0/5" would read as 0%
+      // attendance for someone who was never scheduled to attend.
+      render: (r) => (
+        <span style={{ fontWeight: 700 }}>
+          {hasExpectedDays(r) ? `${r.days_present}/${r.expected_days}` : r.days_present > 0 ? `${r.days_present} (no dept)` : '—'}
+        </span>
+      ),
+    },
+    { key: 'firstIn', label: 'First In', render: (r) => (r.first_in_date ? `${shortDayLabel(r.first_in_date)} ${(r.first_in_time || '').slice(0, 5)}` : '—') },
+    {
+      key: 'lastOut', label: 'Last Out',
+      render: (r) => (r.last_out_date
+        ? `${shortDayLabel(r.last_out_date)} ${(r.last_out_time || '').slice(0, 5)}`
+        : r.still_open ? <span className="pill pill-amber">still IN</span> : '—'),
+    },
+    { key: 'duration', label: 'Duration', render: (r) => sessionDuration(r) },
+    {
+      key: 'rate', label: 'Rate',
+      render: (r) => (hasExpectedDays(r)
+        ? <span className={`pill ${bandPill(r.band)}`}>{r.rate}%</span>
+        : <span className="pill pill-gray" title="No department, so there is no expected-days denominator">—</span>),
+    },
+    {
+      key: 'flags', label: 'Flags',
+      render: (r) => (
+        <span style={{ display: 'inline-flex', gap: '0.25rem', flexWrap: 'wrap' }}>
+          {r.open_sessions > 0 && <span className="pill pill-amber" title="Scanned IN, not yet OUT"><Clock size={11} /> Open</span>}
+          {r.undeployed_scan && <span className="pill pill-red" title="Scanned at the gate but not deployed to any department"><AlertTriangle size={11} /> Undeployed</span>}
+          {!r.open_sessions && !r.undeployed_scan && <span className="pill pill-gray">—</span>}
+        </span>
+      ),
+    },
+  ]
+  const dailyColumns = [
+    { key: 'centre', label: 'Centre', render: (r) => r.centre || UNASSIGNED_CENTRE },
+    { key: 'dept', label: 'Department', render: (r) => r.dept_name || '—' },
+    { key: 'expected', label: 'Expected', numeric: true, render: (r) => r.expected },
+    { key: 'present', label: 'Present', numeric: true, render: (r) => r.present },
+    {
+      key: 'absent', label: 'Absent', numeric: true,
+      render: (r) => (<span style={r.absent ? { color: 'var(--err)', fontWeight: 700 } : undefined}>{r.absent}</span>),
+    },
+    { key: 'open', label: 'Open', numeric: true, render: (r) => r.open_now },
+    {
+      key: 'rate', label: 'Day Rate',
+      render: (r) => (r.expected > 0
+        ? <span className={`pill ${bandPill(r.band)}`}>{r.rate}%</span>
+        : <span className="pill pill-gray" title="Nobody was expected, so there is no rate">—</span>),
+    },
+  ]
+  const scannerColumns = [
+    { key: 'scanner', label: 'Scanner', render: (r) => r.scanner_name || '—' },
+    { key: 'badge', label: 'Badge', mono: true, render: (r) => r.scanner_badge },
+    { key: 'centre', label: 'Centre', render: (r) => r.scanner_centre || UNASSIGNED_CENTRE },
+    { key: 'in', label: 'Scans In', numeric: true, render: (r) => (<span style={{ fontWeight: 700 }}>{r.scans_in}</span>) },
+    { key: 'out', label: 'Scans Out', numeric: true, render: (r) => r.scans_out },
+    {
+      key: 'open', label: 'Open', numeric: true,
+      render: (r) => (<span style={r.open_now ? { color: '#b45309' } : undefined}>{r.open_now}</span>),
+    },
+    { key: 'manual', label: 'Manual', numeric: true, render: (r) => r.manual_scans },
+    { key: 'first', label: 'First', render: (r) => (r.first_in_time || '').slice(0, 5) || '—' },
+    { key: 'last', label: 'Last', render: (r) => (r.last_scan_time || '').slice(0, 5) || '—' },
+  ]
+  // Scan log: one compact line per session — IN time + IN-by and OUT time +
+  // OUT-by side by side, so the whole IN→OUT story reads without scrolling.
+  const logColumns = [
+    { key: 'badge', label: 'Badge', mono: true, render: (r) => (<span style={{ fontSize: '0.8rem' }}>{r.badge_number}</span>) },
+    {
+      key: 'name', label: 'Name',
+      render: (r) => (<>{r.sewadar_name || '—'}{' '}{r.is_vss && <span className="pill pill-amber" style={{ fontSize: '0.6rem' }}>VSS</span>}</>),
+    },
+    { key: 'centre', label: 'Centre', render: (r) => r.sewadar_centre || UNASSIGNED_CENTRE },
+    { key: 'dept', label: 'Department', render: (r) => r.dept_name || '—' },
+    { key: 'day', label: 'Day', render: (r) => (r.in_date ? shortDayLabel(r.in_date) : '—') },
+    {
+      key: 'in', label: 'IN',
+      render: (r) => (
+        <span style={{ whiteSpace: 'nowrap' }}>
+          <strong>{(r.in_time || '').slice(0, 5) || '—'}</strong>{' '}
+          <span style={{ color: 'var(--text-sec)', fontSize: '0.78rem' }}>by {r.in_by || '—'}</span>
+        </span>
+      ),
+    },
+    {
+      key: 'out', label: 'OUT',
+      render: (r) => (
+        <span style={{ whiteSpace: 'nowrap' }}>
+          <strong>{(r.out_time || '').slice(0, 5) || (r.status === 'OPEN' ? 'open' : '—')}</strong>{' '}
+          <span style={{ color: 'var(--text-sec)', fontSize: '0.78rem' }}>by {r.out_time ? (r.out_by || '—') : '—'}</span>
+        </span>
+      ),
+    },
+    {
+      key: 'duration', label: 'Duration',
+      render: (r) => {
+        const mins = sessionMinutes(r.in_time, r.out_time, r.in_date, r.out_date)
+        if (mins == null) {
+          return r.status === 'OPEN'
+            ? <span className="pill pill-amber">still IN</span>
+            : '—'
+        }
+        return formatDuration(mins)
+      },
+    },
+    {
+      key: 'flags', label: 'Flags',
+      render: (r) => (
+        <span style={{ display: 'inline-flex', gap: '0.25rem', flexWrap: 'wrap' }}>
+          {r.status === 'OPEN' && <span className="pill pill-amber" title="Scanned IN, not yet OUT">Open</span>}
+          {r.is_manual && <span className="pill pill-gray" title="Operator-entered, not a camera scan">Manual</span>}
+          {r.undeployed_scan && <span className="pill pill-red" title="Scanned with no deployment for this schedule">Undeployed</span>}
+          {r.status !== 'OPEN' && !r.is_manual && !r.undeployed_scan && <span className="pill pill-gray">—</span>}
+        </span>
+      ),
+    },
   ]
 
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
-      <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
-        <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
-          <h2 className="page-title"><ScanLine size={22} /> Attendance</h2>
-          <div className="page-sub">Who scanned in, on which day, and who is still open · WED – SUN visit</div>
-          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-            <span className="pill" title="Attendance is read-only here — scans are recorded on the Scanner and Dept Incharge pages" style={{ background: '#f1f5f9', color: '#64748b', fontWeight: 600 }}>
-              <Lock size={12} /> View-only
+      <PageHeader
+        icon={<ScanLine size={22} />}
+        title="Attendance"
+        sub="Who scanned in, on which day, and who is still open · WED – SUN visit"
+        pills={<>
+          <ViewOnlyPill title="Attendance is read-only here — scans are recorded on the Scanner and Dept Incharge pages" />
+          {filtering && tab === 'sewadars' && (
+            <span className="pill pill-indigo" title="The table and all four Excel sheets show this filtered set">
+              Showing {visible.length} of {allSewadars.length}
             </span>
-            <button onClick={load} disabled={loading} className="btn btn-ghost">
-              {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
-            </button>
-            <button onClick={onExportPress} disabled={exporting || mobileExport.building || !rowsAreCurrent} className="btn btn-primary">
-              {exporting || mobileExport.building ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export Excel
-            </button>
-            <PrintPdfButton className="btn" />
-            {filtering && tab === 'sewadars' && (
-              <span className="pill pill-indigo" title="The table and all three Excel sheets show this filtered set">
-                Showing {visible.length} of {allSewadars.length}
-              </span>
-            )}
-            {filtering && tab === 'daily' && (
-              <span className="pill pill-indigo" title="The Daily table and its Excel sheet show this filtered set">
-                Showing {visibleDaily.length} of {dailyRows.length}
-              </span>
-            )}
-            {filtering && tab === 'scanners' && (
-              <span className="pill pill-indigo" title="The Scanner Ops table and its Excel sheet show this filtered set">
-                Showing {visibleScanner.length} of {scannerRows.length}
-              </span>
-            )}
-          </div>
-        </div>
-        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          )}
+          {filtering && tab === 'daily' && (
+            <span className="pill pill-indigo" title="The Daily table and its Excel sheet show this filtered set">
+              Showing {visibleDaily.length} of {dailyRows.length}
+            </span>
+          )}
+          {filtering && tab === 'scanners' && (
+            <span className="pill pill-indigo" title="The Scanner Ops table and its Excel sheet show this filtered set">
+              Showing {visibleScanner.length} of {scannerRows.length}
+            </span>
+          )}
+          {filtering && tab === 'logs' && (
+            <span className="pill pill-indigo" title="The Logs table and its Excel sheet show this filtered set">
+              Showing {visibleLog.length} of {logRows.length}
+            </span>
+          )}
+        </>}
+        actions={<>
+          <button onClick={load} disabled={loading} className="btn btn-ghost">
+            {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
+          </button>
+          <ExportButton
+            filename={exportFilename}
+            buildSheets={buildExportSheets}
+            disabled={!rowsAreCurrent}
+            onExported={onExported}
+            onExportError={onExportError}
+          />
+          <PrintPdfButton className="btn" />
+        </>}
+        aside={(
           <div>
             <div className="stat-label" style={{ marginBottom: '0.2rem' }}>Scan day</div>
             <input
@@ -609,45 +782,27 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
               aria-invalid={!date || undefined}
             />
             {!date && (
-              <div role="alert" style={{ fontSize: '0.72rem', color: '#b91c1c', marginTop: '0.25rem', maxWidth: 220 }}>
+              <div role="alert" style={{ fontSize: '0.72rem', color: 'var(--err)', marginTop: '0.25rem', maxWidth: 220 }}>
                 Pick a scan day — the date is empty, so the Daily and Scanner tabs cannot load.
               </div>
             )}
           </div>
-        </div>
-      </div>
+        )}
+      />
 
       <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-        <div className="stat">
-          <div className="stat-label">Scanned</div>
-          <div className="stat-value">{stats.sewadars}</div>
-          <div className="stat-sub">across {stats.centres} centres</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Present ≥1 day</div>
-          <div className="stat-value">{stats.presentToday}</div>
-          <div className="stat-sub">of {stats.sewadars} scanned</div>
-        </div>
+        <KpiTile label="Scanned" value={stats.sewadars} sub={`across ${stats.centres} centres`} />
+        <KpiTile label="Present ≥1 day" value={stats.presentToday} sub={`of ${stats.sewadars} scanned`} />
         {/* A7: `stats.full` counts rate >= 100, which for an OE ESCORTS sewadar
             is 3/3 — not a full 5-day visit. The label therefore says "every
             expected day" and the 5-day subset is reported alongside it. */}
-        <div className="stat">
-          <div className="stat-label">Full attendance</div>
-          <div className="stat-value">{stats.full}</div>
-          <div className="stat-sub">
-            every expected day{stats.full !== stats.full5 ? ` · ${stats.full5} on ${FULL_VISIT_DAYS}-day depts` : ''}
-          </div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Open now</div>
-          <div className="stat-value" style={{ color: stats.openNow ? '#b45309' : undefined }}>{stats.openNow}</div>
-          <div className="stat-sub">IN, not yet OUT</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Undeployed</div>
-          <div className="stat-value" style={{ color: stats.flagged ? '#b91c1c' : undefined }}>{stats.flagged}</div>
-          <div className="stat-sub">scanned but not deployed</div>
-        </div>
+        <KpiTile
+          label="Full attendance"
+          value={stats.full}
+          sub={`every expected day${stats.full !== stats.full5 ? ` · ${stats.full5} on ${FULL_VISIT_DAYS}-day depts` : ''}`}
+        />
+        <KpiTile label="Open now" value={stats.openNow} tone={stats.openNow ? '#b45309' : undefined} sub="IN, not yet OUT" />
+        <KpiTile label="Undeployed" value={stats.flagged} tone={stats.flagged ? 'var(--err)' : undefined} sub="scanned but not deployed" />
       </div>
 
       <PullToRefresh onRefresh={load} refreshing={loading} disabled={!isMobile}>
@@ -661,8 +816,8 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
             ))}
           </div>
           <div style={{ flex: 1 }} />
-          {/* A4: one filter set drives all three tabs, the three tables and all
-              three export sheets, so the tooltip claim can stay honest.
+          {/* A4: one filter set drives all four tabs, the four tables and all
+              four export sheets, so the tooltip claim can stay honest.
               Mobile shows the sheet version only (no duplicate inline row). */}
           {!isMobile && filtersNode}
         </div>
@@ -679,13 +834,14 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
 
         {tab === 'sewadars' && (
           visible.length === 0 ? (
-            <div className="empty">
-              <div className="empty-icon"><Users size={22} /></div>
-              <div className="empty-title">No attendance records</div>
-              <div className="empty-text">
-                {filtering ? 'Try clearing the filters.' : 'No scans have been recorded for this schedule yet.'}
-              </div>
-            </div>
+            loading ? (
+              <DataTable columns={sewadarColumns} rows={[]} loading label="Sewadar attendance" />
+            ) : (
+              <EmptyState
+                title="No attendance records"
+                hint={filtering ? 'Try clearing the filters.' : 'No scans have been recorded for this schedule yet.'}
+              />
+            )
           ) : isMobile ? (
             // Phone: virtualised cards (same fields as the desktop table).
             <VirtualList
@@ -696,66 +852,16 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
               renderRow={(r) => <SewadarCard r={r} />}
             />
           ) : (
-            <div className="table-wrap table-wrap-sticky">
-              <table className="table table-sticky">
-                <thead>
-                  <tr>
-                    <th>Centre</th>
-                    <th>Badge</th>
-                    <th>Name</th>
-                    <th>Department</th>
-                    <th style={{ textAlign: 'center' }}>Days</th>
-                    <th>First In</th>
-                    <th>Last Out</th>
-                    <th>Duration</th>
-                    <th style={{ textAlign: 'center' }}>Rate</th>
-                    <th>Flags</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visible.map((r) => {
-                    return (
-                      // One row per badge: buildSewadarRows re-aggregates, so the
-                      // badge alone is a unique key (dept_name is not).
-                      <tr key={r.badge_number}>
-                        <td data-label="Centre">{r.sewadar_centre || UNASSIGNED_CENTRE}</td>
-                        <td data-label="Badge" style={{ fontFamily: 'monospace' }}>
-                          {r.badge_number}{' '}
-                          {r.is_vss && <span className="pill pill-amber" style={{ fontSize: '0.6rem' }}>VSS</span>}
-                        </td>
-                        <td data-label="Name">{r.sewadar_name}</td>
-                        <td data-label="Department">{r.dept_name || '—'}</td>
-                        {/* A6: no department = no expected days. Showing "0/5"
-                            would read as 0% attendance for someone who was never
-                            scheduled to attend. */}
-                        <td data-label="Days" style={{ textAlign: 'center', fontWeight: 700 }}>
-                          {hasExpectedDays(r) ? `${r.days_present}/${r.expected_days}` : r.days_present > 0 ? `${r.days_present} (no dept)` : '—'}
-                        </td>
-                        <td data-label="First In">{r.first_in_date ? `${shortDayLabel(r.first_in_date)} ${(r.first_in_time || '').slice(0, 5)}` : '—'}</td>
-                        <td data-label="Last Out">
-                          {r.last_out_date
-                            ? `${shortDayLabel(r.last_out_date)} ${(r.last_out_time || '').slice(0, 5)}`
-                            : r.still_open ? <span className="pill pill-amber">still IN</span> : '—'}
-                        </td>
-                        <td data-label="Duration">{sessionDuration(r)}</td>
-                        <td data-label="Rate" style={{ textAlign: 'center' }}>
-                          {hasExpectedDays(r)
-                            ? <span className={`pill ${bandPill(r.band)}`}>{r.rate}%</span>
-                            : <span className="pill pill-gray" title="No department, so there is no expected-days denominator">—</span>}
-                        </td>
-                        <td data-label="Flags">
-                          <span style={{ display: 'inline-flex', gap: '0.25rem', flexWrap: 'wrap' }}>
-                            {r.open_sessions > 0 && <span className="pill pill-amber" title="Scanned IN, not yet OUT"><Clock size={11} /> Open</span>}
-                            {r.undeployed_scan && <span className="pill pill-red" title="Scanned at the gate but not deployed to any department"><AlertTriangle size={11} /> Undeployed</span>}
-                            {!r.open_sessions && !r.undeployed_scan && <span className="pill pill-gray">—</span>}
-                          </span>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
+            // Stale rows stay visible during a realtime reload — the skeleton
+            // above only shows when there is nothing to show yet.
+            // One row per badge: buildSewadarRows re-aggregates, so the badge
+            // alone is a unique key (dept_name is not).
+            <DataTable
+              columns={sewadarColumns}
+              rows={visible}
+              rowKey={(r) => r.badge_number}
+              label="Sewadar attendance"
+            />
           )
         )}
 
@@ -766,8 +872,8 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
                 role="alert"
                 style={{
                   display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap',
-                  background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10,
-                  padding: '0.6rem 0.75rem', fontSize: '0.8rem', color: '#b91c1c', marginBottom: '0.75rem',
+                  background: 'var(--danger-soft)', border: '1px solid #fecaca', borderRadius: 10,
+                  padding: '0.6rem 0.75rem', fontSize: '0.8rem', color: 'var(--err)', marginBottom: '0.75rem',
                 }}
               >
                 <AlertTriangle size={15} />
@@ -779,63 +885,44 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
             )}
             {!date ? (
             // A5: never claim "no deployment for this day" when no day was asked for.
-            <div className="empty">
-              <div className="empty-icon"><Clock size={22} /></div>
-              <div className="empty-title">No scan day selected</div>
-              <div className="empty-text">Pick a scan day above to load the daily summary.</div>
-            </div>
+            <EmptyState title="No scan day selected" hint="Pick a scan day above to load the daily summary." />
           ) : visibleDaily.length === 0 ? (
-            <div className="empty">
-              <div className="empty-icon"><Clock size={22} /></div>
-              <div className="empty-title">No deployment for this day</div>
-              <div className="empty-text">
-                {filtering ? 'Try clearing the filters.' : 'Pick another scan day, or check that departments are allocated.'}
-              </div>
-            </div>
+            loading ? (
+              <DataTable columns={dailyColumns} rows={[]} loading label="Daily attendance" />
+            ) : (
+              <EmptyState
+                title="No deployment for this day"
+                hint={filtering ? 'Try clearing the filters.' : 'Pick another scan day, or check that departments are allocated.'}
+              />
+            )
           ) : (
-            <div className="table-wrap">
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Centre</th>
-                    <th>Department</th>
-                    <th style={{ textAlign: 'center' }}>Expected</th>
-                    <th style={{ textAlign: 'center' }}>Present</th>
-                    <th style={{ textAlign: 'center' }}>Absent</th>
-                    <th style={{ textAlign: 'center' }}>Open</th>
-                    <th style={{ textAlign: 'center' }}>Day Rate</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visibleDaily.map((r) => (
-                    <tr key={`${r.centre}-${r.dept_name}`}>
-                      <td data-label="Centre">{r.centre || UNASSIGNED_CENTRE}</td>
-                      <td data-label="Department">{r.dept_name || '—'}</td>
-                      <td data-label="Expected" style={{ textAlign: 'center' }}>{r.expected}</td>
-                      <td data-label="Present" style={{ textAlign: 'center' }}>{r.present}</td>
-                      <td data-label="Absent" style={{ textAlign: 'center', color: r.absent ? '#b91c1c' : undefined, fontWeight: r.absent ? 700 : 400 }}>{r.absent}</td>
-                      <td data-label="Open" style={{ textAlign: 'center' }}>{r.open_now}</td>
-                      <td data-label="Day Rate" style={{ textAlign: 'center' }}>
-                        {r.expected > 0
-                          ? <span className={`pill ${bandPill(r.band)}`}>{r.rate}%</span>
-                          : <span className="pill pill-gray" title="Nobody was expected, so there is no rate">—</span>}
-                      </td>
+            <>
+              <DataTable
+                columns={dailyColumns}
+                rows={visibleDaily}
+                rowKey={(r) => `${r.centre}-${r.dept_name}`}
+                sticky={false}
+                label="Daily attendance"
+              />
+              {/* DataTable has no footer slot, so the TOTAL row keeps its own
+                  tfoot-only table: `table tbody tr` row counts (and the export,
+                  which totals separately) are unchanged. */}
+              <div className="table-wrap" style={{ marginTop: '0.5rem' }}>
+                <table className="table" aria-label="Daily totals">
+                  <tfoot>
+                    <tr className="table-total" style={{ fontWeight: 700, background: 'var(--surface-2)' }}>
+                      <td data-label="Centre">TOTAL</td>
+                      <td data-label="Department">—</td>
+                      <td data-label="Expected" style={{ textAlign: 'center' }}>{visibleTotals.expected}</td>
+                      <td data-label="Present" style={{ textAlign: 'center' }}>{visibleTotals.present}</td>
+                      <td data-label="Absent" style={{ textAlign: 'center' }}>{visibleTotals.absent}</td>
+                      <td data-label="Open" style={{ textAlign: 'center' }}>{visibleTotals.open_now}</td>
+                      <td data-label="Day Rate" style={{ textAlign: 'center' }}>{visibleTotals.expected > 0 ? `${visibleTotals.rate}%` : '—'}</td>
                     </tr>
-                  ))}
-                </tbody>
-                <tfoot>
-                  <tr className="table-total" style={{ fontWeight: 700, background: '#f8fafc' }}>
-                    <td data-label="Centre">TOTAL</td>
-                    <td data-label="Department">—</td>
-                    <td data-label="Expected" style={{ textAlign: 'center' }}>{visibleTotals.expected}</td>
-                    <td data-label="Present" style={{ textAlign: 'center' }}>{visibleTotals.present}</td>
-                    <td data-label="Absent" style={{ textAlign: 'center' }}>{visibleTotals.absent}</td>
-                    <td data-label="Open" style={{ textAlign: 'center' }}>{visibleTotals.open_now}</td>
-                    <td data-label="Day Rate" style={{ textAlign: 'center' }}>{visibleTotals.expected > 0 ? `${visibleTotals.rate}%` : '—'}</td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
+                  </tfoot>
+                </table>
+              </div>
+            </>
           )
           }
           </>
@@ -848,8 +935,8 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
                 role="alert"
                 style={{
                   display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap',
-                  background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10,
-                  padding: '0.6rem 0.75rem', fontSize: '0.8rem', color: '#b91c1c', marginBottom: '0.75rem',
+                  background: 'var(--danger-soft)', border: '1px solid #fecaca', borderRadius: 10,
+                  padding: '0.6rem 0.75rem', fontSize: '0.8rem', color: 'var(--err)', marginBottom: '0.75rem',
                 }}
               >
                 <AlertTriangle size={15} />
@@ -860,19 +947,16 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
               </div>
             )}
             {!date ? (
-            <div className="empty">
-              <div className="empty-icon"><Radio size={22} /></div>
-              <div className="empty-title">No scan day selected</div>
-              <div className="empty-text">Pick a scan day above to load scanner activity.</div>
-            </div>
+            <EmptyState title="No scan day selected" hint="Pick a scan day above to load scanner activity." />
           ) : visibleScanner.length === 0 ? (
-            <div className="empty">
-              <div className="empty-icon"><Radio size={22} /></div>
-              <div className="empty-title">No scanner activity</div>
-              <div className="empty-text">
-                {filtering ? 'Try clearing the filters.' : `No scans were recorded on ${date}.`}
-              </div>
-            </div>
+            loading ? (
+              <DataTable columns={scannerColumns} rows={[]} loading label="Scanner activity" />
+            ) : (
+              <EmptyState
+                title="No scanner activity"
+                hint={filtering ? 'Try clearing the filters.' : `No scans were recorded on ${date}.`}
+              />
+            )
           ) : isMobile ? (
             // Phone: virtualised cards (same fields as the desktop table).
             <VirtualList
@@ -883,40 +967,58 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
               renderRow={(r) => <ScannerCard r={r} />}
             />
           ) : (
-            <div className="table-wrap">
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Scanner</th>
-                    <th>Badge</th>
-                    <th>Centre</th>
-                    <th style={{ textAlign: 'center' }}>Scans In</th>
-                    <th style={{ textAlign: 'center' }}>Scans Out</th>
-                    <th style={{ textAlign: 'center' }}>Open</th>
-                    <th style={{ textAlign: 'center' }}>Manual</th>
-                    <th>First</th>
-                    <th>Last</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visibleScanner.map((r) => (
-                    <tr key={r.scanner_badge}>
-                      <td data-label="Scanner">{r.scanner_name || '—'}</td>
-                      <td data-label="Badge" style={{ fontFamily: 'monospace' }}>{r.scanner_badge}</td>
-                      <td data-label="Centre">{r.scanner_centre || UNASSIGNED_CENTRE}</td>
-                      <td data-label="Scans In" style={{ textAlign: 'center', fontWeight: 700 }}>{r.scans_in}</td>
-                      <td data-label="Scans Out" style={{ textAlign: 'center' }}>{r.scans_out}</td>
-                      <td data-label="Open" style={{ textAlign: 'center', color: r.open_now ? '#b45309' : undefined }}>{r.open_now}</td>
-                      <td data-label="Manual" style={{ textAlign: 'center' }}>{r.manual_scans}</td>
-                      <td data-label="First">{(r.first_in_time || '').slice(0, 5) || '—'}</td>
-                      <td data-label="Last">{(r.last_scan_time || '').slice(0, 5) || '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            // Stale rows stay visible during a realtime reload — the skeleton
+            // above only shows when there is nothing to show yet.
+            <DataTable
+              columns={scannerColumns}
+              rows={visibleScanner}
+              rowKey={(r) => r.scanner_badge}
+              sticky={false}
+              label="Scanner activity"
+            />
           )
           }
+          </>
+        )}
+
+        {tab === 'logs' && (
+          <>
+            {logErr && (
+              <div
+                role="alert"
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap',
+                  background: 'var(--danger-soft)', border: '1px solid #fecaca', borderRadius: 10,
+                  padding: '0.6rem 0.75rem', fontSize: '0.8rem', color: 'var(--err)', marginBottom: '0.75rem',
+                }}
+              >
+                <AlertTriangle size={15} />
+                <span><strong>Scan log</strong> could not be loaded — the Sewadars, Daily and Scanner Ops tabs are unaffected.</span>
+                <button onClick={load} disabled={loading} className="btn btn-ghost">
+                  <RefreshCw size={12} /> Retry
+                </button>
+              </div>
+            )}
+            {visibleLog.length === 0 ? (
+              loading ? (
+                <DataTable columns={logColumns} rows={[]} loading label="Scan log" />
+              ) : (
+                <EmptyState
+                  title="No scans logged"
+                  hint={filtering ? 'Try clearing the filters.' : 'No scans have been recorded for this schedule yet.'}
+                />
+              )
+            ) : (
+              // Whole-schedule log, newest first — one compact line per
+              // session, so IN/IN-by and OUT/OUT-by read as a single story.
+              <DataTable
+                columns={logColumns}
+                rows={visibleLog}
+                rowKey={(r) => r.id}
+                sticky={false}
+                label="Scan log"
+              />
+            )}
           </>
         )}
       </div>
@@ -933,18 +1035,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
         {filtersNode}
       </FilterSheet>
 
-      <ExportSheet
-        open={isMobile && exportSheetOpen}
-        onClose={() => { setExportSheetOpen(false); mobileExport.reset() }}
-        filename={exportFilename}
-        file={mobileExport.file?.blob || null}
-        building={mobileExport.building}
-        buildError={mobileExport.buildError}
-        delivering={mobileExport.delivering}
-        deliveredVia={mobileExport.deliveredVia}
-        onDeliver={mobileExport.deliver}
-        onRetry={onExportPress}
-      />
+      {/* The mobile share sheet lives inside <ExportButton>. */}
 
       <div className="page-sub" style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
         <CheckCircle2 size={13} />

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { supabase, fetchAllRows } from '../lib/supabase'
+import { supabase } from '../lib/supabase'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import BarcodeScanner from '../components/scanner/BarcodeScanner'
@@ -13,7 +13,11 @@ import MobileScanFeed from '../components/mobile/MobileScanFeed'
 import { todayStrIST } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import { useSewadarDirectory } from '../hooks/useSewadarDirectory'
+import { useDeptNames, refreshDeptNames } from '../hooks/useDeptNames'
 import RecentScansTable from '../components/scanner/RecentScansTable'
+import SewadarPicker from '../components/scanner/SewadarPicker'
+import PageHeader from '../components/PageHeader'
+import KpiTile from '../components/KpiTile'
 
 
 export default function ScannerPage({ schedules, scheduleId, sewaMode }){
@@ -23,8 +27,10 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
   const [sessions, setSessions]=useState([])
   const [manualBadge, setManualBadge]=useState('')
   // `deployment_departments` id -> name source for the popup's Dept pill and
-  // the Dept column of the recent-scans table.
-  const [depts, setDepts]=useState([])
+  // the Dept column of the recent-scans table. Offline-first: the hook seeds
+  // state from the IndexedDB snapshot, so an offline reload still resolves
+  // dept names; live rows overwrite and refresh the cache.
+  const [depts, syncDepts] = useDeptNames()
   const [offline, setOffline]=useState(false)
   // Reactive connectivity — `navigator.onLine` read at render time never
   // updates, so the Online/Offline pill used to go stale until some other
@@ -83,19 +89,19 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
   // show a raw-uuid-free em dash instead of a department name.
   const refreshDepts=useCallback(async()=>{
     if(!scheduleId) return
-    try {
-      // stableKey 'id': fetchAllRows' contract — keyless paging skips both
-      // dedupe and the count-mismatch guard (audit R8).
-      setDepts(await fetchAllRows('deployment_departments', 'id, name', null, 'id') || [])
-    } catch(e){ console.warn('[Scanner] department load failed:', e?.message) }
-  },[scheduleId])
+    // stableKey 'id': fetchAllRows' contract — keyless paging skips both
+    // dedupe and the count-mismatch guard (audit R8). syncDepts only stores
+    // non-empty live rows, so an offline/denied fetch keeps cached names.
+    await refreshDeptNames(syncDepts)
+  },[scheduleId, syncDepts])
 
   const deptNameById = useMemo(() => deptNameMap(depts), [depts])
 
   // Mobile offline-first directory: cached identity (name/centre/dept) so
   // the popup names the sewadar with no network and resolves instantly.
-  // Desktop stays RPC-only (empty Map — zero behavior change).
-  const directoryByBadge = useSewadarDirectory({ scheduleId, enabled: isMobile })
+  // Enabled on all viewports — dirFor is fallback-only (live data first),
+  // so online behaviour is unchanged while desktop offline gains identity.
+  const directoryByBadge = useSewadarDirectory({ scheduleId, enabled: true })
 
   const clearManual = useCallback(() => setManualBadge(''), [])
 
@@ -170,6 +176,11 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
     />
   )
   const manualSubmit = () => { handleScan(manualBadge, { manual: true }) }
+  // ASO "mark for anyone": aso/super_admin may start the normal scan flow
+  // for any badge without a physical scan. A pick is operator-entered, so
+  // it carries the manual flag exactly like a hand-typed badge.
+  const canPick = profile?.role === 'aso' || profile?.role === 'super_admin'
+  const pickSubmit = (badge) => { handleScan(badge, { manual: true }) }
 
   // Mobile: immersive full-screen capture. Same state machine, same slots.
   if (isMobile) {
@@ -180,7 +191,10 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
           pills={<>{profile?.centre} · {schedule?.name || ''} {pillsNode}</>}
           camera={<BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />}
           action={<button onClick={manualSubmit} className="btn btn-primary scan-shell-go" disabled={busy || !manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark In/Out</button>}
-          manual={<input value={manualBadge} onChange={e => setManualBadge(e.target.value)} placeholder="Manual FB/BH/VS badge" className="input scan-shell-input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} onKeyDown={e => { if (e.key === 'Enter') { manualSubmit() } }} />}
+          manual={<>
+            <input value={manualBadge} onChange={e => setManualBadge(e.target.value)} placeholder="Manual FB/BH/VS badge" className="input scan-shell-input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} onKeyDown={e => { if (e.key === 'Enter') { manualSubmit() } }} />
+            {canPick && <SewadarPicker scheduleId={scheduleId} onPick={pickSubmit} />}
+          </>}
           queueBar={queueBarNode}
           feedTitle={<div style={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}><Clock size={14} /> My last 10 scans (today)</div>}
           feed={<MobileScanFeed rows={sessions} deptNameById={deptNameById} limit={10} emptyMessage={myBadge ? 'No scans by you yet today' : 'No scans yet'} />}
@@ -192,18 +206,26 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
 
   return (
     <div className="page" style={{maxWidth:900, margin:'0 auto'}}>
-      <div className="page-header"><div><h2 className="page-title"><ScanLine size={22}/> Scanner</h2><div className="page-sub" style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
-        {profile?.centre} · {schedule?.name||''}
-        {pillsNode}
-      </div></div></div>
+      <PageHeader
+        icon={<ScanLine size={22} />}
+        title="Scanner"
+        sub={`${profile?.centre || ''} · ${schedule?.name || ''}`}
+        pills={pillsNode}
+      />
+      <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
+        <KpiTile label="Scans today" value={sessions.length} sub="your last 10 shown" />
+        <KpiTile label="Queued scans" value={queued.length} sub={syncing ? 'syncing…' : queued.length ? 'waiting for network' : 'nothing waiting'} tone={queued.length ? '#b45309' : undefined} />
+      </div>
       <div className="card" style={{padding:'1rem', marginBottom:12}}>
+        <div className="card-title" style={{ marginBottom: '0.75rem' }}>New scan</div>
         <BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />
         <div style={{display:'flex', gap:8, marginTop:10}}><input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Manual FB/BH/VS badge" className="input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ manualSubmit() }}}/><button onClick={manualSubmit} className="btn btn-primary" disabled={busy||!manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark In/Out</button></div>
       </div>
+      {canPick && <div style={{marginBottom:12}}><SewadarPicker scheduleId={scheduleId} onPick={pickSubmit} /></div>}
       <div className="card" style={{padding:'1rem'}}>
-        <div style={{fontWeight:700, display:'flex', alignItems:'center', gap:6, flexWrap:'wrap'}}>
+        <div className="card-title" style={{display:'flex', alignItems:'center', gap:6, flexWrap:'wrap'}}>
           <Clock size={14}/> My last 10 scans (today, any dept incl. VSS)
-          <span style={{fontWeight:400, fontSize:'0.75rem', color:'#64748b'}}>by you{myBadge?` · ${myBadge}`:''}</span>
+          <span style={{fontWeight:400, fontSize:'0.75rem', color:'var(--text-sec)'}}>by you{myBadge?` · ${myBadge}`:''}</span>
           {/* V16: failed/orphaned rows get their own counted clear actions —
               previously only a single uncounted "Clear failed scans" link. */}
         </div>

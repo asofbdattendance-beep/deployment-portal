@@ -17,10 +17,11 @@
 //
 // The mock setup mirrors src/pages/AttendancePage.test.jsx.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, within, waitFor, fireEvent, cleanup } from '@testing-library/react'
 import AnomaliesPage from './AnomaliesPage'
 
 const rpc = vi.fn()
+const fromMock = vi.fn()
 const toastError = vi.fn()
 const toastSuccess = vi.fn()
 const toastWarning = vi.fn()
@@ -42,6 +43,7 @@ const noopChannel = () => {
 vi.mock('../lib/supabase', () => ({
   supabase: {
     rpc: (...args) => rpc(...args),
+    from: (...args) => fromMock(...args),
     channel: (name) => { channelName = name; return noopChannel() },
     removeChannel: () => {},
   },
@@ -138,17 +140,35 @@ const settle = async () => {
 }
 
 /**
- * Render and wait until the loading gate has passed. Content-agnostic on
- * purpose — waiting for a specific string couples the test to the fixture.
+ * Render and wait until the feed has settled. Content-agnostic on purpose —
+ * waiting for a specific string couples the test to the fixture. Loading now
+ * renders skeleton rows (never a spinner), so readiness means table rows, the
+ * empty state, or the error panel — whichever the fixture produces.
  */
 async function renderPage(props = {}) {
   const utils = render(<AnomaliesPage schedules={SCHEDULES} scheduleId="sched-1" {...props} />)
-  await waitFor(() => expect(screen.queryByText('Loading anomalies…')).toBeNull())
+  await waitFor(() => {
+    const ready = document.querySelector('table tbody tr')
+      || screen.queryByRole('alert')
+      || screen.queryByText('No anomalies')
+      || screen.queryByText('No anomalies for this filter')
+    expect(ready).toBeTruthy()
+  })
   return utils
 }
 
 beforeEach(() => {
   rpc.mockReset()
+  fromMock.mockReset()
+  // Direct table reads (the anomaly popup's trail + the dept-name refresh)
+  // resolve per-table canned rows; default everything to empty.
+  fromMock.mockImplementation(() => {
+    const q = {
+      select: () => q, eq: () => q, order: () => q, limit: () => q, range: () => q,
+      then: (resolve) => Promise.resolve(resolve({ data: [], error: null, count: 0 })),
+    }
+    return q
+  })
   toastError.mockReset()
   toastSuccess.mockReset()
   toastWarning.mockReset()
@@ -365,9 +385,10 @@ describe('null-safe display — a null centre and a null event date are never bl
   it('shows an unknown server-side rule as a neutral pill rather than dropping it', async () => {
     respondWith({ rows: [{ ...NULL_ROW, rule: 'FUTURE_RULE', sewadar_centre: 'DELHI' }] })
     await renderPage()
-    // The chip keeps the rule reachable, and the row is still shown.
+    // The chip keeps the rule reachable, and the row is still shown. Scoped to
+    // the feed table: the header ViewOnlyPill is also .pill-gray.
     expect(screen.getByText('FUTURE RULE (1)')).toBeTruthy()
-    const pill = document.querySelector('.pill-gray')
+    const pill = document.querySelector('table .pill-gray')
     expect(pill.textContent).toContain('FUTURE RULE')
   })
 })
@@ -414,5 +435,105 @@ describe('cap-aware counts — a capped feed reads as a lower bound, never a cen
     const countsRows = bookAppendSheet.mock.calls[1][1].rows
     expect(countsRows[0]).toEqual({ Rule: 'Undeployed scan', Count: '200+' })
     expect(countsRows[countsRows.length - 1].Rule).toMatch(/showing newest 200/i)
+  })
+})
+
+// Drill-in — clicking ANY anomaly row opens its info trail popup with the
+// scan history and related info (deployment + consent + sibling anomalies).
+describe('drill-in — a row click opens the badge info trail', () => {
+  const TRAIL = {
+    dp_attendance_sessions: [{
+      id: 's1', badge_number: 'FB5971GA0001', sewadar_name: 'RAM',
+      sewadar_centre: 'DELHI', sewadar_dept: 'dept-1', is_vss: false,
+      status: 'CLOSED', centre: 'Bhati - Delhi MC',
+      in_date: '2026-09-23', in_time: '09:00:00',
+      in_scanner_badge: 'SC01', in_scanner_name: 'Scanner One', in_scanner_centre: 'DELHI',
+      is_manual: false, undeployed_scan: true,
+      out_date: '2026-09-23', out_time: '18:00:00',
+      out_scanner_badge: 'SC02', out_scanner_name: 'Scanner Two', out_scanner_centre: 'DELHI',
+    }],
+    deployments: [{
+      id: 'd1', badge_number: 'FB5971GA0001', sewadar_name: 'RAM', centre: 'DELHI',
+      department_id: 'dept-1', deployed_department_id: 'dept-2', status: 'requested',
+    }],
+    sewadar_consents: [{
+      id: 'c1', badge_number: 'FB5971GA0001', sewadar_name: 'RAM', centre: 'DELHI',
+      consent_given: true, available_days_count: 5, stay_at_bhati: true, chair_pass: false,
+    }],
+  }
+
+  function respondTrail() {
+    fromMock.mockImplementation((table) => {
+      const rows = TRAIL[table] ?? []
+      const q = {
+        select: () => q, eq: () => q, order: () => q, limit: () => q, range: () => q,
+        then: (resolve) => Promise.resolve(resolve({ data: rows, error: null, count: rows.length })),
+      }
+      return q
+    })
+  }
+
+  async function openFirstRow() {
+    await renderPage()
+    const rowButtons = screen.getAllByRole('button', { name: /Open details for row/ })
+    expect(rowButtons.length).toBeGreaterThan(0)
+    fireEvent.click(rowButtons[0])
+    return waitFor(() => {
+      expect(screen.getByRole('dialog')).toBeTruthy()
+    })
+  }
+
+  it('shows the trail with IN/OUT by-whom plus deployment and consent', async () => {
+    respondTrail()
+    await openFirstRow()
+    expect(screen.getByText(/Scanner One/)).toBeTruthy()
+    expect(screen.getByText(/Scanner Two/)).toBeTruthy()
+    const dep = screen.getByText(/Requested:/)
+    expect(dep.textContent).toContain('dept-1')
+    expect(dep.textContent).toContain('dept-2')
+    expect(screen.getByText(/5 day\(s\)/)).toBeTruthy()
+  })
+
+  it('closes the popup and lists the badge’s other anomalies as related', async () => {
+    respondWith({
+      rows: [
+        { rule: 'UNDEPLOYED_SCAN', badge_number: 'FB5971GA0001', sewadar_name: 'RAM', sewadar_centre: 'DELHI', dept_name: null, detail: 'no deployment', event_date: '2026-09-23' },
+        { rule: 'MULTI_SESSION', badge_number: 'FB5971GA0001', sewadar_name: 'RAM', sewadar_centre: 'DELHI', dept_name: null, detail: '4 INs on 2026-09-23', event_date: '2026-09-23' },
+      ],
+    })
+    respondTrail()
+    await openFirstRow()
+    expect(screen.getByText(/Related anomalies \(1\)/)).toBeTruthy()
+    expect(within(screen.getByRole('dialog')).getByText(/4 INs on 2026-09-23/)).toBeTruthy()
+    fireEvent.click(screen.getByLabelText('Close anomaly details'))
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+  })
+
+  it('drops the selection on schedule change', async () => {
+    respondTrail()
+    const utils = await renderPage()
+    const rowButtons = screen.getAllByRole('button', { name: /Open details for row/ })
+    fireEvent.click(rowButtons[0])
+    await waitFor(() => {
+      expect(screen.getByRole('dialog')).toBeTruthy()
+    })
+    utils.rerender(<AnomaliesPage schedules={SCHEDULES} scheduleId="sched-2" />)
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+  })
+})
+
+describe('drill-in affordance — rows advertise that they open the trail', () => {
+  it('shows a chevron on every row and a tip explaining the click', async () => {
+    await renderPage()
+    const chevrons = [...document.querySelectorAll('table tbody tr')].map(
+      (tr) => tr.textContent.includes('›')
+    )
+    expect(chevrons.length).toBeGreaterThan(0)
+    expect(chevrons.every(Boolean)).toBe(true)
+    expect(screen.getByText(/click any row.*full scan trail/i)).toBeTruthy()
   })
 })

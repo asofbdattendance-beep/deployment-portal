@@ -4,18 +4,22 @@ import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 // `exportWorkbook` runs every sheet name through `sheetName` internally (≤31
 // chars, no \ / * ? : [ ]), so one sheet per centre needs no extra trimming.
-import { exportWorkbook, exportWorkbookBlob, fileSlug } from '../lib/excel'
+// Only fileSlug is imported here — the workbook itself is written inside
+// <ExportButton> (see useExcelExport).
+import { fileSlug } from '../lib/excel'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import FilterSheet, { MobileFilterBar } from '../components/mobile/FilterSheet'
-import { useExport } from '../hooks/useExport'
-import ExportSheet from '../components/mobile/ExportSheet'
+import ExportButton from '../components/ExportButton'
+import PageHeader, { ViewOnlyPill } from '../components/PageHeader'
+import DataTable from '../components/DataTable'
+import EmptyState from '../components/EmptyState'
 import PrintPdfButton from '../components/PrintPdfButton'
 import { shortDayLabel } from '../lib/attendance'
 import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
 import { todayStrIST, withTimeout } from '../lib/scannerUtils'
 import {
-  FileText, Download, Search,
-  RefreshCw, Loader2, AlertTriangle, Lock, Users,
+  FileText, Search,
+  RefreshCw, Loader2, AlertTriangle,
 } from 'lucide-react'
 
 /**
@@ -65,6 +69,23 @@ function matchesSearch(r, term) {
 }
 
 /**
+ * Columns for the on-screen report table (<DataTable>). Same six columns in
+ * the same order as the hand-rolled table this replaced (Badge mono, `—`
+ * fallbacks, VSS/Regular, plain-text Status — the styled `.print-status` chip
+ * lives only in the print-only per-centre sections below, which are untouched
+ * so the PDF is byte-identical). Every column has a label, so every `td`
+ * carries `data-label` for the ≤768px card CSS.
+ */
+const REPORT_COLUMNS = [
+  { key: 'badge_number', label: 'Badge', mono: true },
+  { key: 'sewadar_name', label: 'Name', render: (r) => r.sewadar_name || '—' },
+  { key: 'centre', label: 'Centre', render: (r) => r.centre || '—' },
+  { key: 'dept', label: 'Dept', render: (r) => r.dept || '—' },
+  { key: 'type', label: 'Type', render: (r) => (r.is_vss ? 'VSS' : 'Regular') },
+  { key: 'status', label: 'Status' },
+]
+
+/**
  * Reports — shared day-wise present / absent lists over `attendance_day_badges`.
  *
  * SCOPE IS ENFORCED SERVER-SIDE, exactly as on AttendancePage: the RPC
@@ -96,7 +117,6 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
   const [presentRaw, setPresentRaw] = useState([])
   const [absentRaw, setAbsentRaw] = useState([])
   const [loading, setLoading] = useState(true)
-  const [exporting, setExporting] = useState(false)
   const [search, setSearch] = useState('')
   const [filterCentre, setFilterCentre] = useState(initialCentre || 'all')
   // Per-RPC errors, not one all-or-nothing flag: a present-list failure must
@@ -330,44 +350,24 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
     </div>
   </>)
 
-  const handleExport = async () => {
+  // Pre-press export guards. <ExportButton> owns the press (desktop anchor
+  // download / mobile share sheet live inside it), so the two "don't export"
+  // warnings that used to live at the top of handleExport run here on the
+  // capture phase instead: stopPropagation keeps a guarded press from ever
+  // reaching the button, and the workbook is never built. Messages are
+  // byte-identical to the old handleExport guards.
+  const guardExportPress = (e) => {
     if (!rowsAreCurrent) {
       toast.warning('Reports are still loading — try again in a moment')
+      e.stopPropagation()
+      e.preventDefault()
       return
     }
     if (activeRows.length === 0) {
       toast.warning(`Nothing to export — no ${tabLabel.toLowerCase()} rows match the current filters`)
-      return
+      e.stopPropagation()
+      e.preventDefault()
     }
-    // Mobile: same builder, delivered through the share sheet.
-    if (isMobile) { await onExportPress(); return }
-    setExporting(true)
-    try {
-      const written = await exportWorkbook(exportFilename, buildExportSheets())
-      if (written === 0) {
-        toast.warning('Nothing to export — no rows match the current filters')
-      } else {
-        toast.success(`${tabLabel} list exported`)
-      }
-    } catch (e) {
-      console.error('[Reports] export failed:', e)
-      toast.error('Export failed')
-    } finally {
-      if (mountedRef.current) setExporting(false)
-    }
-  }
-
-  // Mobile export delivery (share sheet + save fallback). Desktop keeps the
-  // direct download above.
-  const mobileExport = useExport()
-  const [exportSheetOpen, setExportSheetOpen] = useState(false)
-  const onExportPress = async () => {
-    setExportSheetOpen(true)
-    await mobileExport.prepare(async () => {
-      const { blob, written } = await exportWorkbookBlob(exportFilename, buildExportSheets())
-      if (!written) return null
-      return { blob, filename: exportFilename }
-    })
   }
 
   const filtering = filterCentre !== 'all' || String(search || '').trim() !== ''
@@ -376,11 +376,10 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
     return (
       <div className="page" style={{ maxWidth: 1400 }}>
         <div className="card">
-          <div className="empty">
-            <div className="empty-icon"><Users size={22} /></div>
-            <div className="empty-title">No schedule selected</div>
-            <div className="empty-text">Pick a schedule to view its day-wise reports.</div>
-          </div>
+          <EmptyState
+            title="No schedule selected"
+            hint="Pick a schedule to view its day-wise reports."
+          />
         </div>
       </div>
     )
@@ -400,39 +399,6 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
     )
   }
 
-  const renderTable = (rows) => (
-    // `.rows-on-phone` keeps this a real row/column grid on phones (horizontal
-    // scroll + pinned Badge column) instead of collapsing every row into a
-    // stacked card — see the notes in index.css. Desktop is untouched.
-    <div className="table-wrap table-wrap-sticky table-wrap-rows">
-      <table className="table table-sticky rows-on-phone">
-        <caption className="sr-only">Report rows</caption>
-        <thead>
-          <tr>
-            <th scope="col">Badge</th>
-            <th scope="col">Name</th>
-            <th scope="col">Centre</th>
-            <th scope="col">Dept</th>
-            <th scope="col">Type</th>
-            <th scope="col">Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={badgeKey(r)}>
-              <td data-label="Badge" style={{ fontFamily: 'monospace' }}>{r.badge_number}</td>
-              <td data-label="Name">{r.sewadar_name || '—'}</td>
-              <td data-label="Centre">{r.centre || '—'}</td>
-              <td data-label="Dept">{r.dept || '—'}</td>
-              <td data-label="Type">{r.is_vss ? 'VSS' : 'Regular'}</td>
-              <td data-label="Status">{r.status}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
-
   const emptyForTab = tab === 'present'
     ? { title: 'No present sewadars', text: date ? `No scans were recorded on ${shortDayLabel(date)}.` : 'Pick a report day above.' }
     : tab === 'absent'
@@ -441,36 +407,47 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
 
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
-      <div className="page-header print-hide" style={{ alignItems: 'center', gap: '1.25rem' }}>
-        <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
-          <h2 className="page-title"><FileText size={22} /> Reports</h2>
-          <div className="page-sub">Day-wise present / absent lists{schedule ? ` · ${schedule.name}` : ''}</div>
-          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-            <span className="pill" title="Read-only — this page never writes attendance" style={{ background: '#f1f5f9', color: '#64748b', fontWeight: 600 }}>
-              <Lock size={12} /> View-only
-            </span>
-            <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ fontSize: '0.75rem' }}>
-              {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
-            </button>
-            {onNavigate && (
-              <button onClick={() => onNavigate?.()} className="btn btn-ghost" style={{ fontSize: '0.75rem' }}>
-                Back
+      {/* print-hide lives on this wrapper, not on PageHeader (which owns no
+          print props): the header chrome must stay out of the PDF exactly as
+          before. */}
+      <div className="print-hide">
+        <PageHeader
+          icon={<FileText size={22} />}
+          title="Reports"
+          sub={`Day-wise present / absent lists${schedule ? ` · ${schedule.name}` : ''}`}
+          pills={<ViewOnlyPill title="Read-only — this page never writes attendance" />}
+          actions={(
+            <>
+              <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ fontSize: '0.75rem' }}>
+                {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
               </button>
-            )}
-            {canExport && (
-              <button onClick={handleExport} disabled={exporting || mobileExport.building || loading || !rowsAreCurrent} className="btn btn-primary" style={{ fontSize: '0.78rem' }}>
-                {exporting || mobileExport.building ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Download Excel
-              </button>
-            )}
-            {/* PDF sits BESIDE Excel, never instead of it: the same report
-                through the browser's Print-to-PDF (index.css `@media print`
-                strips the chrome and forces a real table, so a phone prints a
-                table — not a stack of cards). dept_incharge gets BOTH exports:
-                its rows come from the same role-scoped RPCs, so the workbook
-                is exactly what it can see. */}
-            <PrintPdfButton className="btn" style={{ fontSize: '0.78rem' }} />
-          </div>
-        </div>
+              {onNavigate && (
+                <button onClick={() => onNavigate?.()} className="btn btn-ghost" style={{ fontSize: '0.75rem' }}>
+                  Back
+                </button>
+              )}
+              {canExport && (
+                <span onClickCapture={guardExportPress}>
+                  <ExportButton
+                    filename={exportFilename}
+                    buildSheets={buildExportSheets}
+                    label="Download Excel"
+                    disabled={!rowsAreCurrent || loading}
+                    onExported={() => { toast.success(`${tabLabel} list exported`) }}
+                    onExportError={() => { toast.error('Export failed') }}
+                  />
+                </span>
+              )}
+              {/* PDF sits BESIDE Excel, never instead of it: the same report
+                  through the browser's Print-to-PDF (index.css `@media print`
+                  strips the chrome and forces a real table, so a phone prints a
+                  table — not a stack of cards). dept_incharge gets BOTH exports:
+                  its rows come from the same role-scoped RPCs, so the workbook
+                  is exactly what it can see. */}
+              <PrintPdfButton className="btn" style={{ fontSize: '0.78rem' }} />
+            </>
+          )}
+        />
       </div>
 
       <div className="card print-hide" style={{ padding: '1.25rem' }}>
@@ -521,21 +498,22 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
           Showing {activeRows.length} of {complete.length} sewadars
         </div>
         {activeRows.length === 0 ? (
-          <div className="empty">
-            <div className="empty-icon"><Users size={22} /></div>
-            <div className="empty-title">{emptyForTab.title}</div>
-            <div className="empty-text">
-              {filtering ? 'Try clearing the filters.' : emptyForTab.text}
-            </div>
-            {filtering && (
-              <button type="button" className="btn" style={{ marginTop: '0.75rem' }} onClick={() => { setFilterCentre('all'); setSearch('') }}>
-                Clear filters
-              </button>
-            )}
-          </div>
+          <EmptyState
+            title={emptyForTab.title}
+            hint={filtering ? 'Try clearing the filters.' : emptyForTab.text}
+            {...(filtering ? { actionLabel: 'Clear filters', onAction: clearFilters } : {})}
+          />
         ) : (
           <div role="tabpanel" aria-label={tabLabel}>
-            {renderTable(activeRows)}
+            {/* Initial load is gated by the spinner card above, so this table
+                only ever receives settled rows — no loading skeleton is wired
+                (a background refresh keeps the stale rows by design). */}
+            <DataTable
+              columns={REPORT_COLUMNS}
+              rows={activeRows}
+              rowKey={(r) => badgeKey(r)}
+              label="Report rows"
+            />
           </div>
         )}
       </div>
@@ -618,19 +596,6 @@ export default function ReportsPage({ schedules = [], scheduleId, onNavigate, in
       >
         {reportFiltersNode}
       </FilterSheet>
-
-      <ExportSheet
-        open={isMobile && exportSheetOpen}
-        onClose={() => { setExportSheetOpen(false); mobileExport.reset() }}
-        filename={exportFilename}
-        file={mobileExport.file?.blob || null}
-        building={mobileExport.building}
-        buildError={mobileExport.buildError}
-        delivering={mobileExport.delivering}
-        deliveredVia={mobileExport.deliveredVia}
-        onDeliver={mobileExport.deliver}
-        onRetry={onExportPress}
-      />
     </div>
   )
 }

@@ -15,6 +15,7 @@ import { deptNameMap } from '../lib/scanDisplay'
 import { exportWorkbook, fileSlug } from '../lib/excel'
 import { useScannerSession } from '../hooks/useScannerSession'
 import { useSewadarDirectory } from '../hooks/useSewadarDirectory'
+import { useDeptNames } from '../hooks/useDeptNames'
 import { ScanLine, Users, UserX, UserCheck, Search, Clock, AlertTriangle, Download, Wifi, WifiOff, RefreshCw, Loader2 } from 'lucide-react'
 
 // Canonical queue predicates, mirrored from offlineQueue + ScannerPage: a
@@ -41,7 +42,9 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
   const [centreFilter, setCentreFilter] = useState('') // '' = all centres
   const [myDeptIds, setMyDeptIds] = useState([])
   const [activeDept, setActiveDept] = useState('')
-  const [depts, setDepts] = useState([])
+  // Offline-first department names (popup Dept pill + tables): cached
+  // snapshot first, live rows overwrite + refresh the cache.
+  const [depts, syncDepts] = useDeptNames()
   const [deployments, setDeployments] = useState([])
   const [sewadars, setSewadars] = useState([])
   const [vss, setVss] = useState([])
@@ -137,7 +140,9 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
         byBadge('dp_sewadars', 'badge_number, sewadar_name, centre, is_initiated, gender', ['centre', 'badge_number']),
       ])
       if (!alive()) return
-      setDepts(deptAll||[])
+      // syncDepts ignores empty live results so an offline/denied load keeps
+      // the cached department names (popup Dept pill + tables).
+      syncDepts(deptAll)
       setDeployments(depAll||[])
       setVss(vssAll||[])
       setSewadars(sewAll||[])
@@ -153,7 +158,7 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
       toast.error(e?.message || 'Could not load')
       setOffline(true)
     } finally { if (mountedRef.current && seq === seqRef.current) setLoading(false) }
-  }, [selectedScheduleId, toast])
+  }, [selectedScheduleId, toast, syncDepts])
 
   // Separate effect for initial dept selection — defaults to ALL of the
   // incharge's departments ('' = every id from get_my_dept_ids), so the three
@@ -301,7 +306,9 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
   const isMobile = useIsMobile()
 
   // Mobile offline-first directory (see ScannerPage) — same hook, same rule.
-  const directoryByBadge = useSewadarDirectory({ scheduleId: selectedScheduleId, enabled: isMobile })
+  // Enabled on all viewports: fallback-only, so online behaviour is
+  // unchanged while desktop offline gains popup identity.
+  const directoryByBadge = useSewadarDirectory({ scheduleId: selectedScheduleId, enabled: true })
 
   const {
     popup, outTime, setOutTime, closePopup,

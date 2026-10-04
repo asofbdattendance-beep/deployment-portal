@@ -3,15 +3,17 @@ import { fetchAllRows } from '../lib/supabase'
 import { buildDirectoryMap, readDirectory, writeDirectory } from '../lib/sewadarDirectory'
 
 /**
- * useSewadarDirectory — mobile offline-first identity cache for the scanner.
+ * useSewadarDirectory — offline-first identity cache for the scanner.
  *
  * Returns a Map<UPPER_BADGE, {badge,name,centre,deptId}> built from the
  * schedule's `deployments` rows (RLS already scopes to the scanner's subtree).
  * Served stale-while-revalidate: the IndexedDB snapshot renders immediately,
  * then a background refresh replaces it when online.
  *
- * Mobile-only by contract: pages pass `enabled: isMobile`. Desktop keeps an
- * empty Map (RPC-only path, zero behavior change).
+ * Enabled on all viewports: the directory is fallback-only identity (live
+ * lookup results always win), so online behaviour is identical everywhere
+ * while desktop offline gains popup names too. `enabled` remains so callers
+ * can opt out; pages pass true unconditionally.
  *
  * Identity ONLY — never session state. A stale directory can mislabel a
  * popup; it can never miswrite, because direction and writes stay server-side.

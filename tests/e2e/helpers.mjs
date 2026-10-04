@@ -17,6 +17,15 @@ export async function seedMock(request, rpc) {
   await request.post(`${API}/__test/seed`, { data: { rpc } })
 }
 
+/**
+ * Override the mock profile for the spec (e.g. a multi-tab role like
+ * dept_incharge). Session identity (USER) is untouched, so the offline
+ * queue owner still matches the signed-in user.
+ */
+export async function seedProfile(request, profile) {
+  await request.post(`${API}/__test/seed`, { data: { profile } })
+}
+
 export async function mockCalls(request) {
   return (await request.get(`${API}/__test/calls`)).json()
 }
@@ -44,6 +53,31 @@ export async function loginAsScanner(page) {
 export async function manualScan(page, badge) {
   await page.getByPlaceholder('Manual FB/BH/VS badge').fill(badge)
   await page.getByRole('button', { name: 'Mark In/Out' }).click()
+}
+
+/**
+ * Log in as a dept_incharge (requires seedProfile with role dept_incharge
+ * first) and open the Attendance tab (InchargeScannerPage). The mock
+ * accepts any credentials; the role comes from the seeded profile.
+ */
+export async function loginAsIncharge(page) {
+  await page.goto('/')
+  await page.getByPlaceholder('your@email.com').fill('incharge@example.com')
+  await page.getByPlaceholder('Enter password').fill('secret')
+  await page.getByRole('button', { name: 'Sign In' }).click()
+  await gotoTab(page, 'Attendance')
+  await expect(page.getByPlaceholder('Enter badge manually (FB/BH/VS)')).toBeVisible()
+}
+
+/** Click a desktop nav tab (scoped to .tab-btn so the mobile bar never collides). */
+export async function gotoTab(page, label) {
+  await page.locator('button.tab-btn', { hasText: label }).click()
+}
+
+/** Manual scan on the incharge surface (Enter key — the Go button shifts under popups). */
+export async function inchargeScan(page, badge) {
+  await page.getByPlaceholder('Enter badge manually (FB/BH/VS)').fill(badge)
+  await page.getByPlaceholder('Enter badge manually (FB/BH/VS)').press('Enter')
 }
 
 /** All rows in the app's real IndexedDB offline queue. */
@@ -122,4 +156,52 @@ export async function waitForRpc(request, predicate, timeout = 25000) {
     )
     .toBe(1)
   return found
+}
+
+/**
+ * Seed the offline identity caches directly (same shapes the app writes):
+ * the per-schedule directory snapshot plus the global department map.
+ * Lets a spec prove the offline popup path without depending on the
+ * deployments fetch.
+ */
+export async function seedOfflineIdentity(page, { badge, name, centre, deptId, deptName, scheduleId = SCHEDULE } = {}) {
+  return page.evaluate(
+    ({ badge, name, centre, deptId, deptName, scheduleId }) =>
+      new Promise((resolve, reject) => {
+        const open = indexedDB.open('sewadar_offline_q', 2)
+        open.onerror = () => reject(open.error)
+        open.onsuccess = () => {
+          const db = open.result
+          if (!db.objectStoreNames.contains('sewadar_cache')) {
+            db.close()
+            reject(new Error('sewadar_cache store missing'))
+            return
+          }
+          const now = Date.now()
+          const tx = db.transaction('sewadar_cache', 'readwrite')
+          const store = tx.objectStore('sewadar_cache')
+          store.put({
+            key: `dir:${scheduleId}`,
+            value: {
+              rows: [
+                {
+                  badge_number: badge,
+                  sewadar_name: name,
+                  centre,
+                  deployed_department_id: deptId,
+                  department_id: deptId,
+                },
+              ],
+              vss: [],
+            },
+            at: now,
+          })
+          store.put({ key: `dir_at:${scheduleId}`, value: now, at: now })
+          store.put({ key: 'dept_map', value: [{ id: deptId, name: deptName }], at: now })
+          tx.oncomplete = () => resolve(true)
+          tx.onerror = () => reject(tx.error)
+        }
+      }),
+    { badge, name, centre, deptId, deptName, scheduleId },
+  )
 }

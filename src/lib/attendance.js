@@ -448,6 +448,83 @@ export function buildScannerRows(rows) {
     .sort((a, b) => b.scans_in - a.scans_in || String(a.scanner_badge).localeCompare(String(b.scanner_badge)))
 }
 
+/**
+ * Trim a DB time string (HH:MM:SS or HH:MM:SS.mmm) to HH:MM for display.
+ * Returns '—' for missing values so tables never show a blank cell.
+ * @param {string|null|undefined} t
+ * @returns {string}
+ */
+export function shortTime(t) {
+  const s = String(t || '').slice(0, 5)
+  return s || '—'
+}
+
+/* ─── Scan log shaping ─── */
+
+// Columns read for the scan log: one compact line per session (IN/OUT with
+// by-whom), so the select stays narrow on wide schedules. Shared by the
+// Attendance Logs tab and the Previsit Logs tab — one list, never two.
+export const SCAN_LOG_SESSION_COLS = [
+  'id', 'badge_number', 'sewadar_name', 'sewadar_centre', 'sewadar_dept',
+  'is_vss', 'status', 'centre',
+  'in_date', 'in_time', 'in_scanner_badge', 'in_scanner_name',
+  'is_manual', 'undeployed_scan',
+  'out_date', 'out_time', 'out_scanner_badge', 'out_scanner_name',
+].join(',')
+
+/**
+ * Shape one `dp_attendance_sessions` row into a scan-log line: one session
+ * with IN/OUT and by-whom, newest first. Session rows carry only the
+ * department id, so the department NAME resolves through `deptByBadge`
+ * (badge → department name, built from the sewadar summary); a Map or a
+ * plain object both work.
+ * @param {object} r
+ * @param {Map<string,string>|Object<string,string>} [deptByBadge]
+ * @returns {object}
+ */
+export function toLogRow(r, deptByBadge) {
+  const badge = r?.badge_number || ''
+  const dept = deptByBadge instanceof Map
+    ? deptByBadge.get(badge)
+    : deptByBadge?.[badge]
+  return {
+    id: r?.id ?? badge,
+    badge_number: badge,
+    sewadar_name: r?.sewadar_name || '',
+    sewadar_centre: r?.sewadar_centre || UNASSIGNED_CENTRE,
+    dept_name: dept || r?.dept_name || '',
+    is_vss: !!r?.is_vss,
+    status: r?.status || '',
+    in_date: r?.in_date || null,
+    in_time: r?.in_time || null,
+    in_by: r?.in_scanner_name || r?.in_scanner_badge || '',
+    out_date: r?.out_date || null,
+    out_time: r?.out_time || null,
+    out_by: r?.out_scanner_name || r?.out_scanner_badge || '',
+    is_manual: !!r?.is_manual,
+    undeployed_scan: !!r?.undeployed_scan,
+    venue: r?.centre || '',
+  }
+}
+
+/**
+ * Build the scan-log lines, newest session first. Rows without a badge are
+ * dropped — they cannot be attributed to a sewadar.
+ * @param {Array<object>} rows
+ * @param {Map<string,string>|Object<string,string>} [deptByBadge]
+ * @returns {Array<object>}
+ */
+export function buildLogRows(rows, deptByBadge) {
+  if (!Array.isArray(rows)) return []
+  return rows
+    .filter((r) => r && r.badge_number)
+    .map((r) => toLogRow(r, deptByBadge))
+    .sort((a, b) =>
+      String(b.in_date || '').localeCompare(String(a.in_date || '')) ||
+      String(b.in_time || '').localeCompare(String(a.in_time || '')) ||
+      String(a.badge_number).localeCompare(String(b.badge_number)))
+}
+
 /* ─── Filtering ─── */
 
 /**

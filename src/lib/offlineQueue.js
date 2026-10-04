@@ -41,8 +41,11 @@ function quarantineRow(id, reason) {
         const v = req.result
         if (v) store.put({ ...v, failed: true, status: 'failed', failReason: reason })
       }
-      tx.oncomplete = () => resolve()
+      tx.oncomplete = () => { notifyQueueChanged(); resolve() }
       tx.onerror = () => resolve() // don't throw — best-effort
+      // Abort (quota, versionchange-close) fires instead of error — without
+      // this the promise pends forever and latches _draining.
+      tx.onabort = () => resolve()
     })
   })
 }
@@ -78,7 +81,12 @@ export function classifyScanError(msg, err) {
   if (
     s.includes('Not authorized to scan') ||
     s.includes('Timestamp cannot be in the future') ||
-    s.includes('Timestamp too old')
+    s.includes('Timestamp too old') ||
+    // A queued OUT whose ts precedes its session's IN time can never succeed
+    // on retry (the row ts is fixed at enqueue) — quarantining keeps the
+    // queue flowing instead of head-of-line-blocking behind it for all
+    // MAX_DRAIN_ATTEMPTS backoff cycles.
+    s.includes('OUT time must be after IN time')
   ) return 'permanent'
   // T8: honour err.code (supabase-js attaches .code to RPC errors; it may be
   // numeric or string). 401/403/42501 and any PGRST3xx are auth/RLS denials —
@@ -133,6 +141,26 @@ const DB_VERSION = 2
 const STORE = 'scan_queue'
 const CACHE = 'sewadar_cache'
 
+/**
+ * QUEUE_CHANGED_EVENT — fired on `window` whenever the queue mutates
+ * (enqueue, drain removal, quarantine, markFailed, clears). The app-level
+ * sync engine (`offlineSync.js`) listens for it to refresh counts and kick
+ * a drain, so producers never import the engine (no import cycle: the
+ * engine imports this constant FROM here).
+ */
+export const QUEUE_CHANGED_EVENT = 'portal-queue-changed'
+
+/** Broadcast a queue mutation. Never throws — sync must survive UI errors. */
+export function notifyQueueChanged() {
+  try {
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+      window.dispatchEvent(new window.CustomEvent(QUEUE_CHANGED_EVENT))
+    }
+  } catch {
+    // A notification must never break the write it announces.
+  }
+}
+
 let _dbPromise = null
 let _dbInstance = null
 
@@ -140,7 +168,11 @@ function getDB() {
   if (_dbInstance && _dbInstance.objectStoreNames && _dbInstance.objectStoreNames.length > 0) return Promise.resolve(_dbInstance)
   if (_dbPromise) return _dbPromise
   _dbPromise = safeOpenDB(DB_NAME, DB_VERSION).then(db => {
-    if (!db) return null
+    // A transient open failure must not wedge the module: safeOpenDB resolves
+    // null (never rejects), so without this reset _dbPromise stays a
+    // resolved-null forever and every later call returns null — rows on disk
+    // become unreadable and undrainable until a reload. Retry next call.
+    if (!db) { _dbPromise = null; return null }
     _dbInstance = db
     db.onversionchange = () => { db.close(); _dbInstance = null; _dbPromise = null }
     db.onclose = () => { _dbInstance = null; _dbPromise = null }
@@ -151,7 +183,10 @@ function getDB() {
 
 // ─── enqueueScan result contract (Task A1: L-01 / L-02) ─────────────────────
 // enqueueScan NEVER rejects. Every path resolves a result object:
-//   { ok: true,  id }                        row durably written
+//   { ok: true,  id, owner }                row durably written (owner null
+//                                          when the session was unresolvable —
+//                                          the row can never auto-drain, so
+//                                          callers must say so honestly)
 //   { ok: false, reason: 'unavailable' }     no IndexedDB (private mode, blocked)
 //   { ok: false, reason: 'full' }            MAX_QUEUE_SIZE LIVE rows reached
 //   { ok: false, reason: 'write-failed', error }
@@ -201,12 +236,19 @@ export async function enqueueScan(scan) {
   // persisted in localStorage; storage exceptions (private mode) fall back
   // to Date.now().
   let createdAt = Date.now()
+  // Floor against live rows too: localStorage can throw (Safari private
+  // mode) while IndexedDB still works — without the row-max term a backward
+  // clock jump inverts drain order (OUT before IN), orphaning the pair.
+  const maxRowTs = (existing || []).reduce((m, r) => Math.max(m, Number(r?.createdAt) || 0), 0)
   try {
     const LS_KEY = 'sewadar_offline_q_last_ts'
     const last = Number(localStorage.getItem(LS_KEY) || 0)
-    createdAt = Math.max(Date.now(), (Number.isFinite(last) ? last : 0) + 1)
+    createdAt = Math.max(Date.now(), (Number.isFinite(last) ? last : 0) + 1, maxRowTs + 1)
     localStorage.setItem(LS_KEY, String(createdAt))
-  } catch { /* storage unavailable — Date.now() stands */ }
+  } catch {
+    // Storage unavailable — the row-max floor above still holds order.
+    createdAt = Math.max(Date.now(), maxRowTs + 1)
+  }
   return new Promise((resolve) => {
     let tx2 = null
     // `IDBTransaction.error` THROWS (InvalidStateError) unless the transaction
@@ -221,7 +263,7 @@ export async function enqueueScan(scan) {
       resolve({ ok: false, reason: 'write-failed', error: e })
       return
     }
-    tx2.oncomplete = () => resolve({ ok: true, id })
+    tx2.oncomplete = () => { notifyQueueChanged(); resolve({ ok: true, id, owner: owner ?? null }) }
     tx2.onerror = () => resolve({ ok: false, reason: 'write-failed', error: txError() })
     // A quota breach fires `abort`, not `error`. Without this the promise never
     // settles and the operator's scan hangs on `await enqueueScan(...)` forever.
@@ -248,14 +290,25 @@ export async function removeQueued(id) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite')
     tx.objectStore(STORE).delete(id)
-    tx.oncomplete = () => resolve()
+    tx.oncomplete = () => { notifyQueueChanged(); resolve() }
     tx.onerror = () => reject(tx.error)
+    // Abort (quota, versionchange-close) fires instead of error: resolve so a
+    // delete failure never burns a scan attempt — the row persists and the
+    // next replay dedups by nonce, which is the correct outcome for a scan
+    // the server already applied.
+    tx.onabort = () => resolve()
   })
 }
 
 export async function markFailed(id) {
   const db = await getDB()
   if (!db) return
+  // NOTE: deliberately no notifyQueueChanged() here. A failed attempt is not
+  // new work — broadcasting it would kick a ~1s retry and burn all
+  // MAX_DRAIN_ATTEMPTS in seconds, quarantining rows a transient outage
+  // could have cleared. Recovery cadence comes from the poll, reconnect /
+  // foreground events, and genuinely new queue writes. Counts still refresh
+  // via the drain's onProgress callback.
   return new Promise((resolve) => {
     const tx = db.transaction(STORE, 'readwrite')
     const store = tx.objectStore(STORE)
@@ -270,8 +323,11 @@ export async function markFailed(id) {
         store.put({ ...v, attempts, failed, ...(failed ? { status: 'failed' } : {}) })
       }
     }
-    tx.oncomplete = () => resolve()
-    tx.onerror = () => resolve() // don't throw — best-effort
+      tx.oncomplete = () => resolve()
+      tx.onerror = () => resolve() // don't throw — best-effort
+      // An aborted tx (quota, versionchange-close) fires abort, never error —
+      // without this the promise pends forever and latches _draining.
+      tx.onabort = () => resolve()
   })
 }
 
@@ -294,8 +350,9 @@ export async function clearFailedQueue() {
     const tx = db.transaction(STORE, 'readwrite')
     const store = tx.objectStore(STORE)
     for (const r of doomed) store.delete(r.id)
-    tx.oncomplete = () => resolve(doomed.length)
+    tx.oncomplete = () => { notifyQueueChanged(); resolve(doomed.length) }
     tx.onerror = () => resolve(0)
+    tx.onabort = () => resolve(0)
   })
 }
 
@@ -321,8 +378,9 @@ export async function clearOrphanedQueue() {
     const tx = db.transaction(STORE, 'readwrite')
     const store = tx.objectStore(STORE)
     for (const r of doomed) store.delete(r.id)
-    tx.oncomplete = () => resolve(doomed.length)
+    tx.oncomplete = () => { notifyQueueChanged(); resolve(doomed.length) }
     tx.onerror = () => resolve(0)
+    tx.onabort = () => resolve(0)
   })
 }
 
@@ -356,6 +414,12 @@ export function isStrandedRow(r) {
 export async function listStrandedQueue() {
   const db = await getDB()
   if (!db) return []
+  // Owner-gated: null-owner rows are surfaced ONLY while logged out, beside
+  // clearOrphanedQueue. While logged in, listing them would expose another
+  // operator's queued badges (shared devices) with a working per-row delete
+  // via the unscoped removeQueued — a cross-user read+delete leak.
+  const uid = await resolveOwnerId(null)
+  if (uid !== null) return []
   return new Promise((res) => {
     const req = db.transaction(STORE, 'readonly').objectStore(STORE).getAll()
     req.onsuccess = () => res((req.result || []).filter(isStrandedRow))
@@ -382,8 +446,9 @@ export async function clearLiveQueue() {
     const tx = db.transaction(STORE, 'readwrite')
     const store = tx.objectStore(STORE)
     for (const r of doomed) store.delete(r.id)
-    tx.oncomplete = () => resolve(doomed.length)
+    tx.oncomplete = () => { notifyQueueChanged(); resolve(doomed.length) }
     tx.onerror = () => resolve(0)
+    tx.onabort = () => resolve(0)
   })
 }
 
@@ -409,6 +474,9 @@ export async function cacheDelete(key) {
     tx.objectStore(CACHE).delete(key)
     tx.oncomplete = () => resolve()
     tx.onerror = () => reject(tx.error)
+    // Abort (quota, versionchange-close) fires instead of error — never leave
+    // the promise pending.
+    tx.onabort = () => reject(tx.error || new Error('cache delete aborted'))
   })
 }
 export async function cacheGet(key) {
@@ -458,7 +526,10 @@ export async function drainQueue(supabase, onProgress) {
     try {
       // D1a: logged out → no-op. Otherwise only rows owned by this session
       // user drain; anyone else's (and null-owner) rows are left untouched.
-      const uid = await resolveOwnerId(supabase)
+      // Bounded: getSession() can perform an untimed refresh_token fetch, and
+      // this runs inside the cross-tab Web Lock — an unbounded wait would
+      // wedge every tab's drain. Timeout reads as logged-out (clean no-op).
+      const uid = await withTimeout(resolveOwnerId(supabase), 8000, 'Drain session').catch(() => null)
       if (!uid) return 0
       const db = await getDB()
       if (!db) return 0
@@ -488,6 +559,12 @@ export async function drainQueue(supabase, onProgress) {
       )
 
       let drained = 0
+      // Circuit breaker for systemic failures: consecutive `permanent`
+      // outcomes (an expired fleet token, a revoked RLS policy) would
+      // otherwise terminally quarantine the ENTIRE remaining queue in one
+      // pass. After a short run, leave the tail live for the next pass or
+      // the operator — a single poison row still quarantines and continues.
+      let consecutivePermanent = 0
       for (const q of pending) {
         // D1c: validate timestamp parseability BEFORE attempting the row — an
         // unparseable q.ts used to throw inside the drain try, counted as a
@@ -505,6 +582,9 @@ export async function drainQueue(supabase, onProgress) {
           // the key now so a later OUT failing as dedup/drop is quarantined
           // (visible) instead of deleted (silent pair loss).
           if (q.action === 'IN') failedInKeys.add(`${q.badge}␟${q.schedule_id}`)
+          // A bad timestamp is deterministic for THIS row, not systemic —
+          // it must not count toward the permanent circuit breaker.
+          consecutivePermanent = 0
           onProgress?.(q, false, e)
           continue
         }
@@ -533,6 +613,7 @@ export async function drainQueue(supabase, onProgress) {
           await removeQueued(q.id)
           drained++
           // Decay sticky backoff on forward progress (else ~6 blips pin 60s forever).
+          consecutivePermanent = 0
           _consecutiveFailures = Math.max(0, _consecutiveFailures - 1)
           onProgress?.(q, true)
         } catch (e) {
@@ -569,8 +650,11 @@ export async function drainQueue(supabase, onProgress) {
                 if (openError) throw openError
                 const openRow = Array.isArray(openData) ? openData[0] : openData
                 if (!openRow?.id) throw new Error('No open session to close', { cause: e })
+                // The escalation closes a session discovered NOW — stamp now,
+                // not the queued IN's ts, which can predate the foreign
+                // session's in_time and fail 'OUT time must be after IN time'.
                 const { error: outError } = await withTimeout(
-                  supabase.rpc('scan_out', { p_badge: q.badge, p_schedule: q.schedule_id, p_ts: ts, p_open_id: openRow.id, p_is_manual: q.is_manual || false }),
+                  supabase.rpc('scan_out', { p_badge: q.badge, p_schedule: q.schedule_id, p_ts: new Date().toISOString(), p_open_id: openRow.id, p_is_manual: q.is_manual || false }),
                   10000,
                   'Drain OUT'
                 )
@@ -582,18 +666,33 @@ export async function drainQueue(supabase, onProgress) {
               if (outOk) {
                 await removeQueued(q.id)
                 drained++
+                consecutivePermanent = 0
                 _consecutiveFailures = Math.max(0, _consecutiveFailures - 1)
                 onProgress?.(q, true)
                 continue
               }
             } else {
+              // Dedup/drop: the row is gone (already applied server-side or
+              // never retryable) — report success, not failure. The old code
+              // fell through to `onProgress?.(q, false, e)` below, so every
+              // cleanly-deduped replay painted the UI as a failed sync.
               await removeQueued(q.id)
               drained++
+              consecutivePermanent = 0
               _consecutiveFailures = Math.max(0, _consecutiveFailures - 1)
+              onProgress?.(q, true)
             }
           } else if (kind === 'permanent') {
             await quarantineRow(q.id, msg.slice(0, 160) || 'permanent')
             if (q.action === 'IN') failedInKeys.add(`${q.badge}␟${q.schedule_id}`)
+            onProgress?.(q, false, e)
+            consecutivePermanent++
+            if (consecutivePermanent >= 3) {
+              // Systemic failure, not a poison row: stop this pass with the
+              // tail still live instead of quarantining hundreds of rows.
+              _consecutiveFailures++
+              break
+            }
           } else {
             // T9: pure network/timeout failures never reached the server —
             // back off and break WITHOUT burning one of the row's
@@ -616,9 +715,9 @@ export async function drainQueue(supabase, onProgress) {
               await markFailed(q.id)
             }
             _consecutiveFailures++
+            onProgress?.(q, false, e)
             break // network error — stop draining, backoff
           }
-          onProgress?.(q, false, e)
         }
       }
       return drained
@@ -632,6 +731,13 @@ export async function drainQueue(supabase, onProgress) {
   return run()
 }
 
+/**
+ * @deprecated Superseded by the app-level engine in `offlineSync.js`
+ * (`installOfflineSync` at boot + `subscribeOfflineSync` in components),
+ * which survives page navigation. Retained for its unit test and as a
+ * standalone drain loop — do NOT wire it into pages again: a page-scoped
+ * drainer dies on unmount and stalls the queue.
+ */
 export function installDrainListeners(supabase, cb) {
   let intervalId = null
   const getInterval = () => {

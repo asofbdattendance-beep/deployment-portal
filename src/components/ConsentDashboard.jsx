@@ -1,10 +1,14 @@
-import { useState, useEffect, useCallback } from 'react'
-import { supabase, fetchCentres, fetchAllRows, fetchPortalSettings, setPortalSetting } from '../lib/supabase'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { supabase, fetchCentres, fetchAllRows, fetchPortalSettings } from '../lib/supabase'
 import { getSubtreeCentres, getRootCentre } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from './Toast'
-import MasterSwitch from './MasterSwitch'
-import { BarChart3, Users, Download, AlertTriangle, Building2, LayoutGrid, Lock, History } from 'lucide-react'
+import { BarChart3, Users, AlertTriangle, Building2, LayoutGrid, Lock, Unlock, History } from 'lucide-react'
+import PageHeader, { ViewOnlyPill } from './PageHeader'
+import KpiTile from './KpiTile'
+import EmptyState from './EmptyState'
+import ExportButton from './ExportButton'
+import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
 
 /* ─── Super admin / ASO: comprehensive consent dashboard ───
    Two matrices:
@@ -27,9 +31,7 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
   const [settings, setSettings] = useState({ sewadar_deployment_open: true })
   const [locks, setLocks] = useState([])
   const [activity, setActivity] = useState([])
-  const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [exporting, setExporting] = useState(false)
 
   useEffect(() => {
     fetchPortalSettings().then(setSettings).catch(() => {})
@@ -74,29 +76,25 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
     return () => { mounted = false }
   }, [selectedScheduleId, loadMatrices])
 
-  // realtime: refresh live while centres edit. Coalesced (400ms) so a burst of
-  // changes (e.g. a centre bulk-assign) causes one reload instead of dozens.
-  useEffect(() => {
-    if (!selectedScheduleId) return
-    let mounted = true
-    let reloadTimer = null
-    const scheduleReload = () => {
-      if (!mounted) return
-      if (reloadTimer) clearTimeout(reloadTimer)
-      reloadTimer = setTimeout(() => { if (mounted) loadMatrices(selectedScheduleId).catch(() => {}) }, 400)
-    }
-    const channel = supabase
-      .channel(`consent-dash-${selectedScheduleId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_allocations', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_audit_log', filter: `schedule_id=eq.${selectedScheduleId}` }, scheduleReload)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_settings' }, () => {
-        fetchPortalSettings().then(setSettings).catch(() => {})
-      })
-      .subscribe()
-    return () => { mounted = false; if (reloadTimer) clearTimeout(reloadTimer); supabase.removeChannel(channel) }
-  }, [selectedScheduleId, loadMatrices])
+  // realtime: refresh live while centres edit. Burst-coalesced (400ms) so a
+  // bulk-assign causes one reload instead of dozens; the settings refetch
+  // rides along so one extra cheap RPC per burst replaces the split path.
+  useRealtimeRefresh({
+    scheduleId: selectedScheduleId,
+    channelName: `consent-dash-${selectedScheduleId}`,
+    subscriptions: [
+      { table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` },
+      { table: 'centre_allocations', filter: `schedule_id=eq.${selectedScheduleId}` },
+      { table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` },
+      { table: 'sewadar_audit_log', filter: `schedule_id=eq.${selectedScheduleId}` },
+      { table: 'portal_settings' },
+    ],
+    onReload: () => {
+      loadMatrices(selectedScheduleId).catch(() => {})
+      fetchPortalSettings().then(setSettings).catch(() => {})
+    },
+    label: 'consent-dashboard',
+  })
 
   const unlockCentre = async (id) => {
     const row = locks.find(l => l.id === id)
@@ -107,72 +105,61 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
     toast.success('Deployment reopened — the centre can edit again')
   }
 
-  const toggleSewadars = async () => {
-    if (busy) return
-    setBusy(true)
-    const next = !settings.sewadar_deployment_open
-    try {
-      await setPortalSetting('sewadar_deployment_open', next, profile?.name || null)
-      setSettings(s => ({ ...s, sewadar_deployment_open: next }))
-      toast.success(next ? 'Sewadar deployment is now OPEN' : 'Sewadar deployment is now CLOSED')
-    } catch (err) {
-      toast.error(err.message || 'Could not update setting')
-    } finally { setBusy(false) }
-  }
-
   const schedule = schedules.find(s => s.id === selectedScheduleId)
 
-  // build parent rows (names from centres, counts from the consent RPC)
+  // build parent rows (names from centres, counts from the consent RPC).
+  // Memoized so the export builder below keeps a stable identity.
   const parents = centres.filter(c => !c.parent_centre)
-  const parentRows = parents.map(p => {
-    const cm = consentMatrix.find(r => r.parent_centre === p.name) || {}
-    return {
-      name: p.name,
-      childCount: getSubtreeCentres(centres, p.name).length - 1,
-      total: Number(cm.total_badges || 0),
-      consented: Number(cm.consented || 0),
-      initiated: Number(cm.initiated || 0),
-      nonInitiated: Number(cm.non_initiated || 0),
-      staying: Number(cm.staying || 0),
-      allocCounts: {},
+  const parentRows = useMemo(() => {
+    const rows = parents.map(p => {
+      const cm = consentMatrix.find(r => r.parent_centre === p.name) || {}
+      return {
+        name: p.name,
+        childCount: getSubtreeCentres(centres, p.name).length - 1,
+        total: Number(cm.total_badges || 0),
+        consented: Number(cm.consented || 0),
+        initiated: Number(cm.initiated || 0),
+        nonInitiated: Number(cm.non_initiated || 0),
+        staying: Number(cm.staying || 0),
+        allocCounts: {},
+      }
+    }).sort((a, b) => a.name.localeCompare(b.name))
+
+    // roll allocations up to the parent centre (allocations are stored per parent;
+    // clubbing child-centre allocations if any)
+    const allocByParent = {}
+    ;(allocations || []).forEach(a => {
+      const root = getRootCentre(centres, a.centre) || a.centre
+      if (!allocByParent[root]) allocByParent[root] = {}
+      allocByParent[root][a.department_id] = (allocByParent[root][a.department_id] || 0) + (a.max_count || 0)
+    })
+    rows.forEach(r => {
+      r.allocCounts = allocByParent[r.name] || {}
+      r.allocTotal = Object.values(r.allocCounts).reduce((a, b) => a + b, 0)
+    })
+    return rows
+  }, [centres, consentMatrix, allocations, parents])
+
+  const totals = useMemo(() => {
+    const t = {
+      total: parentRows.reduce((s, r) => s + r.total, 0),
+      consented: parentRows.reduce((s, r) => s + r.consented, 0),
+      initiated: parentRows.reduce((s, r) => s + r.initiated, 0),
+      nonInitiated: parentRows.reduce((s, r) => s + r.nonInitiated, 0),
+      staying: parentRows.reduce((s, r) => s + r.staying, 0),
+      allocTotal: parentRows.reduce((s, r) => s + r.allocTotal, 0),
     }
-  }).sort((a, b) => a.name.localeCompare(b.name))
-
-  // roll allocations up to the parent centre (allocations are stored per parent;
-  // clubbing child-centre allocations if any)
-  const allocByParent = {}
-  ;(allocations || []).forEach(a => {
-    const root = getRootCentre(centres, a.centre) || a.centre
-    if (!allocByParent[root]) allocByParent[root] = {}
-    allocByParent[root][a.department_id] = (allocByParent[root][a.department_id] || 0) + (a.max_count || 0)
-  })
-  parentRows.forEach(r => {
-    r.allocCounts = allocByParent[r.name] || {}
-    r.allocTotal = Object.values(r.allocCounts).reduce((a, b) => a + b, 0)
-  })
-
-  const totals = {
-    total: parentRows.reduce((s, r) => s + r.total, 0),
-    consented: parentRows.reduce((s, r) => s + r.consented, 0),
-    initiated: parentRows.reduce((s, r) => s + r.initiated, 0),
-    nonInitiated: parentRows.reduce((s, r) => s + r.nonInitiated, 0),
-    staying: parentRows.reduce((s, r) => s + r.staying, 0),
-    allocTotal: parentRows.reduce((s, r) => s + r.allocTotal, 0),
-  }
-  totals.allocCounts = {}
-  depts.forEach(d => {
-    totals.allocCounts[d.id] = parentRows.reduce((s, r) => s + ((r.allocCounts || {})[d.id] || 0), 0)
-  })
+    t.allocCounts = {}
+    depts.forEach(d => {
+      t.allocCounts[d.id] = parentRows.reduce((s, r) => s + ((r.allocCounts || {})[d.id] || 0), 0)
+    })
+    return t
+  }, [parentRows, depts])
 
   const pct = totals.total ? Math.round(totals.consented / totals.total * 100) : 0
 
-  const exportExcel = async () => {
-    if (exporting) return
-    setExporting(true)
-    try {
-      const XLSX = await import('xlsx') // lazy — keeps xlsx (~400 kB) out of the main bundle
-    const wb = XLSX.utils.book_new()
-
+  // Excel sheets (shared ExportButton owns the lazy-xlsx driver + mobile path).
+  const buildSheets = useCallback(() => {
     const consentRows = parentRows.map(r => ({
       'CENTRE': r.childCount > 0 ? `${r.name} (+${r.childCount})` : r.name,
       'Total Badges': r.total,
@@ -191,7 +178,6 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
       'Staying (consented)': totals.staying,
       'Scheduled (allocated)': totals.allocTotal,
     })
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(consentRows), 'Consent Matrix')
 
     const deptRows = parentRows.map(r => {
       const row = { 'CENTRE': r.childCount > 0 ? `${r.name} (+${r.childCount})` : r.name, 'Scheduled (allocated)': r.allocTotal }
@@ -203,14 +189,13 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
       'Scheduled (allocated)': totals.allocTotal,
       ...Object.fromEntries(depts.map(d => [d.name, totals.allocCounts[d.id] || 0])),
     })
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(deptRows), 'Department Matrix')
+    return [
+      { name: 'Consent Matrix', rows: consentRows },
+      { name: 'Department Matrix', rows: deptRows },
+    ]
+  }, [parentRows, totals, depts])
 
-    const name = (schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')
-    XLSX.writeFile(wb, `${name}.xlsx`)
-    } catch (err) {
-      toast.error(err?.message || 'Export failed')
-    } finally { setExporting(false) }
-  }
+  const exportFilename = `${(schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')}.xlsx`
 
   const cell = (key, v) => (
     <td key={key} style={{ textAlign: 'center', fontWeight: v > 0 ? 800 : 400, color: v > 0 ? '#047857' : '#94a3b8' }}>{v}</td>
@@ -250,29 +235,32 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
 
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
-      <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
-        <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
-          <h2 className="page-title"><BarChart3 size={22} /> Consent Dashboard</h2>
-          <div className="page-sub">CENTRE consent &amp; allocated-seat matrices</div>
-          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-            {isSuperAdmin ? (
-              <MasterSwitch
-                label="Sewadar Deployment"
-                open={settings.sewadar_deployment_open}
-                onToggle={toggleSewadars}
-                busy={busy}
-              />
-            ) : (
-              <span className="pill" title="View-only access — changes are not permitted for ASO accounts (v20)" style={{ background: '#f1f5f9', color: '#64748b', fontWeight: 600 }}>
-                <Lock size={12} /> View-only
-              </span>
-            )}
-            <button onClick={exportExcel} disabled={exporting} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
-              <Download size={13} /> {exporting ? 'Exporting…' : 'Export Excel'}
-            </button>
-          </div>
-        </div>
-      </div>
+      <PageHeader
+        icon={<BarChart3 size={22} />}
+        title="Consent Dashboard"
+        sub="CENTRE consent & allocated-seat matrices"
+        pills={isSuperAdmin ? (
+          <>
+            <span
+              className={`pill ${settings.sewadar_deployment_open ? 'pill-green' : 'pill-red'}`}
+              title="Sewadar deployment status — the master switch lives in the Control Panel"
+            >
+              {settings.sewadar_deployment_open ? <Unlock size={12} aria-hidden="true" /> : <Lock size={12} aria-hidden="true" />}
+              {' '}Sewadar Deployment: {settings.sewadar_deployment_open ? 'Open' : 'Closed'}
+            </span>
+            <span style={{ fontSize: '0.72rem', color: '#64748b' }}>Master switches live in Control Panel</span>
+          </>
+        ) : (
+          <ViewOnlyPill title="View-only access — changes are not permitted for ASO accounts (v20)" />
+        )}
+        actions={(
+          <ExportButton
+            filename={exportFilename}
+            buildSheets={buildSheets}
+            onExportError={(err) => toast.error(err?.message || 'Export failed')}
+          />
+        )}
+      />
 
       {locks.length > 0 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, padding: '0.6rem 0.75rem', fontSize: '0.82rem', color: '#92400e', marginBottom: '1rem' }}>
@@ -301,50 +289,29 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
         </div>
       ) : totals.total === 0 ? (
         <div className="card">
-          <div className="empty">
-            <div className="empty-icon"><Users size={22} /></div>
-            <div className="empty-title">No sewadars yet</div>
-            <div className="empty-text">Sewadars across centres will appear here once they are added.</div>
-          </div>
+          <EmptyState
+            title="No sewadars yet"
+            hint="Sewadars across centres will appear here once they are added."
+          />
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
           {/* ── collective stats ── */}
           <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-            <div className="stat">
-              <div className="stat-label">Sewadars</div>
-              <div className="stat-value">{totals.total}</div>
-              <div className="stat-sub">across {centres.length} centres</div>
-            </div>
-            <div className="stat">
-              <div className="stat-label">Consented (Yes)</div>
-              <div className="stat-value" style={{ color: '#10b981' }}>{totals.consented}</div>
-              <div className="stat-sub">of {totals.total}</div>
-            </div>
-            <div className="stat">
-              <div className="stat-label">Consent rate</div>
-              <div className="stat-value" style={{ fontSize: '1.1rem', paddingTop: '0.35rem' }}>
+            <KpiTile label="Sewadars" value={totals.total} sub={`across ${centres.length} centres`} />
+            <KpiTile label="Consented (Yes)" value={totals.consented} sub={`of ${totals.total}`} tone="#10b981" />
+            <KpiTile
+              label="Consent rate"
+              value={(
                 <div className="progress" style={{ height: 10 }}>
                   <div className="progress-bar" style={{ width: `${pct}%` }} />
                 </div>
-              </div>
-              <div className="stat-sub">{pct}% consented</div>
-            </div>
-            <div className="stat">
-              <div className="stat-label">Initiated</div>
-              <div className="stat-value" style={{ color: '#0ea5e9' }}>{totals.initiated}</div>
-              <div className="stat-sub">of {totals.consented} consented</div>
-            </div>
-            <div className="stat">
-              <div className="stat-label">Stay at Bhati</div>
-              <div className="stat-value" style={{ color: '#6366f1' }}>{totals.staying}</div>
-              <div className="stat-sub">of {totals.consented} consented</div>
-            </div>
-            <div className="stat">
-              <div className="stat-label">Allocated</div>
-              <div className="stat-value" style={{ color: '#8b5cf6' }}>{totals.allocTotal}</div>
-              <div className="stat-sub">seats across departments</div>
-            </div>
+              )}
+              sub={`${pct}% consented`}
+            />
+            <KpiTile label="Initiated" value={totals.initiated} sub={`of ${totals.consented} consented`} tone="#0ea5e9" />
+            <KpiTile label="Stay at Bhati" value={totals.staying} sub={`of ${totals.consented} consented`} tone="#6366f1" />
+            <KpiTile label="Allocated" value={totals.allocTotal} sub="seats across departments" tone="#8b5cf6" />
           </div>
 
           {/* ── 1. Parent-centre consent matrix ── */}

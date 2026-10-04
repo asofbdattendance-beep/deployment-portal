@@ -12,6 +12,9 @@ import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import MasterSwitch from '../components/MasterSwitch'
 import DeadlinePill from '../components/DeadlinePill'
+import PageHeader from '../components/PageHeader'
+import EmptyState from '../components/EmptyState'
+import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
 import {
   SlidersHorizontal, Globe, Star, ChevronDown, ChevronRight, Search,
   Lock, Unlock, Building2, Layers, Plus, ShieldCheck, AlertTriangle, Users,
@@ -158,30 +161,30 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedScheduleId, loadStatic, loadScheduleData])
 
-  // realtime: overrides / switches / locks change live
-  useEffect(() => {
-    // schedule-scoped subscriptions only get a filter key when a schedule is
-    // selected — an explicit `filter: undefined` has bitten client builds
-    const schedFilter = selectedScheduleId ? { filter: `schedule_id=eq.${selectedScheduleId}` } : {}
-    const channel = supabase
-      .channel(`control-panel-${selectedScheduleId || 'none'}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_settings' }, () => {
-        fetchPortalSettings().then(setSettings).catch(() => {})
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_vss_overrides' }, () => {
-        fetchVssOverrides().then(setVssOverrides).catch(() => {})
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', ...schedFilter }, () => {
-        if (!selectedScheduleId) return
-        fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', selectedScheduleId), 'id').then((data) => setLocks(data || [])).catch(() => {})
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_overrides', ...schedFilter }, () => {
-        if (!selectedScheduleId) return
-        fetchCentreOverrides(selectedScheduleId).then(setOverrides).catch(() => {})
-      })
-      .subscribe()
-    return () => { supabase.removeChannel(channel) }
-  }, [selectedScheduleId])
+  // realtime: overrides / switches / locks change live. This page keeps a
+  // GLOBAL channel (portal_settings + vss overrides are unfiltered), so the
+  // hook gets a truthy scheduleId even with no schedule selected — only the
+  // schedule-scoped bindings are conditional.
+  useRealtimeRefresh({
+    scheduleId: selectedScheduleId || 'global',
+    channelName: `control-panel-${selectedScheduleId || 'none'}`,
+    subscriptions: [
+      { table: 'portal_settings' },
+      { table: 'centre_vss_overrides' },
+      ...(selectedScheduleId ? [
+        { table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` },
+        { table: 'centre_overrides', filter: `schedule_id=eq.${selectedScheduleId}` },
+      ] : []),
+    ],
+    onReload: () => {
+      fetchPortalSettings().then(setSettings).catch(() => {})
+      fetchVssOverrides().then(setVssOverrides).catch(() => {})
+      if (!selectedScheduleId) return
+      fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', selectedScheduleId), 'id').then((data) => setLocks(data || [])).catch(() => {})
+      fetchCentreOverrides(selectedScheduleId).then(setOverrides).catch(() => {})
+    },
+    label: 'control-panel',
+  })
 
   // Header totals prefer DB-side counts (head:true) when available; fallback to
   // JS counts from rows already fetched for the quota table (no extra download).
@@ -448,16 +451,15 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
   // ═════════════════════════ RENDER ════════════════════════════════════
   return (
     <div className="page" style={{ maxWidth: 1500 }}>
-      <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
-        <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
-          <h2 className="page-title"><SlidersHorizontal size={22} /> Control Panel</h2>
-          <div className="page-sub">Per-centre permissions · overrides beat the switch, the deadline and centre locks — never quotas, rules, finalized sewadars or a done schedule</div>
-        </div>
-        {schedule && <DeadlinePill deadline={schedule.deadline} small />}
-      </div>
+      <PageHeader
+        icon={<SlidersHorizontal size={22} />}
+        title="Control Panel"
+        sub="Per-centre permissions · overrides beat the switch, the deadline and centre locks — never quotas, rules, finalized sewadars or a done schedule"
+        aside={schedule ? <DeadlinePill deadline={schedule.deadline} small /> : null}
+      />
 
       {!selectedScheduleId ? (
-        <div className="card"><div className="empty"><div className="empty-icon"><AlertTriangle size={22} /></div><div className="empty-title">No schedule selected</div><div className="empty-text">Create a schedule first.</div></div></div>
+        <div className="card"><EmptyState title="No schedule selected" hint="Create a schedule first." /></div>
       ) : loading ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
           {[...Array(3)].map((_, i) => <div key={i} className="skeleton" style={{ height: 64, borderRadius: 10 }} />)}

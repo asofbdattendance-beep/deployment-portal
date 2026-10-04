@@ -28,6 +28,13 @@ const fetchAllRpc = vi.fn(async (name, params) => {
   if (res?.error) throw res.error
   return Array.isArray(res?.data) ? res.data : []
 })
+// The scan log reads the table directly (complete-or-throw paging); in this
+// suite it rides the same fixture engine, keyed by table name.
+const fetchAllRows = vi.fn(async (table) => {
+  const res = await rpc(table, {})
+  if (res?.error) throw res.error
+  return Array.isArray(res?.data) ? res.data : []
+})
 const toastError = vi.fn()
 const toastSuccess = vi.fn()
 const toastWarning = vi.fn()
@@ -52,6 +59,7 @@ vi.mock('../lib/supabase', () => ({
     removeChannel: () => {},
   },
   fetchAllRpc: (...args) => fetchAllRpc(...args),
+  fetchAllRows: (...args) => fetchAllRows(...args),
 }))
 // A STABLE toast object, deliberately. The real useToast() is useMemo'd in
 // ToastProvider — the provider comments call out that returning a fresh object
@@ -97,13 +105,33 @@ const DAILY = [
 const SCANNER = [
   { scanner_badge: 'SC01', scanner_name: 'Scanner One', scanner_centre: 'DELHI', scans_in: 5, scans_out: 5, open_now: 0, manual_scans: 0, first_in_time: '08:00:00', last_scan_time: '20:00:00' },
 ]
+// Raw dp_attendance_sessions rows: one closed session (RAM) + one still-open,
+// hand-entered session (SHAM). Department NAMES resolve through the sewadar
+// summary above (MEDICAL / COOKING) — the session rows carry only ids.
+const LOG = [
+  {
+    id: 'log-1', badge_number: 'FB5971GA0001', sewadar_name: 'RAM', sewadar_centre: 'DELHI',
+    sewadar_dept: 'dept-x', is_vss: false, status: 'CLOSED', centre: 'Bhati - Delhi MC',
+    in_date: DATE, in_time: '09:00:00', in_scanner_badge: 'SC01', in_scanner_name: 'Scanner One',
+    is_manual: false, undeployed_scan: false,
+    out_date: DATE, out_time: '18:00:00', out_scanner_badge: 'SC02', out_scanner_name: 'Scanner Two',
+  },
+  {
+    id: 'log-2', badge_number: 'FB5971GA0002', sewadar_name: 'SHAM', sewadar_centre: 'FARIDABAD',
+    sewadar_dept: 'dept-y', is_vss: false, status: 'OPEN', centre: 'Bhati - Delhi MC',
+    in_date: DATE, in_time: '08:00:00', in_scanner_badge: 'SC01', in_scanner_name: 'Scanner One',
+    is_manual: true, undeployed_scan: false,
+    out_date: null, out_time: null, out_scanner_badge: null, out_scanner_name: null,
+  },
+]
 
 /** Queue one resolved result per RPC, in the order the page fires them. */
-function respondWith({ sew = [SEWADAR, OTHER_CENTRE], daily = DAILY, scanners = SCANNER } = {}) {
+function respondWith({ sew = [SEWADAR, OTHER_CENTRE], daily = DAILY, scanners = SCANNER, log = LOG } = {}) {
   rpc.mockImplementation((name) => {
     if (name === 'attendance_sewadar_summary') return Promise.resolve({ data: sew, error: null })
     if (name === 'attendance_daily_summary') return Promise.resolve({ data: daily, error: null })
     if (name === 'attendance_scanner_ops') return Promise.resolve({ data: scanners, error: null })
+    if (name === 'dp_attendance_sessions') return Promise.resolve({ data: log, error: null })
     return Promise.resolve({ data: [], error: null })
   })
 }
@@ -133,6 +161,7 @@ async function renderPage(props = {}) {
 
 beforeEach(() => {
   rpc.mockReset()
+  fetchAllRows.mockReset()
   pgHandlers.length = 0
   toastError.mockReset()
   toastSuccess.mockReset()
@@ -165,16 +194,16 @@ describe('A11 — an RPC failure renders an error state, never a silent empty vi
     expect(screen.queryByText('Scanned')).toBeNull()
   })
 
-  it('offers a retry that re-issues all three RPCs', async () => {
+  it('offers a retry that re-issues all four reads', async () => {
     rpc.mockImplementation(() => Promise.resolve({ data: null, error: { message: 'boom' } }))
     await renderPage()
     expect(screen.getByText('Could not load attendance')).toBeTruthy()
-    expect(rpc).toHaveBeenCalledTimes(3)
+    expect(rpc).toHaveBeenCalledTimes(4)
 
     respondWith()
     fireEvent.click(screen.getByText(/Retry/))
     await waitFor(() => expect(screen.getByText('RAM')).toBeTruthy())
-    expect(rpc).toHaveBeenCalledTimes(6)
+    expect(rpc).toHaveBeenCalledTimes(8)
   })
 
   it('degrades only the Scanner tab when scanner_ops fails — the page stays live', async () => {
@@ -372,12 +401,14 @@ describe('A16 — department options follow the centre filter', () => {
 })
 
 describe('A10 — the tab list is not role-gated', () => {
-  it('offers all three tabs and lets the RPC decide the rows', async () => {
+  it('offers all four tabs and lets the RPC decide the rows', async () => {
     // A role with no scanner_ops access gets zero rows server-side; the tab is
     // still present and the empty state shows through honestly.
     respondWith({ sew: [SEWADAR], daily: DAILY, scanners: [] })
     await renderPage()
-    expect(screen.getByText('Scanner Ops')).toBeTruthy()
+    for (const label of ['Sewadars', 'Daily', 'Scanner Ops', 'Logs']) {
+      expect(screen.getByText(label)).toBeTruthy()
+    }
     fireEvent.click(screen.getByText('Scanner Ops'))
     expect(screen.getByText('No scanner activity')).toBeTruthy()
   })
@@ -500,6 +531,7 @@ describe('C2 — exports use the shared driver naming (L-24/L-25)', () => {
     await waitFor(() => expect(utils.book_append_sheet).toHaveBeenCalled())
     const names = utils.book_append_sheet.mock.calls.map(c => c[2])
     expect(names[0]).toMatch(/^Sewadars/)
+    expect(names).toEqual(expect.arrayContaining([expect.stringMatching(/^Logs/)]))
     for (const n of names) {
       expect(typeof n).toBe('string')
       expect(n.length).toBeLessThanOrEqual(31)
@@ -566,19 +598,19 @@ describe('realtime max-wait', () => {
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => 2_000_000)
     try {
       await renderPage()
-      expect(rpc).toHaveBeenCalledTimes(3)
+      expect(rpc).toHaveBeenCalledTimes(4)
       expect(pgHandlers.length).toBeGreaterThan(0)
       const reload = pgHandlers[0]
 
       // 500ms after the load: inside the window → trailing 400ms debounce.
       nowSpy.mockImplementation(() => 2_000_500)
       reload()
-      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(6))
+      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(8))
 
       // 5s after the last load: past max-wait → immediate, no timer wait.
       nowSpy.mockImplementation(() => 2_010_000)
       reload()
-      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(9))
+      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(12))
     } finally {
       nowSpy.mockRestore()
     }
@@ -628,5 +660,68 @@ describe('AttendancePage — the mount/focus "today" sync clamps into the visit 
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('Logs — the whole-schedule scan record, one compact line per session', () => {
+  it('renders IN/IN-by with OUT/OUT-by and the duration on each line', async () => {
+    await renderPage()
+    fireEvent.click(screen.getByText('Logs'))
+    const table = screen.getByRole('table', { name: 'Scan log' })
+    expect(table.textContent).toContain('Scanner One')
+    expect(table.textContent).toContain('Scanner Two')
+    expect(table.textContent).toContain('09:00')
+    expect(table.textContent).toContain('18:00')
+    expect(table.textContent).toMatch(/9h/)
+    // Department names resolve through the sewadar summary, not the raw id.
+    expect(table.textContent).toContain('MEDICAL')
+    expect(table.textContent).not.toContain('dept-x')
+  })
+
+  it('marks the still-open hand-entered session honestly', async () => {
+    await renderPage()
+    fireEvent.click(screen.getByText('Logs'))
+    const table = screen.getByRole('table', { name: 'Scan log' })
+    expect(table.textContent).toContain('open')
+    expect(table.textContent).toContain('still IN')
+    expect(table.textContent).toContain('Manual')
+  })
+
+  it('honours the shared centre filter and the search box', async () => {
+    await renderPage()
+    fireEvent.click(screen.getByText('Logs'))
+    fireEvent.change(screen.getByLabelText('Filter by centre'), { target: { value: 'DELHI' } })
+    await settle()
+    let table = screen.getByRole('table', { name: 'Scan log' })
+    expect(table.textContent).toContain('FB5971GA0001')
+    expect(table.textContent).not.toContain('FB5971GA0002')
+    fireEvent.change(screen.getByLabelText('Filter by centre'), { target: { value: 'all' } })
+    fireEvent.change(screen.getByLabelText('Search attendance'), { target: { value: 'Scanner Two' } })
+    await settle()
+    table = screen.getByRole('table', { name: 'Scan log' })
+    expect(table.textContent).toContain('FB5971GA0001')
+    expect(table.textContent).not.toContain('FB5971GA0002')
+  })
+
+  it('degrades only the Logs tab when the log read fails — the page stays live', async () => {
+    rpc.mockImplementation((name) => {
+      if (name === 'dp_attendance_sessions') return Promise.resolve({ data: null, error: { message: 'boom' } })
+      if (name === 'attendance_sewadar_summary') return Promise.resolve({ data: [SEWADAR, OTHER_CENTRE], error: null })
+      if (name === 'attendance_daily_summary') return Promise.resolve({ data: DAILY, error: null })
+      if (name === 'attendance_scanner_ops') return Promise.resolve({ data: SCANNER, error: null })
+      return Promise.resolve({ data: [], error: null })
+    })
+    await renderPage()
+    // The Sewadars tab is unaffected by the log outage.
+    expect(screen.getByText('RAM')).toBeTruthy()
+    fireEvent.click(screen.getByText('Logs'))
+    expect(screen.getByRole('alert').textContent).toContain('Scan log')
+  })
+
+  it('shows an honest empty state when nothing was ever scanned', async () => {
+    respondWith({ log: [] })
+    await renderPage()
+    fireEvent.click(screen.getByText('Logs'))
+    expect(screen.getByText('No scans logged')).toBeTruthy()
   })
 })

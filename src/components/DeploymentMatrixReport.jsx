@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, Fragment, forwardRef, useImperativeHandle } from 'react'
-import { supabase, fetchCentres, fetchAllRows, getRootCentre } from '../lib/supabase'
-import { Users } from 'lucide-react'
+import { fetchCentres, fetchAllRows, getRootCentre } from '../lib/supabase'
 import { deploymentCounts, verifyDeploymentCounts, reportCountProblems } from '../lib/counts'
+import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
+import EmptyState from './EmptyState'
 
 /* ─── centre-wise deployment matrix report ───
    Rendered as a section inside the Overview tab. One block per department,
@@ -96,24 +97,19 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     return () => { mounted = false }
   }, [scheduleId, load])
 
-  // realtime: refresh live while centres edit or allocations change. Coalesced (400ms).
+  // realtime: refresh live while centres edit or allocations change.
   // Deployed (effective) reflects deployments table; Scheduled reflects centre_allocations — both change in real time, no lock gating.
-  useEffect(() => {
-    if (!scheduleId) return
-    let mounted = true
-    let reloadTimer = null
-    const scheduleReload = () => {
-      if (!mounted) return
-      if (reloadTimer) clearTimeout(reloadTimer)
-      reloadTimer = setTimeout(() => { if (mounted) load(scheduleId).catch((e) => { console.error('[Overview] reload failed:', e?.message) }) }, 400)
-    }
-    const channel = supabase
-      .channel(`deploy-overview-${scheduleId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${scheduleId}` }, scheduleReload)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_allocations', filter: `schedule_id=eq.${scheduleId}` }, scheduleReload)
-      .subscribe()
-    return () => { mounted = false; if (reloadTimer) clearTimeout(reloadTimer); supabase.removeChannel(channel) }
-  }, [scheduleId, load])
+  // Reload failures stay log-only (initial-load errors surface via loadError) — same as before.
+  useRealtimeRefresh({
+    scheduleId,
+    channelName: `deploy-overview-${scheduleId}`,
+    subscriptions: [
+      { table: 'deployments', filter: `schedule_id=eq.${scheduleId}` },
+      { table: 'centre_allocations', filter: `schedule_id=eq.${scheduleId}` },
+    ],
+    onReload: () => load(scheduleId).catch((e) => { console.error('[Overview] reload failed:', e?.message) }),
+    label: 'deploy-overview',
+  })
 
   // ── build the report ─────────────────────────────────────────────
   const rootOf = (centre) => getRootCentre(centres, centre) || centre
@@ -423,11 +419,10 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
   if (departments.length === 0 || rootCentres.length === 0) {
     return (
       <div className="card">
-        <div className="empty">
-          <div className="empty-icon"><Users size={22} /></div>
-          <div className="empty-title">No allocations yet</div>
-          <div className="empty-text">Centres will appear here once departments are allocated for this schedule.</div>
-        </div>
+        <EmptyState
+          title="No allocations yet"
+          hint="Centres will appear here once departments are allocated for this schedule."
+        />
       </div>
     )
   }
