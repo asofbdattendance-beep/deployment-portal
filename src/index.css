@@ -2786,3 +2786,37 @@ select.previsit-control { max-width: 15rem; }
     text-align: left;
   }
 }
+
+/* SewadarPicker (ASO "mark for anyone") — search box + result rows. */
+.pill-grey { background: #f1f5f9; color: #64748b; }
+.picker-card { padding: 1rem; }
+.picker-label { display: block; font-weight: 700; margin-bottom: 0.5rem; }
+.picker-input { width: 100%; }
+.picker-status { font-size: 0.8rem; color: var(--text-muted); margin: 0.5rem 0 0; }
+.picker-error { color: #b91c1c; }
+.picker-results { list-style: none; margin: 0.5rem 0 0; padding: 0; max-height: 280px; overflow-y: auto; }
+.picker-row { display: flex; align-items: center; gap: 0.5rem; width: 100%; text-align: left; background: none; border: none; border-top: 1px solid var(--border, #e2e8f0); padding: 0.55rem 0.25rem; cursor: pointer; font-size: 0.85rem; }
+.picker-row:hover { background: var(--primary-soft); }
+.picker-badge { font-weight: 700; min-width: 4.5rem; }
+.picker-name { font-weight: 600; flex: 1; }
+.picker-meta { color: var(--text-muted); font-size: 0.78rem; }
+.picker-pills { display: flex; gap: 0.3rem; margin-left: auto; }
+/* Clickable DataTable rows (anomaly detail drill-in). */
+tr.row-clickable { cursor: pointer; }
+tr.row-clickable:hover td { background: var(--primary-soft); }
+tr.row-clickable:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+/* Scan log compact lines. */
+.log-line { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+.log-side { white-space: nowrap; }
+.log-side .log-by { color: var(--text-muted); font-size: 0.78rem; }
+
+/* Anomaly trail popup: section headers, session card, responsive lines. */
+.trail-h { margin: 1rem 0 0.4rem; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+.trail-card { border: 1px solid var(--border, #e2e8f0); border-radius: 10px; overflow: hidden; }
+.trail-row { padding: 0.55rem 0.7rem; }
+.trail-row + .trail-row { border-top: 1px solid var(--border, #e2e8f0); }
+.trail-row:nth-child(odd) { background: var(--row-alt, #f8fafc); }
+@media (max-width: 560px) {
+  .log-line { row-gap: 0.2rem; }
+  .picker-row { flex-wrap: wrap; }
+}

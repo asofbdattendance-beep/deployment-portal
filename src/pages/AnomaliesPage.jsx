@@ -9,6 +9,7 @@ import { useIsMobile } from '../hooks/useMediaQuery'
 import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
 import PageHeader, { ViewOnlyPill } from '../components/PageHeader'
 import DataTable from '../components/DataTable'
+import AnomalyDetailPopup from '../components/AnomalyDetailPopup'
 import EmptyState from '../components/EmptyState'
 import ExportButton from '../components/ExportButton'
 import PrintPdfButton from '../components/PrintPdfButton'
@@ -116,6 +117,12 @@ const ANOMALY_COLUMNS = [
     // BAD_STATUS reports the CURRENT badge status, so it is visit-level by
     // design and carries no event date.
     render: (r) => <span style={{ fontSize: '0.8rem', whiteSpace: 'nowrap' }}>{r.event_date || '—'}</span>,
+  },
+  {
+    key: 'open',
+    label: '',
+    // Unmissable click affordance: every row opens the badge's info trail.
+    render: () => <span aria-hidden="true" title="Open the full trail" style={{ color: '#4f46e5', fontWeight: 800 }}>›</span>,
   },
 ]
 // A rule can report the same badge on more than one date (MULTI_SESSION), so
@@ -294,6 +301,11 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
   }, [base, rule, search])
 
   const [filtersOpen, setFiltersOpen] = useState(false)
+  // Drill-in: clicking any anomaly row (every rule) opens its info trail.
+  // Reset on schedule change — a row from the previous schedule would fetch
+  // the new schedule's trail under the old row's identity.
+  const [selected, setSelected] = useState(null)
+  useEffect(() => { setSelected(null) }, [scheduleId])
   const clearFilters = () => { setRule('all'); setSearch(''); setDate('') }
   const filterChips = useMemo(() => {
     const chips = []
@@ -567,7 +579,20 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
             ariaLabel="Attendance anomalies"
             empty={null}
             renderRow={(r) => (
-              <div className="att-card">
+              <div
+                className="att-card"
+                role="button"
+                tabIndex={0}
+                aria-label={`Open details for anomaly ${r.badge_number}`}
+                style={{ cursor: 'pointer' }}
+                onClick={() => setSelected(r)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    setSelected(r)
+                  }
+                }}
+              >
                 <div className="att-card-top">
                   <span className={`pill ${rulePill(r.rule)}`} title={ruleText(r.rule)}>{ruleLabel(r.rule)}</span>
                   <span className="att-card-badge">{r.badge_number}</span>
@@ -581,6 +606,7 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
                 <div className="att-card-foot">
                   <span className="att-card-times">{r.detail || '—'}</span>
                   <span className="att-card-times">{r.event_date || '—'}</span>
+                  <span aria-hidden="true" title="Open the full trail" style={{ color: '#4f46e5', fontWeight: 800 }}>›</span>
                 </div>
               </div>
             )}
@@ -591,6 +617,7 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
             rows={visible}
             rowKey={anomalyRowKey}
             label="Attendance anomalies"
+            onRowClick={(r) => setSelected(r)}
           />
         )}
       </div>
@@ -599,6 +626,9 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
         <ShieldAlert size={13} />
         An anomaly is cleared by fixing the underlying scan or deployment record — this page never
         writes, and there is no “resolve” action to click.
+      </div>
+      <div className="page-sub" style={{ marginTop: '0.25rem' }}>
+        Tip: click any row (or tap a card) to open that badge’s full scan trail with deployment + consent.
       </div>
 
       <FilterSheet
@@ -631,6 +661,15 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
       </FilterSheet>
 
       {/* The mobile share sheet lives inside <ExportButton>. */}
+      {selected && (
+        <AnomalyDetailPopup
+          row={selected}
+          scheduleId={scheduleId}
+          related={visible.filter((r) => r !== selected && r.badge_number === selected.badge_number)}
+          ruleMeta={RULE_META}
+          onClose={() => setSelected(null)}
+        />
+      )}
     </div>
   )
 }

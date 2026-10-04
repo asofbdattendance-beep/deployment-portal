@@ -19,6 +19,10 @@ import Skeleton from './mobile/Skeleton'
  * @param {string} [props.emptyHint='No rows for the current filters.']
  * @param {boolean} [props.sticky=true]
  * @param {string} [props.label]             accessible name for the table
+ * @param {(row:any,index:number)=>void} [props.onRowClick]
+ *   when set, every body row becomes a keyboard-operable button
+ *   (role="button", tabIndex 0, Enter/Space) that calls it. Absent =
+ *   byte-identical static table, so existing pages are untouched.
  */
 export default function DataTable({
   columns,
@@ -29,6 +33,7 @@ export default function DataTable({
   emptyHint = 'No rows for the current filters.',
   sticky = true,
   label,
+  onRowClick,
 }) {
   if (loading) return <Skeleton variant="table" rows={skeletonRows} />
   if (!rows.length) {
@@ -53,7 +58,24 @@ export default function DataTable({
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={keyOf(r, i)}>
+            <tr
+              key={keyOf(r, i)}
+              {...(typeof onRowClick === 'function'
+                ? {
+                    className: 'row-clickable',
+                    role: 'button',
+                    tabIndex: 0,
+                    'aria-label': `Open details for row ${i + 1}`,
+                    onClick: () => onRowClick(r, i),
+                    onKeyDown: (e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        onRowClick(r, i)
+                      }
+                    },
+                  }
+                : null)}
+              >
               {columns.map((c) => (
                 <td
                   key={c.key}

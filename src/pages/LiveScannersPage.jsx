@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'rea
 import { supabase } from '../lib/supabase'
 import { useToast } from '../components/Toast'
 import { scannerStatus, timeAgo, UNASSIGNED_CENTRE, shortDayLabel } from '../lib/attendance'
-import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
 import { todayStrIST } from '../lib/scannerUtils'
 import { fileSlug } from '../lib/excel'
 import { useIsMobile } from '../hooks/useMediaQuery'
@@ -81,15 +80,11 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
   const toast = useToast()
   const schedule = schedules?.find((s) => s.id === scheduleId)
 
-  const [date, setDate] = useState(() => clampDateToWindow(todayStrIST(), scheduleWindow(schedule)))
-  // Bhati Visit shows visit-days data only: pin the picker inside the
-  // window (windowless schedules pass through untouched).
-  const visitWin = useMemo(() => scheduleWindow(schedule), [schedule])
-  // The focus-sync effect below closes over the window once, so it reads the
-  // CURRENT window through this ref (same pattern as DashboardPage.jsx:192).
-  const winRef = useRef(visitWin)
-  winRef.current = visitWin
-  useEffect(() => { setDate((d) => clampDateToWindow(d, visitWin)) }, [visitWin])
+  // Any date is pickable — previous days and previsit days included
+  // (v66 answers attendance_scanner_ops for ANY p_date). The picker is
+  // deliberately NOT clamped into the visit window: the operator asked for
+  // the history, not just today.
+  const [date, setDate] = useState(() => todayStrIST())
   const [raw, setRaw] = useState([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
@@ -132,10 +127,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
   useEffect(() => {
     const sync = () => {
       if (dateTouchedRef.current) return
-      // Clamp "today" into the visit window: outside it the unclamped today
-      // is a previsit date, and the whole page would report a day the
-      // operator never picked (windowless schedules pass through untouched).
-      const today = clampDateToWindow(todayStrIST(), winRef.current)
+      const today = todayStrIST()
       setDate((d) => (d === today ? d : today))
     }
     sync()
@@ -399,7 +391,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
       <PageHeader
         icon={<Radio size={22} />}
         title="Live Scanners"
-        sub="Who is scanning right now, and who still has a session open"
+        sub="Who scanned on the picked day — today, a previous day, or a previsit day — and who still has a session open"
         pills={
           <>
             <ViewOnlyPill title="Read-only — scans are recorded on the Scanner and Dept Incharge pages" />
@@ -439,9 +431,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
             <input
               type="date"
               value={date}
-              min={visitWin.start || undefined}
-              max={visitWin.end || undefined}
-              onChange={(e) => { dateTouchedRef.current = true; setDate(clampDateToWindow(e.target.value, visitWin)) }}
+              onChange={(e) => { dateTouchedRef.current = true; setDate(e.target.value) }}
               className="input"
               style={{ height: 36 }}
               aria-label="Scan day"

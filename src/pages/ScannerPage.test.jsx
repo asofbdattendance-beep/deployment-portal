@@ -24,6 +24,8 @@ const mocks = vi.hoisted(() => ({
   listStrandedQueue: vi.fn(),
   removeQueued: vi.fn(),
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
+  profile: { centre: 'DELHI', badge_number: 'FB0001AA0001' },
+  searchHook: vi.fn(),
 }))
 
 // V10: the path must reach the cameraManager the component actually imports
@@ -53,7 +55,10 @@ vi.mock('../lib/supabase', () => ({
   fetchAllRows: (...args) => mocks.fetchAllRows(...args),
 }))
 vi.mock('../context/PortalAuthContext', () => ({
-  usePortalAuth: () => ({ profile: { centre: 'DELHI', badge_number: 'FB0001AA0001' } }),
+  usePortalAuth: () => ({ profile: mocks.profile }),
+}))
+vi.mock('../hooks/useSewadarSearch', () => ({
+  useSewadarSearch: (...args) => mocks.searchHook(...args),
 }))
 vi.mock('../components/Toast', () => ({ useToast: () => mocks.toast }))
 vi.mock('../lib/offlineQueue', () => ({
@@ -98,6 +103,9 @@ beforeEach(() => {
   mocks.removeQueued.mockReset()
   mocks.fromCalls.length = 0
   for (const k of ['success', 'error', 'warning', 'info']) mocks.toast[k].mockReset()
+  mocks.profile = { centre: 'DELHI', badge_number: 'FB0001AA0001' }
+  mocks.searchHook.mockReset()
+  mocks.searchHook.mockReturnValue({ results: [], searching: false, searchError: null })
 
   const stream = makeStream()
   mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
@@ -455,5 +463,48 @@ describe('ScannerPage unified live count + clear-live + stranded interval', () =
       expect(spy.mock.calls.some(c => c[1] === 30000)).toBe(true)
       expect(mocks.listStrandedQueue).toHaveBeenCalled()
     } finally { spy.mockRestore() }
+  })
+})
+
+// ASO "mark for anyone": the picker renders only for aso/super_admin and a
+// pick starts the normal scan flow for that badge (get_scan_state with the
+// picked badge, manual flag like a hand-typed entry). The picker itself
+// never writes — the proof is the lookup RPC, not a session row.
+describe('ScannerPage ASO sewadar picker', () => {
+  const PICK_ROWS = [
+    { badge_number: 'FB5971GA0001', sewadar_name: 'Pick Me', sewadar_centre: 'CENTRE A', dept_name: 'LANGAR', is_vss: false, deployed: true, open_now: false },
+  ]
+
+  it('hides the picker from the scanner role', async () => {
+    render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+    await settle()
+    expect(screen.queryByTestId('sewadar-picker')).toBeNull()
+  })
+
+  it('shows the picker to aso and super_admin only', async () => {
+    for (const role of ['aso', 'super_admin']) {
+      cleanup()
+      mocks.profile = { centre: 'DELHI', badge_number: null, role }
+      render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+      await settle()
+      expect(screen.getByTestId('sewadar-picker')).toBeTruthy()
+    }
+    cleanup()
+    mocks.profile = { centre: 'DELHI', badge_number: 'FB0001AA0001', role: 'centre_user' }
+    render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+    await settle()
+    expect(screen.queryByTestId('sewadar-picker')).toBeNull()
+  })
+
+  it('a pick starts the scan flow for that badge', async () => {
+    mocks.profile = { centre: 'DELHI', badge_number: null, role: 'aso' }
+    mocks.searchHook.mockReturnValue({ results: PICK_ROWS, searching: false, searchError: null })
+    render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+    await settle()
+    fireEvent.click(screen.getByText('FB5971GA0001'))
+    await settle()
+    const lookups = mocks.rpc.mock.calls.filter(([name]) => name === 'get_scan_state')
+    expect(lookups.length).toBeGreaterThan(0)
+    expect(lookups[0][1]).toMatchObject({ p_badge: 'FB5971GA0001', p_schedule: 'sched-1' })
   })
 })

@@ -31,13 +31,13 @@ describe('PAGES phase registry', () => {
     expect(phase2).toEqual(['dashboard', 'alloc', 'inchargeDashboard', 'scanner', 'attendance', 'reports', 'liveScanners', 'anomalies'])
   })
 
-  it('gives aso 5 + 6, super_admin 7 + 6 pages across the phases', () => {
+  it('gives aso 5 + 7, super_admin 7 + 7 pages across the phases', () => {
     const forRolePhase = (role, phase) =>
       Object.entries(PAGES).filter(([, c]) => c.roles.includes(role) && c.phase === phase).map(([k]) => k)
     expect(forRolePhase('aso', 1)).toEqual(['schedule', 'consent', 'vss', 'deployment', 'centreLists'])
-    expect(forRolePhase('aso', 2)).toEqual(['dashboard', 'alloc', 'attendance', 'reports', 'liveScanners', 'anomalies'])
+    expect(forRolePhase('aso', 2)).toEqual(['dashboard', 'alloc', 'scanner', 'attendance', 'reports', 'liveScanners', 'anomalies'])
     expect(forRolePhase('super_admin', 1)).toEqual(['schedule', 'consent', 'vss', 'deployment', 'centreLists', 'control', 'users'])
-    expect(forRolePhase('super_admin', 2)).toEqual(['dashboard', 'alloc', 'attendance', 'reports', 'liveScanners', 'anomalies'])
+    expect(forRolePhase('super_admin', 2)).toEqual(['dashboard', 'alloc', 'scanner', 'attendance', 'reports', 'liveScanners', 'anomalies'])
   })
 
   it('gives single-phase roles the right landing phase', () => {

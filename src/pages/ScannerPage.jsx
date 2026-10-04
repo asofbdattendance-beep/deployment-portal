@@ -15,6 +15,7 @@ import { deptNameMap } from '../lib/scanDisplay'
 import { useSewadarDirectory } from '../hooks/useSewadarDirectory'
 import { useDeptNames, refreshDeptNames } from '../hooks/useDeptNames'
 import RecentScansTable from '../components/scanner/RecentScansTable'
+import SewadarPicker from '../components/scanner/SewadarPicker'
 
 
 export default function ScannerPage({ schedules, scheduleId, sewaMode }){
@@ -173,6 +174,11 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
     />
   )
   const manualSubmit = () => { handleScan(manualBadge, { manual: true }) }
+  // ASO "mark for anyone": aso/super_admin may start the normal scan flow
+  // for any badge without a physical scan. A pick is operator-entered, so
+  // it carries the manual flag exactly like a hand-typed badge.
+  const canPick = profile?.role === 'aso' || profile?.role === 'super_admin'
+  const pickSubmit = (badge) => { handleScan(badge, { manual: true }) }
 
   // Mobile: immersive full-screen capture. Same state machine, same slots.
   if (isMobile) {
@@ -183,7 +189,10 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
           pills={<>{profile?.centre} · {schedule?.name || ''} {pillsNode}</>}
           camera={<BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />}
           action={<button onClick={manualSubmit} className="btn btn-primary scan-shell-go" disabled={busy || !manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark In/Out</button>}
-          manual={<input value={manualBadge} onChange={e => setManualBadge(e.target.value)} placeholder="Manual FB/BH/VS badge" className="input scan-shell-input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} onKeyDown={e => { if (e.key === 'Enter') { manualSubmit() } }} />}
+          manual={<>
+            <input value={manualBadge} onChange={e => setManualBadge(e.target.value)} placeholder="Manual FB/BH/VS badge" className="input scan-shell-input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} onKeyDown={e => { if (e.key === 'Enter') { manualSubmit() } }} />
+            {canPick && <SewadarPicker scheduleId={scheduleId} onPick={pickSubmit} />}
+          </>}
           queueBar={queueBarNode}
           feedTitle={<div style={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}><Clock size={14} /> My last 10 scans (today)</div>}
           feed={<MobileScanFeed rows={sessions} deptNameById={deptNameById} limit={10} emptyMessage={myBadge ? 'No scans by you yet today' : 'No scans yet'} />}
@@ -203,6 +212,7 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
         <BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />
         <div style={{display:'flex', gap:8, marginTop:10}}><input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Manual FB/BH/VS badge" className="input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ manualSubmit() }}}/><button onClick={manualSubmit} className="btn btn-primary" disabled={busy||!manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark In/Out</button></div>
       </div>
+      {canPick && <div style={{marginBottom:12}}><SewadarPicker scheduleId={scheduleId} onPick={pickSubmit} /></div>}
       <div className="card" style={{padding:'1rem'}}>
         <div style={{fontWeight:700, display:'flex', alignItems:'center', gap:6, flexWrap:'wrap'}}>
           <Clock size={14}/> My last 10 scans (today, any dept incl. VSS)

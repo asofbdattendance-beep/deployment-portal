@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { supabase, fetchAllRpc } from '../lib/supabase'
+import { supabase, fetchAllRpc, fetchAllRows } from '../lib/supabase'
 import { useToast } from '../components/Toast'
 import {
   buildSewadarRows,
   buildDailyRows,
   buildScannerRows,
+  buildLogRows,
+  SCAN_LOG_SESSION_COLS,
   dailyTotals,
   attendanceStats,
   searchRows,
@@ -14,6 +16,8 @@ import {
   deptOptions,
   hasExpectedDays,
   sessionDuration,
+  sessionMinutes,
+  formatDuration,
   FULL_VISIT_DAYS,
   UNASSIGNED_CENTRE,
   VISIT_DAYS,
@@ -58,6 +62,11 @@ const bandPill = (band) => BAND_PILL[band] || BAND_PILL.none
  * @param {object} params RPC arguments
  * @returns {Promise<Array<object>>}
  */
+// Columns read for the scan log: shared SCAN_LOG_SESSION_COLS
+// (src/lib/attendance.js) — one compact line per session (IN/OUT with
+// by-whom), so the select stays narrow on wide schedules.
+const LOG_SESSION_COLS = SCAN_LOG_SESSION_COLS
+
 async function rpcRows(name, params) {
   const { data, error } = await supabase.rpc(name, params)
   if (error) {
@@ -82,7 +91,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   const toast = useToast()
   const schedule = schedules.find((s) => s.id === scheduleId)
 
-  const [tab, setTab] = useState('sewadars') // sewadars | daily | scanners
+  const [tab, setTab] = useState('sewadars') // sewadars | daily | scanners | logs
   const [date, setDate] = useState(() => clampDateToWindow(todayStrIST(), scheduleWindow(schedule)))
   // Bhati Visit shows visit-days data only: pin the picker inside the
   // window (windowless schedules pass through untouched).
@@ -95,6 +104,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   const [sewadarRaw, setSewadarRaw] = useState([])
   const [dailyRaw, setDailyRaw] = useState([])
   const [scannerRaw, setScannerRaw] = useState([])
+  const [logRaw, setLogRaw] = useState([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [filterCentre, setFilterCentre] = useState('all')
@@ -111,6 +121,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   const [sewErr, setSewErr] = useState(null)
   const [dayErr, setDayErr] = useState(null)
   const [opsErr, setOpsErr] = useState(null)
+  const [logErr, setLogErr] = useState(null)
   // A13: which schedule the rows in state actually belong to. Rows from the
   // previous schedule must never be shown (or exported) under the new one.
   const [rowsScheduleId, setRowsScheduleId] = useState(null)
@@ -140,7 +151,9 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     return () => window.removeEventListener('focus', sync)
   }, [])
 
-  // ─── Load. The three RPCs are independent, so fire them together. ───
+  // ─── Load. The RPCs and the log read are independent, so fire them
+  // together. The log is NOT date-gated: it is the whole-schedule,
+  // searchable record ("logs ... and all"), while Daily/Scanner stay day views.
   const load = useCallback(async () => {
     // Clear the spinner on the no-schedule path too. Leaving `loading` true
     // here latched the page on its spinner with no timeout and no error.
@@ -160,12 +173,15 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
             withTimeout(rpcRows('attendance_scanner_ops', { p_schedule: scheduleId, p_date: date }), 15000, 'attendance_scanner_ops'),
           ]
         : [Promise.resolve([]), Promise.resolve([])]
-      const [sewR, dayR, opsR] = await Promise.allSettled([
+      const [sewR, dayR, opsR, logR] = await Promise.allSettled([
         // one row PER BADGE across ~3597 sewadars — must paginate, or the
         // KPI tiles and the Excel export silently read only the first 1000.
         withTimeout(fetchAllRpc('attendance_sewadar_summary', { p_schedule: scheduleId }), 15000, 'attendance_sewadar_summary'),
         dayCalls[0],
         dayCalls[1],
+        // the scan log: every session for the schedule, complete-or-throw
+        // paging (RLS scopes each role to its own rows).
+        withTimeout(fetchAllRows('dp_attendance_sessions', LOG_SESSION_COLS, (q) => q.eq('schedule_id', scheduleId), 'id'), 20000, 'attendance_scan_log'),
       ])
       // A3: drop a stale response that landed after a newer one.
       if (!mountedRef.current || seq !== seqRef.current) return
@@ -197,6 +213,13 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
       } else {
         console.error('[Attendance] scanner-ops load failed:', opsR.reason)
         setOpsErr(opsR.reason?.message || 'Unknown error')
+      }
+      if (logR.status === 'fulfilled') {
+        setLogRaw(logR.value)
+        setLogErr(null)
+      } else {
+        console.error('[Attendance] scan-log load failed:', logR.reason)
+        setLogErr(logR.reason?.message || 'Unknown error')
       }
       setRowsScheduleId(scheduleId)
     } finally {
@@ -253,6 +276,16 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   const allSewadars = useMemo(() => buildSewadarRows(rowsAreCurrent ? sewadarRaw : []), [sewadarRaw, rowsAreCurrent])
   const dailyRows = useMemo(() => buildDailyRows((rowsAreCurrent ? dailyRaw : []).map((r) => ({ ...r, centre: r?.centre || UNASSIGNED_CENTRE }))), [dailyRaw, rowsAreCurrent])
   const scannerRows = useMemo(() => buildScannerRows(rowsAreCurrent ? scannerRaw : []), [scannerRaw, rowsAreCurrent])
+  // Log rows resolve their department NAME through the sewadar summary
+  // (session rows carry only the department id).
+  const badgeDeptNames = useMemo(() => {
+    const m = new Map()
+    for (const r of allSewadars) {
+      if (r?.badge_number && !m.has(r.badge_number)) m.set(r.badge_number, r.dept_name || '')
+    }
+    return m
+  }, [allSewadars])
+  const logRows = useMemo(() => buildLogRows(rowsAreCurrent ? logRaw : [], badgeDeptNames), [logRaw, rowsAreCurrent, badgeDeptNames])
 
   const centres = useMemo(() => {
     // Union the sewadar rows AND the daily rows: a centre that is deployed
@@ -341,6 +374,18 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scannerRows, filterCentre, search, filtering])
 
+  // The Logs tab answers "who scanned what, when, by whom" for the whole
+  // schedule: same centre/dept/search controls, plus the scanner identities.
+  const visibleLog = useMemo(() => {
+    if (!filtering) return logRows
+    return logRows.filter(
+      (r) => centreMatches(r.sewadar_centre)
+        && (filterDept === 'all' || r.dept_name === filterDept)
+        && matchText(search, r.badge_number, r.sewadar_name, r.sewadar_centre, r.dept_name, r.in_by, r.out_by)
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [logRows, filterCentre, filterDept, search, filtering])
+
   // A4: every sheet title states the active filter, so a filtered export can
   // never be mistaken for a full one.
   const filterLabel = useMemo(() => {
@@ -382,7 +427,9 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     ? `${visible.length} of ${allSewadars.length}`
     : tab === 'daily'
       ? `${visibleDaily.length} of ${dailyRows.length}`
-      : `${visibleScanner.length} of ${scannerRows.length}`
+      : tab === 'logs'
+        ? `${visibleLog.length} of ${logRows.length}`
+        : `${visibleScanner.length} of ${scannerRows.length}`
   const centreSearchLabel = useMemo(() => {
     const parts = []
     if (filterCentre !== 'all') parts.push(filterCentre)
@@ -448,8 +495,26 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
               'Manual Scans': r.manual_scans, 'First Scan': (r.first_in_time || '').slice(0, 5), 'Last Scan': (r.last_scan_time || '').slice(0, 5),
             })),
           },
+          {
+            name: `Logs${filterLabel}`,
+            rows: visibleLog.map((r, i) => {
+              const mins = sessionMinutes(r.in_time, r.out_time, r.in_date, r.out_date)
+              return {
+                'S.No.': i + 1,
+                Badge: r.badge_number, Name: r.sewadar_name || '—',
+                Centre: r.sewadar_centre || UNASSIGNED_CENTRE, Department: r.dept_name || '—',
+                Date: r.in_date || '—',
+                'IN': (r.in_time || '').slice(0, 5) || '—', 'IN By': r.in_by || '—',
+                'OUT': (r.out_time || '').slice(0, 5) || (r.status === 'OPEN' ? 'open' : '—'),
+                'OUT By': r.out_time ? (r.out_by || '—') : '—',
+                Duration: mins == null ? (r.status === 'OPEN' ? 'still IN' : '—') : formatDuration(mins),
+                Status: r.status || '—', Manual: r.is_manual ? 'yes' : 'no',
+                Undeployed: r.undeployed_scan ? 'yes' : 'no',
+              }
+            }),
+          },
         ]
-  ), [visible, visibleDaily, visibleTotals, visibleScanner, filterLabel, centreSearchLabel, date])
+  ), [visible, visibleDaily, visibleTotals, visibleScanner, visibleLog, filterLabel, centreSearchLabel, date])
 
   // Export through the shared <ExportButton>: desktop writes the file directly
   // (anchor download); phones open the ExportSheet and build the Blob on the
@@ -468,7 +533,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   if (!schedules.length) {
     return <div className="page"><div className="card" style={{ padding: '2rem', textAlign: 'center' }}>No schedules</div></div>
   }
-  if (loading && !allSewadars.length && !dailyRows.length) {
+  if (loading && !allSewadars.length && !dailyRows.length && !logRows.length) {
     return (
       <div className="page" style={{ maxWidth: 1400 }}>
         <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', marginBottom: '0.75rem' }}>
@@ -525,6 +590,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     { key: 'sewadars', label: 'Sewadars' },
     { key: 'daily', label: 'Daily' },
     { key: 'scanners', label: 'Scanner Ops' },
+    { key: 'logs', label: 'Logs' },
   ]
 
   // ─── Shared-table columns. Cell content is identical to the hand-rolled
@@ -605,6 +671,59 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     { key: 'first', label: 'First', render: (r) => (r.first_in_time || '').slice(0, 5) || '—' },
     { key: 'last', label: 'Last', render: (r) => (r.last_scan_time || '').slice(0, 5) || '—' },
   ]
+  // Scan log: one compact line per session — IN time + IN-by and OUT time +
+  // OUT-by side by side, so the whole IN→OUT story reads without scrolling.
+  const logColumns = [
+    { key: 'badge', label: 'Badge', mono: true, render: (r) => (<span style={{ fontSize: '0.8rem' }}>{r.badge_number}</span>) },
+    {
+      key: 'name', label: 'Name',
+      render: (r) => (<>{r.sewadar_name || '—'}{' '}{r.is_vss && <span className="pill pill-amber" style={{ fontSize: '0.6rem' }}>VSS</span>}</>),
+    },
+    { key: 'centre', label: 'Centre', render: (r) => r.sewadar_centre || UNASSIGNED_CENTRE },
+    { key: 'dept', label: 'Department', render: (r) => r.dept_name || '—' },
+    { key: 'day', label: 'Day', render: (r) => (r.in_date ? shortDayLabel(r.in_date) : '—') },
+    {
+      key: 'in', label: 'IN',
+      render: (r) => (
+        <span style={{ whiteSpace: 'nowrap' }}>
+          <strong>{(r.in_time || '').slice(0, 5) || '—'}</strong>{' '}
+          <span style={{ color: '#64748b', fontSize: '0.78rem' }}>by {r.in_by || '—'}</span>
+        </span>
+      ),
+    },
+    {
+      key: 'out', label: 'OUT',
+      render: (r) => (
+        <span style={{ whiteSpace: 'nowrap' }}>
+          <strong>{(r.out_time || '').slice(0, 5) || (r.status === 'OPEN' ? 'open' : '—')}</strong>{' '}
+          <span style={{ color: '#64748b', fontSize: '0.78rem' }}>by {r.out_time ? (r.out_by || '—') : '—'}</span>
+        </span>
+      ),
+    },
+    {
+      key: 'duration', label: 'Duration',
+      render: (r) => {
+        const mins = sessionMinutes(r.in_time, r.out_time, r.in_date, r.out_date)
+        if (mins == null) {
+          return r.status === 'OPEN'
+            ? <span className="pill pill-amber">still IN</span>
+            : '—'
+        }
+        return formatDuration(mins)
+      },
+    },
+    {
+      key: 'flags', label: 'Flags',
+      render: (r) => (
+        <span style={{ display: 'inline-flex', gap: '0.25rem', flexWrap: 'wrap' }}>
+          {r.status === 'OPEN' && <span className="pill pill-amber" title="Scanned IN, not yet OUT">Open</span>}
+          {r.is_manual && <span className="pill pill-gray" title="Operator-entered, not a camera scan">Manual</span>}
+          {r.undeployed_scan && <span className="pill pill-red" title="Scanned with no deployment for this schedule">Undeployed</span>}
+          {r.status !== 'OPEN' && !r.is_manual && !r.undeployed_scan && <span className="pill pill-gray">—</span>}
+        </span>
+      ),
+    },
+  ]
 
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
@@ -615,7 +734,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
         pills={<>
           <ViewOnlyPill title="Attendance is read-only here — scans are recorded on the Scanner and Dept Incharge pages" />
           {filtering && tab === 'sewadars' && (
-            <span className="pill pill-indigo" title="The table and all three Excel sheets show this filtered set">
+            <span className="pill pill-indigo" title="The table and all four Excel sheets show this filtered set">
               Showing {visible.length} of {allSewadars.length}
             </span>
           )}
@@ -627,6 +746,11 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
           {filtering && tab === 'scanners' && (
             <span className="pill pill-indigo" title="The Scanner Ops table and its Excel sheet show this filtered set">
               Showing {visibleScanner.length} of {scannerRows.length}
+            </span>
+          )}
+          {filtering && tab === 'logs' && (
+            <span className="pill pill-indigo" title="The Logs table and its Excel sheet show this filtered set">
+              Showing {visibleLog.length} of {logRows.length}
             </span>
           )}
         </>}
@@ -692,8 +816,8 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
             ))}
           </div>
           <div style={{ flex: 1 }} />
-          {/* A4: one filter set drives all three tabs, the three tables and all
-              three export sheets, so the tooltip claim can stay honest.
+          {/* A4: one filter set drives all four tabs, the four tables and all
+              four export sheets, so the tooltip claim can stay honest.
               Mobile shows the sheet version only (no duplicate inline row). */}
           {!isMobile && filtersNode}
         </div>
@@ -854,6 +978,47 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
             />
           )
           }
+          </>
+        )}
+
+        {tab === 'logs' && (
+          <>
+            {logErr && (
+              <div
+                role="alert"
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap',
+                  background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10,
+                  padding: '0.6rem 0.75rem', fontSize: '0.8rem', color: '#b91c1c', marginBottom: '0.75rem',
+                }}
+              >
+                <AlertTriangle size={15} />
+                <span><strong>Scan log</strong> could not be loaded — the Sewadars, Daily and Scanner Ops tabs are unaffected.</span>
+                <button onClick={load} disabled={loading} className="btn btn-ghost">
+                  <RefreshCw size={12} /> Retry
+                </button>
+              </div>
+            )}
+            {visibleLog.length === 0 ? (
+              loading ? (
+                <DataTable columns={logColumns} rows={[]} loading label="Scan log" />
+              ) : (
+                <EmptyState
+                  title="No scans logged"
+                  hint={filtering ? 'Try clearing the filters.' : 'No scans have been recorded for this schedule yet.'}
+                />
+              )
+            ) : (
+              // Whole-schedule log, newest first — one compact line per
+              // session, so IN/IN-by and OUT/OUT-by read as a single story.
+              <DataTable
+                columns={logColumns}
+                rows={visibleLog}
+                rowKey={(r) => r.id}
+                sticky={false}
+                label="Scan log"
+              />
+            )}
           </>
         )}
       </div>

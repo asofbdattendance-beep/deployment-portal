@@ -2,7 +2,7 @@
 // DataTable — skeleton while loading, teaching hint when empty, labelled
 // sticky table otherwise (data-label on every td feeds the mobile cards).
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import DataTable from './DataTable'
 
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
@@ -58,5 +58,33 @@ describe('DataTable', () => {
     )
     expect(screen.getByText('Bhati!')).toBeTruthy()
     expect(container.querySelector('table').className).not.toContain('table-sticky')
+  })
+})
+
+describe('DataTable onRowClick', () => {
+  it('renders static rows with no button semantics when onRowClick is absent', () => {
+    const { container } = render(<DataTable columns={COLUMNS} rows={ROWS} />)
+    const trs = container.querySelectorAll('tbody tr')
+    expect(trs.length).toBe(2)
+    for (const tr of trs) {
+      expect(tr.getAttribute('role')).toBeNull()
+      expect(tr.classList.contains('row-clickable')).toBe(false)
+    }
+  })
+
+  it('makes rows keyboard-operable buttons that report (row, index)', async () => {
+    const onRowClick = vi.fn()
+    const { container } = render(<DataTable columns={COLUMNS} rows={ROWS} onRowClick={onRowClick} />)
+    const trs = container.querySelectorAll('tbody tr.row-clickable[role="button"]')
+    expect(trs.length).toBe(2)
+    expect(trs[0].getAttribute('tabindex')).toBe('0')
+    fireEvent.click(trs[1])
+    expect(onRowClick).toHaveBeenCalledTimes(1)
+    expect(onRowClick).toHaveBeenCalledWith(ROWS[1], 1)
+    fireEvent.keyDown(trs[0], { key: 'Enter' })
+    fireEvent.keyDown(trs[0], { key: ' ' })
+    fireEvent.keyDown(trs[0], { key: 'Tab' })
+    expect(onRowClick).toHaveBeenCalledTimes(3)
+    expect(onRowClick).toHaveBeenLastCalledWith(ROWS[0], 0)
   })
 })

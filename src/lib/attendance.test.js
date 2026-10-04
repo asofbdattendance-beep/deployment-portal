@@ -15,6 +15,8 @@ import {
   dailyTotals,
   toScannerRow,
   buildScannerRows,
+  toLogRow,
+  buildLogRows,
   searchRows,
   filterByCentre,
   filterByDept,
@@ -35,6 +37,7 @@ import {
   buildAttendanceMatrixFromDayBadges,
   splitDayLabel,
   shortDayLabel,
+  shortTime,
 } from './attendance'
 
 /* ─── sessionMinutes ─── */
@@ -1303,5 +1306,58 @@ describe('shortDayLabel', () => {
   it('passes junk through unchanged', () => {
     expect(shortDayLabel('')).toBe('')
     expect(shortDayLabel(null)).toBe('')
+  })
+})
+
+describe('toLogRow / buildLogRows', () => {
+  const SESSION = {
+    id: 's1', badge_number: 'FB1', sewadar_name: 'RAM', sewadar_centre: 'DELHI',
+    sewadar_dept: 'dept-1', is_vss: false, status: 'CLOSED', centre: 'Bhati - Delhi MC',
+    in_date: '2026-09-23', in_time: '09:00:00',
+    in_scanner_badge: 'SC01', in_scanner_name: 'Scanner One',
+    is_manual: false, undeployed_scan: false,
+    out_date: '2026-09-23', out_time: '18:00:00',
+    out_scanner_badge: 'SC02', out_scanner_name: null,
+  }
+
+  it('shapes one session with by-whom preferring names over badges', () => {
+    const r = toLogRow(SESSION, new Map([['FB1', 'LANGAR']]))
+    expect(r.in_by).toBe('Scanner One')
+    expect(r.out_by).toBe('SC02')
+    expect(r.dept_name).toBe('LANGAR')
+    expect(r.sewadar_centre).toBe('DELHI')
+    expect(r.venue).toBe('Bhati - Delhi MC')
+  })
+
+  it('nulls become safe display values, never blanks that read as missing', () => {
+    const r = toLogRow({ badge_number: 'FB2' }, {})
+    expect(r.sewadar_name).toBe('')
+    expect(r.sewadar_centre).toBe(UNASSIGNED_CENTRE)
+    expect(r.in_by).toBe('')
+    expect(r.dept_name).toBe('')
+  })
+
+  it('orders newest first and drops badgeless rows', () => {
+    const rows = buildLogRows([
+      { ...SESSION, id: 'old', in_date: '2026-09-22', in_time: '09:00:00' },
+      { ...SESSION, id: 'new', in_date: '2026-09-23', in_time: '09:00:00' },
+      { id: 'ghost' },
+      null,
+    ])
+    expect(rows.map((r) => r.id)).toEqual(['new', 'old'])
+  })
+
+  it('returns [] for non-arrays', () => {
+    expect(buildLogRows(null)).toEqual([])
+    expect(buildLogRows(undefined)).toEqual([])
+  })
+})
+
+describe('shortTime', () => {
+  it('trims seconds and milliseconds to HH:MM', () => {
+    expect(shortTime('09:17:59.931')).toBe('09:17')
+    expect(shortTime('18:30:00')).toBe('18:30')
+    expect(shortTime(null)).toBe('—')
+    expect(shortTime('')).toBe('—')
   })
 })

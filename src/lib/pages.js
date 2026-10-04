@@ -17,7 +17,9 @@ export const PAGES = {
   deployment: { label: 'Overview', icon: Users, roles: ['aso', 'super_admin'], phase: 1 },
   centreLists: { label: 'Centre Lists', icon: Building2, roles: ['aso', 'super_admin'], phase: 1 },
   inchargeDashboard: { label: 'Dashboard', icon: LayoutDashboard, roles: ['dept_incharge'], phase: 2 },
-  scanner: { label: 'Scanner', icon: ScanLine, roles: ['scanner'], phase: 2 },
+  // scanner (aso/super_admin included): the DB scan gates already admit
+  // the four scan roles for any badge, so the nav is the only unlock.
+  scanner: { label: 'Scanner', icon: ScanLine, roles: ['scanner', 'aso', 'super_admin'], phase: 2 },
   // attendance analytics — read-only; the DB resolves each role's own scope.
   attendance: { label: 'Attendance', icon: ScanLine, roles: ['aso', 'super_admin', 'centre_user', 'centre_admin', 'dept_incharge'], phase: 2 },
   // attendance intelligence suite (v45) — aso/super_admin only, except Reports
