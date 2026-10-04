@@ -4,6 +4,10 @@ import { invitationErrors, INVITE_ROLES, INVITE_CENTRE_ROLES } from '../lib/logi
 import { PAGES } from '../lib/pages'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
+import PageHeader from '../components/PageHeader'
+import KpiTile from '../components/KpiTile'
+import EmptyState from '../components/EmptyState'
+import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
 import { Users, UserPlus, Search, Pencil, Ban, CheckCircle2, Copy, Trash2, KeyRound, Tag, RefreshCw, X, ShieldCheck, Eye, EyeOff } from 'lucide-react'
 
 // ─── Users (v48, super_admin only) ───────────────────────────────────
@@ -265,16 +269,19 @@ export default function UsersPage() {
   useEffect(() => { load() }, [load])
 
   // Realtime: an invite claimed (or a login touched) elsewhere refreshes us.
-  useEffect(() => {
-    const channel = supabase
-      .channel('users-admin')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, () => load().catch(() => {}))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'custom_roles' }, () => load().catch(() => {}))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_invitations' }, () => load().catch(() => {}))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'department_incharge_assignments' }, () => load().catch(() => {}))
-      .subscribe()
-    return () => { supabase.removeChannel(channel) }
-  }, [load])
+  // Global channel (no schedule scope) — the hook subscribes on a constant id.
+  useRealtimeRefresh({
+    scheduleId: 'global',
+    channelName: 'users-admin',
+    subscriptions: [
+      { table: 'portal_users' },
+      { table: 'custom_roles' },
+      { table: 'portal_invitations' },
+      { table: 'department_incharge_assignments' },
+    ],
+    onReload: () => load().catch(() => {}),
+    label: 'users-admin',
+  })
 
   const customById = useMemo(() => {
     const m = {}
@@ -738,28 +745,28 @@ export default function UsersPage() {
   }
   if (loadError) {
     return (
-      <div className="page"><div className="card"><div className="empty">
-        <div className="empty-title">Could not load users</div>
-        <div className="empty-text">{loadError}</div>
-        <button onClick={() => { setLoading(true); load() }} className="btn btn-primary" style={{ marginTop: '0.75rem' }}><RefreshCw size={14} /> Retry</button>
-      </div></div></div>
+      <div className="page"><div className="card"><EmptyState
+        title="Could not load users"
+        hint={loadError}
+        actionLabel="Retry"
+        onAction={() => { setLoading(true); load() }}
+      /></div></div>
     )
   }
 
   return (
     <div className="page" style={{ maxWidth: 1400 }}>
-      <div className="page-header">
-        <div>
-          <h2 className="page-title"><Users size={22} /> Users</h2>
-          <div className="page-sub">Logins, invites and roles. Enforcement always follows the base role server-side — this page only assigns it.</div>
-        </div>
-      </div>
+      <PageHeader
+        icon={<Users size={22} />}
+        title="Users"
+        sub="Logins, invites and roles. Enforcement always follows the base role server-side — this page only assigns it."
+      />
 
       <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-        <div className="stat"><div className="stat-label">Active logins</div><div className="stat-value">{stats.active}</div><div className="stat-sub">can sign in now</div></div>
-        <div className="stat"><div className="stat-label">Suspended</div><div className="stat-value" style={{ color: stats.suspended ? '#b91c1c' : undefined }}>{stats.suspended}</div><div className="stat-sub">locked out server-side</div></div>
-        <div className="stat"><div className="stat-label">Pending invites</div><div className="stat-value">{stats.pending}</div><div className="stat-sub">unclaimed + unexpired</div></div>
-        <div className="stat"><div className="stat-label">Custom roles</div><div className="stat-value">{stats.roles}</div><div className="stat-sub">named base-role aliases</div></div>
+        <KpiTile label="Active logins" value={stats.active} sub="can sign in now" />
+        <KpiTile label="Suspended" value={stats.suspended} tone={stats.suspended ? '#b91c1c' : undefined} sub="locked out server-side" />
+        <KpiTile label="Pending invites" value={stats.pending} sub="unclaimed + unexpired" />
+        <KpiTile label="Custom roles" value={stats.roles} sub="named base-role aliases" />
       </div>
 
       {/* ── Logins ── */}
@@ -786,7 +793,7 @@ export default function UsersPage() {
         )}
       >
         {filteredUsers.length === 0 ? (
-          <div className="empty"><div className="empty-text">No logins match these filters.</div></div>
+          <EmptyState title={null} hint="No logins match these filters." />
         ) : (
           <div className="table-wrap">
             <table className="table">
@@ -1018,7 +1025,7 @@ export default function UsersPage() {
 
         <div className="section-title" style={{ margin: '1.25rem 0 0.5rem', fontSize: '0.85rem' }}>Open invites ({pendingInvites.length})</div>
         {pendingInvites.length === 0 ? (
-          <div className="empty"><div className="empty-text">No open invites.</div></div>
+          <EmptyState title={null} hint="No open invites." />
         ) : (
           <div className="table-wrap"><table className="table">
             <thead><tr><th>Name</th><th>Email</th><th style={{ textAlign: 'center' }}>Role</th><th style={{ textAlign: 'center' }}>Code</th><th style={{ textAlign: 'center' }}>Expires</th><th style={{ textAlign: 'right' }}>Actions</th></tr></thead>

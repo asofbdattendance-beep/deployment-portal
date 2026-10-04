@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase, fetchCentres, fetchAllRows, getParentCentres, getRootCentre, getCount } from '../lib/supabase'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
+import PageHeader from '../components/PageHeader'
+import EmptyState from '../components/EmptyState'
 import { Plus, Trash2, Edit3, Calendar, Lock, Unlock, ChevronRight, X } from 'lucide-react'
 
 const SCHEDULE_STATUS_LABELS = {
@@ -112,12 +114,11 @@ export default function ScheduleMakerPage({ refreshSchedules }) {
 
   return (
     <div className="page">
-      <div className="page-header">
-        <div>
-          <h2 className="page-title"><Calendar size={22} /> Schedule Maker</h2>
-          <div className="page-sub">Create schedules, departments, rules, and centre allocations · WED – SUN</div>
-        </div>
-      </div>
+      <PageHeader
+        icon={<Calendar size={22} />}
+        title="Schedule Maker"
+        sub="Create schedules, departments, rules, and centre allocations · WED – SUN"
+      />
 
       <SchedulesPanel
         schedules={schedules}
@@ -319,7 +320,7 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
       </div>
 
       {schedules.length === 0 ? (
-        <p style={{ color: '#9ca3af', fontSize: '0.85rem', textAlign: 'center', padding: '1rem' }}>No schedules yet. Create one above.</p>
+        <EmptyState title="No schedules yet" hint="Create one above." />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
           {schedules.map(s => {
@@ -583,7 +584,7 @@ function DepartmentsPanel({ isSuper, toast }) {
       </div>
 
       {depts.length === 0 ? (
-        <p style={{ color: '#9ca3af', fontSize: '0.85rem', textAlign: 'center', padding: '1rem' }}>No departments yet.</p>
+        <EmptyState title="No departments yet" hint="Add one above." />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
           {depts.map(d => (
@@ -1015,7 +1016,7 @@ function AllocationsPanel({ schedule, isSuper, toast }) {
                               )}
                             </div>
                           ) : (
-                            <p style={{ fontSize: '0.8rem', color: '#9ca3af', margin: 0 }}>No centres allotted yet — add one below.</p>
+                            <EmptyState title="No centres allotted yet" hint="Add one below." />
                           )}
 
                           {centreNames.length > 0 && (
@@ -1209,7 +1210,7 @@ function ReadOnlySummary({ schedule }) {
         <div className="section-title">Deployment Summary — {schedule.name} <span style={{ fontWeight: 600, color: '#64748b', fontSize: '0.82rem' }}>({headerTotal} deployed · {schedTotal} scheduled{additionalTotal > 0 ? ` · +${additionalTotal} additional` : ''})</span></div>
       </div>
       {centres.length === 0 ? (
-        <p style={{ color: '#9ca3af', fontSize: '0.85rem', textAlign: 'center', padding: '1rem' }}>No deployments yet.</p>
+        <EmptyState title="No deployments yet" hint="Requested deployments will appear here." />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
           {centres.map(c => (
