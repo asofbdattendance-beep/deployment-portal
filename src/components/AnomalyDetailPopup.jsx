@@ -55,10 +55,10 @@ export default function AnomalyDetailPopup({ row, scheduleId, related = [], rule
         onClick={(e) => e.stopPropagation()}
         style={{ width: 'min(680px, 94vw)', maxHeight: '86vh', overflowY: 'auto' }}
       >
-        <div className="trail-head" style={{ display: 'flex', alignItems: 'flex-start', gap: 8, position: 'sticky', top: 0, padding: '0.25rem 0 0.6rem', background: 'var(--modal-bg, #fff)', zIndex: 1, borderBottom: '1px solid var(--border, #e2e8f0)' }}>
+        <div className="trail-head" style={{ display: 'flex', alignItems: 'flex-start', gap: 8, position: 'sticky', top: 0, padding: '0.25rem 0 0.6rem', background: 'var(--surface)', zIndex: 1, borderBottom: '1px solid var(--border)' }}>
           <div style={{ flex: 1 }}>
-            <div style={{ fontWeight: 800, fontSize: '1.05rem' }}>
-              <span style={{ fontFamily: 'monospace' }}>{badge || '—'}</span>
+            <div style={{ fontWeight: 700, fontSize: '0.95rem', letterSpacing: '-0.01em' }}>
+              <span className="mono">{badge || '—'}</span>
               {row?.sewadar_name ? ` · ${row.sewadar_name}` : ''}
             </div>
             <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>

@@ -8,6 +8,7 @@ import { fileSlug } from '../lib/excel'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
 import PageHeader, { ViewOnlyPill } from '../components/PageHeader'
+import KpiTile from '../components/KpiTile'
 import DataTable from '../components/DataTable'
 import AnomalyDetailPopup from '../components/AnomalyDetailPopup'
 import EmptyState from '../components/EmptyState'
@@ -98,12 +99,12 @@ const ANOMALY_COLUMNS = [
   {
     key: 'sewadar_centre',
     label: 'Centre',
-    render: (r) => <span style={{ color: '#64748b' }}>{centreOf(r)}</span>,
+    render: (r) => <span style={{ color: 'var(--text-sec)' }}>{centreOf(r)}</span>,
   },
   {
     key: 'dept_name',
     label: 'Department',
-    render: (r) => <span style={{ color: '#64748b' }}>{r.dept_name || '—'}</span>,
+    render: (r) => <span style={{ color: 'var(--text-sec)' }}>{r.dept_name || '—'}</span>,
   },
   {
     key: 'detail',
@@ -122,7 +123,7 @@ const ANOMALY_COLUMNS = [
     key: 'open',
     label: '',
     // Unmissable click affordance: every row opens the badge's info trail.
-    render: () => <span aria-hidden="true" title="Open the full trail" style={{ color: '#4f46e5', fontWeight: 800 }}>›</span>,
+    render: () => <span aria-hidden="true" title="Open the full trail" style={{ color: 'var(--primary-dark)', fontWeight: 800 }}>›</span>,
   },
 ]
 // A rule can report the same badge on more than one date (MULTI_SESSION), so
@@ -395,13 +396,13 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
       <div className="page" style={{ maxWidth: 1400 }}>
         <div className="card" style={{ padding: '1.5rem', maxWidth: 720, margin: '0 auto' }} role="alert">
           <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', marginBottom: '0.5rem' }}>
-            <ShieldAlert size={18} style={{ color: '#b91c1c' }} />
+            <ShieldAlert size={18} style={{ color: 'var(--err)' }} />
             <h3 className="empty-title" style={{ margin: 0 }}>Could not load anomalies</h3>
           </div>
           <p style={{ fontSize: '0.85rem', color: '#475569', margin: 0 }}>
             The anomaly rules could not be read from the server.
           </p>
-          <p style={{ fontSize: '0.8rem', color: '#64748b', margin: '0.75rem 0 0' }}>
+          <p style={{ fontSize: '0.8rem', color: 'var(--text-sec)', margin: '0.75rem 0 0' }}>
             The attendance reports functions may not be installed on this database, or your role may
             not be permitted to read them. No anomalies are shown, because none could be loaded.
           </p>
@@ -482,30 +483,29 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
       />
 
       <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-        <div className="stat">
-          <div className="stat-label">Anomalies</div>
-          <div className="stat-value" style={{ color: base.length ? '#b45309' : undefined }}>{cappedTotal(base.length)}</div>
-          <div className="stat-sub">{date ? `on ${shortDayLabel(date)}` : 'across the whole visit'}{isCapped ? ' · showing newest' : ''}</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Rules fired</div>
-          <div className="stat-value">{Object.keys(counts).length}</div>
-          <div className="stat-sub">of {RULE_ORDER.length} known rules</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Red</div>
-          <div className="stat-value" style={{ color: (counts.UNDEPLOYED_SCAN || 0) + (counts.BAD_STATUS || 0) ? '#b91c1c' : undefined }}>
-            {(counts.UNDEPLOYED_SCAN || 0) + (counts.BAD_STATUS || 0)}
-          </div>
-          <div className="stat-sub">record is wrong</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Amber</div>
-          <div className="stat-value" style={{ color: '#b45309' }}>
-            {(counts.MULTI_SESSION || 0) + (counts.STALE_OPEN || 0) + (counts.VSS_DEPT_MISMATCH || 0)}
-          </div>
-          <div className="stat-sub">day looks suspicious</div>
-        </div>
+        <KpiTile
+          label="Anomalies"
+          value={cappedTotal(base.length)}
+          sub={`${date ? `on ${shortDayLabel(date)}` : 'across the whole visit'}${isCapped ? ' · showing newest' : ''}`}
+          tone={base.length ? '#b45309' : undefined}
+        />
+        <KpiTile
+          label="Rules fired"
+          value={Object.keys(counts).length}
+          sub={`of ${RULE_ORDER.length} known rules`}
+        />
+        <KpiTile
+          label="Red"
+          value={(counts.UNDEPLOYED_SCAN || 0) + (counts.BAD_STATUS || 0)}
+          sub="record is wrong"
+          tone={(counts.UNDEPLOYED_SCAN || 0) + (counts.BAD_STATUS || 0) ? 'var(--err)' : undefined}
+        />
+        <KpiTile
+          label="Amber"
+          value={(counts.MULTI_SESSION || 0) + (counts.STALE_OPEN || 0) + (counts.VSS_DEPT_MISMATCH || 0)}
+          sub="day looks suspicious"
+          tone={(counts.MULTI_SESSION || 0) + (counts.STALE_OPEN || 0) + (counts.VSS_DEPT_MISMATCH || 0) ? '#b45309' : undefined}
+        />
       </div>
 
       <div className="card" style={{ padding: '1.25rem' }}>
@@ -544,7 +544,7 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
               </span>
             )}
             {rules.length === 0 && (
-              <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-sec)' }}>
                 No rule fired{date ? ` on ${shortDayLabel(date)}` : ' for this visit'} — only “All” is available.
               </span>
             )}
@@ -552,7 +552,7 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
           <div style={{ flex: 1 }} />
           {!isMobile && (
             <div style={{ position: 'relative', minWidth: 200 }}>
-              <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none' }} />
+              <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }} />
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
@@ -606,7 +606,7 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
                 <div className="att-card-foot">
                   <span className="att-card-times">{r.detail || '—'}</span>
                   <span className="att-card-times">{r.event_date || '—'}</span>
-                  <span aria-hidden="true" title="Open the full trail" style={{ color: '#4f46e5', fontWeight: 800 }}>›</span>
+                  <span aria-hidden="true" title="Open the full trail" style={{ color: 'var(--primary-dark)', fontWeight: 800 }}>›</span>
                 </div>
               </div>
             )}
