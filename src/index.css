@@ -58,7 +58,23 @@
   --danger: #ef4444;
   --danger-soft: #fef2f2;
   --violet: #8b5cf6;
-  --radius: 12px;
+  /* ── Phase 2 radius steps (tokens.md): 6 inputs/chips · 8 cards ·
+     10 large cards · 14 modals. --radius itself is the card step. */
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  /* ── One focus ring (value unchanged — extracted, not restyled) ── */
+  --focus-ring: 0 0 0 3px rgba(99, 102, 241, 0.18);
+  /* ── Micro-motion only: 150–250ms state feedback, never decoration ── */
+  --motion-fast: 150ms;
+  --motion-base: 200ms;
+  /* ── Subdued OKLCH semantics for TEXT + DOTS only; grounds stay neutral.
+     Legacy hex --success/--warning/--danger (+soft grounds) are untouched. */
+  --ok: oklch(60% 0.12 150);
+  --warn: oklch(72% 0.13 75);
+  --err: oklch(58% 0.15 25);
+  --info: oklch(62% 0.12 240);
   --shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 1px 3px rgba(15, 23, 42, 0.06);
   --shadow-lg: 0 10px 40px rgba(15, 23, 42, 0.12);
   /* ── Overlay z-index scale (must stay ordered) ──
@@ -107,7 +123,26 @@ html { -webkit-tap-highlight-color: transparent; }
 button { font-family: inherit; }
 
 input, select, textarea { font-family: inherit; }
-input:focus, select:focus, textarea:focus, button:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18); }
+input:focus, select:focus, textarea:focus, button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* ─── Phase 2 shared utilities (tokens.md mirror) ─── */
+.tnum { font-variant-numeric: tabular-nums; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.t-ok { color: var(--ok); }
+.t-warn { color: var(--warn); }
+.t-err { color: var(--err); }
+.t-info { color: var(--info); }
+
+/* Motion is state feedback, not decoration: honour the OS reduce switch by
+   collapsing every animation + transition to (effectively) instant. Layout
+   and content never depend on motion completing. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
 
 /* ─── Card ─── */
 .card {
