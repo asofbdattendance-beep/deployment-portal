@@ -34,4 +34,12 @@ describe('PhaseSwitch', () => {
     fireEvent.keyDown(screen.getByRole('tablist'), { key: 'ArrowRight' })
     expect(onChange).toHaveBeenCalledWith(2)
   })
+
+  it('moves focus to the newly selected tab on arrow keys', () => {
+    const onChange = vi.fn()
+    render(<PhaseSwitch activePhase={1} availablePhases={[1, 2]} onChange={onChange} />)
+    screen.getByRole('tab', { name: 'Deployment' }).focus()
+    fireEvent.keyDown(screen.getByRole('tablist'), { key: 'ArrowRight' })
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'Attendance' }))
+  })
 })
