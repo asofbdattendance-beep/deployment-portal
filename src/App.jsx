@@ -6,7 +6,7 @@ import LoginPage from './pages/LoginPage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
 import { ROLE_LABELS, ROLE_COLORS } from './lib/supabase'
 import DbVersionBanner from './components/DbVersionBanner'
-import { ShieldCheck, RefreshCw, AlertTriangle, Wrench } from 'lucide-react'
+import { ShieldCheck, RefreshCw, AlertTriangle, Wrench, LogOut } from 'lucide-react'
 import { PAGES, PHASES } from './lib/pages'
 import PhaseSwitch from './components/PhaseSwitch'
 import { phasesForRole, resolveActivePhase, readStoredPhase, storeActivePhase, pagesForRolePhase } from './lib/phase'
@@ -293,14 +293,22 @@ function Dashboard() {
           )}
         </div>
         <div className="header-actions">
-          <span className="header-user">{profile?.name}</span>
-          {profile?.badge_number && <span className="header-centre">{profile.badge_number}</span>}
-          <span className="role-badge" style={{ background: ROLE_COLORS[profile?.role] || '#888' }}>
-            {ROLE_LABELS[profile?.role] || profile?.role}
-          </span>
-          {deptNames.length > 0 && <span className="header-centre">{deptNames.join(', ')}</span>}
-          <button onClick={signOut} className="btn btn-ghost signout-btn">
-            Sign out
+          <div
+            className="user-chip"
+            title={[profile?.name, profile?.badge_number, deptNames.join(', ')].filter(Boolean).join(' · ')}
+          >
+            <span className="user-avatar" aria-hidden="true">
+              {(profile?.name || '?').trim().charAt(0).toUpperCase()}
+            </span>
+            <span className="header-user">{profile?.name}</span>
+            {profile?.badge_number && <span className="header-centre">{profile.badge_number}</span>}
+            <span className="role-badge" style={{ background: ROLE_COLORS[profile?.role] || '#888' }}>
+              {ROLE_LABELS[profile?.role] || profile?.role}
+            </span>
+            {deptNames.length > 0 && <span className="header-centre header-depts">{deptNames.join(', ')}</span>}
+          </div>
+          <button onClick={signOut} className="btn btn-ghost signout-btn" title="Sign out" aria-label="Sign out">
+            <LogOut size={16} aria-hidden="true" />
           </button>
         </div>
       </header>
