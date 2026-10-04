@@ -361,6 +361,20 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
     [directoryByBadge]
   )
 
+  // Owner-null honesty: a row enqueued without an owner can never auto-drain
+  // (D1a), so the ack must not promise a sync that will never come. The row
+  // stays visible in the queue with per-row recovery.
+  const queuedAck = useCallback((queuedRes, action) => {
+    if (queuedRes && queuedRes.owner != null) {
+      return { message: 'Queued offline — will sync when online', toast: `${action} queued (offline)`, warn: false }
+    }
+    return {
+      message: 'Queued on this device with no owner — it cannot auto-sync. If it stays queued, re-scan when online.',
+      toast: `${action} queued locally (no owner — cannot auto-sync)`,
+      warn: true,
+    }
+  }, [])
+
   // L-36 core: attempt an OUT write, falling back to the offline queue.
   // Returns { handled, outcome } so each caller keeps its own success UX:
   // the main flow celebrates inline, the forgot flow stays silent for the
@@ -377,11 +391,13 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
     // Identity survives queueing: the forgot popup named the sewadar, else the
     // directory — a queued ack with no name reads as a lost scan.
     const dirQ = displayOf(dirFor(b))
-    showPopup({ status: 'queued', action: 'OUT', badge: b, name: display?.name ?? dirQ.name, centre: display?.centre ?? dirQ.centre, deptName: display?.deptName ?? dirQ.deptName, time: new Date().toLocaleTimeString(), ...eventStamp(), message: 'Queued offline — will sync when online' })
-    toast.success(`OUT queued (offline) ${b}`)
+    const ackQ = queuedAck(queuedRes, 'OUT')
+    showPopup({ status: 'queued', action: 'OUT', badge: b, name: display?.name ?? dirQ.name, centre: display?.centre ?? dirQ.centre, deptName: display?.deptName ?? dirQ.deptName, time: new Date().toLocaleTimeString(), ...eventStamp(), message: ackQ.message })
+    if (ackQ.warn) toast.warning(ackQ.toast)
+    else toast.success(ackQ.toast)
     onQueued?.()
     return { handled: true, outcome: { ok: false, reason: 'queued' } }
-  }, [scheduleId, profile, showPopup, toast, onQueued, isOfflineDupe, tryEnqueue, noteQueuedOffline, offlineEnqueueFailed, displayOf, dirFor])
+  }, [scheduleId, profile, showPopup, toast, onQueued, isOfflineDupe, tryEnqueue, noteQueuedOffline, offlineEnqueueFailed, displayOf, dirFor, queuedAck])
 
   // L-36: the forgot-OUT confirm path with the same offline parity as the
   // main OUT flow. Silent on online paths — the page keeps its form on
@@ -399,10 +415,15 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
       return { ok: true }
     } catch (e) {
       const msg = String(e.message || '')
-      // V14: a clock-skew rejection keeps the page's form AND names the cause.
-      if (isClockSkewed(msg, ts)) return { ok: false, reason: 'server', message: CLOCK_SKEW_MESSAGE }
+      // Network/timeout failures may fall through to the offline queue even
+      // when the ts looks stale — a jammer-adjacent timeout on a non-IST
+      // device must still enqueue (parity with the fast-path and IN flow,
+      // which both test isOfflineLike first). Skew messaging is for errors
+      // that are ONLY skew.
       const fb = await enqueueOutFallback({ b: badge, ts, openId, manual: true, display }, msg)
       if (fb.handled) return fb.outcome
+      // V14: a clock-skew rejection keeps the page's form AND names the cause.
+      if (isClockSkewed(msg, ts)) return { ok: false, reason: 'server', message: CLOCK_SKEW_MESSAGE }
       return { ok: false, reason: 'server', message: friendly(msg) }
     }
   }, [enqueueOutFallback, scheduleId])
@@ -555,8 +576,10 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
             // carry it into the ack, else the queued popup blanks (dir fallback
             // covers a choice that itself came from a blank error branch).
             const dirQO = displayOf(dirFor(b))
-            showPopup({ status: 'queued', action: 'OUT', badge: b, name: display?.name ?? dirQO.name, centre: display?.centre ?? dirQO.centre, deptName: display?.deptName ?? dirQO.deptName, time: new Date().toLocaleTimeString(), ...eventStamp(), message: 'Queued offline — will sync when online' })
-            toast.success(`OUT queued (offline) ${b}`)
+            const ackQO = queuedAck(queuedRes, 'OUT')
+            showPopup({ status: 'queued', action: 'OUT', badge: b, name: display?.name ?? dirQO.name, centre: display?.centre ?? dirQO.centre, deptName: display?.deptName ?? dirQO.deptName, time: new Date().toLocaleTimeString(), ...eventStamp(), message: ackQO.message })
+            if (ackQO.warn) toast.warning(ackQO.toast)
+            else toast.success(ackQO.toast)
             scanOk = true
             onQueued?.()
           } else if (isClockSkewed(msg, tsFast)) {
@@ -843,8 +866,10 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
             // Same identity carry as the OUT ack above (confirmed display
             // first, directory fallback) — the IN choice named the sewadar.
             const dirQI = displayOf(dirFor(b))
-            showPopup({ status: 'queued', action: 'IN', badge: b, name: display?.name ?? dirQI.name, centre: display?.centre ?? dirQI.centre, deptName: display?.deptName ?? dirQI.deptName, time: new Date().toLocaleTimeString(), ...eventStamp(), message: 'Queued offline — will sync when online' })
-            toast.success(`IN queued (offline) ${b}`)
+            const ackQI = queuedAck(queuedRes, 'IN')
+            showPopup({ status: 'queued', action: 'IN', badge: b, name: display?.name ?? dirQI.name, centre: display?.centre ?? dirQI.centre, deptName: display?.deptName ?? dirQI.deptName, time: new Date().toLocaleTimeString(), ...eventStamp(), message: ackQI.message })
+            if (ackQI.warn) toast.warning(ackQI.toast)
+            else toast.success(ackQI.toast)
             scanOk = true
             onQueued?.()
           } else if (isClockSkewed(msg, ts)) {
@@ -863,7 +888,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
     } finally {
       resetBusy()
     }
-  }, [scheduleId, profile, deptName, displayOf, dirFor, showPopup, toast, onQueued, onAfterScan, setBusySafe, resetBusy, offlineEnqueueFailed, isOfflineDupe, noteQueuedOffline, tryEnqueue])
+  }, [scheduleId, profile, deptName, displayOf, dirFor, showPopup, toast, onQueued, onAfterScan, setBusySafe, resetBusy, offlineEnqueueFailed, isOfflineDupe, noteQueuedOffline, tryEnqueue, queuedAck])
 
   return { handleScan, busy, getBusy, resetBusy, submitForgotOut }
 }

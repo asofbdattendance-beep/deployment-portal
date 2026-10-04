@@ -16,7 +16,7 @@ import { useScannerSession } from './useScannerSession'
 const rpc = vi.fn()
 const enqueueScan = vi.fn()
 const getQueuedScans = vi.fn()
-const installDrainListeners = vi.fn(() => vi.fn())
+const subscribeOfflineSync = vi.fn(() => vi.fn())
 
 vi.mock('../lib/supabase', () => ({
   supabase: { rpc: (...args) => rpc(...args) },
@@ -24,7 +24,12 @@ vi.mock('../lib/supabase', () => ({
 vi.mock('../lib/offlineQueue', () => ({
   getQueuedScans: (...args) => getQueuedScans(...args),
   enqueueScan: (...args) => enqueueScan(...args),
-  installDrainListeners: (...args) => installDrainListeners(...args),
+  // Real implementations: the hook shares the canonical predicates now.
+  isFailedQueueRow: (r) => !!r && (r.status === 'failed' || r.failed === true),
+  isOrphanedQueueRow: (r) => !(!!r && (r.status === 'failed' || r.failed === true)) && (r?.owner ?? null) === null && !r?.synced,
+}))
+vi.mock('../lib/offlineSync', () => ({
+  subscribeOfflineSync: (...args) => subscribeOfflineSync(...args),
 }))
 
 const NOW = new Date('2026-09-24T12:00:00Z') // 17:30 IST
@@ -73,8 +78,8 @@ beforeEach(() => {
   rpc.mockReset()
   enqueueScan.mockReset()
   getQueuedScans.mockReset()
-  installDrainListeners.mockReset()
-  installDrainListeners.mockReturnValue(vi.fn())
+  subscribeOfflineSync.mockReset()
+  subscribeOfflineSync.mockReturnValue(vi.fn())
   getQueuedScans.mockResolvedValue([])
   enqueueScan.mockResolvedValue({ ok: true, id: 'q-1' })
   Object.defineProperty(navigator, 'onLine', { value: true, configurable: true })
@@ -83,7 +88,7 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers() })
 
 describe('useScannerSession bundle', () => {
-  it('exposes the session bundle with empty initial state and subscribes the drain', () => {
+  it('exposes the session bundle with empty initial state and subscribes to the app-level sync engine', () => {
     const { result, unmount } = setup()
     expect(result.current.popup).toBeNull()
     expect(result.current.outTime).toBe('')
@@ -93,8 +98,8 @@ describe('useScannerSession bundle', () => {
     for (const k of ['showPopup', 'closePopup', 'handleScan', 'handleCameraScan', 'commitScan', 'confirmForgot', 'refreshQueue']) {
       expect(typeof result.current[k]).toBe('function')
     }
-    expect(installDrainListeners).toHaveBeenCalledTimes(1)
-    const off = installDrainListeners.mock.results[0].value
+    expect(subscribeOfflineSync).toHaveBeenCalledTimes(1)
+    const off = subscribeOfflineSync.mock.results[0].value
     unmount()
     expect(off).toHaveBeenCalledTimes(1)
   })
@@ -110,7 +115,7 @@ describe('useScannerSession bundle', () => {
 
   // L-44: queue progress owns the syncing flag.
   it('refreshQueue raises syncing while rows are pending', async () => {
-    getQueuedScans.mockResolvedValue([{ id: 'q-1', synced: false, failed: false }])
+    getQueuedScans.mockResolvedValue([{ id: 'q-1', synced: false, failed: false, owner: 'user-A' }])
     const { result, unmount } = setup()
     await act(async () => { await result.current.refreshQueue() })
     expect(result.current.queued).toHaveLength(1)
@@ -272,17 +277,22 @@ describe('useScannerSession V15 hardening', () => {
     return { ...view, toast: t, clearManual, onAfterScan }
   }
 
-  it('onDrainProgress never rejects when the queue read fails (V15 .catch)', async () => {
-    const { unmount } = setup()
-    const listener = installDrainListeners.mock.calls[0][1]
-    getQueuedScans.mockRejectedValueOnce(new Error('IDB down'))
-    // Without the .catch this rejects and the drain subscription dies loudly.
-    await act(async () => { listener(); await new Promise(r => setTimeout(r, 0)) })
+  it('store snapshots update queued/syncing and never reject (V15 .catch)', async () => {
+    const { result, unmount } = setup()
+    const subscriber = subscribeOfflineSync.mock.calls[0][0]
+    await act(async () => { subscriber({ queued: [{ id: 'q-1', synced: false, failed: false, owner: 'user-A' }] }) })
+    expect(result.current.queued).toHaveLength(1)
+    expect(result.current.syncing).toBe(true)
+    await act(async () => { subscriber({ queued: [] }) })
+    expect(result.current.queued).toEqual([])
+    expect(result.current.syncing).toBe(false)
+    // A malformed snapshot must not surface as an unhandled rejection.
+    await act(async () => { subscriber(undefined) })
     unmount()
   })
 
   it('refreshQueue lowers syncing once the queue empties (V16)', async () => {
-    getQueuedScans.mockResolvedValue([{ id: 'q-1', synced: false, failed: false }])
+    getQueuedScans.mockResolvedValue([{ id: 'q-1', synced: false, failed: false, owner: 'user-A' }])
     const { result, unmount } = setup()
     await act(async () => { await result.current.refreshQueue() })
     expect(result.current.syncing).toBe(true)

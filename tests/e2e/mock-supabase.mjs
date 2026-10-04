@@ -43,6 +43,7 @@ const TABLES = {
 const state = {
   calls: [], // { rpc, params, at }
   seed: {}, // rpcName -> 'error' | 'hang' | { data, error }
+  profileOverride: null, // { role, centre, ... } merged over PROFILE by seed
 }
 
 // ── opt-in rig variation ─────────────────────────────────────────────
@@ -124,7 +125,7 @@ function rpcResult(name, params) {
   }
   switch (name) {
     case 'get_portal_profile':
-      return { __status: 200, __body: PROFILE }
+      return { __status: 200, __body: { ...PROFILE, ...(state.profileOverride || {}) } }
     case 'get_scan_state':
       return { __status: 200, __body: { open: null, last_out: null } }
     case 'scan_in':
@@ -166,6 +167,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/__test/reset' && req.method === 'POST') {
     state.calls = []
     state.seed = {}
+    state.profileOverride = null
     json(res, 200, { ok: true })
     return
   }
@@ -174,6 +176,12 @@ const server = http.createServer(async (req, res) => {
     // Merge: specs layer seeds (an old open session AND a poison badge).
     // Reset wipes everything between specs.
     state.seed = { ...state.seed, ...(body?.rpc || {}) }
+    // Role override: a spec that needs a multi-tab role (e.g. dept_incharge
+    // for the navigate-away sync proof) seeds { profile: { role, ... } }.
+    // USER/session identity is untouched, so the queue owner still matches.
+    if (body?.profile && typeof body.profile === 'object') {
+      state.profileOverride = body.profile
+    }
     json(res, 200, { ok: true })
     return
   }

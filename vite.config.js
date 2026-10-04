@@ -74,6 +74,7 @@ export default defineConfig(({ command, mode }) => {
         // attendance rows, so it belongs under the gate too
         'src/hooks/useScanHandler.js',
         'src/lib/offlineQueue.js',
+        'src/lib/offlineSync.js',
         'src/lib/scannerUtils.js',
         // scanner UI + session state -- covered by component/hook suites,
         // gated so a regression here is visible to CI (V17)
@@ -90,6 +91,7 @@ export default defineConfig(({ command, mode }) => {
         'src/components/mobile/QueueRecoveryBar.jsx',
         'src/components/mobile/Skeleton.jsx',
         'src/components/mobile/OfflineBanner.jsx',
+        'src/components/mobile/OfflineSyncStatus.jsx',
         'src/components/mobile/QuickPeekSheet.jsx',
         'src/components/mobile/PullToRefresh.jsx',
         'src/components/AttendanceCards.jsx',
@@ -152,6 +154,17 @@ export default defineConfig(({ command, mode }) => {
           functions: 70,
           lines: 91,
         },
+        // App-level sync engine (offlineSync.js): floors sit just below the
+        // measured values with a couple of points of slack, matching the
+        // neighbouring entries. Branches intentionally at the level the
+        // file's own suite achieves, so the gate never depends on other
+        // suites continuing to load the real engine.
+        'src/lib/offlineSync.js': {
+          statements: 84,
+          branches: 78,
+          functions: 71,
+          lines: 88,
+        },
         'src/lib/scanDisplay.js': {
           statements: 98,
           branches: 98,
@@ -211,6 +224,14 @@ export default defineConfig(({ command, mode }) => {
           branches: 80,
           functions: 90,
           lines: 90,
+        },
+        // Global queue pill (OfflineSyncStatus.jsx): same convention as its
+        // QueueRecoveryBar sibling, floors just below measured (100/82/100/100).
+        'src/components/mobile/OfflineSyncStatus.jsx': {
+          statements: 99,
+          branches: 80,
+          functions: 99,
+          lines: 99,
         },
         'src/components/AttendanceCards.jsx': {
           statements: 90,

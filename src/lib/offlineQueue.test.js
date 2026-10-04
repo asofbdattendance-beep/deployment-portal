@@ -21,7 +21,7 @@ vi.mock('./supabase', () => ({
   },
 }))
 
-const { enqueueScan, getQueuedScans, removeQueued, markFailed, clearFailedQueue, clearLiveQueue, clearOrphanedQueue, drainQueue, classifyScanError, isNetworkNotReached, isStrandedRow, listStrandedQueue, getDrainTiming, __resetDrainState, __getConsecutiveFailures, cacheSet, getCachedDeployed, preloadDeployed, installDrainListeners } = await import('./offlineQueue')
+const { enqueueScan, getQueuedScans, removeQueued, markFailed, clearFailedQueue, clearLiveQueue, clearOrphanedQueue, drainQueue, classifyScanError, isNetworkNotReached, isStrandedRow, listStrandedQueue, getDrainTiming, __resetDrainState, __getConsecutiveFailures, cacheSet, getCachedDeployed, preloadDeployed, installDrainListeners, QUEUE_CHANGED_EVENT } = await import('./offlineQueue')
 
 /** Read EVERY row in the store, bypassing the owner filter — test-only helper. */
 function allRows() {
@@ -79,7 +79,7 @@ beforeEach(async () => {
 describe('enqueueScan', () => {
   it('stores a scan and tags it with the signed-in user', async () => {
     const res = await enqueueScan({ badge: 'FB5971GA0001', schedule_id: 'sched-1', action: 'IN', ts: '2026-09-24T09:00:00Z' })
-    expect(res).toEqual({ ok: true, id: expect.any(String) })
+    expect(res).toEqual({ ok: true, id: expect.any(String), owner: 'user-A' })
     const rows = await getQueuedScans()
     expect(rows).toHaveLength(1)
     expect(rows[0].badge).toBe('FB5971GA0001')
@@ -88,7 +88,7 @@ describe('enqueueScan', () => {
 
   it('honours a caller-supplied id (the offline nonce used for idempotency)', async () => {
     const res = await enqueueScan({ id: 'nonce-123', badge: 'VS001', schedule_id: 'sched-1', action: 'IN' })
-    expect(res).toEqual({ ok: true, id: 'nonce-123' })
+    expect(res).toEqual({ ok: true, id: 'nonce-123', owner: 'user-A' })
     expect((await getQueuedScans())[0].id).toBe('nonce-123')
   })
 
@@ -129,7 +129,7 @@ describe('enqueueScan result contract (Task A1: L-01 / L-02)', () => {
   it('never rejects: resolves a result object on the happy path', async () => {
     await expect(
       enqueueScan({ badge: 'VS7200', schedule_id: 's', action: 'IN' })
-    ).resolves.toEqual({ ok: true, id: expect.any(String) })
+    ).resolves.toEqual({ ok: true, id: expect.any(String), owner: 'user-A' })
   })
 
   it('resolves { ok:false, reason:"unavailable" } when IndexedDB is missing', async () => {
@@ -563,14 +563,23 @@ describe('stranded rows (T10)', () => {
     expect(isStrandedRow(null)).toBe(false)
   })
 
-  it('listStrandedQueue returns null-owner live rows while logged in (read-only)', async () => {
+  it('listStrandedQueue surfaces null-owner live rows only while logged out', async () => {
     await putRaw(live('strand-1', { owner: null }))
     await putRaw(live('mine-1', { owner: 'user-A' }))
     await putRaw(live('dead-1', { owner: null, failed: true, status: 'failed' }))
     // getQueuedScans hides the stranded row while logged in (D1a)…
     expect((await getQueuedScans()).map((r) => r.id)).toEqual(['mine-1'])
-    // …but the stranded list surfaces it regardless of login.
-    expect((await listStrandedQueue()).map((r) => r.id)).toEqual(['strand-1'])
+    // …and the stranded list stays hidden too: surfacing null-owner rows to
+    // a logged-in user would leak another operator's queued badges on a
+    // shared device (with a working per-row delete).
+    expect(await listStrandedQueue()).toEqual([])
+    currentUserId = null
+    try {
+      // Logged out, the rows surface beside clearOrphanedQueue for recovery.
+      expect((await listStrandedQueue()).map((r) => r.id)).toEqual(['strand-1'])
+    } finally {
+      currentUserId = 'user-A'
+    }
   })
 
   it('a stranded row is removable per-row via removeQueued and never drains', async () => {
@@ -584,17 +593,26 @@ describe('stranded rows (T10)', () => {
     // Drain skips null-owner rows (cross-user safety) — zero RPCs for it.
     await drainQueue(fake)
     expect(calls).toHaveLength(0)
-    expect((await listStrandedQueue()).map((r) => r.id)).toEqual(['strand-9'])
+    // Hidden while logged in (no cross-user listing)…
+    expect(await listStrandedQueue()).toEqual([])
+    // …surfaced while logged out, beside clearOrphanedQueue.
+    currentUserId = null
+    try {
+      expect((await listStrandedQueue()).map((r) => r.id)).toEqual(['strand-9'])
+    } finally {
+      currentUserId = 'user-A'
+    }
     // Manual per-row clear removes exactly that row.
     await removeQueued('strand-9')
-    expect(await listStrandedQueue()).toEqual([])
     expect(await allRows()).toHaveLength(0)
   })
 
   it('clearOrphanedQueue still returns 0 while logged in (semantics kept)', async () => {
     await putRaw(live('strand-2', { owner: null }))
     await expect(clearOrphanedQueue()).resolves.toBe(0)
-    expect((await listStrandedQueue()).map((r) => r.id)).toEqual(['strand-2'])
+    // …and the row stays unlisted while logged in.
+    expect(await listStrandedQueue()).toEqual([])
+    await removeQueued('strand-2')
   })
 })
 
@@ -947,5 +965,237 @@ describe('worst-case data-loss fixes (C1/C3/C4/C5/C6 + cap policy)', () => {
   it('cap policy: clearLiveQueue returns 0 when there is nothing live to clear', async () => {
     await putRaw(live('dead', { badge: 'VS0035', failed: true, status: 'failed' }))
     await expect(clearLiveQueue()).resolves.toBe(0)
+  })
+})
+
+describe('queue-changed notifications + honest drain progress (app-level sync)', () => {
+  it('enqueueScan broadcasts QUEUE_CHANGED_EVENT on success', async () => {
+    const seen = []
+    const onChange = () => seen.push(1)
+    window.addEventListener(QUEUE_CHANGED_EVENT, onChange)
+    try {
+      const r = await enqueueScan({ id: 'ev-1', badge: 'FB5971GA0001', schedule_id: 's', action: 'IN' })
+      expect(r.ok).toBe(true)
+      // The app-level engine listens for exactly this to refresh counts and
+      // kick a drain — a silent write would leave the UI stale.
+      expect(seen.length).toBeGreaterThan(0)
+    } finally {
+      window.removeEventListener(QUEUE_CHANGED_EVENT, onChange)
+      await removeQueued('ev-1')
+    }
+  })
+
+  it('a quarantined poison row reports progress failure, not silence', async () => {
+    __resetDrainState()
+    await enqueueScan({ id: 'ev-3', badge: 'FB5971GA0003', schedule_id: 's', action: 'IN', ts: new Date().toISOString() })
+    // Auth/RLS failures need a human fix: the row quarantines terminally and
+    // the progress callback says failure (the neighbours keep draining).
+    const sb = {
+      auth: { getSession: async () => ({ data: { session: { user: { id: 'user-A' } } } }) },
+      rpc: async () => ({ data: null, error: { message: 'Not authorized to scan', code: '42501' } }),
+    }
+    const progress = []
+    const drained = await drainQueue(sb, (row, ok, err) => progress.push([row.id, ok, err ? String(err.message || err) : '']))
+    expect(drained).toBe(0)
+    expect(progress).toHaveLength(1)
+    expect(progress[0][0]).toBe('ev-3')
+    expect(progress[0][1]).toBe(false)
+    const rows = await allRows()
+    expect(rows.find((r) => r.id === 'ev-3')?.failed).toBe(true)
+  })
+})
+
+describe('agent wave: error-combination hardening', () => {
+  // MAX_DRAIN_ATTEMPTS = 12 — module-private (via scannerUtils), mirrored deliberately.
+  const ATTEMPTS = 12
+  const lid = (id, extra = {}) => ({
+    id, badge: 'VS0099', schedule_id: 's', action: 'IN', ts: new Date().toISOString(),
+    createdAt: 1, attempts: 0, synced: false, owner: 'user-A', ...extra,
+  })
+  const fakeAuth = () => ({
+    auth: { getSession: async () => ({ data: { session: currentUserId ? { user: { id: currentUserId } } : null } }) },
+  })
+
+  // F4: an OUT whose ts can never satisfy its session is permanent, never a
+  // head-of-line block for 12 backoff cycles.
+  it('classifies OUT-time ordering as permanent', () => {
+    expect(classifyScanError('OUT time must be after IN time')).toBe('permanent')
+  })
+
+  it('an impossible OUT quarantines without blocking its neighbours', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw(lid('ord-1', { action: 'OUT', ts: '2026-09-24T09:00:00Z' }))
+    await putRaw(lid('ord-2', { badge: 'VS0098', createdAt: 2 }))
+    const sb = {
+      ...fakeAuth(),
+      rpc: async (name, params) => {
+        calls.push([name, params])
+        if (params?.p_badge === 'VS0099') return { data: null, error: new Error('OUT time must be after IN time') }
+        return { data: { ok: true }, error: null }
+      },
+    }
+    const drained = await drainQueue(sb, () => {})
+    expect(drained).toBe(1)
+    const rows = await allRows()
+    // Poison quarantined terminally…
+    expect(rows.find((r) => r.id === 'ord-1')?.failed).toBe(true)
+    // …neighbour drained in the SAME pass (no break, no wedge).
+    expect(rows.find((r) => r.id === 'ord-2')).toBeUndefined()
+    expect(calls.map((c) => c[0])).toEqual(['scan_out', 'scan_in'])
+  })
+
+  // F5: the createdAt floor survives a localStorage outage via live rows.
+  it('orders by live rows when localStorage is unavailable', async () => {
+    await putRaw(lid('fl-1', { createdAt: 5000 }))
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000)
+    const getItem = Storage.prototype.getItem
+    Storage.prototype.getItem = () => { throw new Error('denied') }
+    try {
+      const r = await enqueueScan({ id: 'fl-2', badge: 'VS0097', schedule_id: 's', action: 'IN' })
+      expect(r.ok).toBe(true)
+    } finally {
+      nowSpy.mockRestore()
+      Storage.prototype.getItem = getItem
+    }
+    const rows = await allRows()
+    // Date.now() said 1000, but the live row forces the floor above 5000.
+    expect(rows.find((r) => r.id === 'fl-2').createdAt).toBe(5001)
+    await removeQueued('fl-1')
+    await removeQueued('fl-2')
+  })
+
+  // F6: systemic permanent failures break the pass instead of mass-quarantining.
+  it('three consecutive permanents break the pass with the tail live', async () => {
+    __resetDrainState()
+    for (const [id, badge, at] of [['pb-1', 'VS0081', 1], ['pb-2', 'VS0082', 2], ['pb-3', 'VS0083', 3]]) {
+      await putRaw(lid(id, { badge, createdAt: at }))
+    }
+    await putRaw(lid('pb-good', { badge: 'VS0084', createdAt: 9 }))
+    const sb = {
+      ...fakeAuth(),
+      rpc: async (name, params) => {
+        if (String(params?.p_badge || '').startsWith('VS008')) {
+          return { data: null, error: { message: 'Not authorized to scan', code: '42501' } }
+        }
+        return { data: { ok: true }, error: null }
+      },
+    }
+    const drained = await drainQueue(sb, () => {})
+    expect(drained).toBe(0)
+    const rows = await allRows()
+    expect(rows.filter((r) => r.failed).map((r) => r.id).sort()).toEqual(['pb-1', 'pb-2', 'pb-3'])
+    // The tail was never attempted — still live, not terminal.
+    const tail = rows.find((r) => r.id === 'pb-good')
+    expect(tail.failed).not.toBe(true)
+    expect(tail.attempts || 0).toBe(0)
+    // A clean pass drains the spared tail.
+    const sb2 = { ...fakeAuth(), rpc: async () => ({ data: { ok: true }, error: null }) }
+    expect(await drainQueue(sb2, () => {})).toBe(1)
+  })
+
+  it('two permanents do not trip the breaker', async () => {
+    __resetDrainState()
+    await putRaw(lid('br-1', { badge: 'VS0071', createdAt: 1 }))
+    await putRaw(lid('br-2', { badge: 'VS0072', createdAt: 2 }))
+    await putRaw(lid('br-3', { badge: 'VS0073', createdAt: 3 }))
+    const sb = {
+      ...fakeAuth(),
+      rpc: async (name, params) => {
+        if (params?.p_badge === 'VS0073') return { data: { ok: true }, error: null }
+        return { data: null, error: { message: 'Not authorized to scan', code: '42501' } }
+      },
+    }
+    expect(await drainQueue(sb, () => {})).toBe(1)
+    const rows = await allRows()
+    expect(rows.filter((r) => r.failed).map((r) => r.id).sort()).toEqual(['br-1', 'br-2'])
+    expect(rows.find((r) => r.id === 'br-3')).toBeUndefined()
+  })
+
+  // F11: C6 escalation stamps the OUT at discovery time, not the stale row ts.
+  it('C6 escalation closes with a fresh ts, never the stale queued ts', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw(lid('c6ts', { badge: 'VS0019', uncertain: true, ts: '2020-01-01T00:00:00Z' }))
+    const before = Date.now()
+    const sb = {
+      ...fakeAuth(),
+      rpc: async (name, params) => {
+        calls.push([name, params])
+        if (name === 'scan_in') return { data: null, error: new Error('Already IN — OUT first') }
+        if (name === 'get_open_session') return { data: { id: 'open-9', badge_number: 'VS0019' }, error: null }
+        return { data: { ok: true }, error: null }
+      },
+    }
+    expect(await drainQueue(sb, () => {})).toBe(1)
+    const outCall = calls.find((c) => c[0] === 'scan_out')
+    expect(new Date(outCall[1].p_ts).getTime()).toBeGreaterThanOrEqual(before)
+  })
+
+  // F12: the flagship exactly-once path — same-nonce replay answered dedup.
+  it('a same-nonce replay answered dedup drops the row as synced', async () => {
+    __resetDrainState()
+    const calls = []
+    const progress = []
+    await putRaw(lid('nonce-dd-1', { badge: 'VS0061' }))
+    const sb = {
+      ...fakeAuth(),
+      rpc: async (name, params) => {
+        calls.push([name, params])
+        return { data: { ok: true, dedup: true }, error: null }
+      },
+    }
+    const drained = await drainQueue(sb, (row, ok) => progress.push([row.id, ok]))
+    expect(drained).toBe(1)
+    expect(calls).toHaveLength(1)
+    expect(calls[0][1]).toMatchObject({ p_badge: 'VS0061', p_nonce: 'nonce-dd-1' })
+    expect(progress).toEqual([['nonce-dd-1', true]])
+    expect(await allRows()).toHaveLength(0)
+  })
+
+  // F2: a transient IDB outage must not wedge the module for the session.
+  // safeOpenDB resolves null (never rejects) on every failure path, so
+  // without the _dbPromise reset the first outage poisons all later calls.
+  // Fresh registry: the static import's cached connection would mask the
+  // outage, so this test re-imports with IndexedDB missing.
+  it('a transient IDB outage does not wedge later calls', async () => {
+    const realIDB = window.indexedDB
+    Object.defineProperty(window, 'indexedDB', { value: undefined, configurable: true })
+    vi.resetModules()
+    const fresh = await import('./offlineQueue')
+    try {
+      expect((await fresh.enqueueScan({ badge: 'VS0071', schedule_id: 's', action: 'IN' })).reason).toBe('unavailable')
+    } finally {
+      Object.defineProperty(window, 'indexedDB', { value: realIDB, configurable: true })
+    }
+    // Without the reset this stays 'unavailable' forever.
+    const r = await fresh.enqueueScan({ id: 'f2-1', badge: 'VS0071', schedule_id: 's', action: 'IN' })
+    expect(r.ok).toBe(true)
+    await fresh.removeQueued('f2-1')
+  })
+
+  // F3: a hanging session read resolves the drain quickly instead of ever.
+  it('a hanging session read does not hold the drain', async () => {
+    __resetDrainState()
+    await putRaw(lid('f3-1'))
+    const sb = {
+      auth: { getSession: () => new Promise(() => {}) },
+      rpc: async () => ({ data: { ok: true }, error: null }),
+    }
+    const t0 = Date.now()
+    // Bounded by the 8s session timeout (plus scheduling slack), not forever
+    // — and the row is untouched (timeout reads as logged-out, clean no-op).
+    await expect(drainQueue(sb, () => {})).resolves.toBe(0)
+    expect(Date.now() - t0).toBeLessThan(12000)
+    expect(await allRows()).toHaveLength(1)
+    await removeQueued('f3-1')
+  }, 20000)
+
+  // F9: stranded rows stay hidden while logged in.
+  it('listStrandedQueue hides null-owner rows while logged in', async () => {
+    currentUserId = 'user-A'
+    await putRaw(lid('stx-1', { owner: null }))
+    expect(await listStrandedQueue()).toEqual([])
+    await removeQueued('stx-1')
   })
 })

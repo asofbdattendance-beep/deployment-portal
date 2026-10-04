@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { supabase, fetchAllRows } from '../lib/supabase'
+import { supabase } from '../lib/supabase'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import BarcodeScanner from '../components/scanner/BarcodeScanner'
@@ -13,6 +13,7 @@ import MobileScanFeed from '../components/mobile/MobileScanFeed'
 import { todayStrIST } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import { useSewadarDirectory } from '../hooks/useSewadarDirectory'
+import { useDeptNames, refreshDeptNames } from '../hooks/useDeptNames'
 import RecentScansTable from '../components/scanner/RecentScansTable'
 
 
@@ -23,8 +24,10 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
   const [sessions, setSessions]=useState([])
   const [manualBadge, setManualBadge]=useState('')
   // `deployment_departments` id -> name source for the popup's Dept pill and
-  // the Dept column of the recent-scans table.
-  const [depts, setDepts]=useState([])
+  // the Dept column of the recent-scans table. Offline-first: the hook seeds
+  // state from the IndexedDB snapshot, so an offline reload still resolves
+  // dept names; live rows overwrite and refresh the cache.
+  const [depts, syncDepts] = useDeptNames()
   const [offline, setOffline]=useState(false)
   // Reactive connectivity — `navigator.onLine` read at render time never
   // updates, so the Online/Offline pill used to go stale until some other
@@ -83,19 +86,19 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
   // show a raw-uuid-free em dash instead of a department name.
   const refreshDepts=useCallback(async()=>{
     if(!scheduleId) return
-    try {
-      // stableKey 'id': fetchAllRows' contract — keyless paging skips both
-      // dedupe and the count-mismatch guard (audit R8).
-      setDepts(await fetchAllRows('deployment_departments', 'id, name', null, 'id') || [])
-    } catch(e){ console.warn('[Scanner] department load failed:', e?.message) }
-  },[scheduleId])
+    // stableKey 'id': fetchAllRows' contract — keyless paging skips both
+    // dedupe and the count-mismatch guard (audit R8). syncDepts only stores
+    // non-empty live rows, so an offline/denied fetch keeps cached names.
+    await refreshDeptNames(syncDepts)
+  },[scheduleId, syncDepts])
 
   const deptNameById = useMemo(() => deptNameMap(depts), [depts])
 
   // Mobile offline-first directory: cached identity (name/centre/dept) so
   // the popup names the sewadar with no network and resolves instantly.
-  // Desktop stays RPC-only (empty Map — zero behavior change).
-  const directoryByBadge = useSewadarDirectory({ scheduleId, enabled: isMobile })
+  // Enabled on all viewports — dirFor is fallback-only (live data first),
+  // so online behaviour is unchanged while desktop offline gains identity.
+  const directoryByBadge = useSewadarDirectory({ scheduleId, enabled: true })
 
   const clearManual = useCallback(() => setManualBadge(''), [])
 

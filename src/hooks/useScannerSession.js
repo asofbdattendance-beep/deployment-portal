@@ -1,9 +1,18 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { supabase } from '../lib/supabase'
-import { getQueuedScans, installDrainListeners } from '../lib/offlineQueue'
+import { getQueuedScans, isFailedQueueRow, isOrphanedQueueRow } from '../lib/offlineQueue'
+import { subscribeOfflineSync } from '../lib/offlineSync'
 import { useScanHandler } from './useScanHandler'
 import { isDecisionPopup, resolveForgotOutTime } from '../lib/scannerUtils'
 import { vibrate } from '../lib/mobile'
+
+/**
+ * Pending rows EXCLUDE failed and orphaned rows (same rule as
+ * QueueRecoveryBar): failed rows are surfaced separately, and null-owner
+ * rows can never drain, so neither may raise the syncing spinner.
+ */
+function isPending(list) {
+  return list.some((x) => !x.synced && !isFailedQueueRow(x) && !isOrphanedQueueRow(x))
+}
 
 /**
  * useScannerSession — the scan-session bundle shared by ScannerPage and
@@ -83,45 +92,38 @@ export function useScannerSession({
 
   // L-44: queue progress owns the syncing flag — a draining queue shows the
   // spinner instead of a static WifiOff. Raised here (rows pending), lowered
-  // by onDrainProgress (queue clean). V16: assign the flag from the pending
-  // count (not raise-only) so the spinner reliably clears when the queue
-  // empties instead of sticking on after a drain.
+  // by the store subscription below (queue clean). V16: assign the flag from
+  // the pending count (not raise-only) so the spinner reliably clears when
+  // the queue empties instead of sticking on after a drain.
+  // L-44: queue progress owns the syncing flag — a draining queue shows the
+  // spinner instead of a static WifiOff. Raised here (rows pending), lowered
+  // by the store subscription below (queue clean). V16: assign the flag from
+  // the pending count (not raise-only) so the spinner reliably clears when
+  // the queue empties instead of sticking on after a drain.
   const refreshQueue = useCallback(() => getQueuedScans()
     .then(q => {
       const list = Array.isArray(q) ? q : []
       setQueued(list)
-      setSyncing(list.some(x => !x.synced && !x.failed))
+      setSyncing(isPending(list))
     })
     .catch(e => console.warn('[Scanner] queue refresh failed:', e?.message)), [])
 
-  const drainProgressAtRef = useRef(0)
-  const onDrainProgress = useCallback(() => {
-    // Called per queued item — refresh queue count after each sync.
-    // V15: the drain fires per item on a background subscription; a failing
-    // IndexedDB read must not surface as an unhandled rejection.
-    // Throttle: each refresh is getSession() + full-store getAll() + setState.
-    // At one refresh per drained row the queue gets SLOWER the more it drains
-    // (O(n²) storm). 750ms coalescing keeps the spinner honest without it.
-    const now = Date.now()
-    if (now - drainProgressAtRef.current < 750) return
-    drainProgressAtRef.current = now
-    getQueuedScans()
-      .then(q => {
-        const list = Array.isArray(q) ? q : []
-        setQueued(list)
-        if (!list.some(x => !x.synced && !x.failed)) setSyncing(false)
-      })
-      .catch(e => console.warn('[Scanner] drain progress refresh failed:', e?.message))
-  }, [])
-
+  // The drain loop is app-level now (offlineSync.js, installed once at boot):
+  // this page only SUBSCRIBES to `{ queued }` snapshots. The engine survives
+  // page navigation, so leaving the scanner no longer stalls the queue —
+  // the old per-page `installDrainListeners` died on unmount.
   useEffect(() => {
-    const off = installDrainListeners(supabase, onDrainProgress)
+    const off = subscribeOfflineSync(({ queued: rows } = {}) => {
+      const list = Array.isArray(rows) ? rows : []
+      setQueued(list)
+      setSyncing(isPending(list))
+    })
     return () => {
       off()
       if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current)
       if (followUpRef.current) clearTimeout(followUpRef.current)
     }
-  }, [onDrainProgress])
+  }, [])
 
   const { handleScan: rawHandleScan, busy, getBusy, resetBusy, submitForgotOut } = useScanHandler({
     scheduleId,

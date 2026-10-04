@@ -2,10 +2,10 @@
  * Sewadar directory — the mobile offline-first identity cache.
  *
  * The scan popup needs a name / home centre / department BEFORE anything is
- * written, but the live answer (`get_scan_state`) needs the network. On
- * phones we keep a per-schedule directory in IndexedDB (`sewadar_cache`
- * store, already provisioned — no version bump), sourced from `deployments`
- * rows the scanner role may already read (deploy_v2_read: subtree centres).
+ * written, but the live answer (`get_scan_state`) needs the network. We keep
+ * a per-schedule directory in IndexedDB (`sewadar_cache` store, already
+ * provisioned — no version bump), sourced from `deployments` rows the
+ * scanner role may already read (deploy_v2_read: subtree centres).
  * The directory answers IDENTITY only — never session state (open/closed)
  * and never direction. The server stays authoritative for writes and for
  * IN-vs-OUT; a stale directory can only mislabel a popup, never miswrite.
@@ -28,6 +28,11 @@ export const DIRECTORY_TTL = 60 * 60 * 1000 // 1 hour
 
 const dirKey = (scheduleId) => `dir:${scheduleId}`
 const dirAtKey = (scheduleId) => `dir_at:${scheduleId}`
+// Global (not per-schedule): deployment_departments is reference data the
+// popup and the recent-scans tables resolve every dept id against. Without a
+// cache, an offline reload empties deptNameById and every offline popup
+// loses its Dept pill even when the directory knows the dept id.
+const DEPT_MAP_KEY = 'dept_map'
 
 /**
  * Normalizes one deployments row to a directory entry. Effective department
@@ -176,4 +181,45 @@ export async function readDirectory(scheduleId) {
   const stale = !Array.isArray(rows) || rows.length === 0
     || typeof at !== 'number' || Date.now() - at > DIRECTORY_TTL
   return { map, stale, count: map.size }
+}
+
+/**
+ * Reads the cached department id→name list. Always resolves (never rejects):
+ * an array of `{id, name}` (possibly empty). Shape-tolerant — a foreign or
+ * corrupt value reads as empty rather than throwing into a page load.
+ *
+ * @returns {Promise<Array<{id: string, name: string}>>}
+ */
+export async function readDeptMap() {
+  try {
+    const stored = await cacheGet(DEPT_MAP_KEY)
+    if (!Array.isArray(stored)) return []
+    return stored.filter((r) => r && typeof r === 'object'
+      && typeof r.id === 'string' && r.id.trim() !== ''
+      && typeof r.name === 'string' && r.name.trim() !== '')
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Persists a freshly fetched department list (write-through from the pages'
+ * departments fetch). Quota/IDB failures resolve false — never throws,
+ * never touches the outbox. An empty/non-array write is refused so a
+ * scoped-out (zero-row) fetch can never poison a good cache.
+ *
+ * @param {Array} rows — raw deployment_departments rows (id, name)
+ * @returns {Promise<boolean>} true when persisted
+ */
+export async function writeDeptMap(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return false
+  const clean = rows
+    .filter((r) => r && typeof r === 'object')
+    .map((r) => ({ id: r.id, name: r.name }))
+  try {
+    await cacheSet(DEPT_MAP_KEY, clean)
+    return true
+  } catch {
+    return false
+  }
 }

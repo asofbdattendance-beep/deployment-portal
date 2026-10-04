@@ -58,7 +58,6 @@ vi.mock('../context/PortalAuthContext', () => ({
 vi.mock('../components/Toast', () => ({ useToast: () => mocks.toast }))
 vi.mock('../lib/offlineQueue', () => ({
   getQueuedScans: (...args) => mocks.getQueuedScans(...args),
-  installDrainListeners: vi.fn(() => vi.fn()),
   preloadDeployed: vi.fn(async () => {}),
   clearFailedQueue: (...args) => mocks.clearFailedQueue(...args),
   clearLiveQueue: (...args) => mocks.clearLiveQueue(...args),
@@ -69,6 +68,8 @@ vi.mock('../lib/offlineQueue', () => ({
   // classification and the pages no longer keep private copies of it.
   isFailedQueueRow: (r) => !!r && (r.status === 'failed' || r.failed === true),
   isOrphanedQueueRow: (r) => !(!!r && (r.status === 'failed' || r.failed === true)) && (r?.owner ?? null) === null && !r?.synced,
+  // The app-level sync engine subscribes to this event name.
+  QUEUE_CHANGED_EVENT: 'portal-queue-changed',
 }))
 
 function makeStream(name = 'stream') {
@@ -153,7 +154,12 @@ describe('ScannerPage session query (L-41)', () => {
     await settle()
     // Keyless paging skips BOTH the Map dedupe and the count-mismatch guard,
     // so the helper's contract demands a unique stable key at every call site.
-    expect(mocks.fetchAllRows).toHaveBeenCalledWith('deployment_departments', 'id, name', null, 'id')
+    expect(mocks.fetchAllRows).toHaveBeenCalledWith('deployment_departments', 'id,name', expect.any(Function), 'id')
+    // And the fetch orders by name (the offline dept cache is written in a
+    // stable order).
+    const call = mocks.fetchAllRows.mock.calls.find(c => c[0] === 'deployment_departments')
+    const orderOf = call[2]({ order: (col) => col })
+    expect(orderOf).toBe('name')
   })
 })
 

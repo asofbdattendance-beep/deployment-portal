@@ -54,10 +54,12 @@ beforeEach(() => {
   enqueueScan.mockReset()
   getQueuedScans.mockReset()
   getQueuedScans.mockResolvedValue([])
-  // Default: a successful enqueue under the A1 result contract. Tests that
-  // need failure override with { ok:false, reason }. An unstubbed mock
-  // resolves undefined, and `res.ok` on undefined would TypeError.
-  enqueueScan.mockResolvedValue({ ok: true, id: 'q-default' })
+  // Default: a successful enqueue under the A1 result contract (owner set,
+  // as in production for a signed-in scanner). Tests that need failure
+  // override with { ok:false, reason }; owner-null tests override the owner.
+  // An unstubbed mock resolves undefined, and `res.ok` on undefined would
+  // TypeError.
+  enqueueScan.mockResolvedValue({ ok: true, id: 'q-default', owner: 'user-A' })
   // default: online
   Object.defineProperty(navigator, 'onLine', { value: true, configurable: true })
 })
@@ -1596,5 +1598,65 @@ describe('offline popup identity (branches C + queued)', () => {
     expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
       status: 'queued', action: 'OUT', name: 'Prior Name', centre: 'PRIOR-C',
     }))
+  })
+})
+
+describe('owner-null enqueue honesty (D1a ack)', () => {
+  it('an owner-null IN ack says it cannot auto-sync', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    rpc.mockRejectedValue(new Error('Failed to fetch'))
+    enqueueScan.mockResolvedValue({ ok: true, id: 'q-1', owner: null })
+    const { result, showPopup, toast } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'queued',
+      action: 'IN',
+      message: expect.stringMatching(/no owner/i),
+    }))
+    expect(toast.warning).toHaveBeenCalledWith(expect.stringMatching(/no owner/i))
+    expect(toast.success).not.toHaveBeenCalledWith(expect.stringMatching(/queued/i))
+  })
+
+  it('an owner-present IN ack keeps the will-sync promise', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    rpc.mockRejectedValue(new Error('Failed to fetch'))
+    enqueueScan.mockResolvedValue({ ok: true, id: 'q-1', owner: 'user-A' })
+    const { result, showPopup } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'queued',
+      message: 'Queued offline — will sync when online',
+    }))
+  })
+})
+
+describe('submitForgotOut timeout on a stale-ts device (skew order)', () => {
+  // Device clock far behind: the chosen ts is stale AND the RPC times out.
+  // Offline-ness must win (the row queues); skew messaging is for errors
+  // that are ONLY skew. Previously the skew arm ran first and the scan was
+  // never enqueued — silent data loss on the forgot path.
+  const STALE_TS = '2020-01-01T00:00:00.000Z'
+
+  it('queues the OUT when the write times out despite a stale ts', async () => {
+    rpc.mockRejectedValueOnce(new Error('Close OUT timed out after 8000ms'))
+    enqueueScan.mockResolvedValue({ ok: true, id: 'q-f', owner: 'user-A' })
+    const { result, showPopup } = setup()
+    let out
+    await act(async () => { out = await result.current.submitForgotOut({ badge: BADGE, openId: 'open-1', ts: STALE_TS }) })
+    expect(enqueueScan).toHaveBeenCalledWith(expect.objectContaining({ badge: BADGE, action: 'OUT', ts: STALE_TS }))
+    expect(out).toEqual({ ok: false, reason: 'queued' })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'queued' }))
+  })
+
+  it('still reports pure skew without queueing', async () => {
+    rpc.mockResolvedValueOnce({ data: null, error: new Error('Timestamp cannot be in the future') })
+    const { result, showPopup } = setup()
+    let out
+    await act(async () => { out = await result.current.submitForgotOut({ badge: BADGE, openId: 'open-1', ts: STALE_TS }) })
+    expect(enqueueScan).not.toHaveBeenCalled()
+    expect(out).toEqual({ ok: false, reason: 'server', message: expect.any(String) })
+    expect(showPopup).not.toHaveBeenCalled()
   })
 })

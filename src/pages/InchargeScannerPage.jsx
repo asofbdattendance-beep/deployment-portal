@@ -9,6 +9,7 @@ import { todayStrIST } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import { useScannerSession } from '../hooks/useScannerSession'
 import { useSewadarDirectory } from '../hooks/useSewadarDirectory'
+import { useDeptNames } from '../hooks/useDeptNames'
 import QueueRecoveryBar from '../components/mobile/QueueRecoveryBar'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import ScanModeShell from '../components/mobile/ScanModeShell'
@@ -29,7 +30,9 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
   const toast = useToast()
   const selectedScheduleId = scheduleId
   const schedule = schedules.find(s => s.id === selectedScheduleId)
-  const [depts, setDepts] = useState([])
+  // Offline-first department names (popup Dept pill + recent-scans table):
+  // cached snapshot first, live rows overwrite + refresh the cache.
+  const [depts, syncDepts] = useDeptNames()
   const [sessions, setSessions] = useState([])
   const [manualBadge, setManualBadge] = useState('')
   const [offline, setOffline] = useState(false)
@@ -68,7 +71,9 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
         fetchAllRows('dp_attendance_sessions', SESSION_COLS, (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id'),
       ])
       if (!alive()) return
-      setDepts(deptAll || [])
+      // syncDepts ignores empty live results so an offline/denied fetch
+      // keeps the cached department names.
+      syncDepts(deptAll)
       setSessions(sessAll || [])
       setOffline(false)
     } catch (e) {
@@ -76,7 +81,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
       console.warn('[InchargeScanner] load failed:', e?.message)
       setOffline(true)
     }
-  }, [selectedScheduleId])
+  }, [selectedScheduleId, syncDepts])
 
   // Light session poll (L-42): refresh sessions only — never the full load.
   // Same event-date predicate as the initial load (I4); sequenced like the
@@ -103,7 +108,8 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
   // load lands. Declared before the load effect so the clear runs first.
   useEffect(() => {
     if (rowsScheduleId !== selectedScheduleId) {
-      setDepts([])
+      // Departments are global reference data — never cleared on a schedule
+      // switch (the cached names stay valid); only schedule-scoped rows reset.
       setSessions([])
       setManualBadge('')
       setRowsScheduleId(selectedScheduleId)
@@ -132,7 +138,9 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
   const isMobile = useIsMobile()
 
   // Mobile offline-first directory (see ScannerPage) — same hook, same rule.
-  const directoryByBadge = useSewadarDirectory({ scheduleId: selectedScheduleId, enabled: isMobile })
+  // Enabled on all viewports: fallback-only, so online behaviour is
+  // unchanged while desktop offline gains popup identity.
+  const directoryByBadge = useSewadarDirectory({ scheduleId: selectedScheduleId, enabled: true })
 
   const {
     popup, outTime, setOutTime, closePopup,

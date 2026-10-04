@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
+import { notifySessionAvailable } from '../lib/offlineSync'
 
 const PortalAuthContext = createContext(null)
 
@@ -133,6 +134,10 @@ export function PortalAuthProvider({ children }) {
       }
       if (s?.user) {
         setProfilePending(true)
+        // A boot drain that ran before the session restored reads an empty
+        // queue — kick the app-level sync engine now that auth is available.
+        // Fire-and-forget: auth must never wait on sync.
+        try { notifySessionAvailable() } catch { /* sync best-effort */ }
         const p = await fetchProfile()
         if (!mounted) return
         setProfile(p)
@@ -166,6 +171,9 @@ export function PortalAuthProvider({ children }) {
       // (hourly) and any other event must not re-hit the profile RPC.
       if (s?.user && ['SIGNED_IN', 'INITIAL_SESSION', 'USER_UPDATED', 'PASSWORD_RECOVERY'].includes(event)) {
         setProfilePending(true)
+        // Kick the sync engine on every fresh session (not just boot):
+        // queued rows must not wait for the poll after a sign-in.
+        try { notifySessionAvailable() } catch { /* sync best-effort */ }
         const p = await fetchProfile()
         if (!mounted) return
         setProfile(p)
