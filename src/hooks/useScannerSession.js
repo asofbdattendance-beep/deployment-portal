@@ -21,13 +21,15 @@ import { vibrate } from '../lib/mobile'
  * @param {object} cfg.profile
  * @param {string|null} cfg.deptName
  * @param {Map} cfg.deptNameById
+ * @param {Map|null} cfg.directoryByBadge — mobile offline-first directory
+ *   (see sewadarDirectory); forwarded to useScanHandler, null on desktop.
  * @param {object} cfg.toast — { success, error, warning, info }
  * @param {() => Promise<void>} cfg.onAfterScan — page refresh after a scan
  * @param {string} cfg.forgotSuccessToast — page-specific celebration text
  * @param {() => void} cfg.clearManual — clear the page's manual input
  */
 export function useScannerSession({
-  scheduleId, profile, deptName, deptNameById, toast,
+  scheduleId, profile, deptName, deptNameById, directoryByBadge, toast,
   onAfterScan, forgotSuccessToast, clearManual,
 }) {
   const [popup, setPopup] = useState(null)
@@ -92,10 +94,17 @@ export function useScannerSession({
     })
     .catch(e => console.warn('[Scanner] queue refresh failed:', e?.message)), [])
 
+  const drainProgressAtRef = useRef(0)
   const onDrainProgress = useCallback(() => {
     // Called per queued item — refresh queue count after each sync.
     // V15: the drain fires per item on a background subscription; a failing
     // IndexedDB read must not surface as an unhandled rejection.
+    // Throttle: each refresh is getSession() + full-store getAll() + setState.
+    // At one refresh per drained row the queue gets SLOWER the more it drains
+    // (O(n²) storm). 750ms coalescing keeps the spinner honest without it.
+    const now = Date.now()
+    if (now - drainProgressAtRef.current < 750) return
+    drainProgressAtRef.current = now
     getQueuedScans()
       .then(q => {
         const list = Array.isArray(q) ? q : []
@@ -119,6 +128,7 @@ export function useScannerSession({
     profile,
     deptName,
     deptNameById,
+    directoryByBadge,
     showPopup,
     toast,
     onQueued: refreshQueue,
@@ -217,8 +227,9 @@ export function useScannerSession({
     }
     const ts = new Date(out.ts).toISOString()
     // L-36: the OUT write goes through the hook's submitForgotOut — the same
-    // RPC attempt + offline enqueue as the main OUT flow.
-    const r = await submitForgotOut({ badge: popup.badge, openId: popup.openId, ts })
+    // RPC attempt + offline enqueue as the main OUT flow. The popup's identity
+    // rides along so a queued forgot-OUT still names the sewadar.
+    const r = await submitForgotOut({ badge: popup.badge, openId: popup.openId, ts, display: { name: popup.name ?? null, centre: popup.centre ?? null, deptName: popup.deptName ?? null } })
     if (!r.ok && r.reason === 'server') { toast.error(r.message); return }
     if (!r.ok) return // queued/duplicate/queue errors already surfaced; no follow-up while the OUT hasn't synced
     toast.success(forgotSuccessToast)

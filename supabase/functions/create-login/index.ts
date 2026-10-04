@@ -14,10 +14,16 @@
 //   client cannot write it; see 5b).
 //   When the superadmin sets a password it is used as-is
 //   (min 8 chars); otherwise a one-time temporary password is generated.
-// Success:      { ok, user_id, tempPassword? } (present only when generated)
+// Success:      { ok, user_id, mode, tempPassword? }
+//   mode: 'fresh' (row created) | 'overlap-completed' (an existing
+//   portal_users row — the attendance overlap — was reinstated/repaired and
+//   linked to a working auth account; see ./overlap.ts).
 // Errors:       { error } with 400/401/403/404/409 status.
+//   409 is reserved for: a genuinely finished active login, a cross-person
+//   email, or an active login under a different email for the same badge.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { preflightOverlap } from './overlap.ts'
 
 const ROLES = ['centre_user', 'centre_admin', 'aso', 'super_admin', 'dept_incharge', 'scanner', 'vss_operator']
 const CENTRE_ROLES = ['centre_user', 'centre_admin']
@@ -43,6 +49,22 @@ function tempPassword() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%'
   const bytes = crypto.getRandomValues(new Uint8Array(16))
   return [...bytes].map((b) => alphabet[b % alphabet.length]).join('')
+}
+
+// Locate the auth account that already owns an email (the adopt path).
+// supabase-js has no getUserByEmail, so page through the admin list — the
+// portal's user count is small; cap the scan to bound the work.
+async function findAuthByEmail(admin, email) {
+  const target = String(email || '').trim().toLowerCase()
+  for (let page = 1; page <= 40; page++) {
+    const { data, error } = await admin.auth.admin.listUsers({ page, perPage: 200 })
+    if (error) return null
+    const users = data?.users || []
+    const hit = users.find((u) => String(u.email || '').trim().toLowerCase() === target)
+    if (hit) return hit
+    if (users.length < 200) break
+  }
+  return null
 }
 
 // NOTE on auth: this function runs with "Enforce JWT verification" OFF (see
@@ -97,44 +119,82 @@ async function handler(req) {
       if (custom.base_role !== role) return json({ error: 'Custom role belongs to a different base role' }, 400)
     }
 
-    // 3. Refuse duplicates before creating anything (avoid orphan auth rows).
-    const { data: existing } = await admin
-      .from('portal_users')
-      .select('id, is_active')
-      .ilike('email', email)
-      .limit(1)
-      .maybeSingle()
-    if (existing) {
-      return json({ error: 'A login already exists for this email — edit or reinstate it instead' }, 409)
+    // 3. OVERLAP-AWARE preflight (the attendance-overlap fix): pull every
+    //    portal_users row that matches the typed email OR the badge, then let
+    //    the pure decision module choose fresh / resume / conflict (see
+    //    ./overlap.ts). The old code refused ANY same-email row — that is
+    //    exactly what made existing sewadars un-creatable.
+    const deptSchedule = String(body.dept_schedule_id || '').trim() || null
+    const deptIds = Array.isArray(body.dept_ids) ? body.dept_ids.filter(Boolean) : []
+    if (role === 'dept_incharge') {
+      // Validate BEFORE any write — no rollback needed for these.
+      if (!deptSchedule) return json({ error: 'Pick the schedule this department applies to' }, 400)
+      if (deptIds.length === 0) return json({ error: 'Pick at least one department for this role' }, 400)
     }
+    const ROW_COLS = 'id, email, badge_number, auth_id, is_active, name, role, centre, custom_role_id, created_at'
+    const [emailRows, badgeRows] = await Promise.all([
+      admin.from('portal_users').select(ROW_COLS).ilike('email', email).order('created_at', { ascending: true }),
+      badge
+        ? admin.from('portal_users').select(ROW_COLS).eq('badge_number', badge).order('created_at', { ascending: true })
+        : Promise.resolve({ data: [] }),
+    ])
+    const rows = [...(emailRows.data || [])]
+    for (const r of badgeRows.data || []) {
+      if (!rows.some((x) => x.id === r.id)) rows.push(r)
+    }
+    const plan = preflightOverlap({ rows, email, badge })
+    if (plan.kind === 'conflict') return json({ error: plan.message }, 409)
+    const resumeRow = plan.kind === 'resume' ? plan.row : null
 
-    // 4. Create the auth account (email pre-confirmed). An admin-set
-    //    password is used as-is; otherwise a one-time temporary password is
-    //    generated and returned ONCE for the UI to display.
+    // 4. Auth account: create fresh, or ADOPT the one that already owns this
+    //    email (orphan from the attendance system / a prior half-create) and
+    //    apply the password the admin is setting right now — that is the
+    //    point of this action.
     const adminPassword = String(body.password || '')
     if (adminPassword && adminPassword.length < 8) {
       return json({ error: 'Password needs at least 8 characters' }, 400)
     }
     const password = adminPassword || tempPassword()
     const generated = !adminPassword
+    let authId = null
+    let createdAuth = false
     const { data: created, error: createErr } = await admin.auth.admin.createUser({
       email,
       password,
       email_confirm: true,
       user_metadata: { name },
     })
-    if (createErr || !created?.user) {
+    if (created?.user) {
+      authId = created.user.id
+      createdAuth = true
+    } else {
       const msg = String(createErr?.message || '')
-      if (/already (been )?registered|already exists/i.test(msg)) {
-        return json({ error: 'An auth account already exists for this email — link it from the Users page instead' }, 409)
+      if (!/already (been )?registered|already exists/i.test(msg)) {
+        return json({ error: msg || 'Could not create auth account' }, 400)
       }
-      return json({ error: msg || 'Could not create auth account' }, 400)
+      const existingAuth = await findAuthByEmail(admin, email)
+      if (!existingAuth) {
+        return json({
+          error: 'An auth account already exists for this email but cannot be read — open it from the Users page instead',
+        }, 409)
+      }
+      authId = existingAuth.id
+      const { error: updErr } = await admin.auth.admin.updateUserById(authId, {
+        password,
+        email_confirm: true,
+        user_metadata: { name },
+      })
+      if (updErr) {
+        return json({ error: updErr.message || 'Could not update the existing auth account' }, 400)
+      }
     }
 
-    // 5. Attach the portal identity. `role` is always a base value, so every
-    //    RLS policy and trigger behaves exactly as for any other login.
-    const { error: rowErr } = await admin.from('portal_users').insert({
-      auth_id: created.user.id,
+    // 5. Attach the portal identity: UPDATE an existing overlapping row
+    //    (reinstate + relink — this is the fix), INSERT a fresh one otherwise.
+    //    `role` is always a base value, so every RLS policy and trigger
+    //    behaves exactly as for any other login.
+    const rowPayload = {
+      auth_id: authId,
       email,
       name,
       role,
@@ -142,11 +202,32 @@ async function handler(req) {
       centre,
       badge_number: badge,
       is_active: true,
-    })
+    }
+    // A failed step restores the PREVIOUS row state on resume (never deletes
+    // a pre-existing record) and only ever deletes an auth account WE
+    // created in this call — a hard constraint: never destroy adopted data.
+    const undoRow = async () => {
+      if (resumeRow) {
+        await admin.from('portal_users').update({
+          auth_id: resumeRow.auth_id, email: resumeRow.email, name: resumeRow.name,
+          role: resumeRow.role, custom_role_id: resumeRow.custom_role_id,
+          centre: resumeRow.centre, badge_number: resumeRow.badge_number,
+          is_active: resumeRow.is_active,
+        }).eq('id', resumeRow.id).catch(() => {})
+      } else {
+        await admin.from('portal_users').delete().eq('auth_id', authId).catch(() => {})
+      }
+    }
+    const undoAuth = async () => {
+      if (createdAuth) await admin.auth.admin.deleteUser(authId).catch(() => {})
+    }
+    const { error: rowErr } = resumeRow
+      ? await admin.from('portal_users').update(rowPayload).eq('id', resumeRow.id)
+      : await admin.from('portal_users').insert(rowPayload)
     if (rowErr) {
-      // Roll back the orphan auth account — a half-created login is worse
-      // than none (it could be claimed by nobody and confuse audits).
-      await admin.auth.admin.deleteUser(created.user.id).catch(() => {})
+      // Roll back — a half-created login is worse than none.
+      await undoRow()
+      await undoAuth()
       return json({ error: rowErr.message }, 400)
     }
 
@@ -156,20 +237,9 @@ async function handler(req) {
     // `department_incharge_assignments` (its RLS allows aso/super_admin only),
     // and this function already holds the service role. A failure rolls the
     // whole login back — a dept_incharge with no department would come up with
-    // an empty dashboard and an empty scan list.
-    const deptSchedule = String(body.dept_schedule_id || '').trim() || null
-    const deptIds = Array.isArray(body.dept_ids) ? body.dept_ids.filter(Boolean) : []
+    // an empty dashboard and an empty scan list. (Presence of deptSchedule /
+    // deptIds was validated in step 3, before any write.)
     if (role === 'dept_incharge') {
-      if (!deptSchedule) {
-        await admin.auth.admin.deleteUser(created.user.id).catch(() => {})
-        await admin.from('portal_users').delete().eq('auth_id', created.user.id).catch(() => {})
-        return json({ error: 'Pick the schedule this department applies to' }, 400)
-      }
-      if (deptIds.length === 0) {
-        await admin.auth.admin.deleteUser(created.user.id).catch(() => {})
-        await admin.from('portal_users').delete().eq('auth_id', created.user.id).catch(() => {})
-        return json({ error: 'Pick at least one department for this role' }, 400)
-      }
       const { error: assignErr } = await admin.from('department_incharge_assignments').upsert(
         deptIds.map((department_id) => ({
           schedule_id: deptSchedule,
@@ -181,8 +251,8 @@ async function handler(req) {
       )
       if (assignErr) {
         await admin.from('department_incharge_assignments').delete().eq('schedule_id', deptSchedule).eq('badge_number', badge).catch(() => {})
-        await admin.auth.admin.deleteUser(created.user.id).catch(() => {})
-        await admin.from('portal_users').delete().eq('auth_id', created.user.id).catch(() => {})
+        await undoRow()
+        await undoAuth()
         return json({ error: assignErr.message }, 400)
       }
     }
@@ -193,11 +263,16 @@ async function handler(req) {
       table_name: 'portal_users',
       record_id: null,
       schedule_id: null,
-      payload: { email, role, centre, departments: deptIds.length, via: 'edge-function' },
+      payload: { email, role, centre, departments: deptIds.length, via: 'edge-function', mode: resumeRow ? 'overlap-completed' : 'fresh' },
       acted_by: me.name || null,
     }).then(() => {}, () => {})
 
-    return json({ ok: true, user_id: created.user.id, ...(generated ? { tempPassword: password } : {}) })
+    return json({
+      ok: true,
+      user_id: authId,
+      mode: resumeRow ? 'overlap-completed' : 'fresh',
+      ...(generated ? { tempPassword: password } : {}),
+    })
   } catch (e) {
     return json({ error: e?.message || 'Unexpected error' }, 500)
   }

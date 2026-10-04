@@ -23,6 +23,13 @@ import { render, screen, waitFor, cleanup, within, fireEvent } from '@testing-li
 import DeptInchargeDashboardPage from './DeptInchargeDashboardPage'
 
 const rpc = vi.fn()
+// Delegates to `rpc` fixtures, upholding the real fetchAllRpc contract:
+// a resolved `{ error }` THROWS instead of returning rows.
+const fetchAllRpc = vi.fn(async (name, params) => {
+  const res = await rpc(name, params)
+  if (res?.error) throw res.error
+  return Array.isArray(res?.data) ? res.data : []
+})
 const toastError = vi.fn()
 const toastSuccess = vi.fn()
 const toastWarning = vi.fn()
@@ -40,6 +47,7 @@ vi.mock('../lib/supabase', () => ({
     channel: () => noopChannel(),
     removeChannel: () => {},
   },
+  fetchAllRpc: (...args) => fetchAllRpc(...args),
 }))
 
 // A STABLE toast object — a fresh object per render() would re-trigger the
@@ -241,6 +249,8 @@ describe('DeptInchargeDashboardPage — visit window is the only column source',
     // And the badge fan-out never asks for the previsit date either.
     const badgeDates = new Set(rpc.mock.calls.filter((c) => c[0] === 'attendance_day_badges').map(([, params]) => params.p_date))
     expect([...badgeDates].sort()).toEqual(['2026-10-07', '2026-10-08', '2026-10-09', '2026-10-10', '2026-10-11'])
+    // …and the fan-out runs through the paginating helper (complete matrix).
+    expect(fetchAllRpc.mock.calls.map(([n]) => n)).toContain('attendance_day_badges')
   })
 
   it('shows a no-window notice and fetches no badge lists without a window', async () => {

@@ -305,9 +305,9 @@ describe('clearFailedQueue', () => {  it('removes only terminally failed rows be
 })
 
 describe('drainQueue scan_out contract', () => {
-  // scan_out declares (p_badge, p_schedule, p_ts, p_open_id) only — an extra
-  // p_nonce makes PostgREST return PGRST202, which the drain treats as a
-  // failure and head-of-line-blocks the whole queue behind.
+  // scan_out declares (p_badge, p_schedule, p_ts, p_open_id, p_is_manual) —
+  // an extra p_nonce makes PostgREST return PGRST202, which the drain treats
+  // as a failure and head-of-line-blocks the whole queue behind.
   function fakeSupabase(calls, impl) {
     return {
       auth: { getSession: async () => ({ data: { session: { user: { id: 'user-A' } } } }) },
@@ -325,9 +325,16 @@ describe('drainQueue scan_out contract', () => {
     expect(drained).toBe(1)
     expect(calls).toHaveLength(1)
     expect(calls[0][0]).toBe('scan_out')
-    expect(calls[0][1]).toEqual({ p_badge: 'FB5971GA0001', p_schedule: 'sched-1', p_ts: '2026-09-24T13:00:00.000Z', p_open_id: 'open-1' })
+    expect(calls[0][1]).toEqual({ p_badge: 'FB5971GA0001', p_schedule: 'sched-1', p_ts: '2026-09-24T13:00:00.000Z', p_open_id: 'open-1', p_is_manual: false })
     expect(calls[0][1]).not.toHaveProperty('p_nonce')
     expect(await getQueuedScans()).toHaveLength(0)
+  })
+
+  it('carries the queued OUT manual flag end to end (v67 audit)', async () => {
+    const calls = []
+    await enqueueScan({ id: 'out-manual', badge: 'FB5971GA0003', schedule_id: 'sched-1', action: 'OUT', ts: '2026-09-24T13:10:00Z', open_id: 'open-3', is_manual: true })
+    expect(await drainQueue(fakeSupabase(calls))).toBe(1)
+    expect(calls[0][1]).toEqual(expect.objectContaining({ p_open_id: 'open-3', p_is_manual: true }))
   })
 
   it('treats an ok/dedup OUT replay as synced, not failed', async () => {

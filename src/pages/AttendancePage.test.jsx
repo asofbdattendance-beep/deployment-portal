@@ -20,6 +20,14 @@ import { UNASSIGNED_CENTRE } from '../lib/attendance'
 import AttendancePage from './AttendancePage'
 
 const rpc = vi.fn()
+// fetchAllRpc delegates to the SAME fixture engine as `rpc`, then upholds the
+// real contract: a resolved `{ error }` THROWS (production fetchAllRpc never
+// returns an error object as rows). Page fixtures stay in one place.
+const fetchAllRpc = vi.fn(async (name, params) => {
+  const res = await rpc(name, params)
+  if (res?.error) throw res.error
+  return Array.isArray(res?.data) ? res.data : []
+})
 const toastError = vi.fn()
 const toastSuccess = vi.fn()
 const toastWarning = vi.fn()
@@ -43,6 +51,7 @@ vi.mock('../lib/supabase', () => ({
     channel: () => noopChannel(),
     removeChannel: () => {},
   },
+  fetchAllRpc: (...args) => fetchAllRpc(...args),
 }))
 // A STABLE toast object, deliberately. The real useToast() is useMemo'd in
 // ToastProvider — the provider comments call out that returning a fresh object
@@ -273,6 +282,9 @@ describe('A5 — an empty scan day is never sent to Postgres', () => {
     expect(names).not.toContain('attendance_daily_summary')
     expect(names).not.toContain('attendance_scanner_ops')
     expect(names).toContain('attendance_sewadar_summary')
+    // …and it goes through the PAGINATING helper, not the single-shot wrapper
+    // (a revert to rpcRows would silently re-cap KPIs + export at 1000 rows).
+    expect(fetchAllRpc.mock.calls.map(([n]) => n)).toContain('attendance_sewadar_summary')
   })
 })
 
@@ -589,6 +601,30 @@ describe('a hung RPC degrades its tab instead of latching loading', () => {
       fireEvent.click(screen.getByText('Daily'))
       expect(screen.getByText('Daily figures')).toBeTruthy()
       expect(screen.getByText('Retry')).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('AttendancePage — the mount/focus "today" sync clamps into the visit window', () => {
+  // 2026-10-07 → 2026-10-11, entirely AFTER the faked "today" (2026-09-23),
+  // so the sync must clamp forward to the window's first day.
+  const WINDOWED = [
+    { id: 'sched-1', name: 'October 2026 Visit', visit_start_date: '2026-10-07', visit_end_date: '2026-10-11' },
+    { id: 'sched-2', name: 'November 2026 Visit' },
+  ]
+
+  it('opens on the window edge, never on the raw previsit today', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-09-23T04:30:00Z')) // 2026-09-23 10:00 IST
+    try {
+      await renderPage({ schedules: WINDOWED })
+      // The regression: useState's init clamped today, but the focus-sync
+      // effect then wrote the RAW today, and the page silently flipped to a
+      // previsit date the operator never picked.
+      expect(rpc).toHaveBeenCalledWith('attendance_daily_summary', { p_schedule: 'sched-1', p_date: '2026-10-07' })
+      expect(rpc).not.toHaveBeenCalledWith('attendance_daily_summary', { p_schedule: 'sched-1', p_date: '2026-09-23' })
     } finally {
       vi.useRealTimers()
     }

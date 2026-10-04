@@ -20,6 +20,13 @@ import {
   applyFocusConstraints,
   applyTapFocus,
   toggleTorch,
+  focusHunt,
+  setZoom,
+  getZoom,
+  zoomRampForMisses,
+  shouldSuggestTorch,
+  beginFocusHunt,
+  platform,
 } from './cameraManager'
 
 /* ── helpers ────────────────────────────────────────────────────────────────── */
@@ -440,5 +447,319 @@ describe('toggleTorch', () => {
   it('returns false when unsupported so the UI can revert the pill', async () => {
     const track = makeTrack({ applyConstraints: vi.fn().mockRejectedValue(new Error('unsupported')) })
     await expect(toggleTorch(track, true)).resolves.toBe(false)
+  })
+})
+
+/* ── focusHunt ─────────────────────────────────────────────────────────────── */
+
+describe('focusHunt', () => {
+  it('re-requests continuous AF on attempt 1 when advertised', async () => {
+    const track = makeTrack({ caps: { focusMode: ['continuous', 'manual'], focusDistance: { min: 0, max: 10 } } })
+    const res = await focusHunt(track, 1)
+    expect(res.mode).toBe('continuous')
+    expect(res.ok).toBe(true)
+    expect(track.applied).toHaveLength(1)
+    expect(track.applied[0].advanced).toEqual([{ focusMode: 'continuous' }])
+  })
+
+  it('requests continuous on Android even when focusMode is empty', async () => {
+    const original = platform.isAndroid
+    platform.isAndroid = true
+    try {
+      const track = makeTrack({ caps: {} })
+      const res = await focusHunt(track, 1)
+      expect(res.mode).toBe('continuous')
+      expect(res.ok).toBe(true)
+      expect(track.applied[0].advanced).toContainEqual({ focusMode: 'continuous' })
+    } finally {
+      platform.isAndroid = original
+    }
+  })
+
+  it('escalates to manual-near on attempt 2 and schedules a return to continuous', async () => {
+    vi.useFakeTimers()
+    try {
+      const track = makeTrack({ caps: { focusMode: ['continuous', 'manual'], focusDistance: { min: 0, max: 10 } } })
+      const res = await focusHunt(track, 2)
+      expect(res.mode).toBe('manual')
+      expect(res.ok).toBe(true)
+      expect(track.applied).toHaveLength(1)
+      // Biased NEAR: 25% of the way from min toward max — small badges are close.
+      expect(track.applied[0].advanced).toEqual([{ focusMode: 'manual', focusDistance: 2.5 }])
+
+      // The return to continuous AF is scheduled, not applied immediately.
+      await vi.advanceTimersByTimeAsync(1300) // hold is 1200ms — +margin
+      expect(track.applied).toHaveLength(2)
+      expect(track.applied[1].advanced).toEqual([{ focusMode: 'continuous' }])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('no-ops cleanly when neither focusMode nor focusDistance exists (iOS-like track)', async () => {
+    const track = makeTrack({ caps: {} })
+    const res = await focusHunt(track, 1)
+    expect(res.mode).toBe('none')
+    expect(res.ok).toBe(false)
+    expect(res.nextMs).toBeGreaterThanOrEqual(800)
+    expect(track.applyConstraints).not.toHaveBeenCalled()
+    // A later attempt on the same track is equally helpless — still no throw.
+    const res2 = await focusHunt(track, 2)
+    expect(res2.mode).toBe('none')
+    expect(res2.ok).toBe(false)
+    expect(track.applyConstraints).not.toHaveBeenCalled()
+  })
+
+  it('no-ops when only continuous is advertised (no manual/distance to nudge with)', async () => {
+    const track = makeTrack({ caps: { focusMode: ['continuous'] } })
+    const res = await focusHunt(track, 2)
+    expect(res.mode).toBe('none')
+    expect(res.ok).toBe(false)
+    expect(track.applyConstraints).not.toHaveBeenCalled()
+  })
+
+  it('never throws when getCapabilities throws', async () => {
+    const track = makeTrack({ getCapabilities: vi.fn(() => { throw new Error('boom') }) })
+    const res = await focusHunt(track, 1)
+    expect(res.mode).toBe('none')
+    expect(res.ok).toBe(false)
+    expect(typeof res.nextMs).toBe('number')
+  })
+
+  it('never throws when applyConstraints rejects', async () => {
+    const track = makeTrack({
+      caps: { focusMode: ['continuous', 'manual'], focusDistance: { min: 0, max: 10 } },
+      applyConstraints: vi.fn().mockRejectedValue(new Error('nope')),
+    })
+    const res = await focusHunt(track, 1)
+    expect(res.mode).toBe('none')
+    expect(res.ok).toBe(false)
+  })
+
+  it('grows nextMs with attempt and clamps at the cap', async () => {
+    vi.useFakeTimers()
+    try {
+      const track = makeTrack({ caps: { focusMode: ['continuous', 'manual'], focusDistance: { min: 0, max: 10 } } })
+      const delays = []
+      for (const a of [1, 2, 3, 4, 5, 100]) {
+        const res = await focusHunt(track, a)
+        delays.push(res.nextMs)
+      }
+      expect(delays).toEqual([1000, 2000, 3000, 4000, 4000, 4000])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+/* ── zoom ──────────────────────────────────────────────────────────────────── */
+
+describe('setZoom', () => {
+  /** A track that actually honours zoom, like a real device would. */
+  function makeZoomTrack() {
+    const track = makeTrack({ caps: { zoom: { min: 1, max: 4 } } })
+    track.applyConstraints = vi.fn(async (c) => {
+      track.applied.push(c)
+      const adv = c?.advanced?.[0]
+      if (adv && 'zoom' in adv) track.settings.zoom = adv.zoom
+    })
+    return track
+  }
+
+  it('clamps to the advertised max and reads the set value back', async () => {
+    const track = makeZoomTrack()
+    const res = await setZoom(track, 10)
+    expect(res).toEqual({ ok: true, zoom: 4 })
+    expect(track.applied[0].advanced).toEqual([{ zoom: 4 }])
+  })
+
+  it('clamps to the advertised min', async () => {
+    const track = makeZoomTrack()
+    const res = await setZoom(track, 0.5)
+    expect(res).toEqual({ ok: true, zoom: 1 })
+  })
+
+  it('applies zoom in its own call carrying only zoom', async () => {
+    const track = makeZoomTrack()
+    await setZoom(track, 2)
+    expect(track.applied).toHaveLength(1)
+    expect(track.applied[0]).toEqual({ advanced: [{ zoom: 2 }] })
+  })
+
+  it('returns the clamped value when the device cannot read zoom back', async () => {
+    const track = makeTrack({ caps: { zoom: { min: 1, max: 4 } } }) // default mock: settings stay empty
+    const res = await setZoom(track, 3)
+    expect(res).toEqual({ ok: true, zoom: 3 })
+  })
+
+  it('reports ok:false with the current zoom when applyConstraints rejects', async () => {
+    const track = makeZoomTrack()
+    await setZoom(track, 2) // current is now 2
+    track.applyConstraints.mockRejectedValue(new Error('zoom unsupported'))
+    const res = await setZoom(track, 3)
+    expect(res).toEqual({ ok: false, zoom: 2 })
+  })
+
+  it('reports ok:false when the device advertises no zoom', async () => {
+    const track = makeTrack({ caps: {} })
+    const res = await setZoom(track, 2)
+    expect(res).toEqual({ ok: false, zoom: null })
+    expect(track.applyConstraints).not.toHaveBeenCalled()
+  })
+
+  it('reports ok:false for a non-finite level', async () => {
+    const track = makeZoomTrack()
+    const res = await setZoom(track, NaN)
+    expect(res.ok).toBe(false)
+    expect(track.applyConstraints).not.toHaveBeenCalled()
+  })
+})
+
+describe('getZoom', () => {
+  it('returns the current zoom setting', () => {
+    expect(getZoom(makeTrack({ settings: { zoom: 2.5 } }))).toBe(2.5)
+  })
+
+  it('returns null when zoom is unsupported or absent', () => {
+    expect(getZoom(makeTrack({ settings: {} }))).toBeNull()
+    expect(getZoom(makeTrack())).toBeNull()
+    expect(getZoom(null)).toBeNull()
+  })
+
+  it('never returns NaN', () => {
+    expect(getZoom(makeTrack({ settings: { zoom: NaN } }))).toBeNull()
+  })
+})
+
+/* ── zoomRampForMisses ─────────────────────────────────────────────────────── */
+
+describe('zoomRampForMisses', () => {
+  const caps = { zoom: { min: 1, max: 4 } }
+
+  it('holds 1.0 through the first couple of misses', () => {
+    expect(zoomRampForMisses(0, caps)).toBe(1.0)
+    expect(zoomRampForMisses(1, caps)).toBe(1.0)
+    expect(zoomRampForMisses(2, caps)).toBe(1.0)
+  })
+
+  it('ramps gently: +0.25 per couple of misses', () => {
+    expect(zoomRampForMisses(3, caps)).toBe(1.25)
+    expect(zoomRampForMisses(4, caps)).toBe(1.25)
+    expect(zoomRampForMisses(5, caps)).toBe(1.5)
+    expect(zoomRampForMisses(6, caps)).toBe(1.5)
+    expect(zoomRampForMisses(7, caps)).toBe(1.75)
+  })
+
+  it('stops at the 1.75 cap no matter how long the miss streak', () => {
+    expect(zoomRampForMisses(50, caps)).toBe(1.75)
+  })
+
+  it('never exceeds the advertised zoom max', () => {
+    expect(zoomRampForMisses(50, { zoom: { min: 1, max: 1.4 } })).toBe(1.4)
+    expect(zoomRampForMisses(0, { zoom: { min: 1, max: 1.4 } })).toBe(1.0)
+  })
+
+  it('is monotonic non-decreasing in the miss count', () => {
+    let prev = 0
+    for (let m = 0; m <= 30; m++) {
+      const z = zoomRampForMisses(m, caps)
+      expect(z).toBeGreaterThanOrEqual(prev)
+      prev = z
+    }
+  })
+
+  it('returns 1.0 for null/undefined caps or a missing zoom capability', () => {
+    expect(zoomRampForMisses(10, null)).toBe(1.0)
+    expect(zoomRampForMisses(10, undefined)).toBe(1.0)
+    expect(zoomRampForMisses(10, {})).toBe(1.0)
+  })
+
+  it('treats a non-finite miss count as zero', () => {
+    expect(zoomRampForMisses(NaN, caps)).toBe(1.0)
+  })
+})
+
+/* ── shouldSuggestTorch ────────────────────────────────────────────────────── */
+
+describe('shouldSuggestTorch', () => {
+  it('is true only when the frame is dark AND the device has a torch', () => {
+    expect(shouldSuggestTorch(20, { torch: true })).toBe(true)
+    expect(shouldSuggestTorch(39.9, { torch: true })).toBe(true)
+  })
+
+  it('is false when the frame is not genuinely dark', () => {
+    expect(shouldSuggestTorch(40, { torch: true })).toBe(false) // boundary: not < 40
+    expect(shouldSuggestTorch(120, { torch: true })).toBe(false)
+  })
+
+  it('is false when the device has no torch, however dark', () => {
+    expect(shouldSuggestTorch(10, {})).toBe(false)
+    expect(shouldSuggestTorch(10, { torch: false })).toBe(false)
+    expect(shouldSuggestTorch(10, null)).toBe(false)
+  })
+
+  it('is false for missing or NaN luma', () => {
+    expect(shouldSuggestTorch(NaN, { torch: true })).toBe(false)
+    expect(shouldSuggestTorch(null, { torch: true })).toBe(false)
+    expect(shouldSuggestTorch(undefined, { torch: true })).toBe(false)
+  })
+})
+
+/* ── beginFocusHunt ────────────────────────────────────────────────────────── */
+
+describe('beginFocusHunt', () => {
+  it('drives focusHunt on an interval, backing off via nextMs', async () => {
+    vi.useFakeTimers()
+    try {
+      const track = makeTrack({ caps: { focusMode: ['continuous', 'manual'], focusDistance: { min: 0, max: 10 } } })
+      const stop = beginFocusHunt(track)
+      expect(vi.getTimerCount()).toBe(1)
+
+      await vi.advanceTimersByTimeAsync(1000) // t=1000: attempt 1 → continuous
+      expect(track.applied.map(c => c.advanced[0].focusMode)).toEqual(['continuous'])
+
+      await vi.advanceTimersByTimeAsync(1000) // t=2000: nextMs(1)=1000 → attempt 2 → manual-near
+      expect(track.applied.map(c => c.advanced[0].focusMode)).toEqual(['continuous', 'manual'])
+      expect(track.applied[1].advanced[0]).toMatchObject({ focusMode: 'manual', focusDistance: 2.5 })
+
+      await vi.advanceTimersByTimeAsync(1199) // t=3199: the 1200ms revert hold has not elapsed
+      expect(track.applied).toHaveLength(2)
+
+      await vi.advanceTimersByTimeAsync(1) // t=3200: revert fires → back to continuous
+      expect(track.applied.map(c => c.advanced[0].focusMode)).toEqual(['continuous', 'manual', 'continuous'])
+
+      await vi.advanceTimersByTimeAsync(800) // t=4000: nextMs(2)=2000 → attempt 3
+      expect(track.applied.map(c => c.advanced[0].focusMode)).toEqual(['continuous', 'manual', 'continuous', 'manual'])
+
+      await vi.advanceTimersByTimeAsync(1300) // let attempt 3's revert fire before stopping
+      stop()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stop() is idempotent and leaves no timer alive', async () => {
+    vi.useFakeTimers()
+    try {
+      // A no-capability track: focusHunt no-ops, so no revert timer is ever
+      // scheduled and the only timer in the air is the helper's own interval.
+      const track = makeTrack({ caps: {} })
+      const stop = beginFocusHunt(track)
+      expect(vi.getTimerCount()).toBe(1)
+
+      await vi.advanceTimersByTimeAsync(1000) // one no-op hunt
+      expect(track.applyConstraints).not.toHaveBeenCalled()
+
+      stop()
+      expect(vi.getTimerCount()).toBe(0)
+      stop() // idempotent
+      expect(vi.getTimerCount()).toBe(0)
+
+      await vi.advanceTimersByTimeAsync(100000) // nothing further happens
+      expect(track.applyConstraints).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

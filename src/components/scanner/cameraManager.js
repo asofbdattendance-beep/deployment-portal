@@ -16,6 +16,14 @@
  *  4. CAPABILITY PROBES NEVER THROW. Torch/focus/zoom differ wildly across
  *     Safari, Samsung Internet, Chrome and WebViews, so every probe degrades to
  *     a boolean instead of propagating an exception into the render loop.
+ *  5. MISS-DRIVEN FOCUS, NOT TIMER-DRIVEN. Decode misses — not a wall clock —
+ *     drive focus recovery: `focusHunt` re-asserts continuous AF first, then
+ *     escalates to a manual-near nudge on a growing backoff, and
+ *     `zoomRampForMisses` trades a little magnification for decode size,
+ *     gently, because zoom amplifies focus hunting as much as it helps.
+ *     A device that exposes no focus capability (iOS Safari commonly exposes
+ *     neither `focusMode` nor `focusDistance`) gets a clean no-op, never a
+ *     throw.
  */
 
 /* ─── Platform detection ────────────────────────────────────────────────────── */
@@ -300,6 +308,244 @@ export async function applyTapFocus(track, x, y) {
     return { applied: true, mode: 'distance', cleanup: () => clearTimeout(revertTimer) }
   } catch {
     return { applied: false, mode: null, cleanup: () => {} }
+  }
+}
+
+/* ─── Adaptive focus hunt & zoom ────────────────────────────────────────────── */
+
+// Miss-driven focus recovery. A fixed re-assert timer cannot tell "focus is
+// fine" from "the phone locked onto the background", so a hunt escalates:
+// continuous AF first, then a manual-near nudge, with a growing backoff so a
+// stubborn phone is nudged on a backing-off schedule, not spammed.
+const FOCUS_HUNT_BASE_MS = 1000 // first re-hunt delay — short, while the operator is still waving the badge
+const FOCUS_HUNT_MAX_MS = 4000  // backoff ceiling — a hunt must never become a busy loop
+const FOCUS_HUNT_MAX_ATTEMPT = 5 // attempt cap: nextMs saturates at FOCUS_HUNT_MAX_MS from here on
+const MANUAL_FOCUS_HOLD_MS = 1200 // how long manual-near is held before continuous AF returns
+
+/**
+ * True when continuous AF can be requested on this device.
+ *
+ * Mirrors `applyFocusConstraints`: an explicit `continuous` in the advertised
+ * focusMode list, or — on Android — an empty list, because several Samsung
+ * firmwares report no focusMode at all while still honouring continuous AF.
+ * iOS Safari commonly exposes neither focusMode nor focusDistance, which is
+ * exactly the case `focusHunt` must no-op on.
+ */
+function continuousFocusRequestable(caps) {
+  const focusModes = Array.isArray(caps.focusMode) ? caps.focusMode : []
+  return focusModes.includes('continuous') || (platform.isAndroid && focusModes.length === 0)
+}
+
+/**
+ * One miss-driven focus hunt.
+ *
+ * NOT a timer — the caller invokes this when decodes keep missing and uses
+ * `nextMs` to schedule the next hunt. Attempt 1 re-requests continuous AF
+ * (cheap, and enough for a phone that merely dropped its AF lock). Attempt 2+
+ * escalates to a brief manual-near nudge: small badges are held close to the
+ * lens, so a near-biased `focusDistance` breaks a background lock that
+ * continuous AF won't, then continuous AF is restored after a short hold.
+ *
+ * Fully guarded: a track that throws on `getCapabilities`/`applyConstraints`,
+ * or advertises no usable focus capability (iOS Safari commonly exposes
+ * neither `focusMode` nor `focusDistance`), yields
+ * `{ mode: 'none', ok: false, nextMs }` — a clean no-op, never a throw.
+ *
+ * @param {MediaStreamTrack} track
+ * @param {number} [attempt] — 1-based hunt number; capped so callers can't overflow
+ * @param {{debug?: boolean}} [opts]
+ * @returns {Promise<{mode:'continuous'|'manual'|'none', ok:boolean, nextMs:number}>}
+ */
+export async function focusHunt(track, attempt = 1, opts = {}) {
+  const { debug = false } = opts
+  const nextMs = () => {
+    const n = Number.isFinite(attempt) ? Math.trunc(attempt) : 1
+    const a = Math.min(Math.max(1, n), FOCUS_HUNT_MAX_ATTEMPT)
+    return Math.min(FOCUS_HUNT_MAX_MS, FOCUS_HUNT_BASE_MS * a)
+  }
+  const none = () => ({ mode: 'none', ok: false, nextMs: nextMs() })
+
+  if (!track) return none()
+
+  try {
+    const caps = safeCall(() => track.getCapabilities?.(), {}) || {}
+
+    if (attempt <= 1) {
+      // First hunt: re-assert continuous AF — the same reasoning as
+      // applyFocusConstraints, in its own call so a firmware that rejects
+      // it cannot take a zoom or focus request down with it.
+      if (continuousFocusRequestable(caps)) {
+        await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] })
+        if (debug) console.log('[CameraMgr] focus hunt: re-asserted continuous AF')
+        return { mode: 'continuous', ok: true, nextMs: nextMs() }
+      }
+      return none()
+    }
+
+    // Escalation: manual focus biased NEAR, then back to continuous. Only
+    // possible when the device advertises BOTH manual mode and a distance
+    // range — without them there is nothing to nudge (iOS Safari).
+    const focusModes = Array.isArray(caps.focusMode) ? caps.focusMode : []
+    if (!focusModes.includes('manual') || !caps.focusDistance) return none()
+    const minDist = Number(caps.focusDistance.min) || 0
+    const maxDist = Number(caps.focusDistance.max) || 10
+    const near = minDist + (maxDist - minDist) * 0.25
+
+    await track.applyConstraints({ advanced: [{ focusMode: 'manual', focusDistance: near }] })
+    // Hold manual-near briefly, then hand the lens back to continuous AF —
+    // leaving it manual would strand the next badge at the wrong distance.
+    setTimeout(() => {
+      track.applyConstraints?.({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {})
+    }, MANUAL_FOCUS_HOLD_MS)
+    if (debug) console.log(`[CameraMgr] focus hunt: manual-near @ ${near}`)
+    return { mode: 'manual', ok: true, nextMs: nextMs() }
+  } catch {
+    return none()
+  }
+}
+
+/**
+ * The digital zoom to request after a run of consecutive decode misses.
+ *
+ * WHY A RAMP: zoom makes a small barcode physically larger in the frame, which
+ * genuinely helps the decoder — but it also magnifies focus hunting and
+ * motion blur, so a heavy crop can cost more detections than it cures. Hence
+ * gentle: hold 1.0 through the first couple of misses (most misses are angle
+ * or glare, not size), then +0.25 per couple of misses, stopping at a modest
+ * 1.75 cap — and never above what the device actually supports.
+ *
+ * Pure and total: null/undefined caps (or no zoom capability) → 1.0.
+ *
+ * @param {number} misses — consecutive decode misses
+ * @param {{zoom?: {min: number, max: number}}} [caps]
+ * @returns {number}
+ */
+export function zoomRampForMisses(misses, caps) {
+  if (!caps || !caps.zoom) return 1.0
+  const m = Number.isFinite(misses) ? Math.max(0, Math.trunc(misses)) : 0
+  const ramped = m <= 2 ? 1.0 : 1 + 0.25 * Math.ceil((m - 2) / 2)
+  return Math.min(Math.max(Math.min(ramped, 1.75), 1), Number(caps.zoom.max) || 1)
+}
+
+/**
+ * Current digital zoom, or null when the device doesn't expose it.
+ * Never throws, never NaN — null is the caller's signal to skip zoom logic.
+ *
+ * @param {MediaStreamTrack|null} track
+ * @returns {number|null}
+ */
+export function getZoom(track) {
+  if (!track) return null
+  const settings = safeCall(() => track.getSettings?.(), null)
+  const z = settings?.zoom
+  return Number.isFinite(z) ? z : null
+}
+
+/**
+ * Set digital zoom, clamped to what the device advertises.
+ *
+ * Zoom goes out in its OWN `applyConstraints` call carrying ONLY `zoom` — the
+ * same Samsung-firmware reasoning as `applyFocusConstraints`: a combined
+ * advanced set is rejected or silently ignored there, which would void the
+ * zoom. The returned `zoom` is read back from `getSettings()` when the device
+ * reports it, so the caller learns the value actually in effect; on any
+ * failure it gets `{ ok: false, zoom: <current> }` and can retry later.
+ *
+ * @param {MediaStreamTrack} track
+ * @param {number} level
+ * @returns {Promise<{ok: boolean, zoom: number|null}>}
+ */
+export async function setZoom(track, level) {
+  const current = getZoom(track)
+  if (!track || !Number.isFinite(level)) return { ok: false, zoom: current }
+  try {
+    const caps = safeCall(() => track.getCapabilities?.(), {}) || {}
+    if (!caps.zoom) return { ok: false, zoom: current }
+    const min = Number(caps.zoom.min) || 1
+    const max = Number(caps.zoom.max) || 1
+    const clamped = Math.min(Math.max(level, min), max)
+    await track.applyConstraints({ advanced: [{ zoom: clamped }] })
+    const readBack = getZoom(track)
+    return { ok: true, zoom: Number.isFinite(readBack) ? readBack : clamped }
+  } catch {
+    return { ok: false, zoom: current }
+  }
+}
+
+// Mean luma (0-255) below which a frame is genuinely dark: badge contrast
+// collapses well before the operator perceives the scene as "dark", so the
+// threshold sits low. This gates an ACTIONABLE torch suggestion, not the
+// passive "dark" hint `guidanceFor` already shows.
+const DARK_LUMA_THRESHOLD = 40
+
+/**
+ * Should the UI suggest turning the torch on?
+ *
+ * Both conditions must hold: the frame is genuinely dark (mean luma < 40 —
+ * below this, badge contrast is too poor for reliable decoding) AND the
+ * device actually has a torch. Pure and total: missing/NaN inputs → false.
+ * Deliberately narrower than `guidanceFor`'s 'dark' hint, which only advises;
+ * this one triggers an action, so it fires only when the torch can help.
+ *
+ * @param {number} meanLuma — 0-255 average frame luminance
+ * @param {{torch?: boolean}} [caps]
+ * @returns {boolean}
+ */
+export function shouldSuggestTorch(meanLuma, caps) {
+  if (!Number.isFinite(meanLuma) || meanLuma >= DARK_LUMA_THRESHOLD) return false
+  return !!(caps && caps.torch)
+}
+
+/**
+ * Drive `focusHunt` on an interval owned by the caller.
+ *
+ * This helper only paces hunts: the first after `interval`, then whatever
+ * `focusHunt` returns as `nextMs` (which grows with the attempt count, so a
+ * phone that won't focus is nudged on a backing-off schedule rather than
+ * spammed). The caller owns the miss streak — stop this when a decode
+ * succeeds and restart it when misses pile up.
+ *
+ * The returned `stop()` is idempotent and leaves this helper's own timer
+ * chain dead — safe to call from an unmount path, as many times as needed.
+ * (A manual-near revert timer scheduled by an in-flight `focusHunt` is that
+ * function's own concern and self-clears after its hold.)
+ *
+ * @param {MediaStreamTrack} track
+ * @param {{interval?: number, debug?: boolean}} [opts]
+ * @returns {() => void} stop
+ */
+export function beginFocusHunt(track, opts = {}) {
+  const { interval = FOCUS_HUNT_BASE_MS } = opts
+  let stopped = false
+  let timer = null
+  let attempt = 0
+
+  function schedule(ms) {
+    if (stopped) return
+    timer = setTimeout(run, ms)
+  }
+
+  async function run() {
+    if (stopped) return
+    attempt += 1
+    try {
+      const res = await focusHunt(track, attempt, opts)
+      if (stopped) return
+      schedule(Number.isFinite(res?.nextMs) ? res.nextMs : interval)
+    } catch {
+      // focusHunt is guarded and should never throw; never let the chain die.
+      if (!stopped) schedule(interval)
+    }
+  }
+
+  schedule(interval)
+
+  return function stop() {
+    stopped = true
+    if (timer !== null) {
+      clearTimeout(timer)
+      timer = null
+    }
   }
 }
 

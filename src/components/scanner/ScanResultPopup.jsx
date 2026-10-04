@@ -123,6 +123,13 @@ const VARIANT = {
  *  centre          string — centre name (optional)
  *  deptName        string — department name (optional)
  *  time            string — formatted time e.g. "10:42:11 AM"
+ *  eventDate       string — YYYY-MM-DD in IST of the event this popup is
+ *                  about (optional; from `eventStamp` in useScanHandler)
+ *  eventTime       string — HH:MM:SS in IST, paired with eventDate and
+ *                  rendered with the direction of the current moment —
+ *                  "Time (IN)" or "Time (OUT)". Absent on popups that
+ *                  describe no event (error / busy), which simply omit
+ *                  the row.
  *  message         string — subtitle / detail line (e.g. error msg)
  *  flag            string — amber flag text (e.g. "Not in my dept")
  *  openSince       string — for forgot: "2026-08-30 08:12:00"
@@ -143,6 +150,8 @@ export default function ScanResultPopup({
   centre,
   deptName,
   time,
+  eventDate,
+  eventTime,
   message,
   flag,
   openSince,
@@ -261,6 +270,17 @@ export default function ScanResultPopup({
   // go ahead" — the exact misread the gate exists to prevent — so it must say
   // "Cancel", which is also the honest description of what it does.
   const secondaryLabel = key === 'error' ? 'Close' : (isChoice || isConfirm) ? 'Cancel' : 'Done'
+
+  // Which direction the event stamp belongs to, so the date/time row can say
+  // "Time (IN)" or "Time (OUT)" instead of an unlabelled clock. Null on
+  // popups that describe no directional event (busy / queued / storage
+  // failure) — those fall back to a bare "Time" label.
+  const eventDir = (() => {
+    if (key === 'in' || key === 'flagged' || key === 'confirm_in') return 'IN'
+    if (key === 'out' || key === 'confirm_out' || key === 'forgot') return 'OUT'
+    if (isChoice) return choiceAction
+    return null
+  })()
 
   return (
     <div
@@ -448,6 +468,48 @@ export default function ScanResultPopup({
                   )}
                   {isForgot && <div style={{ marginTop: 4 }}><span className="pill pill-amber" style={{ fontSize: '0.72rem' }}> &gt; 12h open</span></div>}
                 </dl>
+              )}
+
+              {/* date + time of the event this popup is about — the operator's
+                  "when?" answer. Own block rather than part of the identity
+                  <dl> above it: an unknown badge has no name/centre/dept and
+                  must still show when it was scanned. The direction suffix
+                  comes from the moment (IN before the tap, OUT after it), not
+                  from any record, because nothing is written until the tap. */}
+              {(eventDate || eventTime) && (
+                <div
+                  style={{
+                    marginTop: 10,
+                    display: 'flex',
+                    gap: '1.5rem',
+                    flexWrap: 'wrap',
+                    padding: '0.55rem 0.75rem',
+                    background: 'var(--surface-2)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 10,
+                  }}
+                >
+                  {eventDate && (
+                    <div>
+                      <div style={{ fontSize: '0.66rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)' }}>
+                        Date
+                      </div>
+                      <div style={{ fontWeight: 700, color: 'var(--text)', fontVariantNumeric: 'tabular-nums' }}>
+                        {eventDate}
+                      </div>
+                    </div>
+                  )}
+                  {eventTime && (
+                    <div>
+                      <div style={{ fontSize: '0.66rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)' }}>
+                        Time{eventDir ? ` (${eventDir})` : ''}
+                      </div>
+                      <div style={{ fontWeight: 700, color: 'var(--text)', fontVariantNumeric: 'tabular-nums' }}>
+                        {eventTime}
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
 
               {/* choice context: which session the OUT would close */}

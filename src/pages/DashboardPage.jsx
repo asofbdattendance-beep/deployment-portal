@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, fetchAllRpc, fetchCentres } from '../lib/supabase'
 import { useToast } from '../components/Toast'
 import {
   buildDailyRows,
@@ -22,6 +22,7 @@ import { useIsMobile } from '../hooks/useMediaQuery'
 import { useExport } from '../hooks/useExport'
 import ExportSheet from '../components/mobile/ExportSheet'
 import PrintPdfButton from '../components/PrintPdfButton'
+import CentreDeptMatrixCard from '../components/CentreDeptMatrixCard'
 import {
   LayoutDashboard, Users, UserX, Percent, Clock, Radio, AlertTriangle,
   CalendarClock, RefreshCw, Download, FileDown, ArrowUp, ArrowDown,
@@ -201,6 +202,13 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
     return () => window.removeEventListener('focus', sync)
   }, [])
   useEffect(() => { setDate((d) => clampDateToWindow(d, visitWin)) }, [visitWin])
+
+  // The centre × department matrix groups each centre under its parent —
+  // dp_centres is reference data (schedule-independent), so it loads once.
+  // A failure degrades the matrix to a flat grid rather than blanking a
+  // dashboard section, so it deliberately has no error surface.
+  const [centres, setCentres] = useState([])
+  useEffect(() => { fetchCentres().then(setCentres).catch(() => {}) }, [])
 
   // The "updated Ns ago" label only needs second resolution, not a re-render
   // per second.
@@ -442,8 +450,10 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   // delivers one file through the share sheet: the snapshot combines Present
   // + Absent into a single 4-sheet workbook instead of two downloads.
   const fetchDayRows = useCallback(async (mode) => {
+    // Per-badge rows: fetchAllRpc paginates so buildDaySheets' per-centre
+    // counts and TOTAL are complete, never a 1000-row prefix.
     const rows = await withTimeout(
-      rpcRows('attendance_day_badges', { p_schedule: scheduleId, p_date: date, p_mode: mode }),
+      fetchAllRpc('attendance_day_badges', { p_schedule: scheduleId, p_date: date, p_mode: mode }),
       15000,
       'attendance_day_badges'
     )
@@ -755,6 +765,17 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
           </div>
         )}
       </div>
+
+      {/* ── Centre × department matrix: the same visit summary the snapshot
+          above reads, cut the other way — one row per centre (parents
+          collapsed over their subtree), one column per department. No RPC of
+          its own: it consumes the already-fetched attendance_visit_summary. ── */}
+      <CentreDeptMatrixCard
+        rows={rowsAreCurrent ? sec.visit.rows : []}
+        centres={centres}
+        error={sec.visit.error ? 'attendance_visit_summary could not be loaded' : null}
+        onRetry={load}
+      />
 
       {/* ── Body: leaderboard + right rail ── */}
       <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start', flexWrap: 'wrap' }}>

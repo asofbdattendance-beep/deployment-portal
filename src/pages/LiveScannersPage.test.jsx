@@ -46,6 +46,10 @@ vi.mock('../components/Toast', () => ({
 }))
 
 const SCHEDULES = [{ id: 'sched-1', name: 'October 2026 Visit' }]
+// Windowed variant: 2026-10-07 → 2026-10-11, entirely AFTER the pinned
+// "today" (2026-09-23), so the mount/focus sync must clamp forward to the
+// window's first day rather than sit on a previsit date.
+const WINDOWED_SCHEDULES = [{ id: 'sched-1', name: 'October 2026 Visit', visit_start_date: '2026-10-07', visit_end_date: '2026-10-11' }]
 
 // L1: the clock is pinned to 2026-09-23 10:00:00 IST. `scannerStatus` builds
 // `${dateStr}T${lastScanTime}+05:30` and calls anything inside 15 minutes
@@ -272,6 +276,17 @@ vi.mock('xlsx', () => ({
   writeFile: vi.fn(),
   write: vi.fn(() => new Uint8Array([1, 2, 3])),
 }))
+
+describe('Live Scanners — the mount/focus "today" sync clamps into the visit window', () => {
+  it('opens on the window edge, never on the raw previsit today', async () => {
+    await renderPage({ schedules: WINDOWED_SCHEDULES })
+    // The regression: useState's init clamped today, but the focus-sync
+    // effect then wrote the RAW today (2026-09-23, a previsit date), and
+    // the whole page silently flipped to a day the operator never picked.
+    expect(rpc).toHaveBeenCalledWith('attendance_scanner_ops', { p_schedule: 'sched-1', p_date: '2026-10-07' })
+    expect(rpc).not.toHaveBeenCalledWith('attendance_scanner_ops', { p_schedule: 'sched-1', p_date: DATE })
+  })
+})
 
 describe('C2 — exports use the shared driver naming (L-24/L-25)', () => {
   it('writes a slugged {schedule}_{date}_scanners.xlsx filename', async () => {

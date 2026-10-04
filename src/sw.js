@@ -15,9 +15,9 @@
  * this SW and wipes its caches on next load. Use if a bad SW ever ships
  * (a bad SW is sticky — this is the escape hatch).
  */
-import { cleanupOutdatedCaches, precacheAndRoute, createHandlerBoundToURL } from 'workbox-precaching'
+import { cleanupOutdatedCaches, precacheAndRoute, createHandlerBoundToURL, matchPrecache } from 'workbox-precaching'
 import { NavigationRoute, registerRoute, setCatchHandler, setDefaultHandler } from 'workbox-routing'
-import { NetworkOnly } from 'workbox-strategies'
+import { NetworkOnly, CacheFirst } from 'workbox-strategies'
 
 const SW_VERSION = 'portal-sw-v1'
 const SW_KILL = false
@@ -58,13 +58,25 @@ if (SW_KILL) {
     }),
   )
 
+  // Hashed build chunks (JS/CSS incl. the lazy ZXing engine chunk): filenames
+  // are content-hashed and served immutable, so cache-first is exact — and it
+  // keeps an offline reload working even when a chunk missed the precache
+  // (e.g. over the 3MB cap) after it was fetched once while online.
+  registerRoute(
+    ({ url }) => url.origin === self.location.origin && url.pathname.startsWith('/assets/'),
+    new CacheFirst({ cacheName: 'portal-assets' }),
+  )
+
   // Default: network only. No runtime caching of any kind.
   setDefaultHandler(new NetworkOnly())
 
   // Offline document → cached app shell; anything else → network error.
+  // matchPrecache (not caches.match) — the manifest keys index.html by its
+  // revision, so the bare literal never matches and the old code hard-failed
+  // every non-document request plus any navigation that missed the route.
   setCatchHandler(({ event }) => {
     if (event.request.destination === 'document') {
-      return caches.match('index.html').then(
+      return matchPrecache('index.html').then(
         (r) => r || Promise.resolve(Response.error()),
       )
     }

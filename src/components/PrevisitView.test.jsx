@@ -15,6 +15,13 @@ import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/re
 import PrevisitView from './PrevisitView'
 
 const rpc = vi.fn()
+// Delegates to `rpc` fixtures, upholding the real fetchAllRpc contract:
+// a resolved `{ error }` THROWS instead of returning rows.
+const fetchAllRpc = vi.fn(async (name, params) => {
+  const res = await rpc(name, params)
+  if (res?.error) throw res.error
+  return Array.isArray(res?.data) ? res.data : []
+})
 const toastError = vi.fn()
 const toastSuccess = vi.fn()
 
@@ -34,6 +41,7 @@ vi.mock('../lib/supabase', () => ({
     channel: () => noopChannel(),
     removeChannel: () => {},
   },
+  fetchAllRpc: (...args) => fetchAllRpc(...args),
 }))
 
 const toast = { error: toastError, success: toastSuccess, warning: vi.fn(), info: vi.fn() }
@@ -99,6 +107,11 @@ describe('PrevisitView', () => {
     // Newest day 2026-10-06 → Asha + Bina visible, Chand (10-05) hidden.
     expect(screen.queryByText('Chand')).toBeNull()
     expect(screen.getByText('Bina')).toBeTruthy()
+    // Both per-badge feeds paginate; the server-aggregated summary stays
+    // single-shot (routing contract of RPC_PAGE_SPECS).
+    const routed = fetchAllRpc.mock.calls.map(([n]) => n)
+    expect(routed).toEqual(expect.arrayContaining(['previsit_sewadars', 'previsit_deployed']))
+    expect(routed).not.toContain('previsit_summary')
   })
 
   it('switching the sewa day swaps the rows', async () => {

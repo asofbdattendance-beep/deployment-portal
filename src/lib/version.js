@@ -10,12 +10,17 @@
  */
 
 /** Oldest DB this frontend works with. Bump when the frontend starts
- *  calling RPCs/columns a migration introduces. v64: previsit_sewadars
+ *  calling RPCs/columns a migration introduces. v67: scan_out takes
+ *  p_is_manual — without it every OUT is PGRST202 (the drain skips it as
+ *  deploy-ordering, so closes never land). v65: get_scan_state returns a
+ *  third key `sewadar` (name/home-centre/deployed-dept) that the scan
+ *  popup prefers for fresh badges — without it the popup falls back to a
+ *  null session row and shows badge + clock only. v64: previsit_sewadars
  *  returns one row per (day, badge) with session_count/is_open (Total,
  *  Present and Attention tabs + the day-count export depend on it),
  *  alongside the v60 window, v61 window-scoped visit RPCs, v62 previsit
  *  RPCs and v63 previsit_deployed. */
-export const MIN_SUPPORTED_DB_VERSION = 'v64'
+export const MIN_SUPPORTED_DB_VERSION = 'v67'
 
 /**
  * 'v50' → 50. Letter suffixes ('v38b') compare by their number — the

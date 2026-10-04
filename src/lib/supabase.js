@@ -148,6 +148,100 @@ export const fetchAll = fetchAllRows
 export const fetchAllFrom = fetchAllRows
 export const fetchPaginated = fetchAllRows
 
+// ── RPC pagination (same complete-or-throw doctrine as fetchAllRows) ──────
+// PostgREST db-max-rows (default 1000) caps rows fetched from views, tables
+// AND functions — a per-badge RPC over ~3597 sewadars returns exactly 1000
+// rows with NO error, and every KPI / "Showing N of M" / Excel total built
+// on it is quietly wrong (audit R1–R4). fetchAllRpc pages the function
+// result with .range() under a deterministic total order, dedupes on the
+// stable key, and refuses to render a short dataset (count mismatch after
+// one retry → throw).
+//
+// Only ONE-ROW-PER-BADGE (or day×badge) RPCs get a spec here; server-
+// aggregated KPI queries return a handful of grouped rows and keep the
+// plain supabase.rpc() call. An RPC with NO spec THROWS rather than
+// paginating without a deterministic order.
+//
+// orderBy replicates the SQL ORDER BY (so page order == the order the report
+// expects) and the unique stable-key tail is appended only when the SQL
+// order lacks that column — never re-sort `event_date desc` with a trailing
+// `event_date asc`. PostgREST honours Range/limit-offset on SETOF/TABLE
+// function results, and `count:'exact'` sets Prefer: count=exact on page 1.
+export const RPC_PAGE_SPECS = {
+  attendance_sewadar_summary: {
+    stableKey: 'badge_number',
+    orderBy: [['sewadar_centre'], ['sewadar_name'], ['badge_number']],
+  },
+  attendance_day_badges: {
+    stableKey: ['sewadar_centre', 'badge_number'],
+    orderBy: [['sewadar_centre'], ['sewadar_name'], ['badge_number']],
+  },
+  previsit_deployed: {
+    stableKey: 'badge_number',
+    orderBy: [['sewadar_centre'], ['sewadar_name'], ['badge_number']],
+  },
+  // v64 orders `s.d DESC, s.first_in DESC` with NO unique tail — OFFSET
+  // pages would interleave equal-time ties. The client adds the full
+  // deterministic order (outer columns of the SQL output); no migration.
+  previsit_sewadars: {
+    stableKey: ['event_date', 'badge_number'],
+    orderBy: [['event_date', 'desc'], ['in_time', 'desc'], ['badge_number', 'asc']],
+  },
+}
+export async function fetchAllRpc(name, params = {}, spec = RPC_PAGE_SPECS[name]) {
+  if (!spec || !spec.stableKey || !Array.isArray(spec.orderBy)) {
+    throw new Error(`fetchAllRpc(${name}): no page spec — refusing to paginate without a stable key`)
+  }
+  const pageSize = 1000
+  const keys = stableKeyCols(spec.stableKey)
+  const keyOf = (row) => JSON.stringify(keys.map(k => row?.[k] ?? null))
+  const runOnce = async () => {
+    const byKey = new Map()
+    let serverCount = null
+    let from = 0
+    let pages = 0
+    while (true) {
+      if (++pages > MAX_FETCH_PAGES) throw new Error(`fetchAllRpc(${name}): page guard tripped (> ${MAX_FETCH_PAGES} pages)`)
+      let q = supabase.rpc(name, params, pages === 1 ? { count: 'exact' } : undefined)
+      const ordered = new Set()
+      for (const [col, dir] of spec.orderBy) {
+        ordered.add(col)
+        q = q.order(col, { ascending: dir !== 'desc' })
+      }
+      for (const k of keys) {
+        if (!ordered.has(k)) q = q.order(k, { ascending: true })
+      }
+      q = q.range(from, from + pageSize - 1)
+      const { data, error, count } = await q
+      if (error) throw error
+      if (pages === 1 && typeof count === 'number') serverCount = count
+      for (const row of data || []) {
+        const k = keyOf(row)
+        if (!byKey.has(k)) byKey.set(k, row) // boundary dups collapse
+      }
+      if (!data || data.length < pageSize) break
+      from += pageSize
+    }
+    return { rows: [...byKey.values()], serverCount }
+  }
+  let { rows, serverCount } = await runOnce()
+  if (typeof serverCount === 'number' && rows.length !== serverCount) {
+    // Genuine drift or a mid-fetch write: one full retry on a fresh snapshot.
+    // If it STILL disagrees, fail loudly — a short count must never render
+    // as truth (identical contract to fetchAllRows).
+    const retry = await runOnce()
+    rows = retry.rows
+    serverCount = retry.serverCount
+    if (typeof serverCount === 'number' && rows.length !== serverCount) {
+      throw new Error(
+        `fetchAllRpc(${name}): count mismatch after retry — server reports ${serverCount} rows but ${rows.length} unique rows were readable. ` +
+        `Refusing to render a partial dataset.`,
+      )
+    }
+  }
+  return rows
+}
+
 // ASO-dept sewadars (home department = AREA SECRETARY OFFICE) are deployed by
 // the super_admin and never consume a centre's deployment quota (v35 — mirrored
 // DB-side in get_dept_quota_remaining + the batch re-checks). Deployment rows

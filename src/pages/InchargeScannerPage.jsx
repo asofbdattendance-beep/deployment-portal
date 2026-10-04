@@ -8,6 +8,7 @@ import RecentScansTable from '../components/scanner/RecentScansTable'
 import { todayStrIST } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import { useScannerSession } from '../hooks/useScannerSession'
+import { useSewadarDirectory } from '../hooks/useSewadarDirectory'
 import QueueRecoveryBar from '../components/mobile/QueueRecoveryBar'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import ScanModeShell from '../components/mobile/ScanModeShell'
@@ -125,6 +126,14 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
 
   const clearManual = useCallback(() => setManualBadge(''), [])
 
+  // Mobile capture renders the immersive ScanModeShell below; desktop keeps
+  // the cards. Declared here (not with the render block below) so the
+  // mobile-gated directory hook can read it.
+  const isMobile = useIsMobile()
+
+  // Mobile offline-first directory (see ScannerPage) — same hook, same rule.
+  const directoryByBadge = useSewadarDirectory({ scheduleId: selectedScheduleId, enabled: isMobile })
+
   const {
     popup, outTime, setOutTime, closePopup,
     handleScan, handleCameraScan, commitScan, confirmForgot,
@@ -135,6 +144,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
     profile,
     deptName: null,
     deptNameById,
+    directoryByBadge,
     toast,
     onAfterScan: refreshSessions,
     forgotSuccessToast: 'OUT closed, now you can IN',
@@ -155,8 +165,8 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
     <QueueRecoveryBar queued={queued} syncing={syncing} isOnline={isOnline} offline={offline} />
   )
   // Mobile capture renders the immersive ScanModeShell below; desktop keeps
-  // the cards. The scan state machine above is shared by both.
-  const isMobile = useIsMobile()
+  // the cards. The scan state machine above is shared by both (isMobile is
+  // declared above, beside the directory hook).
 
   if (!schedules.length) return <div className="page"><div className="card" style={{ padding: '2rem', textAlign: 'center' }}>No schedules</div></div>
 
@@ -184,6 +194,8 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
       centre={popup?.centre}
       deptName={popup?.deptName}
       time={popup?.time}
+      eventDate={popup?.eventDate}
+      eventTime={popup?.eventTime}
       message={popup?.message}
       flag={popup?.flag}
       openSince={popup?.openSince}

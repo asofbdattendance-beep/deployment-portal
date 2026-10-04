@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, fetchAllRpc } from '../lib/supabase'
 import { reportRealtimeStatus } from '../lib/realtime'
 
 /**
@@ -47,8 +47,12 @@ export function usePrevisitData(scheduleId) {
     try {
       const [sum, list, dep] = await Promise.all([
         rpcRows('previsit_summary', { p_schedule: scheduleId }),
-        rpcRows('previsit_sewadars', { p_schedule: scheduleId }),
-        rpcRows('previsit_deployed', { p_schedule: scheduleId }),
+        // Both per-badge feeds paginate (audit R3/R4): the heatmap
+        // denominator and PrevisitView's counts/exports must cover the WHOLE
+        // deployed roster — a 1000-row prefix would understate `deployed`
+        // while the server-aggregated numerator stays complete (inflated %).
+        fetchAllRpc('previsit_sewadars', { p_schedule: scheduleId }),
+        fetchAllRpc('previsit_deployed', { p_schedule: scheduleId }),
       ])
       if (!mountedRef.current || seq !== seqRef.current) return
       setSummary(sum)

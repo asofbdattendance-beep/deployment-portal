@@ -8,6 +8,35 @@ const PortalAuthContext = createContext(null)
 // flag across a reload while the recovery session is live.
 const RECOVERY_FLAG = 'portal_recovery_pending'
 
+// Offline boot cache: the profile is pure reference data for UI gating —
+// every write re-checks role/scope server-side (RLS + RPC gates), so a
+// stale cached profile can only mis-gate the UI, never mis-write. Keyed by
+// auth user id so a shared device never serves user A's profile to user B.
+const PROFILE_CACHE_KEY = 'portal_profile_cache'
+
+function readCachedProfile(userId) {
+  try {
+    if (!userId) return null
+    const raw = localStorage.getItem(PROFILE_CACHE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed || parsed.userId !== userId) return null
+    return parsed.profile ?? null
+  } catch {
+    return null
+  }
+}
+
+function writeCachedProfile(userId, profile) {
+  try {
+    if (!userId || !profile) return
+    localStorage.setItem(PROFILE_CACHE_KEY, JSON.stringify({ userId, profile, at: Date.now() }))
+  } catch {
+    // Private mode / quota — the session still works online, boot just has
+    // no offline fallback. Never let persistence break auth.
+  }
+}
+
 export function PortalAuthProvider({ children }) {
   const [profile, setProfile] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -38,11 +67,32 @@ export function PortalAuthProvider({ children }) {
     for (let attempt = 0; attempt <= 2; attempt++) {
       if (attempt > 0) await new Promise(r => setTimeout(r, 1200 * attempt))
       const { data, error } = await supabase.rpc('get_portal_profile')
-      if (!error) return data
+      if (!error) {
+        // Cache for offline boot (user id from the local session read —
+        // no network — so the cache key can never cross users).
+        try {
+          const { data: { session: s } } = await supabase.auth.getSession()
+          writeCachedProfile(s?.user?.id, data)
+        } catch { /* cache best-effort only */ }
+        return data
+      }
       lastError = error
       if (!isNetworkError(error)) break
     }
     const error = lastError
+    // Offline with a previous login: serve the cached profile instead of
+    // the dead-end error screen — the scanner (and every role page) boots
+    // from here, and writes stay server-gated regardless.
+    if (isNetworkError(error)) {
+      try {
+        const { data: { session: s } } = await supabase.auth.getSession()
+        const cached = readCachedProfile(s?.user?.id)
+        if (cached) {
+          console.warn('[Auth] offline — serving cached profile')
+          return cached
+        }
+      } catch { /* fall through to the error below */ }
+    }
     {
       console.error('Error fetching portal profile:', error)
       setProfileError(error.message || 'Could not load your profile')

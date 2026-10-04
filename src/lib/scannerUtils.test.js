@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { withTimeout, friendly, todayStrIST, hhmmIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, isDecisionPopup, isEdgeDetection, isTimestampStale, CLOCK_SKEW_FUTURE_MS, CLOCK_SKEW_MAX_AGE_MS } from './scannerUtils'
+import { withTimeout, friendly, todayStrIST, hhmmIST, hmsIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, isDecisionPopup, isEdgeDetection, detectionBox, isTimestampStale, CLOCK_SKEW_FUTURE_MS, CLOCK_SKEW_MAX_AGE_MS, rotateGray, SCAN_ROTATIONS, sanitizeBarcode, scoreSharpness, tileRois } from './scannerUtils'
 
 afterEach(() => { vi.useRealTimers() })
 
@@ -121,6 +121,27 @@ describe('hhmmIST', () => {
   })
   it('never emits the h24 "24:00" midnight form', () => {
     expect(hhmmIST(new Date('2026-09-24T18:05:00Z'))).toBe('23:35')  // 00:05 IST
+  })
+})
+
+/* ─── hmsIST — the seconds-precision sibling, for the popup event stamp ─── */
+describe('hmsIST', () => {
+  it('formats HH:MM:SS in IST regardless of the device zone', () => {
+    expect(hmsIST(new Date('2026-09-24T12:00:00Z'))).toBe('17:30:00')
+    expect(hmsIST(new Date('2026-09-24T04:05:07Z'))).toBe('09:35:07')
+    // Keeps seconds — the `in_time`/`out_time` columns are stored at second
+    // resolution, so a minute-only stamp would disagree with the record.
+    expect(hmsIST(new Date('2026-09-27T12:34:56Z'))).toBe('18:04:56')
+  })
+  it('rolls over midnight into a zero-padded IST second day', () => {
+    // UTC 18:30 == IST 00:00 next day — the h23 rollover the h24 quirk hides.
+    expect(hmsIST(new Date('2026-09-24T18:30:09Z'))).toBe('00:00:09')
+    expect(hmsIST(new Date('2026-09-24T18:35:59Z'))).toBe('00:05:59')
+  })
+  it('never emits the h24 "24:00" form and always pads to 8 chars', () => {
+    expect(hmsIST(new Date('2026-09-24T17:30:00Z'))).toBe('23:00:00')
+    expect(hmsIST(new Date('2026-09-24T18:30:00Z'))).toBe('00:00:00')
+    expect(hmsIST(new Date('2026-09-24T12:00:03Z'))).toMatch(/^.{2}:\d{2}:\d{2}$/)
   })
 })
 
@@ -433,6 +454,71 @@ describe('isEdgeDetection', () => {
   })
 })
 
+/* ─── detectionBox (aim overlay: canvas → video → css under object-fit:cover) ─── */
+describe('detectionBox', () => {
+  const full = computeRoi(1280, 720, { mode: 'full', maxWidth: 720 }) // dw 720, dh 405
+
+  it('maps a centred 2-point ZXing pair and grows the hairline to a usable target', () => {
+    // ZXing's 1D readers emit only the two ends of the bar line: bbox height 0.
+    const box = detectionBox([{ x: 200, y: 200 }, { x: 520, y: 200 }], full, 1280, 720, { width: 1280, height: 720 })
+    expect(box).not.toBeNull()
+    // rect matches the video exactly here, so cover scale is 1 and the maths
+    // reduces to the plain canvas→video mapping (dw=720 over sw=1280).
+    expect(box.width).toBeCloseTo(568.9, 0)
+    // the raw bbox height is 0 (two collinear points) — the overlay must grow
+    // it into something the operator can actually aim at
+    expect(box.height).toBeGreaterThan(48)
+    // grown around the same centre at the barcode-ish ~3.2:1 proportion
+    expect(box.height).toBeCloseTo(box.width / 3.2, 0)
+    expect(box.left + box.width / 2).toBeCloseTo(640, 0)
+    expect(box.top + box.height / 2).toBeCloseTo(355.6, 0)
+  })
+
+  it('centres correctly through object-fit: cover letterboxing', () => {
+    // Square container vs 16:9 video → cover scales on height and crops the
+    // sides, so offX is negative. A detection at the video's centre must land
+    // at the container's centre, not at video_width/2.
+    const pts = [{ x: 340, y: 202.5 }, { x: 380, y: 202.5 }]
+    const box = detectionBox(pts, full, 1280, 720, { width: 400, height: 400 })
+    expect(box).not.toBeNull()
+    expect(box.left + box.width / 2).toBeCloseTo(200, 0)
+    expect(box.top + box.height / 2).toBeCloseTo(200, 0)
+  })
+
+  it('keeps the box inside the container when the detection is at the edge', () => {
+    const pts = [{ x: 700, y: 200 }, { x: 719, y: 200 }]
+    const rect = { width: 1280, height: 720 }
+    const box = detectionBox(pts, full, 1280, 720, rect)
+    expect(box).not.toBeNull()
+    expect(box.left).toBeGreaterThanOrEqual(0)
+    expect(box.top).toBeGreaterThanOrEqual(0)
+    expect(box.left + box.width).toBeLessThanOrEqual(rect.width + 1e-6)
+    expect(box.top + box.height).toBeLessThanOrEqual(rect.height + 1e-6)
+  })
+
+  it('grows a tall thin detection too (barcode held vertically)', () => {
+    const pts = [{ x: 300, y: 40 }, { x: 300, y: 180 }]
+    const box = detectionBox(pts, full, 1280, 720, { width: 1280, height: 720 })
+    expect(box).not.toBeNull()
+    expect(box.width).toBeGreaterThan(48)
+    expect(box.width).toBeCloseTo(box.height / 3.2, 0)
+  })
+
+  it('returns null on degenerate input rather than drawing a bogus rectangle', () => {
+    const rect = { width: 1280, height: 720 }
+    const pts = [{ x: 300, y: 200 }, { x: 420, y: 200 }]
+    expect(detectionBox([], full, 1280, 720, rect)).toBeNull()
+    expect(detectionBox(undefined, full, 1280, 720, rect)).toBeNull()
+    expect(detectionBox([{ x: 300, y: 200 }], full, 1280, 720, rect)).toBeNull()
+    expect(detectionBox(pts, full, 0, 720, rect)).toBeNull()
+    expect(detectionBox(pts, full, 1280, 720, null)).toBeNull()
+    expect(detectionBox(pts, full, 1280, 720, { width: 0, height: 0 })).toBeNull()
+    expect(detectionBox(pts, { sx: 0, sy: 0, sw: 0, sh: 0, dw: 0, dh: 0 }, 1280, 720, rect)).toBeNull()
+    // non-finite coordinates must not produce NaN geometry
+    expect(detectionBox([{ x: NaN, y: NaN }, { x: Infinity, y: 0 }], full, 1280, 720, rect)).toBeNull()
+  })
+})
+
 /* ─── isTimestampStale (V14: client clock-skew budget) ─── */
 // Mirrors the server guards (v26/v46: future beyond now()+5min raises
 // 'Timestamp cannot be in the future'; older than now()-30d raises
@@ -479,5 +565,199 @@ describe('isTimestampStale (V14 clock-skew budget)', () => {
   it('V14 honours an explicit nowMs instead of the wall clock', () => {
     expect(isTimestampStale(1_000_000, 2_000_000)).toBe(false)
     expect(isTimestampStale(2_000_000 + 5 * MIN + 1, 2_000_000)).toBe(true)
+  })
+})
+
+/* ─── rotateGray ─── */
+describe('rotateGray', () => {
+  // 4×3 source so the CW/CCW results are hand-checkable:
+  //   0  1  2  3
+  //   4  5  6  7
+  //   8  9 10 11
+  const src = new Uint8ClampedArray([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+
+  it('90° swaps dimensions and rotates clockwise', () => {
+    const r = rotateGray(src, 4, 3, 90)
+    expect(r.width).toBe(3)
+    expect(r.height).toBe(4)
+    expect([...r.gray]).toEqual([8, 4, 0, 9, 5, 1, 10, 6, 2, 11, 7, 3])
+  })
+
+  it('270° swaps dimensions and rotates counter-clockwise', () => {
+    const r = rotateGray(src, 4, 3, 270)
+    expect(r.width).toBe(3)
+    expect(r.height).toBe(4)
+    expect([...r.gray]).toEqual([3, 7, 11, 2, 6, 10, 1, 5, 9, 0, 4, 8])
+  })
+
+  it('180° keeps dimensions and reverses the buffer', () => {
+    const r = rotateGray(src, 4, 3, 180)
+    expect(r.width).toBe(4)
+    expect(r.height).toBe(3)
+    expect([...r.gray]).toEqual([11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0])
+  })
+
+  it('90° then 270° is a lossless round-trip (the hard path relies on this)', () => {
+    const rt = rotateGray(rotateGray(src, 4, 3, 90).gray, 3, 4, 270)
+    expect(rt.width).toBe(4)
+    expect(rt.height).toBe(3)
+    expect([...rt.gray]).toEqual([...src])
+  })
+
+  it('exposes exactly the three worth-trying angles', () => {
+    expect(SCAN_ROTATIONS).toEqual([90, 180, 270])
+  })
+
+  it('returns the input untouched for 0° and unsupported angles', () => {
+    for (const deg of [0, 45, 12, NaN]) {
+      const r = rotateGray(src, 4, 3, deg)
+      expect(r.width).toBe(4)
+      expect(r.height).toBe(3)
+      expect([...r.gray]).toEqual([...src])
+    }
+  })
+
+  it('normalises signed / oversized angles instead of rejecting them', () => {
+    // −90° is 270°, and 450° is 90° — both are real rotations a caller may
+    // legitimately compute, so they must rotate rather than silently no-op.
+    expect([...rotateGray(src, 4, 3, -90).gray]).toEqual([...rotateGray(src, 4, 3, 270).gray])
+    expect([...rotateGray(src, 4, 3, 450).gray]).toEqual([...rotateGray(src, 4, 3, 90).gray])
+    expect(rotateGray(src, 4, 3, -90).width).toBe(3)
+    expect(rotateGray(src, 4, 3, 450).width).toBe(3)
+  })
+
+  it('rejects empty/short buffers instead of reading out of bounds', () => {
+    for (const bad of [null, undefined, new Uint8ClampedArray(0), new Uint8ClampedArray(4)]) {
+      const r = rotateGray(bad, 4, 3, 90)
+      expect(r.width).toBe(0)
+      expect(r.gray.length).toBe(0)
+    }
+  })
+})
+
+/* ─── sanitizeBarcode ─── */
+describe('sanitizeBarcode', () => {
+  it('passes a canonical badge through unchanged', () => {
+    expect(sanitizeBarcode('FB5978GA0005')).toBe('FB5978GA0005')
+    expect(sanitizeBarcode('VSFB5978GA2644')).toBe('VSFB5978GA2644')
+    expect(sanitizeBarcode('982762371')).toBe('982762371')
+  })
+
+  it('strips Code 39 start/stop guards (the common bad read)', () => {
+    expect(sanitizeBarcode('*FB5978GA0005*')).toBe('FB5978GA0005')
+    expect(sanitizeBarcode('**VS123**')).toBe('VS123')
+  })
+
+  it('uppercases and trims printer noise / whitespace / separators', () => {
+    expect(sanitizeBarcode('  fb5978ga0005  ')).toBe('FB5978GA0005')
+    expect(sanitizeBarcode('FB5978-GA0005')).toBe('FB5978GA0005')
+    expect(sanitizeBarcode('982 762 371')).toBe('982762371')
+    expect(sanitizeBarcode('FB5978GA0005\n')).toBe('FB5978GA0005')
+  })
+
+  it('never touches digit identity (leading zeros are meaningful)', () => {
+    expect(sanitizeBarcode('FB0001')).toBe('FB0001')
+    expect(sanitizeBarcode('VS000')).toBe('VS000')
+    expect(sanitizeBarcode('000123')).toBe('000123')
+  })
+
+  it('returns an empty string for empty/undefined input', () => {
+    for (const bad of [null, undefined, '', '   ', '*', '***']) {
+      expect(sanitizeBarcode(bad)).toBe('')
+    }
+  })
+})
+
+/* ─── scoreSharpness ─── */
+describe('scoreSharpness', () => {
+  it('a flat frame has no detail — score 0', () => {
+    const flat = new Uint8ClampedArray(100).fill(128)
+    expect(scoreSharpness(flat, 10, 10)).toBe(0)
+  })
+
+  it('a hard edge scores higher than a smeared one (why we pick the best frame)', () => {
+    const n = 16
+    const sharp = new Uint8ClampedArray(n * n)
+    const soft = new Uint8ClampedArray(n * n)
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) {
+        sharp[y * n + x] = x < 8 ? 0 : 255          // a crisp vertical edge
+        // soft: same layout but a 1px gradient on each side of the edge
+        const d = Math.abs(x - 7.5)
+        soft[y * n + x] = d <= 1 ? 128 : (x < 8 ? 0 : 255)
+      }
+    }
+    expect(scoreSharpness(sharp, n, n)).toBeGreaterThan(scoreSharpness(soft, n, n))
+  })
+
+  it('returns 0 for buffers too small to convolve (never throws)', () => {
+    expect(scoreSharpness(new Uint8ClampedArray(4), 2, 2)).toBe(0)
+    expect(scoreSharpness(new Uint8ClampedArray(0), 10, 10)).toBe(0)
+    expect(scoreSharpness(null, 10, 10)).toBe(0)
+    expect(scoreSharpness(undefined, 10, 10)).toBe(0)
+  })
+})
+
+/* ─── tileRois ─── */
+describe('tileRois', () => {
+  const roi = { sx: 10, sy: 20, sw: 100, sh: 60, dw: 720, dh: 432, scale: 0.72 }
+
+  it('a 1×1 grid returns the parent roi itself', () => {
+    const tiles = tileRois(roi, { rows: 1, cols: 1 })
+    expect(tiles).toHaveLength(1)
+    expect(tiles[0].sx).toBe(10)
+    expect(tiles[0].sw).toBe(100)
+    expect(tiles[0].dw).toBe(72)
+  })
+
+  it('produces exactly rows×cols tiles, all inside the parent bounds', () => {
+    const tiles = tileRois(roi, { rows: 3, cols: 2 })
+    expect(tiles).toHaveLength(6)
+    for (const t of tiles) {
+      expect(t.sx).toBeGreaterThanOrEqual(roi.sx)
+      expect(t.sy).toBeGreaterThanOrEqual(roi.sy)
+      expect(t.sx + t.sw).toBeLessThanOrEqual(roi.sx + roi.sw)
+      expect(t.sy + t.sh).toBeLessThanOrEqual(roi.sy + roi.sh)
+      expect(t.dw).toBeGreaterThan(0)
+      expect(t.dh).toBeGreaterThan(0)
+    }
+  })
+
+  it('tiles overlap so a barcode straddling a seam still fits a whole tile', () => {
+    const tiles = tileRois(roi, { rows: 3 })
+    // With overlap each tile is taller than a plain 1/3 slice.
+    expect(tiles[0].sh).toBeGreaterThan(roi.sh / 3)
+    // ...and the seam between tile 0 and tile 1 is covered by both.
+    const first = tiles[0]
+    const second = tiles[1]
+    expect(second.sy).toBeLessThan(first.sy + first.sh)
+  })
+
+  it('the last tile still reaches the far edge of the roi', () => {
+    const tiles = tileRois(roi, { rows: 3 })
+    const last = tiles[tiles.length - 1]
+    expect(last.sy + last.sh).toBe(roi.sy + roi.sh)
+  })
+
+  it('scales every tile by the roi scale (the canvas the surface expects)', () => {
+    const tiles = tileRois(roi, { rows: 2, cols: 2 })
+    for (const t of tiles) {
+      expect(t.dw).toBe(Math.max(1, Math.round(t.sw * roi.scale)))
+      expect(t.dh).toBe(Math.max(1, Math.round(t.sh * roi.scale)))
+    }
+  })
+
+  it('falls back to the parent when every tile would be below minSize', () => {
+    const tiny = { sx: 0, sy: 0, sw: 4, sh: 4, dw: 720, dh: 720, scale: 1 }
+    const tiles = tileRois(tiny, { rows: 4, cols: 4 })
+    expect(tiles).toHaveLength(1)
+    expect(tiles[0].sw).toBe(4)
+  })
+
+  it('degrades absurd row/col counts to 1 and rejects a missing roi', () => {
+    expect(tileRois(roi, { rows: 0, cols: 0 })).toHaveLength(1)
+    expect(tileRois(roi, { rows: -5 })).toHaveLength(1)
+    expect(tileRois(null)).toEqual([])
+    expect(tileRois({ sx: 0, sy: 0, sw: 0, sh: 0 })).toEqual([])
   })
 })

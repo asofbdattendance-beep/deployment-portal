@@ -92,7 +92,8 @@ export function deptNameMap(depts = []) {
  *   centre: string|null,    // payload.sewadar_centre ONLY — never the venue
  *   deptName: string|null,  // payload.dept_name, else the map lookup
  *   isVss: boolean,         // payload.is_vss — drives the VSS pill
- *   undeployed: boolean,    // payload.undeployed_scan — drives the Flagged pill
+ *   undeployed: boolean,    // payload.undeployed_scan (session row) or
+ *                           // payload.undeployed (scan_in RPC v43/v57) — drives Flagged
  * }} — exactly these five keys; the three text fields are never `undefined`.
  */
 export function scanDisplay(payload, deptNameById) {
@@ -109,6 +110,8 @@ export function scanDisplay(payload, deptNameById) {
     centre: clean(p.sewadar_centre), // deliberately NOT p.centre — that is the venue
     deptName,
     isVss: Boolean(p.is_vss),
-    undeployed: Boolean(p.undeployed_scan),
+    // Session rows carry undeployed_scan; scan_in RPCs (v43/v57) carry
+    // undeployed. Accept both — otherwise RPC payloads always read false.
+    undeployed: Boolean(p.undeployed_scan ?? p.undeployed),
   }
 }

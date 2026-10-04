@@ -351,17 +351,17 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
 .app-header {
   background: #fff;
   border-bottom: 1px solid var(--border);
-  padding: 0.7rem 1.5rem;
+  padding: 0.45rem 1rem;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
+  gap: 0.5rem;
   flex-wrap: wrap;
 }
 .brand-logo {
-  width: 32px;
-  height: 32px;
-  border-radius: 9px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
   background: linear-gradient(135deg, #6366f1, #8b5cf6);
   display: flex;
   align-items: center;
@@ -370,7 +370,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   flex-shrink: 0;
 }
 .brand-title {
-  font-size: 1.15rem;
+  font-size: 1rem;
   font-weight: 800;
   letter-spacing: -0.02em;
   white-space: nowrap;
@@ -400,12 +400,25 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   display: flex;
   gap: 0.35rem;
   align-items: center;
-  flex-wrap: wrap;
+  /* One row, always: an aso/super_admin sees ~11 tabs, and wrapping pushed
+     the bar to 2-3 lines tall. The bar scrolls sideways instead; group
+     menus are position:fixed (see NavGroup in App.jsx) so this overflow
+     clip cannot cut them off. */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
   background: #fff;
   border-bottom: 1px solid var(--border);
-  padding: 0.55rem 1.5rem;
+  padding: 0.4rem 1rem;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
 }
+.tab-nav::-webkit-scrollbar { height: 6px; }
+.tab-nav::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
+.tab-nav::-webkit-scrollbar-track { background: transparent; }
 .tab-btn {
   display: inline-flex;
   align-items: center;
@@ -423,13 +436,18 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
   flex-shrink: 0;
 }
 /* navbar group dropdown (e.g. Attendance ▾) — the menu floats above page
-   content; the bar itself wraps instead of scrolling pills off-screen */
+   content. The bar itself is a single scrolling row (see .tab-nav), so
+   NavGroup positions this menu position:fixed from the trigger's rect —
+   absolute positioning would be clipped by the bar's overflow-x. */
 .tab-group { position: relative; flex-shrink: 0; }
 .tab-menu {
   position: absolute;
   top: calc(100% + 6px);
   left: 0;
   min-width: 230px;
+  /* A long group on a short viewport must scroll, never run past the fold. */
+  max-height: 70dvh;
+  overflow-y: auto;
   background: #fff;
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -2448,6 +2466,8 @@ select.previsit-control { max-width: 15rem; }
   }
   .table tbody td::before { content: none !important; }
   .table thead th { background: #f1f5f9 !important; color: #0f172a !important; }
+  /* Inline nowrap (dashboard matrix cells) would overflow the A4 column. */
+  .table th, .table td { white-space: normal !important; }
 
   /* let the whole table lay out; rows must not split across a page */
   .table-wrap, .table-wrap-sticky, .table-wrap-rows, .att-scroll {
@@ -2466,8 +2486,9 @@ select.previsit-control { max-width: 15rem; }
    block keys off height instead. Tighter vertical rhythm, camera yields
    room to the action button, nested scrollers get more of the viewport. */
 @media (orientation: landscape) and (max-height: 500px) {
-  /* A landscape phone is phone-shaped: the wrapping desktop pill navbar is
-     replaced by the bottom tab bar exactly as in portrait. */
+  /* A landscape phone is phone-shaped: the desktop pill navbar (a single
+     sideways-scrolling row) is replaced by the bottom tab bar exactly as
+     in portrait. */
   .tab-nav { display: none; }
   .scanner-video { height: clamp(150px, 44dvh, 240px) !important; }
   .scan-shell { gap: 0.4rem; }
@@ -2511,5 +2532,159 @@ select.previsit-control { max-width: 15rem; }
     justify-content: center;
     gap: 0.4rem;
     min-height: 48px;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Printed report (Export PDF)
+
+   "Export PDF" is the browser's Print-to-PDF, so this block IS the PDF
+   design. Three jobs, in priority order:
+
+   1. NEVER a dark/unreadable page. The canvas, every container and the
+      text are pinned explicitly, and `color-scheme: only light` stops a
+      dark-OS user agent from painting the page (or the print canvas)
+      from its own dark palette. Whatever the viewer does with colour
+      graphics, white page + ink text is the floor.
+   2. Nothing that is not the report. Chrome, controls and the
+      on-screen table are display:none — the print-only sections below
+      are the ONLY table that prints, so the report is never duplicated.
+   3. It must look deliberate: a masthead, one section per centre with
+      its own count, a zebra table, a repeating header row on every
+      page, and status that reads as a chip rather than bare text.
+
+   Layering note: `.centre-page table thead th` / `… tbody tr:nth-child`
+   are deliberately more specific than the generic `.table` rules in the
+   phone print block above, so these win without !important wars; both
+   still carry !important because the phone block uses it.
+   ═══════════════════════════════════════════════════════════════ */
+
+@page { size: A4; margin: 14mm 12mm; }
+
+@media print {
+  /* 1 ─ the page is white and the text is ink, always. */
+  html, body { background: #fff !important; color-scheme: only light; }
+  .app-shell, main, .page, .card, .print-only, .centre-page, .print-report {
+    background: #fff !important;
+    box-shadow: none !important;
+  }
+  .print-report, .centre-page { color: #0f172a !important; }
+
+  /* 2 ─ the report only. The interactive results card already carries
+     `print-hide` (handled by the block above), so the print-only sections
+     are the single source of truth. The DB-version banner is transient
+     console noise and never belongs in a client-facing PDF — it is the one
+     global addition. Deliberately NOT hiding `.page-header` / `.pill`:
+     those are shared by ten other tabs that DO want them printed, and the
+     Finalize tab's DEPLOYED/FINAL badges would vanish. */
+  .db-version-banner { display: none !important; }
+
+  /* 3 ─ masthead ---------------------------------------------------- */
+  .print-report {
+    border-bottom: 2px solid #4f46e5;
+    padding-bottom: 0.55rem;
+    margin-bottom: 0.9rem;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .print-report-title {
+    margin: 0;
+    font-size: 1.3rem;
+    font-weight: 800;
+    letter-spacing: -0.015em;
+    color: #0f172a;
+    line-height: 1.15;
+  }
+  .print-report-sub { margin: 0.2rem 0 0; font-size: 0.82rem; color: #475569; }
+  .print-report-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.4rem;
+    margin-top: 0.55rem;
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: #64748b;
+  }
+  .print-report-meta b { color: #312e81; font-weight: 800; }
+
+  /* one section per centre, each starting on a fresh page. The LAST one
+     must not break, or the footer lands alone on a blank trailing sheet —
+     so target :last-of-type, not :last-child (the footer div is the last
+     child, which made :last-child never match a section). */
+  .centre-page { break-after: page; page-break-after: always; break-inside: auto; }
+  .centre-page:last-child, .centre-page:last-of-type {
+    break-after: auto;
+    page-break-after: auto;
+  }
+
+  .centre-page h3 {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    margin: 0 0 0.5rem;
+    padding: 0.45rem 0.7rem;
+    background: #eef2ff !important;
+    color: #312e81 !important;
+    border-left: 4px solid #4f46e5;
+    border-radius: 4px;
+    font-size: 1rem;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .centre-page h3 .centre-count {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #6366f1;
+    white-space: nowrap;
+  }
+
+  /* header row repeats on every page of a long centre list */
+  .centre-page table thead { display: table-header-group; }
+  .centre-page table thead th {
+    background: #eef2ff !important;
+    color: #312e81 !important;
+    border-bottom: 2px solid #a5b4fc !important;
+    font-size: 0.64rem;
+    font-weight: 800;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .centre-page table tbody tr:nth-child(even) td {
+    background: #f8fafc !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .centre-page table tbody tr { break-inside: avoid; page-break-inside: avoid; }
+  .centre-page table tbody td { border-bottom: 1px solid #e5e7eb !important; }
+  .centre-page table td:last-child { text-align: right; white-space: nowrap; }
+
+  .print-status {
+    display: inline-block;
+    padding: 0.08rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.64rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .print-status.is-present { background: #ecfdf5 !important; color: #047857 !important; }
+  .print-status.is-absent { background: #fef2f2 !important; color: #b91c1c !important; }
+
+  .print-report-foot {
+    margin-top: 0.7rem;
+    font-size: 0.68rem;
+    color: #94a3b8;
+    text-align: left;
   }
 }

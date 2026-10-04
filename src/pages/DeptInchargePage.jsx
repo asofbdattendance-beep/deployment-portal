@@ -14,6 +14,7 @@ import { todayStrIST } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import { exportWorkbook, fileSlug } from '../lib/excel'
 import { useScannerSession } from '../hooks/useScannerSession'
+import { useSewadarDirectory } from '../hooks/useSewadarDirectory'
 import { ScanLine, Users, UserX, UserCheck, Search, Clock, AlertTriangle, Download, Wifi, WifiOff, RefreshCw, Loader2 } from 'lucide-react'
 
 // Canonical queue predicates, mirrored from offlineQueue + ScannerPage: a
@@ -295,6 +296,13 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
 
   const clearManual = useCallback(() => setManualBadge(''), [])
 
+  // Mobile gating lives beside the directory hook (not the render block
+  // below) so the hook can read it — same pattern as InchargeScannerPage.
+  const isMobile = useIsMobile()
+
+  // Mobile offline-first directory (see ScannerPage) — same hook, same rule.
+  const directoryByBadge = useSewadarDirectory({ scheduleId: selectedScheduleId, enabled: isMobile })
+
   const {
     popup, outTime, setOutTime, closePopup,
     handleScan, handleCameraScan, commitScan, confirmForgot,
@@ -305,6 +313,7 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
     profile,
     deptName: activeDept ? deptLabel : null,
     deptNameById,
+    directoryByBadge,
     toast,
     onAfterScan: refreshSessions,
     forgotSuccessToast: 'OUT closed, now you can IN',
@@ -321,7 +330,7 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
   // and this page): same counts, same failed/orphaned/stranded recoveries,
   // same confirm before dropping unsynced live rows.
   const pendingCount = queued.filter((q) => !q.synced && !q.failed).length
-  const isMobile = useIsMobile()
+  // isMobile is declared above, beside the directory hook.
   const queueBarNode = (
     <QueueRecoveryBar queued={queued} syncing={syncing} isOnline={isOnline} offline={offline} />
   )
@@ -337,6 +346,8 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
       centre={popup?.centre}
       deptName={popup?.deptName}
       time={popup?.time}
+      eventDate={popup?.eventDate}
+      eventTime={popup?.eventTime}
       message={popup?.message}
       flag={popup?.flag}
       openSince={popup?.openSince}
