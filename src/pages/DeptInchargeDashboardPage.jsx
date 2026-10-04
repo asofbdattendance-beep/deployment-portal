@@ -13,9 +13,11 @@ import PrintPdfButton from '../components/PrintPdfButton'
 import FilterSheet, { MobileFilterBar } from '../components/mobile/FilterSheet'
 import AttendanceMatrix from '../components/AttendanceMatrix'
 import {
-  LayoutDashboard, Users, UserX, Percent, Clock, RefreshCw, Download,
-  Loader2, Lock, ArrowUpRight, Search,
+  LayoutDashboard, Clock, RefreshCw, Download,
+  Loader2, ArrowUpRight, Search,
 } from 'lucide-react'
+import PageHeader, { ViewOnlyPill } from '../components/PageHeader'
+import KpiTile from '../components/KpiTile'
 import { reportRealtimeStatus } from '../lib/realtime'
 
 /**
@@ -44,9 +46,8 @@ async function rpcRows(name, params) {
 const BAND_BAR = { full: 'success', partial: '', low: 'warn', none: 'danger' }
 const bandBar = (band) => (BAND_BAR[band] === '' ? '' : ` ${BAND_BAR[band] || ''}`.trim())
 
-// A `<button className="stat">` reuses the existing tile skin while staying a
-// real, focusable, keyboard-operable control.
-const TILE = { appearance: 'none', font: 'inherit', textAlign: 'left', cursor: 'pointer', width: '100%' }
+// The shared KpiTile now carries the tile contract (extracted from this
+// page's TILE) — see src/components/KpiTile.jsx.
 
 /** The live "updated Ns ago" dot — opacity toggle, no new keyframes. */
 function LiveDot() {
@@ -60,7 +61,7 @@ function LiveDot() {
       aria-hidden="true"
       style={{
         display: 'inline-block', width: 7, height: 7, borderRadius: '50%',
-        background: '#10b981', boxShadow: '0 0 0 3px rgba(16,185,129,0.16)',
+        background: 'var(--success)', boxShadow: '0 0 0 3px var(--success-soft)',
         opacity: lit ? 1 : 0.3, transition: 'opacity 0.6s ease-in-out',
       }}
     />
@@ -73,9 +74,9 @@ function SectionError({ label, error, onRetry }) {
     <div
       role="alert"
       className="card"
-      style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', background: '#fef2f2', border: '1px solid #fecaca' }}
+      style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', background: 'var(--danger-soft)', border: '1px solid #fecaca' }}
     >
-      <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#b91c1c' }}>{label} unavailable</span>
+      <span style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--err)' }}>{label} unavailable</span>
       <span style={{ fontSize: '0.78rem', color: '#7f1d1d' }}>{error?.message || 'Could not be read.'}</span>
       <button onClick={onRetry} className="btn btn-ghost" style={{ marginLeft: 'auto', padding: '0.2rem 0.5rem', fontSize: '0.74rem' }}>
         <RefreshCw size={12} /> Retry
@@ -342,7 +343,7 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
   // sheet (same state, same handlers, two presentations).
   const matrixFiltersNode = (<>
     <div style={{ position: 'relative', flex: '1 1 200px', minWidth: 0 }}>
-      <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none' }} />
+      <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }} />
       <input
         value={matrixQuery}
         onChange={(e) => setMatrixQuery(e.target.value)}
@@ -419,7 +420,7 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
       <div className="page" style={{ maxWidth: 1200 }}>
         <div className="card">
           <div className="empty">
-            <div className="spin" style={{ width: 24, height: 24, border: '2px solid #e2e8f0', borderTopColor: '#6366f1', borderRadius: '50%', animation: 'spin .6s linear infinite' }} />
+            <div className="spin" style={{ width: 24, height: 24, border: '2px solid var(--border)', borderTopColor: 'var(--primary)', borderRadius: '50%', animation: 'spin .6s linear infinite' }} />
             <div className="empty-text">Loading your department dashboard…</div>
           </div>
         </div>
@@ -436,17 +437,20 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
   return (
     <div className="page" style={{ maxWidth: 1200 }}>
       {/* ── Header ── */}
-      <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
-        <div style={{ flex: '1 1 320px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
-          <h2 className="page-title"><LayoutDashboard size={22} /> Dashboard</h2>
-          <div className="page-sub">Your department&rsquo;s attendance · {VISIT_DAYS.join(' · ')}</div>
-          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-            <span className="pill" style={{ background: '#ecfdf5', color: '#047857', fontWeight: 600 }} title={lastRefreshAt ? `Last reload at ${new Date(lastRefreshAt).toLocaleTimeString('en-IN')}` : 'Not loaded yet'}>
+      <PageHeader
+        icon={<LayoutDashboard size={22} />}
+        title="Dashboard"
+        sub={<>Your department&rsquo;s attendance · {VISIT_DAYS.join(' · ')}</>}
+        pills={(
+          <>
+            <span className="pill" style={{ background: 'var(--success-soft)', color: '#047857', fontWeight: 600 }} title={lastRefreshAt ? `Last reload at ${new Date(lastRefreshAt).toLocaleTimeString('en-IN')}` : 'Not loaded yet'}>
               <LiveDot /> LIVE · updated {timeAgo(lastRefreshAt, now)}
             </span>
-            <span className="pill pill-gray" title="Attendance is read-only here — scans are recorded on the Dept Incharge page" style={{ fontWeight: 600 }}>
-              <Lock size={12} /> View-only
-            </span>
+            <ViewOnlyPill title="Attendance is read-only here — scans are recorded on the Dept Incharge page" />
+          </>
+        )}
+        actions={(
+          <>
             <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
               {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
             </button>
@@ -454,36 +458,38 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
               {exporting || mobileExport.building ? <Loader2 size={13} className="spin" /> : <Download size={13} />} Export Attd Matrix
             </button>
             <PrintPdfButton className="btn" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }} />
-          </div>
-        </div>
-        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
-          <div>
-            <div className="stat-label" style={{ marginBottom: '0.2rem' }}>Schedule</div>
-            <div style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text)' }}>
-              {schedule?.name || '—'}{' '}
-              <span className={`pill ${schedule?.status === 'done' ? 'pill-gray' : 'pill-green'}`} style={{ marginLeft: '0.25rem' }}>
-                {schedule?.status === 'done' ? 'Done' : 'Open'}
-              </span>
+          </>
+        )}
+        aside={(
+          <>
+            <div>
+              <div className="stat-label" style={{ marginBottom: '0.2rem' }}>Schedule</div>
+              <div style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text)' }}>
+                {schedule?.name || '—'}{' '}
+                <span className={`pill ${schedule?.status === 'done' ? 'pill-gray' : 'pill-green'}`} style={{ marginLeft: '0.25rem' }}>
+                  {schedule?.status === 'done' ? 'Done' : 'Open'}
+                </span>
+              </div>
             </div>
-          </div>
-          <div>
-            <div className="stat-label" style={{ marginBottom: '0.2rem' }}>Scan day (IST)</div>
-            <input
-              type="date"
-              value={date}
-              min={visitWin.start || undefined}
-              max={visitWin.end || undefined}
-              onChange={(e) => { dateTouchedRef.current = true; setDate(clampDateToWindow(e.target.value, visitWin)) }}
-              className="input"
-              aria-label="Scan day"
-              style={{ minHeight: 44 }}
-            />
-          </div>
-        </div>
-      </div>
+            <div>
+              <div className="stat-label" style={{ marginBottom: '0.2rem' }}>Scan day (IST)</div>
+              <input
+                type="date"
+                value={date}
+                min={visitWin.start || undefined}
+                max={visitWin.end || undefined}
+                onChange={(e) => { dateTouchedRef.current = true; setDate(clampDateToWindow(e.target.value, visitWin)) }}
+                className="input"
+                aria-label="Scan day"
+                style={{ minHeight: 44 }}
+              />
+            </div>
+          </>
+        )}
+      />
 
       {noScope && (
-        <div role="status" className="card" style={{ background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', fontSize: '0.85rem', fontWeight: 600, marginBottom: '1rem' }}>
+        <div role="status" className="card" style={{ background: 'var(--warning-soft)', border: '1px solid #fde68a', color: '#92400e', fontSize: '0.85rem', fontWeight: 600, marginBottom: '1rem' }}>
           No department is assigned to this login for the selected schedule, so there is nothing to show. Ask the ASO office to assign your department from the Users page.
         </div>
       )}
@@ -493,35 +499,49 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
         <SectionError label="Today’s attendance" error={errs.daily} onRetry={load} />
       ) : (
         <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-          <button type="button" onClick={() => go('reports')} className="stat" style={TILE} title="Open the Dept Incharge lists">
-            <div className="stat-label">Total deployed</div>
-            <div className="stat-value">{kpis.today.deployed}</div>
-            <div className="stat-sub">in your department{centreCount > 0 ? ` · ${centreCount} centre${centreCount === 1 ? '' : 's'}` : ''} · {shortDayLabel(date)}</div>
-          </button>
-          <button type="button" onClick={() => go('reports')} className="stat" style={TILE} title="Open the Dept Incharge lists">
-            <div className="stat-label">Present today</div>
-            <div className="stat-value" style={{ color: '#047857' }}>{kpis.today.present}</div>
-            <div className="stat-sub">of {kpis.today.deployed} deployed · {shortDayLabel(date)}</div>
-          </button>
-          <button type="button" onClick={() => go('reports')} className="stat" style={TILE} title="Open the Dept Incharge lists">
-            <div className="stat-label">Absent today</div>
-            <div className="stat-value" style={{ color: kpis.today.absent > 0 ? '#b91c1c' : undefined }}>{kpis.today.absent}</div>
-            <div className="stat-sub">expected but not scanned · {shortDayLabel(date)}</div>
-          </button>
-          <button type="button" onClick={() => go('reports')} className="stat" style={TILE} title="Open the Dept Incharge lists">
-            <div className="stat-label">Attendance %</div>
-            <div className="stat-value" style={{ fontSize: '1.1rem', paddingTop: '0.35rem' }}>
-              <div className="progress" style={{ height: 10 }}>
-                <div className={`progress-bar${bandBar(kpis.today.band)}`} style={{ width: `${kpis.today.rate}%` }} />
+          <KpiTile
+            label="Total deployed"
+            value={kpis.today.deployed}
+            sub={`in your department${centreCount > 0 ? ` · ${centreCount} centre${centreCount === 1 ? '' : 's'}` : ''} · ${shortDayLabel(date)}`}
+            onPress={() => go('reports')}
+            title="Open the Dept Incharge lists"
+          />
+          <KpiTile
+            label="Present today"
+            value={kpis.today.present}
+            tone="#047857"
+            sub={`of ${kpis.today.deployed} deployed · ${shortDayLabel(date)}`}
+            onPress={() => go('reports')}
+            title="Open the Dept Incharge lists"
+          />
+          <KpiTile
+            label="Absent today"
+            value={kpis.today.absent}
+            tone={kpis.today.absent > 0 ? 'var(--err)' : undefined}
+            sub={`expected but not scanned · ${shortDayLabel(date)}`}
+            onPress={() => go('reports')}
+            title="Open the Dept Incharge lists"
+          />
+          <KpiTile
+            label="Attendance %"
+            value={(
+              <div style={{ paddingTop: '0.35rem' }}>
+                <div className="progress" style={{ height: 10 }}>
+                  <div className={`progress-bar${bandBar(kpis.today.band)}`} style={{ width: `${kpis.today.rate}%` }} />
+                </div>
               </div>
-            </div>
-            <div className="stat-sub">{kpis.today.rate}% present on {shortDayLabel(date)}</div>
-          </button>
-          <div className="stat" title="Sessions still open right now">
-            <div className="stat-label">Open now</div>
-            <div className="stat-value" style={{ color: kpis.today.openNow > 0 ? '#b45309' : undefined }}>{kpis.today.openNow}</div>
-            <div className="stat-sub">scanned in, not out</div>
-          </div>
+            )}
+            sub={`${kpis.today.rate}% present on ${shortDayLabel(date)}`}
+            onPress={() => go('reports')}
+            title="Open the Dept Incharge lists"
+          />
+          <KpiTile
+            label="Open now"
+            value={kpis.today.openNow}
+            tone={kpis.today.openNow > 0 ? '#b45309' : undefined}
+            sub="scanned in, not out"
+            title="Sessions still open right now"
+          />
         </div>
       )}
 
@@ -530,25 +550,29 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
         <div style={{ marginTop: '1rem' }}><SectionError label="Whole-visit attendance" error={errs.visit} onRetry={load} /></div>
       ) : (
         <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', marginTop: '1rem' }}>
-          <div className="stat">
-            <div className="stat-label">Ever present (visit)</div>
-            <div className="stat-value" style={{ color: '#047857' }}>{kpis.visit.present}</div>
-            <div className="stat-sub">scanned at least once</div>
-          </div>
-          <div className="stat">
-            <div className="stat-label">Never present (visit)</div>
-            <div className="stat-value" style={{ color: kpis.visit.absent > 0 ? '#b91c1c' : undefined }}>{kpis.visit.absent}</div>
-            <div className="stat-sub">no scan all visit</div>
-          </div>
-          <div className="stat">
-            <div className="stat-label">Visit coverage</div>
-            <div className="stat-value" style={{ fontSize: '1.1rem', paddingTop: '0.35rem' }}>
-              <div className="progress" style={{ height: 10 }}>
-                <div className={`progress-bar${bandBar(kpis.visit.band)}`} style={{ width: `${kpis.visit.rate}%` }} />
+          <KpiTile
+            label="Ever present (visit)"
+            value={kpis.visit.present}
+            tone="#047857"
+            sub="scanned at least once"
+          />
+          <KpiTile
+            label="Never present (visit)"
+            value={kpis.visit.absent}
+            tone={kpis.visit.absent > 0 ? 'var(--err)' : undefined}
+            sub="no scan all visit"
+          />
+          <KpiTile
+            label="Visit coverage"
+            value={(
+              <div style={{ paddingTop: '0.35rem' }}>
+                <div className="progress" style={{ height: 10 }}>
+                  <div className={`progress-bar${bandBar(kpis.visit.band)}`} style={{ width: `${kpis.visit.rate}%` }} />
+                </div>
               </div>
-            </div>
-            <div className="stat-sub">{kpis.visit.rate}% of {kpis.visit.deployed} deployed</div>
-          </div>
+            )}
+            sub={`${kpis.visit.rate}% of ${kpis.visit.deployed} deployed`}
+          />
         </div>
       )}
 
@@ -559,7 +583,7 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
           {errs.badges && <SectionError label="Attendance matrix (daily presence)" error={errs.badges} onRetry={load} />}
         </div>
       ) : (!noScope && matrixReady && noWindow) ? (
-        <div role="status" className="card" style={{ marginTop: '1rem', background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', fontSize: '0.85rem', fontWeight: 600, padding: '1rem 1.25rem' }}>
+        <div role="status" className="card" style={{ marginTop: '1rem', background: 'var(--warning-soft)', border: '1px solid #fde68a', color: '#92400e', fontSize: '0.85rem', fontWeight: 600, padding: '1rem 1.25rem' }}>
           No visit dates are set for this schedule, so there is no Bhati Visit attendance to show. Ask the ASO office to set the visit window on Schedule Maker — every scan date shows under Previsit until then.
         </div>
       ) : (!noScope && matrixReady && (
@@ -605,7 +629,7 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
         </div>
       ))}
 
-      <div style={{ marginTop: '1rem', fontSize: '0.78rem', color: '#64748b' }}>
+      <div style={{ marginTop: '1rem', fontSize: '0.78rem', color: 'var(--text-sec)' }}>
         <Clock size={12} style={{ verticalAlign: '-1px', marginRight: '0.2rem' }} />
         Present/absent reflects scans for the selected day. &ldquo;Ever present&rdquo; covers the whole visit. Scans are recorded on the{' '}
         <button onClick={() => go('reports')} className="btn btn-ghost" style={{ padding: '0 0.2rem', fontSize: '0.78rem' }}>Reports <ArrowUpRight size={11} /></button> page.
