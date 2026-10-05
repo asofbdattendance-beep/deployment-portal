@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { supabase } from '../lib/supabase'
+import { perfStart, perfMark } from '../lib/perfTimings'
 import { LogIn, AlertCircle, Users, KeyRound, ArrowLeft, MailCheck } from 'lucide-react'
 
 export default function LoginPage() {
@@ -21,9 +22,35 @@ export default function LoginPage() {
     e.preventDefault()
     setError('')
     setLoading(true)
+    // Phase-0 latency tripwire: tap → resolve → auth → (profile continues in
+    // PortalAuthContext under the same run id). Paste via __portalPerfDump.
+    const runId = perfStart('login')
     try {
-      await signIn(email, password)
+      const identifier = email.trim()
+      let loginEmail = identifier
+      // Dual login (additive): a badge number (no '@') resolves to the
+      // account's EXISTING email via resolve-login, then the SAME
+      // signIn(email, password) runs — password and auth flow unchanged.
+      // The email path below never calls the edge function.
+      if (identifier && !identifier.includes('@')) {
+        perfMark('login', runId, 'resolve-start')
+        const { data, error: fnError } = await supabase.functions.invoke('resolve-login', {
+          body: { badge: identifier },
+        })
+        perfMark('login', runId, 'resolve-end')
+        const resolved = data && data.email
+        if (fnError || !resolved) {
+          const status = fnError && (fnError.status || fnError.code)
+          if (status === 429) throw new Error('Too many attempts — try again in 15 minutes')
+          throw new Error('No account found for that badge number')
+        }
+        loginEmail = resolved
+      }
+      perfMark('login', runId, 'auth-start')
+      await signIn(loginEmail, password)
+      perfMark('login', runId, 'auth-end')
     } catch (err) {
+      perfMark('login', runId, 'failed')
       setError(err.message || 'Login failed')
     } finally {
       setLoading(false)
@@ -122,14 +149,15 @@ export default function LoginPage() {
 
             <form onSubmit={handleSubmit}>
               <div className="form-group">
-                <label>Email</label>
+                <label>Email or badge number</label>
                 <input
-                  type="email"
+                  type="text"
                   value={email}
                   onChange={e => setEmail(e.target.value)}
-                  placeholder="your@email.com"
+                  placeholder="Email or badge number"
                   required
                   autoFocus
+                  autoComplete="username"
                 />
               </div>
 

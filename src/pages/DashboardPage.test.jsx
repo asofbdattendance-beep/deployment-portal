@@ -6,9 +6,12 @@
 // inputs, so the failure modes worth pinning are narrow and structural:
 //
 //   1. It renders at all — title, the LIVE freshness pill, and a KPI tile.
-//   2. It calls EXACTLY the three v45 RPCs it is contracted to call, and never
-//      reads a table directly. Scope is enforced inside the RPCs, so a direct
-//      table read here would be both a contract break and a security regression.
+//   2. It calls EXACTLY the five v45/v61/v74 RPCs it is contracted to call,
+//      and never reads a scoped table directly. Scope is enforced inside the
+//      RPCs, so a direct scoped-table read here would be both a contract
+//      break and a security regression (the centres reference read is
+//      unscoped reference data for the matrix rollup and degrades to a
+//      flat grid when it fails).
 //   3. The IST wall-clock round trip actually works: a scanner_ops row whose
 //      last_scan_time is "now" in IST must count as ACTIVE. Getting the +05:30
 //      combination wrong is silent — the scanner simply reads as offline.
@@ -34,6 +37,9 @@ const fetchAllRpc = vi.fn(async (name, params) => {
   if (res?.error) throw res.error
   return Array.isArray(res?.data) ? res.data : []
 })
+// Reference data for the centre × department matrix parent rollup
+// (empty by default = flat grid; rejects only when a test asks for it).
+const fetchCentres = vi.fn(async () => [])
 
 // Supabase realtime is inert here: a chainable no-op that satisfies
 // channel().on(...).on(...).subscribe() and removeChannel(). Handlers are
@@ -55,6 +61,7 @@ vi.mock('../lib/supabase', () => ({
     removeChannel: () => {},
   },
   fetchAllRpc: (...args) => fetchAllRpc(...args),
+  fetchCentres: (...args) => fetchCentres(...args),
 }))
 
 const SCHEDULES = [{ id: 'sched-1', name: 'October 2026 Visit', status: 'open', visit_start_date: '2026-10-07', visit_end_date: '2026-10-11' }]
@@ -81,13 +88,24 @@ const SCANNER = [
   },
 ]
 
+const VISIT_DAILY = [
+  { event_date: '2026-10-07', centre: 'DELHI', present: 6, open_now: 1, deployed: 10 },
+  { event_date: '2026-10-08', centre: 'DELHI', present: 4, open_now: 0, deployed: 10 },
+  { event_date: '2026-10-07', centre: 'MUMBAI', present: 3, open_now: 0, deployed: 5 },
+]
+const VISIT_SUMMARY = [
+  { centre: 'DELHI', department_id: 'd1', dept_name: 'MEDICAL', deployed: 10, ever_present: 8, never_present: 2, open_now: 1 },
+]
+
 /** Queue one resolved result per RPC, or an error for anything in `fail`. */
-function respondWith({ daily = DAILY, ops = SCANNER, anomalies = [], fail = [] } = {}) {
+function respondWith({ daily = DAILY, ops = SCANNER, anomalies = [], visitDaily = VISIT_DAILY, visitSummary = VISIT_SUMMARY, fail = [] } = {}) {
   rpc.mockImplementation((name) => {
     if (fail.includes(name)) return Promise.resolve({ data: null, error: { message: `${name} does not exist`, code: 'PGRST202' } })
     if (name === 'attendance_daily_summary') return Promise.resolve({ data: daily, error: null })
     if (name === 'attendance_scanner_ops') return Promise.resolve({ data: ops, error: null })
     if (name === 'attendance_anomalies') return Promise.resolve({ data: anomalies, error: null })
+    if (name === 'attendance_centre_daily') return Promise.resolve({ data: visitDaily, error: null })
+    if (name === 'attendance_visit_summary') return Promise.resolve({ data: visitSummary, error: null })
     return Promise.resolve({ data: [], error: null })
   })
 }
@@ -104,6 +122,8 @@ async function renderPage(props = {}) {
 
 beforeEach(() => {
   rpc.mockReset()
+  fetchCentres.mockReset()
+  fetchCentres.mockResolvedValue([])
   pgHandlers.length = 0
   respondWith()
 })
@@ -145,13 +165,15 @@ describe('DashboardPage — renders', () => {
 })
 
 describe('DashboardPage — RPC contract', () => {
-  it('calls exactly the three documented RPCs, all against this schedule', async () => {
+  it('calls exactly the five documented RPCs, all against this schedule', async () => {
     await renderPage()
     const names = rpc.mock.calls.map((c) => c[0])
     expect(names.slice().sort()).toEqual([
       'attendance_anomalies',
+      'attendance_centre_daily',
       'attendance_daily_summary',
       'attendance_scanner_ops',
+      'attendance_visit_summary',
     ])
     for (const [, params] of rpc.mock.calls) {
       expect(params.p_schedule).toBe('sched-1')
@@ -214,8 +236,9 @@ describe('DashboardPage — a failed section renders "—", never a healthy 0', 
 })
 
 describe('DashboardPage — freshness accounting', () => {
-  it('leaves the LIVE pill un-advanced when all three RPCs fail', async () => {
-    respondWith({ fail: ['attendance_daily_summary', 'attendance_scanner_ops', 'attendance_anomalies'] })
+  it('leaves the LIVE pill un-advanced when every source fails', async () => {
+    respondWith({ fail: ['attendance_daily_summary', 'attendance_scanner_ops', 'attendance_anomalies', 'attendance_centre_daily', 'attendance_visit_summary'] })
+    fetchCentres.mockRejectedValueOnce(new Error('dp_centres: boom'))
     await renderPage()
     // timeAgo(null) is '—': no successful reload ever happened, so the pill
     // must not present a fresh timestamp.
@@ -227,7 +250,7 @@ describe('DashboardPage — freshness accounting', () => {
     respondWith({ fail: ['attendance_daily_summary', 'attendance_anomalies'] })
     await renderPage()
     const pill = screen.getByText(/LIVE · updated \d+s ago/)
-    expect(pill.closest('span').title).toMatch(/2 of 3 sources failed/)
+    expect(pill.closest('span').title).toMatch(/2 of 6 sources failed/)
   })
 
   it('reports no failures in the tooltip when everything loaded', async () => {
@@ -242,22 +265,47 @@ describe('DashboardPage — realtime max-wait', () => {
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => 1_000_000)
     try {
       await renderPage()
-      expect(rpc).toHaveBeenCalledTimes(3)
+      expect(rpc).toHaveBeenCalledTimes(5)
       expect(pgHandlers.length).toBeGreaterThan(0)
       const reload = pgHandlers[0]
 
       // 500ms after the load: inside the window → trailing 400ms debounce.
       nowSpy.mockImplementation(() => 1_000_500)
       reload()
-      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(6))
+      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(10))
 
       // 5s after the last load: past max-wait → immediate, no timer wait.
       nowSpy.mockImplementation(() => 1_010_000)
       reload()
-      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(9))
+      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(15))
     } finally {
       nowSpy.mockRestore()
     }
+  })
+})
+
+describe('DashboardPage — Bhati Visit heatmap', () => {
+  it('renders the present-by-day strip and the centre heatmap from attendance_centre_daily', async () => {
+    await renderPage()
+    expect(screen.getByText('Present by visit day')).toBeTruthy()
+    // Day strip carries the fixture's visit-date totals (6 + 3 on 7 Oct).
+    expect(screen.getByText(/9 present/)).toBeTruthy()
+    // Heatmap caption + a present/deployed cell from the fixture.
+    expect(screen.getByText('Present by centre and sewa day')).toBeTruthy()
+    expect(screen.getByTitle('6 of 10 present')).toBeTruthy()
+  })
+
+  it('shows an alert — never fake zeros — when attendance_centre_daily fails', async () => {
+    respondWith({ fail: ['attendance_centre_daily'] })
+    await renderPage()
+    expect(screen.getByRole('alert')).toBeTruthy()
+    // The KPI tiles still carry the fixture's numbers (8 present of 10).
+    expect(screen.getByText('Present today').closest('button').textContent).toContain('8')
+  })
+
+  it('stays empty-worded for Bhati Visit, never previsit, on a windowless schedule', async () => {
+    await renderPage({ schedules: NOWINDOW_SCHEDULES })
+    expect(screen.queryByText(/previsit/i)).toBeNull()
   })
 })
 

@@ -169,8 +169,8 @@ export default function UserDetailDrawer({
               <dt>Created</dt>
               <dd>{meta.created_at ? new Date(meta.created_at).toLocaleString() : '—'}</dd>
               <dt>Last login</dt>
-              <dd>{meta.last_login ? new Date(meta.last_login).toLocaleString() : '—'}</dd>
-              {meta.last_sign_in_at && (
+              <dd>{(meta.last_login || meta.last_sign_in_at) ? new Date(meta.last_login || meta.last_sign_in_at).toLocaleString() : '—'}</dd>
+              {meta.last_sign_in_at && meta.last_login && (
                 <>
                   <dt>Last sign-in</dt>
                   <dd>{new Date(meta.last_sign_in_at).toLocaleString()}</dd>

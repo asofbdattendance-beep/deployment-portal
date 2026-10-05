@@ -93,6 +93,14 @@ describe('parseImportRows', () => {
     expect(errors).toHaveLength(0)
     expect(valid[0]).toMatchObject({ badge: '', centre: '' })
   })
+
+  it('accepts badge_number as an alias for badge (export round-trip)', () => {
+    const { valid, errors } = parseImportRows([
+      { name: 'A', email: 'a@x.com', role: 'scanner', badge_number: 'SC9', centre: '', password: 'secret1' },
+    ])
+    expect(errors).toHaveLength(0)
+    expect(valid[0].badge).toBe('SC9')
+  })
 })
 
 // ── Template ──────────────────────────────────────────────────────────────

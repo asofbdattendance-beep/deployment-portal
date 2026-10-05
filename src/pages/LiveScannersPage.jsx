@@ -11,6 +11,7 @@ import PageHeader, { ViewOnlyPill } from '../components/PageHeader'
 import KpiTile from '../components/KpiTile'
 import EmptyState from '../components/EmptyState'
 import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
+import { perfCurrentRun, perfMark } from '../lib/perfTimings'
 import FilterSheet, { MobileFilterBar } from '../components/mobile/FilterSheet'
 import Skeleton from '../components/mobile/Skeleton'
 import {
@@ -181,6 +182,10 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
       const rows = await rpcRows('attendance_scanner_ops', { p_schedule: scheduleId, p_date: date })
       if (!mountedRef.current || seq !== seqRef.current) return
       setRaw(rows)
+      // Phase-0 tripwire: completes the viewer run started by the realtime
+      // event (no-op on initial/manual loads with no event attached).
+      const vr = perfCurrentRun('viewer')
+      if (vr) perfMark('viewer', vr, 'rows-painted')
       setRowsScheduleId(scheduleId)
       setLoadError(null)
       setStale(false)

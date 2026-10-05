@@ -49,7 +49,7 @@ export function parseImportRows(rows) {
     const name = String(row.name || '').trim()
     const email = String(row.email || '').trim()
     const role = String(row.role || '').trim()
-    const badge = String(row.badge || '').trim()
+    const badge = String(row.badge ?? row.badge_number ?? '').trim()
     const centre = String(row.centre || '').trim()
     const password = String(row.password || '').trim()
     const location = String(row.location || '').trim()

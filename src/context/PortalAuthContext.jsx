@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { notifySessionAvailable } from '../lib/offlineSync'
+import { perfCurrentRun, perfMark } from '../lib/perfTimings'
 
 const PortalAuthContext = createContext(null)
 
@@ -138,7 +139,11 @@ export function PortalAuthProvider({ children }) {
         // queue — kick the app-level sync engine now that auth is available.
         // Fire-and-forget: auth must never wait on sync.
         try { notifySessionAvailable() } catch { /* sync best-effort */ }
+        // Phase-0 tripwire: continues LoginPage's login run when one exists.
+        const bootRun = perfCurrentRun('login')
+        if (bootRun) perfMark('login', bootRun, 'profile-start')
         const p = await fetchProfile()
+        if (bootRun) perfMark('login', bootRun, 'profile-end')
         if (!mounted) return
         setProfile(p)
         setProfilePending(false)
@@ -174,7 +179,11 @@ export function PortalAuthProvider({ children }) {
         // Kick the sync engine on every fresh session (not just boot):
         // queued rows must not wait for the poll after a sign-in.
         try { notifySessionAvailable() } catch { /* sync best-effort */ }
+        // Phase-0 tripwire: continues LoginPage's login run when one exists.
+        const signinRun = perfCurrentRun('login')
+        if (signinRun) perfMark('login', signinRun, 'profile-start')
         const p = await fetchProfile()
+        if (signinRun) perfMark('login', signinRun, 'profile-end')
         if (!mounted) return
         setProfile(p)
         setProfilePending(false)

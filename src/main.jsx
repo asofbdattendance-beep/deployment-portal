@@ -12,7 +12,18 @@ import OfflineSyncStatus from './components/mobile/OfflineSyncStatus'
 import InstallPrompt from './components/mobile/InstallPrompt'
 import SwUpdatePrompt from './components/mobile/SwUpdatePrompt'
 import { installOfflineSync } from './lib/offlineSync'
+import { perfDump } from './lib/perfTimings'
 import './index.css'
+
+// Phase-0 latency capture: console `window.__portalPerfDump()` after a slow
+// login/scan and paste the output. See src/lib/perfTimings.js for procedure.
+try {
+  window.__portalPerfDump = () => {
+    const out = perfDump()
+    console.info('[perf] dump:\n' + out)
+    return out
+  }
+} catch { /* non-browser boot (tests) — skip the console hook */ }
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>

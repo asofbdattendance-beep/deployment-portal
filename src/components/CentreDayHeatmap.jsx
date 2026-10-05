@@ -37,11 +37,11 @@ function DayCell({ date, present, deployed }) {
   )
 }
 
-export default function CentreDayHeatmap({ columns = [], rows = [], totals = null }) {
+export default function CentreDayHeatmap({ columns = [], rows = [], totals = null, emptyText = 'No centre has previsit sewa yet.' }) {
   if (!columns.length || !rows.length) {
     return (
       <div className="att-matrix">
-        <div className="att-empty">No centre has previsit sewa yet.</div>
+        <div className="att-empty">{emptyText}</div>
       </div>
     )
   }

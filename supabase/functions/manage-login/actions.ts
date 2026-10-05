@@ -293,7 +293,7 @@ async function bulkCreateOne(ctx: Ctx, raw: unknown): Promise<ActionResult> {
   const name = String(r?.name || '').trim()
   const role = String(r?.role || '')
   const centre = String(r?.centre || '').trim() || null
-  const badge = String(r?.badge_number || '').trim() || null
+  const badge = String((r as any)?.badge_number ?? (r as any)?.badge ?? '').trim() || null
   const location = String((r as any)?.location || '').trim() || null
   if (!name) return { ...base, status: 'error', error: 'Enter the person’s name' }
   if (!ROLES.includes(role)) return { ...base, status: 'error', error: 'Pick a valid role' }
@@ -303,7 +303,12 @@ async function bulkCreateOne(ctx: Ctx, raw: unknown): Promise<ActionResult> {
   // NEVER overwrite: an existing email is a per-row error, never an update.
   const { row, fetchError } = await fetchPortalRow(ctx.admin, email)
   if (fetchError) return { ...base, status: 'error', error: fetchError.message }
-  if (row) return { ...base, status: 'error', error: 'A login already exists for this email' }
+  if (row) {
+    if ((row as PortalRow).archived_at != null) {
+      return { ...base, status: 'error', error: 'This login is archived — restore it from the Users page first' }
+    }
+    return { ...base, status: 'error', error: 'A login already exists for this email' }
+  }
 
   // Password: admin-provided (min 6) or a generated one-time temp. The
   // plaintext is NEVER logged — it travels only in this per-row result.
@@ -327,7 +332,7 @@ async function bulkCreateOne(ctx: Ctx, raw: unknown): Promise<ActionResult> {
     return { ...base, status: 'error', error: createErr?.message || 'Could not create the auth account' }
   }
 
-  const { error: rowErr } = await ctx.admin.from('portal_users').insert({
+  let { error: rowErr } = await ctx.admin.from('portal_users').insert({
     auth_id: authId,
     email,
     name,
@@ -337,6 +342,19 @@ async function bulkCreateOne(ctx: Ctx, raw: unknown): Promise<ActionResult> {
     location,
     is_active: true,
   })
+  if (rowErr && ((rowErr as any).code === '42703' || /location/.test(rowErr.message || ''))) {
+    // v71 (location) not deployed yet — retry without it, same as UsersPage edit path.
+    const retry = await ctx.admin.from('portal_users').insert({
+      auth_id: authId,
+      email,
+      name,
+      role,
+      centre,
+      badge_number: badge,
+      is_active: true,
+    })
+    rowErr = retry.error
+  }
   if (rowErr) {
     // Roll back — a half-created login is worse than none. Only ever delete
     // an auth account WE created in this call.

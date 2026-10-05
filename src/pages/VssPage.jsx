@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, fetchAllRows, fetchAsoDeptKeys, getRootCentre, fetchPortalSettings, fetchCentres, fetchVssOverrides } from '../lib/supabase'
 import { computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, aggregateQuotaAllocations, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, changedConsentFields, consentRowKey, consentRowSignature, buildConsentSnapshot, groupConsentPatches, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment, resolveVssOverride, effectiveVssCreation, effectiveVssDeployment } from '../lib/logic'
 import { consentCounts } from '../lib/counts'
+import { REALTIME_RELOAD_DEBOUNCE_MS, REALTIME_SELF_SKIP_MS } from '../lib/realtimeDeploy'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import DeptDropdown from '../components/DeptDropdown'
@@ -504,6 +505,8 @@ function VssDeployTable({ schedules, scheduleId }) {
 
   const loadDataRef = useRef(loadData)
   loadDataRef.current = loadData
+  const loadGatesRef = useRef(loadGates)
+  loadGatesRef.current = loadGates
 
   useEffect(() => { loadData() }, [loadData])
 
@@ -522,27 +525,30 @@ function VssDeployTable({ schedules, scheduleId }) {
   // events. Reloads are coalesced (one silent refresh per burst), skipped
   // briefly after OUR OWN saves (which echo back as events) and queued while
   // a save is in flight so a merge never fights the write in progress.
+  // Cadence is shared with ConsentPage via realtimeDeploy (same debounce /
+  // echo-skip); loadData/loadGates ride refs so callback identity never
+  // tears the channel down and re-creates it.
   const reloadTimerRef = useRef(null)
   const reloadQueuedRef = useRef(false)
   const lastWriteAtRef = useRef(0)
   useEffect(() => {
     if (!selectedScheduleId) return
     const reload = () => {
-      if (Date.now() - lastWriteAtRef.current < 1500) return
+      if (Date.now() - lastWriteAtRef.current < REALTIME_SELF_SKIP_MS) return
       if (savingRef.current) { reloadQueuedRef.current = true; return }
       if (reloadTimerRef.current) clearTimeout(reloadTimerRef.current)
       reloadTimerRef.current = setTimeout(() => {
         reloadTimerRef.current = null
-        loadData()
-      }, 600)
+        loadDataRef.current()
+      }, REALTIME_RELOAD_DEBOUNCE_MS)
     }
     const channel = supabase
       .channel(`vss-deploy-${selectedScheduleId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_settings' }, () => {
-        fetchPortalSettings().then(setSettings).then(loadGates).catch(() => {})
+        fetchPortalSettings().then(setSettings).then(() => loadGatesRef.current()).catch(() => {})
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_vss_overrides' }, () => { loadGates() })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_overrides', filter: `schedule_id=eq.${selectedScheduleId}` }, () => { loadGates() })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_vss_overrides' }, () => { loadGatesRef.current() })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_overrides', filter: `schedule_id=eq.${selectedScheduleId}` }, () => { loadGatesRef.current() })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
@@ -551,7 +557,7 @@ function VssDeployTable({ schedules, scheduleId }) {
       supabase.removeChannel(channel)
       if (reloadTimerRef.current) { clearTimeout(reloadTimerRef.current); reloadTimerRef.current = null }
     }
-  }, [selectedScheduleId, loadData, loadGates])
+  }, [selectedScheduleId])
 
   const savedConsentRef = useRef({})
   const liveRef = useRef({})

@@ -13,6 +13,9 @@ import { reportRealtimeStatus } from '../lib/realtime'
  * what the RPCs return, never filtering by role.
  *
  * @param {string} scheduleId
+ * @param {boolean} [enabled=true] — false skips every fetch (the mode-aware
+ * useSewaViewData mounts both lenses to obey the rules of hooks, so the
+ * inactive lens must cost zero RPCs).
  * @returns {{ summary, rows, deployed, loading, loadError, rowsAreCurrent, lastRefreshAt, reload }}
  */
 async function rpcRows(name, params) {
@@ -24,7 +27,7 @@ async function rpcRows(name, params) {
   return Array.isArray(data) ? data : []
 }
 
-export function usePrevisitData(scheduleId) {
+export function usePrevisitData(scheduleId, enabled = true) {
   const [summary, setSummary] = useState([])
   const [rows, setRows] = useState([])
   const [deployed, setDeployed] = useState([])
@@ -41,7 +44,7 @@ export function usePrevisitData(scheduleId) {
   }, [])
 
   const reload = useCallback(async () => {
-    if (!scheduleId) { setLoading(false); return }
+    if (!scheduleId || !enabled) { setLoading(false); return }
     const seq = ++seqRef.current
     setLoading(true)
     try {
@@ -67,7 +70,7 @@ export function usePrevisitData(scheduleId) {
     } finally {
       if (mountedRef.current && seq === seqRef.current) setLoading(false)
     }
-  }, [scheduleId])
+  }, [scheduleId, enabled])
 
   useEffect(() => { reload() }, [reload])
 
@@ -75,7 +78,7 @@ export function usePrevisitData(scheduleId) {
   // reads deployments): debounced reload, teardown warns nothing
   // (reportRealtimeStatus only warns on real faults while mounted).
   useEffect(() => {
-    if (!scheduleId) return
+    if (!scheduleId || !enabled) return
     let alive = true
     let timer = null
     const queue = () => {
@@ -93,7 +96,7 @@ export function usePrevisitData(scheduleId) {
       if (timer) clearTimeout(timer)
       supabase.removeChannel(channel)
     }
-  }, [scheduleId, reload])
+  }, [scheduleId, reload, enabled])
 
   return {
     summary,

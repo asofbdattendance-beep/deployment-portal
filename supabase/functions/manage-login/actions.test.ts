@@ -412,6 +412,24 @@ describe('actionBulkCreate', () => {
     expect(ctx.portalRows[0].location).toBeNull()
   })
 
+  it('accepts badge as an alias for badge_number (import template shape)', async () => {
+    const ctx = makeCtx()
+    const res = await actionBulkCreate(ctx, {
+      users: [{ email: 'scan@b.c', name: 'Scanner', role: 'scanner', badge: 'SC9' }],
+    })
+    expect(res.created).toBe(1)
+    expect(ctx.portalRows[0].badge_number).toBe('SC9')
+  })
+
+  it('returns an archived-specific error for an archived existing email', async () => {
+    const ctx = makeCtx({ portalRows: [row({ email: 'old@b.c', archived_at: new Date().toISOString() })] })
+    const res = await actionBulkCreate(ctx, {
+      users: [{ email: 'old@b.c', name: 'Old', role: 'centre_user', centre: 'MAIN' }],
+    })
+    expect(res.results[0].status).toBe('error')
+    expect(String(res.results[0].error)).toMatch(/archived/i)
+  })
+
   it('generates a one-time tempPassword when none is provided', async () => {
     const ctx = makeCtx()
     const res = await actionBulkCreate(ctx, {

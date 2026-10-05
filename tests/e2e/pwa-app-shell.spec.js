@@ -14,9 +14,16 @@ import { test, expect } from '@playwright/test'
 import {
   collectPageErrors,
   loginAsScanner,
+  resetMock,
 } from './helpers.mjs'
 
 test.describe('PWA app shell', () => {
+  // The mock server is shared across the whole run (workers: 1): an aso
+  // profile seeded by an earlier suite would otherwise leak in here and the
+  // scanner login would land on Schedule Maker instead of the scan shell.
+  test.beforeEach(async ({ request }) => {
+    await resetMock(request)
+  })
   test('the service worker registers and precaches the shell', async ({ page }) => {
     const guard = collectPageErrors(page)
     await loginAsScanner(page)

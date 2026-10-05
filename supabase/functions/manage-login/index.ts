@@ -92,14 +92,42 @@ async function handler(req) {
     if (!user) return json({ error: 'Not signed in' }, 401)
 
     const admin = createClient(url, serviceKey)
-    const { data: me } = await admin
-      .from('portal_users')
-      .select('name, role, is_active')
-      .eq('auth_id', user.id)
-      .maybeSingle()
-    if (!me || me.role !== 'super_admin' || me.is_active === false) {
+    let me = null
+    {
+      const { data, error } = await admin
+        .from('portal_users')
+        .select('name, role, is_active, archived_at')
+        .eq('auth_id', user.id)
+        .maybeSingle()
+      if (error && ((error as any).code === '42703' || /archived_at/.test(error.message || ''))) {
+        // v69 not deployed yet — retry without the column, treat as not archived.
+        const fallback = await admin
+          .from('portal_users')
+          .select('name, role, is_active')
+          .eq('auth_id', user.id)
+          .maybeSingle()
+        me = fallback.data
+      } else {
+        me = data
+      }
+    }
+    if (!me || (me as any).role !== 'super_admin' || (me as any).is_active === false || (me as any).archived_at != null) {
       return json({ error: 'Super admin only' }, 403)
     }
+
+    // 1b. Throttle (v73 check_login_rate): 30 req / 60 s per admin. Fail open
+    //     when the RPC is missing (v73 not applied yet) — availability wins.
+    try {
+      const fwd = req.headers.get('x-forwarded-for')
+      const ip = ((fwd ? fwd.split(',')[0].trim() : '') || req.headers.get('cf-connecting-ip') || 'unknown').slice(0, 64)
+      const { data: allowed } = await admin.rpc('check_login_rate', {
+        p_ip: ip,
+        p_identity: `admin:${user.id}:manage-login`,
+        p_max: 30,
+        p_window_secs: 60,
+      })
+      if (allowed === false) return json({ error: 'Too many requests — slow down and retry' }, 429)
+    } catch { /* fail open: throttling is defense-in-depth */ }
 
     // 2. Dispatch the requested action (validated inside each action).
     const body = await req.json().catch(() => ({}))

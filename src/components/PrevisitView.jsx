@@ -10,8 +10,9 @@ import { shortDayLabel, centreOptions, buildLogRows, SCAN_LOG_SESSION_COLS, sess
 import { fetchAllRows } from '../lib/supabase'
 import AnomalyDetailPopup from './AnomalyDetailPopup'
 import { usePrevisitData } from '../hooks/usePrevisitData'
+import { SEWA_MODE_PREVISIT, SEWA_MODE_VISIT } from '../lib/sewaMode'
+import { sewaViewDates } from '../lib/sewaView'
 import {
-  previsitDates,
   filterPrevisitRows,
   filterPrevisitTotal,
   previsitPresentMap,
@@ -52,10 +53,40 @@ const TAB_LOGS = 'logs'
 const TABS = [TAB_TOTAL, TAB_PRESENT, TAB_ATTENTION, TAB_LOGS]
 const DAY_ALL = 'all'
 
-// Labels for the trail popup when it opens from a previsit row (previsit
-// rows carry no `rule` field — the section/register they came from is the
-// closest thing to one, and the popup falls back to these verbatim).
-const PREVISIT_RULE_META = {
+// Mode vocab: the register UI is identical in both lenses — only the dates
+// (previsit event dates vs the visit window) and the nouns change.
+const SEWA_VOCAB = {
+  [SEWA_MODE_PREVISIT]: {
+    slug: 'previsit',
+    title: 'Previsit Sewa Register',
+    listLabel: 'Previsit list',
+    dayLabel: 'Sewa day',
+    searchLabel: 'Search previsit rows',
+    loading: 'Loading previsit sewa…',
+    emptyPresent: 'No previsit sewa recorded',
+    emptyPresentHint: 'Nobody has scanned outside the visit window for this schedule yet.',
+    noScheduleHint: 'Pick a schedule to view its previsit sewa.',
+    exportDone: 'Previsit workbook exported',
+  },
+  [SEWA_MODE_VISIT]: {
+    slug: 'visit',
+    title: 'Bhati Visit Register',
+    listLabel: 'Visit list',
+    dayLabel: 'Visit day',
+    searchLabel: 'Search visit rows',
+    loading: 'Loading Bhati visit…',
+    emptyPresent: 'No visit attendance recorded',
+    emptyPresentHint: 'Nobody has scanned inside the visit window for this schedule yet.',
+    noScheduleHint: 'Pick a schedule to view its Bhati visit.',
+    exportDone: 'Visit workbook exported',
+  },
+}
+
+// Labels for the trail popup when it opens from a sewa row (rows carry no
+// `rule` field — the section/register they came from is the closest thing
+// to one, and the popup falls back to these verbatim). Mode-agnostic: the
+// same four tabs exist in both lenses, only the dates differ.
+const SEWA_RULE_META = {
   'Open session': { label: 'Open session', pill: 'pill-amber', text: 'Scanned IN with no OUT yet' },
   'Undeployed scan': { label: 'Undeployed scan', pill: 'pill-red', text: 'Badge scanned with no deployment for this schedule' },
   'Scanned more than once': { label: 'Scanned more than once', pill: 'pill-amber', text: 'Same badge scanned IN more than once on one date' },
@@ -154,17 +185,32 @@ function AttentionSection({ title, rows, showDate, detail, onSelect }) {
   )
 }
 
-export default function PrevisitView({ schedules = [], scheduleId, initialTab }) {
+export default function PrevisitView({
+  schedules = [],
+  scheduleId,
+  initialTab,
+  mode = SEWA_MODE_PREVISIT,
+  windowDates = [],
+  initialCentre = 'all',
+  viewData = null,
+}) {
   const toast = useToast()
   const schedule = (schedules || []).find((s) => s.id === scheduleId)
-  const { summary, rows, deployed, loading, loadError, rowsScheduleId, reload } = usePrevisitData(scheduleId)
+  const vocab = SEWA_VOCAB[mode] || SEWA_VOCAB[SEWA_MODE_PREVISIT]
+  // SewaView passes the mode-aware feed in; the internal previsit feed
+  // stays mounted (rules of hooks) but disabled — zero duplicate RPCs.
+  const internal = usePrevisitData(scheduleId, !viewData)
+  const { summary, rows, deployed, loading, loadError, rowsScheduleId, reload } = viewData || internal
 
   const [tab, setTab] = useState(TABS.includes(initialTab) ? initialTab : TAB_PRESENT)
   useEffect(() => {
     if (TABS.includes(initialTab)) setTab(initialTab)
   }, [initialTab])
   const [dateSel, setDateSel] = useState('')
-  const [centreSel, setCentreSel] = useState('all')
+  const [centreSel, setCentreSel] = useState(typeof initialCentre === 'string' && initialCentre ? initialCentre : 'all')
+  useEffect(() => {
+    if (typeof initialCentre === 'string' && initialCentre) setCentreSel(initialCentre)
+  }, [initialCentre])
   const [query, setQuery] = useState('')
   const [exporting, setExporting] = useState(false)
   // Drill-in: clicking any row (every tab) opens its scan-trail popup.
@@ -227,7 +273,11 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
   const liveRows = shown.rows
   const liveDeployed = shown.deployed
   const hasShown = liveRows.length > 0 || liveDeployed.length > 0 || liveSummary.length > 0
-  const dates = useMemo(() => previsitDates(liveSummary), [liveSummary])
+  const dates = useMemo(
+    () => sewaViewDates(mode, liveSummary, windowDates),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [mode, liveSummary, JSON.stringify(windowDates || [])],
+  )
   const centreOpts = useMemo(
     () => centreOptions([...liveRows, ...liveDeployed]),
     [liveRows, liveDeployed]
@@ -313,7 +363,7 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
   // ONE builder for both delivery paths — desktop downloads the workbook,
   // phones share it (the only reliable "save" on iOS Safari). They can never
   // drift because they are the same rows in the same call.
-  const exportFilename = `${fileSlug(schedule?.name || 'schedule')}_previsit_${
+  const exportFilename = `${fileSlug(schedule?.name || 'schedule')}_${vocab.slug}_${
     tab === TAB_TOTAL ? 'total' : tab === TAB_ATTENTION ? 'attention' : tab === TAB_LOGS ? 'logs' : (effDate || 'all-days')
   }.xlsx`
   const buildExportSheets = () => ([{
@@ -348,7 +398,7 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
     try {
       const n = await exportWorkbook(exportFilename, buildExportSheets())
       if (!n) toast.error('Nothing to export')
-      else toast.success('Previsit workbook exported')
+      else toast.success(vocab.exportDone)
     } catch (err) {
       toast.error(err?.message || 'Export failed')
     } finally {
@@ -360,7 +410,7 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
     return (
       <div className="page"><div className="card"><div className="empty">
         <div className="empty-title">No schedule selected</div>
-        <div className="empty-text">Pick a schedule to view its previsit sewa.</div>
+        <div className="empty-text">{vocab.noScheduleHint}</div>
       </div></div></div>
     )
   }
@@ -369,7 +419,7 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
     <div className="page">
       <div className="page-header">
         <div>
-          <h2 className="page-title">Previsit Sewa Register{schedule ? ` · ${schedule.name}` : ''}</h2>
+          <h2 className="page-title">{vocab.title}{schedule ? ` · ${schedule.name}` : ''}</h2>
           <div className="page-sub">
             Deployed {totalCount} · Present {presentCount}{effDate ? ` on ${effDate}` : dates.length > 0 ? ` across ${dates.length} days` : ''}
           </div>
@@ -425,7 +475,7 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
 
       <div className="card previsit-card" style={{ marginTop: '0.75rem' }}>
         <div className="previsit-toolbar" role="search">
-          <div className="previsit-tabs" role="tablist" aria-label="Previsit list">
+          <div className="previsit-tabs" role="tablist" aria-label={vocab.listLabel}>
             <button
               type="button"
               role="tab"
@@ -465,7 +515,7 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
             </button>
           </div>
           <div className="previsit-field" style={{ flex: '1 1 100%' }}>
-            <span className="previsit-label" id="previsit-day-label">Sewa day</span>
+            <span className="previsit-label" id="previsit-day-label">{vocab.dayLabel}</span>
             <div className="day-chip-row" role="group" aria-labelledby="previsit-day-label">
               <button
                 type="button"
@@ -506,7 +556,7 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Badge, name or centre…"
-                aria-label="Search previsit rows"
+                aria-label={vocab.searchLabel}
                 className="input previsit-control"
               />
             </span>
@@ -520,11 +570,11 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
         </div>
 
         {loading && !hasShown ? (
-          <div className="empty"><div className="empty-title">Loading previsit sewa…</div></div>
+          <div className="empty"><div className="empty-title">{vocab.loading}</div></div>
         ) : visible.length === 0 ? (
           <div className="empty">
             <div className="empty-title">
-              {tab === TAB_TOTAL ? 'Nobody deployed in scope' : tab === TAB_ATTENTION ? 'Nothing needs attention' : tab === TAB_LOGS ? (logErr ? 'Scan log could not be loaded' : 'No scans logged') : 'No previsit sewa recorded'}
+              {tab === TAB_TOTAL ? 'Nobody deployed in scope' : tab === TAB_ATTENTION ? 'Nothing needs attention' : tab === TAB_LOGS ? (logErr ? 'Scan log could not be loaded' : 'No scans logged') : vocab.emptyPresent}
             </div>
             <div className="empty-text">
               {tab === TAB_TOTAL
@@ -536,7 +586,7 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
                       ? 'The scan record could not be read from the server. The other tabs are unaffected.'
                       : 'No scans have been recorded for this schedule yet.')
                     : (liveRows.length === 0
-                      ? 'Nobody has scanned outside the visit window for this schedule yet.'
+                      ? vocab.emptyPresentHint
                       : 'Nothing matches the current filters.')}
             </div>
             {(centreSel !== 'all' || query) && (
@@ -801,7 +851,7 @@ export default function PrevisitView({ schedules = [], scheduleId, initialTab })
           row={selected}
           scheduleId={scheduleId}
           related={relatedForSelected}
-          ruleMeta={PREVISIT_RULE_META}
+          ruleMeta={SEWA_RULE_META}
           onClose={() => setSelected(null)}
         />
       )}
