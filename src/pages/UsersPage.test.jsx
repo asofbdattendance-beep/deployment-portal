@@ -580,12 +580,33 @@ describe('UsersPage — drawer lifecycle (archive / restore / delete)', () => {
 
   it('deletes from the drawer via the manage-login function', async () => {
     await renderPage()
-    const drawer = await openDrawerFor('Old Scanner')
+    const drawer = await openDrawerFor('Ram Centre')
     fireEvent.click(within(drawer).getByRole('button', { name: 'Delete' }))
-    const confirm = await waitFor(() => screen.getByRole('dialog', { name: /Delete Old Scanner permanently/ }))
+    const confirm = await waitFor(() => screen.getByRole('dialog', { name: /Delete Ram Centre permanently/ }))
     fireEvent.click(within(confirm).getByRole('button', { name: 'Delete permanently' }))
-    await waitFor(() => expect(manageMock.deleteUser).toHaveBeenCalledWith('u2'))
+    await waitFor(() => expect(manageMock.deleteUser).toHaveBeenCalledWith('u1'))
     await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith(expect.stringMatching(/Login deleted permanently/)))
+  })
+
+  it('shows ONLY Reinstate in the drawer for a suspended login', async () => {
+    await renderPage()
+    const drawer = await openDrawerFor('Old Scanner')
+    expect(within(drawer).getByText('Suspended')).toBeTruthy()
+    expect(within(drawer).getByRole('button', { name: 'Reinstate' })).toBeTruthy()
+    for (const name of ['Edit / Change Role', 'Set Password', 'Sign Out All', 'Archive', 'Restore', 'Delete']) {
+      expect(within(drawer).queryByRole('button', { name })).toBeNull()
+    }
+  })
+
+  it('reinstates a suspended login from the drawer Reinstate button', async () => {
+    await renderPage()
+    const drawer = await openDrawerFor('Old Scanner')
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Reinstate' }))
+    const confirm = await waitFor(() => screen.getByRole('dialog', { name: 'Reinstate Old Scanner?' }))
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Reinstate' }))
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith(expect.stringMatching(/Login reinstated/)))
+    const patch = fromMock.mock.results.map(r => r.value).find(qb => qb.update?.mock?.calls?.length).update.mock.calls[0][0]
+    expect(patch.is_active).toBe(true)
   })
 
   it('blocks archiving your own login', async () => {

@@ -40,6 +40,7 @@ const defaultProps = {
   onSetPassword: vi.fn(),
   onSignOutAll: vi.fn(),
   onSuspend: vi.fn(),
+  onReinstate: vi.fn(),
   onArchive: vi.fn(),
   onRestore: vi.fn(),
   onDelete: vi.fn(),
@@ -157,9 +158,28 @@ describe('UserDetailDrawer', () => {
     expect(defaultProps.onDelete).toHaveBeenCalledWith(baseUser)
   })
 
-  it('shows Restore instead of Suspend when user is suspended', () => {
+  it('shows ONLY Reinstate when user is suspended (all other actions hidden)', () => {
     render(<UserDetailDrawer {...defaultProps} user={{ ...baseUser, is_active: false }} />)
-    expect(screen.queryByRole('button', { name: /suspend/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^suspend$/i })).toBeNull()
+    expect(screen.getByRole('button', { name: /reinstate/i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /edit \/ change role/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /set password/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /sign out all/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /archive/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^delete$/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^restore$/i })).toBeNull()
+  })
+
+  it('calls onReinstate with user when Reinstate clicked', () => {
+    render(<UserDetailDrawer {...defaultProps} user={{ ...baseUser, is_active: false }} />)
+    fireEvent.click(screen.getByRole('button', { name: /reinstate/i }))
+    expect(defaultProps.onReinstate).toHaveBeenCalledWith(expect.objectContaining({ is_active: false }))
+  })
+
+  it('falls back to Restore for suspended user when onReinstate is not provided', () => {
+    const { onReinstate: _dropped, ...withoutReinstate } = defaultProps
+    render(<UserDetailDrawer {...withoutReinstate} user={{ ...baseUser, is_active: false }} />)
+    expect(screen.queryByRole('button', { name: /reinstate/i })).toBeNull()
     expect(screen.getByRole('button', { name: /restore/i })).toBeTruthy()
   })
 
@@ -170,9 +190,9 @@ describe('UserDetailDrawer', () => {
   })
 
   it('calls onRestore with user when Restore clicked', () => {
-    render(<UserDetailDrawer {...defaultProps} user={{ ...baseUser, is_active: false }} />)
+    render(<UserDetailDrawer {...defaultProps} user={{ ...baseUser, is_archived: true }} />)
     fireEvent.click(screen.getByRole('button', { name: /restore/i }))
-    expect(defaultProps.onRestore).toHaveBeenCalledWith(expect.objectContaining({ is_active: false }))
+    expect(defaultProps.onRestore).toHaveBeenCalledWith(expect.objectContaining({ is_archived: true }))
   })
 
   it('disables all action buttons when busy is true', () => {

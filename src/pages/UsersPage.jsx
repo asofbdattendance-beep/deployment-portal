@@ -690,6 +690,7 @@ export default function UsersPage() {
     toast.success('Signed out on every device')
   }
   const drawerSuspend = (u) => { setDrawerUser(null); askToggleActive(u, false) }
+  const drawerReinstate = (u) => { setDrawerUser(null); askToggleActive(u, true) }
   const drawerArchive = (u) => { setDrawerUser(null); askArchive(u) }
   const drawerRestore = (u) => { setDrawerUser(null); askRestore(u) }
   const drawerDelete = (u) => { setDrawerUser(null); askDelete(u) }
@@ -1606,6 +1607,7 @@ export default function UsersPage() {
         onSignOutAll={drawerSignOutAll}
         onEdit={(u) => { setDrawerUser(null); openEdit(u) }}
         onSuspend={drawerSuspend}
+        onReinstate={drawerReinstate}
         onArchive={drawerArchive}
         onRestore={drawerRestore}
         onDelete={drawerDelete}

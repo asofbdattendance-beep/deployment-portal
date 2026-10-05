@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { X, KeyRound, LogOut, Pencil, Ban, Archive, RotateCcw, Trash2, ShieldCheck } from 'lucide-react'
+import { X, KeyRound, LogOut, Pencil, Ban, Archive, RotateCcw, Trash2, ShieldCheck, CheckCircle2 } from 'lucide-react'
 import { userPhaseGroup, statusOf } from '../lib/userAdmin'
 import { ROLE_LABELS } from '../lib/supabase'
 
@@ -22,6 +22,7 @@ import { ROLE_LABELS } from '../lib/supabase'
  * @param {(user:object) => void} [props.onSignOutAll]
  * @param {(user:object) => void} [props.onEdit] — open the Edit dialog (role, centre, badge, location)
  * @param {(user:object) => void} [props.onSuspend]
+ * @param {(user:object) => void} [props.onReinstate] — unsuspend (shown alone when suspended)
  * @param {(user:object) => void} [props.onArchive]
  * @param {(user:object) => void} [props.onRestore]
  * @param {(user:object) => void} [props.onDelete]
@@ -38,6 +39,7 @@ export default function UserDetailDrawer({
   onSignOutAll,
   onEdit,
   onSuspend,
+  onReinstate,
   onArchive,
   onRestore,
   onDelete,
@@ -239,7 +241,9 @@ export default function UserDetailDrawer({
           <section aria-label="Admin actions">
             <div className="drawer-section-title">Admin Actions</div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
-              {onEdit && (
+              {/* Suspended logins show ONLY the suspend control (as Reinstate)
+                  — every other action is hidden until they are reinstated. */}
+              {onEdit && !isSuspended && (
                 <button
                   type="button"
                   className={actionBtn}
@@ -251,7 +255,7 @@ export default function UserDetailDrawer({
                   Edit / Change Role
                 </button>
               )}
-              {onSetPassword && (
+              {onSetPassword && !isSuspended && (
                 <button
                   type="button"
                   className={actionBtn}
@@ -263,7 +267,7 @@ export default function UserDetailDrawer({
                   Set Password
                 </button>
               )}
-              {onSignOutAll && (
+              {onSignOutAll && !isSuspended && (
                 <button
                   type="button"
                   className={actionBtn}
@@ -287,7 +291,19 @@ export default function UserDetailDrawer({
                   Suspend
                 </button>
               )}
-              {onArchive && !isArchived && (
+              {onReinstate && isSuspended && (
+                <button
+                  type="button"
+                  className={actionBtn}
+                  style={{ ...actionStyle, color: '#15803d' }}
+                  disabled={busy}
+                  onClick={() => onReinstate(user)}
+                >
+                  <CheckCircle2 size={13} style={{ marginRight: 4, verticalAlign: '-2px' }} />
+                  Reinstate
+                </button>
+              )}
+              {onArchive && !isArchived && !isSuspended && (
                 <button
                   type="button"
                   className={actionBtn}
@@ -299,7 +315,10 @@ export default function UserDetailDrawer({
                   Archive
                 </button>
               )}
-              {onRestore && (isSuspended || isArchived) && (
+              {/* Archived logins reinstate via Restore. Suspended logins use the
+                  Reinstate toggle above — Restore is only their fallback when
+                  the parent supplies no onReinstate. */}
+              {onRestore && (isArchived || (isSuspended && !onReinstate)) && (
                 <button
                   type="button"
                   className={actionBtn}
@@ -311,7 +330,7 @@ export default function UserDetailDrawer({
                   Restore
                 </button>
               )}
-              {onDelete && (
+              {onDelete && !isSuspended && (
                 <button
                   type="button"
                   className="btn btn-danger"
