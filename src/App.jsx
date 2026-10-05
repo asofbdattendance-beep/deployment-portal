@@ -13,7 +13,7 @@ import { phasesForRole, resolveActivePhase, readStoredPhase, storeActivePhase, p
 import { useIsMobile } from './hooks/useMediaQuery'
 import MobileTabBar, { flattenNavItems, splitBarItems } from './components/mobile/MobileTabBar'
 import MoreSheet from './components/mobile/MoreSheet'
-import { SEWA_MODE_VISIT, SEWA_MODE_PREVISIT, canUsePrevisitMode, scheduleWindow, resolveSewaMode, isTestLogin } from './lib/sewaMode'
+import { SEWA_MODE_VISIT, SEWA_MODE_PREVISIT, canUsePrevisitMode, scheduleWindow, resolveSewaMode, isPrevisitAvailable, isTestLogin } from './lib/sewaMode'
 import { todayStrIST } from './lib/scannerUtils'
 
 // ── Maintenance mode — flip to false to restore portal ──
@@ -50,7 +50,7 @@ const AttendancePage = lazy(() => import('./pages/AttendancePage'))
 const InchargeScannerPage = lazy(() => import('./pages/InchargeScannerPage'))
 const ControlPanelPage = lazy(() => import('./pages/ControlPanelPage'))
 const DashboardPage = lazy(() => import('./pages/DashboardPage'))
-const ReportsPage = lazy(() => import('./pages/ReportsPage'))
+const SewaView = lazy(() => import('./components/SewaView'))
 // Previously dead code — present in the repo with tests, but neither in PAGES
 // nor in the page switch, so no role could ever open them.
 const LiveScannersPage = lazy(() => import('./pages/LiveScannersPage'))
@@ -94,16 +94,19 @@ function Dashboard() {
   // ── Global sewa mode: Previsit vs Bhati Visit. Calendar auto-view for
   // REAL accounts, derived from the selected schedule's visit window +
   // today (IST); a schedule with no window reads as previsit-only. The
-  // manual toggle is a TEST-login DEMO privilege only (email contains
-  // "test", on a previsit-capable role): demo accounts open on the
-  // calendar-correct side but the toggle is theirs and sticks — auto
-  // never takes the view back. Real operators never see the switch, so
-  // the view can never claim "Bhati Visit" while showing previsit-date
-  // data. The override is VIEW-ONLY and resets on schedule change —
-  // scanning writes the same session row in both modes and the scan date
-  // classifies it, so the switch can never misfile a record. Roles without
-  // previsit access (centre roles, vss_operator) are pinned to the visit
-  // view they already have.
+  // previsit view itself closes the day before the visit starts
+  // (isPrevisitAvailable): from the cutoff day onward every role sees
+  // Bhati Visit. The manual toggle is a TEST-login DEMO privilege only
+  // (email contains "test", on a previsit-capable role, while previsit is
+  // still open): demo accounts open on the calendar-correct side but the
+  // toggle is theirs and sticks — auto never takes the view back. Real
+  // operators never see the switch, so the view can never claim
+  // "Bhati Visit" while showing previsit-date data. The override is
+  // VIEW-ONLY and resets on schedule change — scanning writes the same
+  // session row in both modes and the scan date classifies it, so the
+  // switch can never misfile a record. Roles without previsit access
+  // (centre roles, vss_operator) are pinned to the visit view they
+  // already have.
   const [sewaModeOverride, setSewaModeOverride] = useState(null)
   // A schedule change clears any manual lens synchronously (in the select
   // handler below) and here for programmatic changes — schedule B must
@@ -132,15 +135,21 @@ function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [win.start, win.end, modeTick, scheduleId]
   )
-  const canOverrideSewaMode = canUsePrevisitMode(profile?.role) && isTestLogin(profile)
+  // Cutover rule: previsit is only available strictly before the day
+  // before the visit starts. From that cutoff day onward (and after the
+  // visit ends) every role is forced onto Bhati Visit — no override may
+  // reopen the previsit view. Scanning is unaffected: the scan date still
+  // classifies the record.
+  const previsitOpen = isPrevisitAvailable(win.start, todayStrIST())
+  const canOverrideSewaMode = canUsePrevisitMode(profile?.role) && isTestLogin(profile) && previsitOpen
   // Hard rule: a manual Bhati Visit pin is meaningless without visit dates —
   // the schedule window is the only source of visit days, so the pin falls
   // back to auto (previsit) instead of rendering a visit view with no dates.
   const windowUsable = Boolean(win.start && win.end)
   const effectiveOverride = sewaModeOverride === SEWA_MODE_VISIT && !windowUsable ? null : sewaModeOverride
-  const sewaMode = canUsePrevisitMode(profile?.role)
-    ? (canOverrideSewaMode ? (effectiveOverride || autoSewaMode) : autoSewaMode)
-    : SEWA_MODE_VISIT
+  const sewaMode = !canUsePrevisitMode(profile?.role) || !previsitOpen
+    ? SEWA_MODE_VISIT
+    : (canOverrideSewaMode ? (effectiveOverride || autoSewaMode) : autoSewaMode)
   // Deep-link payload for cross-page jumps (dashboard tiles/rows → a page
   // with a filter pre-applied). Tab switches remount pages, so a prop is
   // enough — no router, no context. Cleared on manual tab clicks.
@@ -352,7 +361,7 @@ function Dashboard() {
           {currentPage === 'scanner' && <ScannerPage schedules={schedules} scheduleId={scheduleId} sewaMode={autoSewaMode} />}
           {currentPage === 'attendance' && (profile?.role === 'dept_incharge' ? <InchargeScannerPage schedules={schedules} scheduleId={scheduleId} sewaMode={autoSewaMode} /> : sewaMode === SEWA_MODE_PREVISIT ? <PrevisitView schedules={schedules} scheduleId={scheduleId} initialTab="present" /> : <AttendancePage schedules={schedules} scheduleId={scheduleId} />)}
           {currentPage === 'dashboard' && (sewaMode === SEWA_MODE_PREVISIT ? <PrevisitDashboard schedules={schedules} scheduleId={scheduleId} /> : <DashboardPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} />)}
-          {currentPage === 'reports' && (sewaMode === SEWA_MODE_PREVISIT ? <PrevisitView schedules={schedules} scheduleId={scheduleId} initialTab="total" /> : <ReportsPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} initialCentre={navFilter?.page === 'reports' ? navFilter?.centre : undefined} />)}
+          {currentPage === 'reports' && (sewaMode === SEWA_MODE_PREVISIT ? <PrevisitView schedules={schedules} scheduleId={scheduleId} initialTab="total" /> : <SewaView schedules={schedules} scheduleId={scheduleId} mode={sewaMode} initialTab="total" initialCentre={navFilter?.page === 'reports' ? navFilter?.centre : undefined} />)}
           {currentPage === 'liveScanners' && <LiveScannersPage schedules={schedules} scheduleId={scheduleId} />}
           {currentPage === 'anomalies' && (sewaMode === SEWA_MODE_PREVISIT ? <PrevisitView schedules={schedules} scheduleId={scheduleId} initialTab="attention" /> : <AnomaliesPage schedules={schedules} scheduleId={scheduleId} onNavigate={handleNavigate} />)}
           {currentPage === 'control' && <ControlPanelPage schedules={schedules} scheduleId={scheduleId} refreshSchedules={loadSchedules} />}

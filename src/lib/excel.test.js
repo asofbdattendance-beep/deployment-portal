@@ -14,24 +14,39 @@ const mocks = vi.hoisted(() => ({
   bookAppendSheet: vi.fn(),
   writeFile: vi.fn(),
   write: vi.fn(() => new Uint8Array([1, 2, 3])),
+  read: vi.fn(),
+  actual: null,
 }))
 
-vi.mock('xlsx', () => ({
-  utils: {
-    book_new: (...a) => mocks.bookNew(...a),
-    json_to_sheet: (...a) => mocks.jsonToSheet(...a),
-    book_append_sheet: (...a) => mocks.bookAppendSheet(...a),
-  },
-  writeFile: (...a) => mocks.writeFile(...a),
-  write: (...a) => mocks.write(...a),
-  default: {},
-}))
+vi.mock('xlsx', async (importOriginal) => {
+  const actual = await importOriginal()
+  mocks.actual = actual
+  return {
+    ...actual,
+    utils: {
+      ...actual.utils,
+      book_new: (...a) => mocks.bookNew(...a),
+      json_to_sheet: (...a) => actual.utils.json_to_sheet(...a),
+      book_append_sheet: (...a) => mocks.bookAppendSheet(...a),
+      sheet_to_json: (...a) => actual.utils.sheet_to_json(...a),
+    },
+    writeFile: (...a) => mocks.writeFile(...a),
+    write: (...a) => mocks.write(...a),
+    read: (...a) => mocks.read(...a),
+    default: {},
+  }
+})
 
 beforeEach(() => {
-  for (const k of ['bookNew', 'jsonToSheet', 'bookAppendSheet', 'writeFile', 'write']) mocks[k].mockReset()
+  for (const k of ['bookNew', 'jsonToSheet', 'bookAppendSheet', 'writeFile', 'write', 'read']) mocks[k].mockReset()
   mocks.bookNew.mockReturnValue({})
   mocks.jsonToSheet.mockImplementation((rows) => ({ rows }))
   mocks.write.mockReturnValue(new Uint8Array([1, 2, 3]))
+  // read delegates to the real xlsx by default so readWorkbookRows tests
+  // can parse real buffers; individual tests may override with mockReturnValueOnce
+  if (mocks.actual) {
+    mocks.read.mockImplementation((...a) => mocks.actual.read(...a))
+  }
 })
 
 describe('sheetName', () => {
@@ -114,5 +129,52 @@ describe('exportWorkbookBlob', () => {
     const { saveBlob } = await import('./excel')
     expect(saveBlob(new Blob(['x']), 'a.xlsx')).toBe(false)
     expect(saveBlob(null, 'a.xlsx')).toBe(false)
+  })
+})
+
+describe('readWorkbookRows', () => {
+  // These tests need the REAL xlsx for read/sheet_to_json/json_to_sheet,
+  // so we use importOriginal to bypass the module-level mock.
+  const getRealXlsx = async () => {
+    const mod = await vi.importActual('xlsx')
+    return mod.default || mod
+  }
+
+  const makeFile = (bytes) => ({
+    arrayBuffer: async () => bytes,
+  })
+
+  it('reads the first sheet and normalises headers', async () => {
+    const XLSX = await getRealXlsx()
+    const wb = XLSX.utils.book_new()
+    const ws = XLSX.utils.json_to_sheet([
+      { Name: 'Ram', Email: 'ram@example.com', 'Badge Number': 'B001' },
+      { Name: 'Shyam', Email: 'shyam@example.com', 'Badge Number': 'B002' },
+    ])
+    XLSX.utils.book_append_sheet(wb, ws, 'Users')
+    const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' })
+    const { readWorkbookRows } = await import('./excel')
+    const rows = await readWorkbookRows(makeFile(buf))
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toMatchObject({ name: 'Ram', email: 'ram@example.com', badge_number: 'B001' })
+    expect(rows[1]).toMatchObject({ name: 'Shyam', email: 'shyam@example.com', badge_number: 'B002' })
+  })
+
+  it('returns empty array for a sheet with only headers', async () => {
+    const XLSX = await getRealXlsx()
+    const wb = XLSX.utils.book_new()
+    const ws = XLSX.utils.json_to_sheet([])
+    XLSX.utils.book_append_sheet(wb, ws, 'Empty')
+    const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' })
+    const { readWorkbookRows } = await import('./excel')
+    const rows = await readWorkbookRows(makeFile(buf))
+    expect(rows).toEqual([])
+  })
+
+  it('throws when the workbook has no sheets', async () => {
+    // XLSX.write on an empty workbook throws, so mock read to return no sheets
+    mocks.read.mockReturnValueOnce({ SheetNames: [], Sheets: {} })
+    const { readWorkbookRows } = await import('./excel')
+    await expect(readWorkbookRows(makeFile(new Uint8Array([1, 2, 3])))).rejects.toThrow()
   })
 })

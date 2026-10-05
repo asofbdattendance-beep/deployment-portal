@@ -16,6 +16,7 @@ const row = (over: Partial<PortalRow> = {}): PortalRow => ({
   auth_id: over.auth_id ?? null,
   is_active: over.is_active ?? true,
   created_at: over.created_at ?? '2026-01-01T00:00:00Z',
+  archived_at: over.archived_at ?? null,
 })
 
 describe('pickRow', () => {
@@ -92,5 +93,31 @@ describe('preflightOverlap', () => {
   it('ignores rows matching neither the email nor the badge', () => {
     const r = row({ email: 'z@z.z', badge_number: 'NOPE' })
     expect(preflightOverlap({ rows: [r], email: 'a@b.c', badge: 'FB1' }).kind).toBe('fresh')
+  })
+
+  it('conflicts on an ARCHIVED same-email row — restore it, never resume it', () => {
+    const r = row({ email: 'a@b.c', badge_number: 'FB1', is_active: false, archived_at: '2026-03-01T00:00:00Z' })
+    const plan = preflightOverlap({ rows: [r], email: 'a@b.c', badge: 'FB1' })
+    expect(plan.kind).toBe('conflict')
+    if (plan.kind === 'conflict') expect(plan.message).toMatch(/archived — restore it/)
+  })
+
+  it('conflicts on an archived row even with a LIVE auth link (archived wins over every other rule)', () => {
+    const r = row({ email: 'a@b.c', badge_number: 'FB1', is_active: true, auth_id: 'a-live', archived_at: '2026-03-01T00:00:00Z' })
+    const plan = preflightOverlap({ rows: [r], email: 'a@b.c', badge: 'FB1' })
+    expect(plan.kind).toBe('conflict')
+    if (plan.kind === 'conflict') expect(plan.message).toMatch(/archived — restore it/)
+  })
+
+  it('conflicts on an archived badge-only match (different email)', () => {
+    const r = row({ email: 'old@x.org', badge_number: 'FB1', is_active: true, auth_id: 'a-live', archived_at: '2026-03-01T00:00:00Z' })
+    const plan = preflightOverlap({ rows: [r], email: 'new@x.org', badge: 'FB1' })
+    expect(plan.kind).toBe('conflict')
+    if (plan.kind === 'conflict') expect(plan.message).toMatch(/archived — restore it/)
+  })
+
+  it('still resumes a live row when archived_at is null (v69 no-regression)', () => {
+    const r = row({ email: 'a@b.c', badge_number: 'FB1', is_active: false, auth_id: 'stale', archived_at: null })
+    expect(preflightOverlap({ rows: [r], email: 'a@b.c', badge: 'FB1' }).kind).toBe('resume')
   })
 })

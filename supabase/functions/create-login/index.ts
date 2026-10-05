@@ -13,7 +13,7 @@
 //   DEPARTMENT grant it oversees, applied in the same privileged step (the anon
 //   client cannot write it; see 5b).
 //   When the superadmin sets a password it is used as-is
-//   (min 8 chars); otherwise a one-time temporary password is generated.
+//   (min 6 chars); otherwise a one-time temporary password is generated.
 // Success:      { ok, user_id, mode, tempPassword? }
 //   mode: 'fresh' (row created) | 'overlap-completed' (an existing
 //   portal_users row — the attendance overlap — was reinstated/repaired and
@@ -91,14 +91,42 @@ async function handler(req) {
     if (!user) return json({ error: 'Not signed in' }, 401)
 
     const admin = createClient(url, serviceKey)
-    const { data: me } = await admin
-      .from('portal_users')
-      .select('name, role, is_active')
-      .eq('auth_id', user.id)
-      .maybeSingle()
-    if (!me || me.role !== 'super_admin' || me.is_active === false) {
+    let me = null
+    {
+      const { data, error } = await admin
+        .from('portal_users')
+        .select('name, role, is_active, archived_at')
+        .eq('auth_id', user.id)
+        .maybeSingle()
+      if (error && (error.code === '42703' || /archived_at/.test(error.message || ''))) {
+        // v69 not deployed yet — retry without the column, treat as not archived.
+        const fallback = await admin
+          .from('portal_users')
+          .select('name, role, is_active')
+          .eq('auth_id', user.id)
+          .maybeSingle()
+        me = fallback.data
+      } else {
+        me = data
+      }
+    }
+    if (!me || me.role !== 'super_admin' || me.is_active === false || (me as any).archived_at != null) {
       return json({ error: 'Super admin only' }, 403)
     }
+
+    // 1b. Throttle (v73 check_login_rate): 30 req / 60 s per admin. Fail open
+    //     when the RPC is missing (v73 not applied yet) — availability wins.
+    try {
+      const fwd = req.headers.get('x-forwarded-for')
+      const ip = ((fwd ? fwd.split(',')[0].trim() : '') || req.headers.get('cf-connecting-ip') || 'unknown').slice(0, 64)
+      const { data: allowed } = await admin.rpc('check_login_rate', {
+        p_ip: ip,
+        p_identity: `admin:${user.id}:create-login`,
+        p_max: 30,
+        p_window_secs: 60,
+      })
+      if (allowed === false) return json({ error: 'Too many requests — slow down and retry' }, 429)
+    } catch { /* fail open: throttling is defense-in-depth */ }
 
     // 2. Validate the request (same rules as invitationErrors + claim).
     const body = await req.json().catch(() => ({}))
@@ -107,6 +135,7 @@ async function handler(req) {
     const role = String(body.role || '')
     const centre = role === 'dept_incharge' ? null : (String(body.centre || '').trim() || null)
     const badge = String(body.badge_number || '').trim() || null
+    const location = String(body.location || '').trim() || null
     const customId = body.custom_role_id || null
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: 'Enter a valid email address' }, 400)
     if (!name) return json({ error: 'Enter the person’s name' }, 400)
@@ -131,13 +160,26 @@ async function handler(req) {
       if (!deptSchedule) return json({ error: 'Pick the schedule this department applies to' }, 400)
       if (deptIds.length === 0) return json({ error: 'Pick at least one department for this role' }, 400)
     }
-    const ROW_COLS = 'id, email, badge_number, auth_id, is_active, name, role, centre, custom_role_id, created_at'
-    const [emailRows, badgeRows] = await Promise.all([
-      admin.from('portal_users').select(ROW_COLS).ilike('email', email).order('created_at', { ascending: true }),
-      badge
-        ? admin.from('portal_users').select(ROW_COLS).eq('badge_number', badge).order('created_at', { ascending: true })
-        : Promise.resolve({ data: [] }),
-    ])
+    const ROW_COLS = 'id, email, badge_number, auth_id, is_active, name, role, centre, custom_role_id, created_at, archived_at, location'
+    const ROW_COLS_FALLBACK = 'id, email, badge_number, auth_id, is_active, name, role, centre, custom_role_id, created_at'
+    async function fetchByEmail(cols: string) {
+      return admin.from('portal_users').select(cols).ilike('email', email).order('created_at', { ascending: true })
+    }
+    async function fetchByBadge(cols: string) {
+      return admin.from('portal_users').select(cols).eq('badge_number', badge).order('created_at', { ascending: true })
+    }
+    let emailRows = await fetchByEmail(ROW_COLS)
+    if (emailRows.error && (emailRows.error.code === '42703' || /archived_at|location/.test(emailRows.error.message || ''))) {
+      // v69/v71 not deployed yet — retry without those columns.
+      emailRows = await fetchByEmail(ROW_COLS_FALLBACK)
+    }
+    let badgeRows: any = { data: [] }
+    if (badge) {
+      badgeRows = await fetchByBadge(ROW_COLS)
+      if (badgeRows.error && (badgeRows.error.code === '42703' || /archived_at|location/.test(badgeRows.error.message || ''))) {
+        badgeRows = await fetchByBadge(ROW_COLS_FALLBACK)
+      }
+    }
     const rows = [...(emailRows.data || [])]
     for (const r of badgeRows.data || []) {
       if (!rows.some((x) => x.id === r.id)) rows.push(r)
@@ -151,8 +193,8 @@ async function handler(req) {
     //    apply the password the admin is setting right now — that is the
     //    point of this action.
     const adminPassword = String(body.password || '')
-    if (adminPassword && adminPassword.length < 8) {
-      return json({ error: 'Password needs at least 8 characters' }, 400)
+    if (adminPassword && adminPassword.length < 6) {
+      return json({ error: 'Password must be at least 6 characters' }, 400)
     }
     const password = adminPassword || tempPassword()
     const generated = !adminPassword
@@ -201,6 +243,7 @@ async function handler(req) {
       custom_role_id: customId,
       centre,
       badge_number: badge,
+      location,
       is_active: true,
     }
     // A failed step restores the PREVIOUS row state on resume (never deletes
@@ -212,6 +255,7 @@ async function handler(req) {
           auth_id: resumeRow.auth_id, email: resumeRow.email, name: resumeRow.name,
           role: resumeRow.role, custom_role_id: resumeRow.custom_role_id,
           centre: resumeRow.centre, badge_number: resumeRow.badge_number,
+          location: (resumeRow as Record<string, unknown>).location ?? null,
           is_active: resumeRow.is_active,
         }).eq('id', resumeRow.id).catch(() => {})
       } else {
@@ -221,9 +265,17 @@ async function handler(req) {
     const undoAuth = async () => {
       if (createdAuth) await admin.auth.admin.deleteUser(authId).catch(() => {})
     }
-    const { error: rowErr } = resumeRow
-      ? await admin.from('portal_users').update(rowPayload).eq('id', resumeRow.id)
-      : await admin.from('portal_users').insert(rowPayload)
+    async function writeRow(payload: Record<string, unknown>) {
+      return resumeRow
+        ? await admin.from('portal_users').update(payload).eq('id', resumeRow.id)
+        : await admin.from('portal_users').insert(payload)
+    }
+    let { error: rowErr } = await writeRow(rowPayload)
+    if (rowErr && (rowErr.code === '42703' || /location/.test(rowErr.message || ''))) {
+      // v71 (location) not deployed yet — retry without it.
+      const { location: _omit, ...payloadNoLoc } = rowPayload
+      ;({ error: rowErr } = await writeRow(payloadNoLoc))
+    }
     if (rowErr) {
       // Roll back — a half-created login is worse than none.
       await undoRow()

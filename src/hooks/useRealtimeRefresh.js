@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { reportRealtimeStatus } from '../lib/realtime'
+import { perfStart, perfMark } from '../lib/perfTimings'
 
 /**
  * useRealtimeRefresh — the one realtime subscribe pattern every live page shares.
@@ -50,12 +51,18 @@ export function useRealtimeRefresh({
     let timer = null
     const reload = () => {
       if (!alive) return
+      // Phase-0 tripwire: every postgres_changes event starts a viewer run;
+      // pages mark 'rows-painted' when their reload lands (same run id via
+      // perfCurrentRun). Paste via __portalPerfDump.
+      const viewerRun = perfStart('viewer')
+      perfMark('viewer', viewerRun, 'rt-event')
       // Max-wait: the trailing debounce coalesces bursts, but a sustained
       // burst would re-arm it forever and starve the reload. Fire immediately
       // when the last actual load is more than maxWaitMs old.
       if (Date.now() - lastReloadAt.current > maxWaitMs) {
         if (timer) clearTimeout(timer)
         lastReloadAt.current = Date.now()
+        perfMark('viewer', viewerRun, 'reload-fired:max-wait')
         if (alive) Promise.resolve().then(() => reloadRef.current?.()).catch(() => {})
         return
       }
@@ -63,6 +70,7 @@ export function useRealtimeRefresh({
       timer = setTimeout(() => {
         if (!alive) return
         lastReloadAt.current = Date.now()
+        perfMark('viewer', viewerRun, 'reload-fired:debounced')
         Promise.resolve().then(() => reloadRef.current?.()).catch(() => {})
       }, debounceMs)
     }

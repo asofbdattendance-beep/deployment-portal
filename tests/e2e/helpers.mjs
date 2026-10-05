@@ -26,6 +26,25 @@ export async function seedProfile(request, profile) {
   await request.post(`${API}/__test/seed`, { data: { profile } })
 }
 
+/**
+ * Override the mock schedule row for the spec (per-spec visit window —
+ * cutover specs need windows relative to the real today). Merged over
+ * schedules[0] on read; cleared by resetMock like everything else.
+ */
+export async function seedSchedule(request, schedule) {
+  await request.post(`${API}/__test/seed`, { data: { schedule } })
+}
+
+/** YYYY-MM-DD in Asia/Kolkata, offset by whole days from today. */
+export function istDate(offsetDays = 0) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(Date.now() + offsetDays * 86400000))
+}
+
 export async function mockCalls(request) {
   return (await request.get(`${API}/__test/calls`)).json()
 }
@@ -42,7 +61,7 @@ export function collectPageErrors(page) {
 
 export async function loginAsScanner(page) {
   await page.goto('/')
-  await page.getByPlaceholder('your@email.com').fill('scanner@example.com')
+  await page.getByPlaceholder('Email or badge number').fill('scanner@example.com')
   await page.getByPlaceholder('Enter password').fill('secret')
   await page.getByRole('button', { name: 'Sign In' }).click()
   // Role `scanner` sees only the Scanner tab, so a successful login lands
@@ -62,7 +81,7 @@ export async function manualScan(page, badge) {
  */
 export async function loginAsIncharge(page) {
   await page.goto('/')
-  await page.getByPlaceholder('your@email.com').fill('incharge@example.com')
+  await page.getByPlaceholder('Email or badge number').fill('incharge@example.com')
   await page.getByPlaceholder('Enter password').fill('secret')
   await page.getByRole('button', { name: 'Sign In' }).click()
   await gotoTab(page, 'Attendance')

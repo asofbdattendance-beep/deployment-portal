@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { BADGE_REGEX, sanitizeScannedBadge } from '../lib/logic'
 import { scanDisplay } from '../lib/scanDisplay'
+import { perfStart, perfMark } from '../lib/perfTimings'
 import { enqueueScan, getQueuedScans } from '../lib/offlineQueue'
 import {
   friendly,
@@ -512,6 +513,10 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
 
     setBusySafe()
     let scanOk = false
+    // Phase-0 latency tripwire: tap → lookup → write → popup(first paint of
+    // the verdict). Paste via __portalPerfDump.
+    const scanRun = perfStart('scan')
+    perfMark('scan', scanRun, 'tap')
     // One nonce per attempt: online p_nonce AND the queued row's id (D-3).
     const nonce = newNonce()
     try {
@@ -607,6 +612,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
       // instant and the directory (when loaded) still names the sewadar.
       const offlineFast = !isConfirmed('IN') && typeof navigator !== 'undefined' && navigator.onLine === false
       const lookup = isConfirmed('IN') ? { kind: 'committed' } : offlineFast ? { kind: 'offline' } : await lookupScanState(b, scheduleId)
+      perfMark('scan', scanRun, `lookup-end:${lookup.kind}`)
       let open = null
       let lastOut = null
       // v65: the sewadar's own identity, resolved from the source tables so a
@@ -884,6 +890,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
         }
       }
       onAfterScan?.()
+      perfMark('scan', scanRun, scanOk ? 'done:ok' : 'done:not-ok')
       return { ok: scanOk }
     } finally {
       resetBusy()

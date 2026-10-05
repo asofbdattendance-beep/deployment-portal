@@ -7,6 +7,8 @@ import {
   toISODate,
   scheduleWindow,
   expandDateRange,
+  previsitCutoff,
+  isPrevisitAvailable,
   resolveSewaMode,
   clampDateToWindow,
   isTestLogin,
@@ -80,12 +82,26 @@ describe('resolveSewaMode', () => {
   const START = '2026-10-07'
   const END = '2026-10-11'
 
-  it('is visit inside the window, previsit outside it', () => {
+  it('cuts previsit off one day before the visit window', () => {
+    expect(previsitCutoff(START)).toBe('2026-10-06')
+    expect(resolveSewaMode(START, END, '2026-10-06')).toBe(SEWA_MODE_VISIT)
+    expect(resolveSewaMode(START, END, '2026-10-05')).toBe(SEWA_MODE_PREVISIT)
+  })
+
+  it('stays on the visit view through and after the window', () => {
     expect(resolveSewaMode(START, END, '2026-10-07')).toBe(SEWA_MODE_VISIT)
     expect(resolveSewaMode(START, END, '2026-10-09')).toBe(SEWA_MODE_VISIT)
     expect(resolveSewaMode(START, END, '2026-10-11')).toBe(SEWA_MODE_VISIT)
-    expect(resolveSewaMode(START, END, '2026-10-06')).toBe(SEWA_MODE_PREVISIT)
-    expect(resolveSewaMode(START, END, '2026-10-12')).toBe(SEWA_MODE_PREVISIT)
+    expect(resolveSewaMode(START, END, '2026-10-12')).toBe(SEWA_MODE_VISIT)
+  })
+
+  it('is visit from the cutoff through the window and after it', () => {
+    expect(resolveSewaMode(START, END, '2026-10-06')).toBe(SEWA_MODE_VISIT)
+    expect(resolveSewaMode(START, END, '2026-10-07')).toBe(SEWA_MODE_VISIT)
+    expect(resolveSewaMode(START, END, '2026-10-09')).toBe(SEWA_MODE_VISIT)
+    expect(resolveSewaMode(START, END, '2026-10-11')).toBe(SEWA_MODE_VISIT)
+    expect(resolveSewaMode(START, END, '2026-10-12')).toBe(SEWA_MODE_VISIT)
+    expect(resolveSewaMode(START, END, '2026-10-05')).toBe(SEWA_MODE_PREVISIT)
   })
 
   it('fails toward previsit when the window is unusable', () => {
@@ -94,6 +110,19 @@ describe('resolveSewaMode', () => {
     expect(resolveSewaMode('', END, '2026-10-08')).toBe(SEWA_MODE_PREVISIT)
     expect(resolveSewaMode(END, START, '2026-10-09')).toBe(SEWA_MODE_PREVISIT)
     expect(resolveSewaMode(START, END, '')).toBe(SEWA_MODE_PREVISIT)
+  })
+})
+
+describe('isPrevisitAvailable', () => {
+  it('is true only strictly before the cutoff day', () => {
+    expect(isPrevisitAvailable('2026-10-07', '2026-10-05')).toBe(true)
+    expect(isPrevisitAvailable('2026-10-07', '2026-10-06')).toBe(false)
+    expect(isPrevisitAvailable('2026-10-07', '2026-10-12')).toBe(false)
+  })
+
+  it('is false when the window or today is unusable', () => {
+    expect(isPrevisitAvailable('', '2026-10-05')).toBe(false)
+    expect(isPrevisitAvailable('2026-10-07', '')).toBe(false)
   })
 })
 

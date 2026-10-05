@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, fetchCentres, fetchAllRows, fetchAsoDeptKeys, getRootCentre, eligibleBadgeStatusFilter, isAssoDepartment, fetchPortalSettings, shouldHideFromConsent } from '../lib/supabase'
 import { computeEditGates, isDeptSelectable, isUndeployedCohort, computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, aggregateQuotaAllocations, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, changedConsentFields, consentRowKey, buildConsentSnapshot, groupConsentPatches, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
 import { consentCounts } from '../lib/counts'
+import { REALTIME_RELOAD_DEBOUNCE_MS, REALTIME_SELF_SKIP_MS } from '../lib/realtimeDeploy'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import ConsentDashboard from '../components/ConsentDashboard'
@@ -397,13 +398,13 @@ export default function ConsentPage({ schedules, scheduleId }) {
   useEffect(() => {
     if (!selectedScheduleId) return
     const reload = () => {
-      if (Date.now() - lastWriteAtRef.current < 1500) return
+      if (Date.now() - lastWriteAtRef.current < REALTIME_SELF_SKIP_MS) return
       if (savingRef.current) { reloadQueuedRef.current = true; return }
       if (reloadTimerRef.current) clearTimeout(reloadTimerRef.current)
       reloadTimerRef.current = setTimeout(() => {
         reloadTimerRef.current = null
         loadDataRef.current(true)
-      }, 600)
+      }, REALTIME_RELOAD_DEBOUNCE_MS)
     }
     const channel = supabase
       .channel(`consent-settings-${selectedScheduleId}`)

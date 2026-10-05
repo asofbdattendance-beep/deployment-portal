@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, fetchCentres } from '../lib/supabase'
 import {
   buildDailyRows,
   buildScannerRows,
@@ -13,10 +13,14 @@ import {
   shortDayLabel,
 } from '../lib/attendance'
 import { todayStrIST, withTimeout } from '../lib/scannerUtils'
-import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
+import { scheduleWindow, clampDateToWindow, expandDateRange, SEWA_MODE_VISIT } from '../lib/sewaMode'
+import { previsitByDay } from '../lib/previsit'
+import { sewaCentreMatrix } from '../lib/sewaView'
 import PageHeader, { ViewOnlyPill } from '../components/PageHeader'
 import KpiTile from '../components/KpiTile'
 import EmptyState from '../components/EmptyState'
+import CentreDayHeatmap from '../components/CentreDayHeatmap'
+import CentreDeptMatrixCard from '../components/CentreDeptMatrixCard'
 import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
 import {
   LayoutDashboard, Users, Clock, AlertTriangle, ArrowUpRight,
@@ -87,15 +91,16 @@ function scanEpoch(lastScanTime, dateStr) {
 /**
  * Dashboard — the aso / super_admin landing tab.
  *
- * THIN LAUNCHER (Phase 4): KPI tiles + alerts only. Every tile navigates to
- * its single-owner detail page (Reports / Attendance / Anomalies) — the
- * department snapshot, centre × department matrix, leaderboard, scanner
- * feed, trend strip and snapshot export that used to re-render those pages
- * here are gone. Three RPCs (daily, ops, anomalies) feed the tiles; the
- * visit summary and trend feeds are no longer fetched.
+ * KPI tiles + alerts up top (every tile navigates to its single-owner detail
+ * page), then the Bhati Visit picture: a present-by-visit-day strip, the
+ * centre × visit-day heatmap (v74 attendance_centre_daily) and the centre ×
+ * department matrix (attendance_visit_summary, shared with PrevisitDashboard).
+ * Six sources feed the page (daily, ops, anomalies, visit-day, visit summary,
+ * centres reference); each degrades in place, never as a healthy zero.
  *
- * Status, above the fold, and nothing to fill in. Every figure comes from the
- * v45 read-only RPCs; the page never reads a table directly and never writes.
+ * Status, above the fold, and nothing to fill in. Every figure comes from
+ * read-only RPCs (plus the unscoped centres reference list); the page never
+ * reads a scoped table directly and never writes.
  *
  * SCOPE IS ENFORCED SERVER-SIDE (v39's `attendance_scope_centres` /
  * `attendance_allowed_depts` run inside each function), so this page renders
@@ -116,11 +121,14 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   const [now, setNow] = useState(() => Date.now())
   const [loading, setLoading] = useState(true)
   const [lastRefreshAt, setLastRefreshAt] = useState(null)
-  // One slot per section, so a rejected RPC degrades in place.
+  // One slot per section, so a rejected source degrades in place.
   const [sec, setSec] = useState({
     daily: { rows: [], error: null },
     ops: { rows: [], error: null },
     anom: { rows: [], error: null },
+    visit: { rows: [], error: null },
+    matrix: { rows: [], error: null },
+    centres: { rows: [], error: null },
   })
   // Which schedule the rows in state belong to. Rows from the previous schedule
   // must never be shown (or exported) under the new one's name.
@@ -153,7 +161,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
     return () => clearInterval(t)
   }, [])
 
-  // ─── Load. One Promise.allSettled over the three RPCs. ───
+  // ─── Load. One Promise.allSettled over the six sources. ───
   const load = useCallback(async () => {
     // Clear the spinner on the no-schedule path too. Leaving `loading` true
     // here latched the page on its spinner with no timeout and no error.
@@ -161,30 +169,37 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
     const seq = ++seqRef.current
     setLoading(true)
     try {
-      // Every RPC is wrapped in withTimeout: a hung function must surface a
+      // Every source is wrapped in withTimeout: a hung function must surface a
       // friendly section error, never latch the page on its spinner forever.
       const results = await Promise.allSettled([
         withTimeout(rpcRows('attendance_daily_summary', { p_schedule: scheduleId, p_date: date }), 15000, 'attendance_daily_summary'),
         withTimeout(rpcRows('attendance_scanner_ops', { p_schedule: scheduleId, p_date: date }), 15000, 'attendance_scanner_ops'),
         // p_date: null → the visit-wide anomaly sweep, not one day.
         withTimeout(rpcRows('attendance_anomalies', { p_schedule: scheduleId, p_date: null }), 15000, 'attendance_anomalies'),
+        // v74: one row per centre × visit date — the day strip + heatmap.
+        withTimeout(rpcRows('attendance_centre_daily', { p_schedule: scheduleId }), 15000, 'attendance_centre_daily'),
+        // Whole-visit centre × department denominators for the matrix card.
+        withTimeout(rpcRows('attendance_visit_summary', { p_schedule: scheduleId }), 15000, 'attendance_visit_summary'),
+        // Unscoped reference data for the matrix parent-centre rollup; a
+        // failure here degrades to a flat grid, never blanks the matrix.
+        withTimeout(fetchCentres(), 15000, 'dp_centres'),
       ])
       if (!mountedRef.current || seq !== seqRef.current) return
       const next = {}
-      ;['daily', 'ops', 'anom'].forEach((key, i) => {
+      ;['daily', 'ops', 'anom', 'visit', 'matrix', 'centres'].forEach((key, i) => {
         const r = results[i]
         if (r.status === 'fulfilled') {
           next[key] = { rows: r.value, error: null }
         } else {
           // The backend text (function names, PGRST202) is logged, never shown.
-          console.error(`[Dashboard] ${key} RPC failed:`, r.reason)
+          console.error(`[Dashboard] ${key} source failed:`, r.reason)
           next[key] = { rows: [], error: r.reason?.message || 'Unknown error' }
         }
       })
       setSec(next)
       setRowsScheduleId(scheduleId)
       // No silent freshness: the LIVE pill only advances when at least one
-      // source actually answered — three rejections leave the old timestamp.
+      // source actually answered — six rejections leave the old timestamp.
       if (results.some((r) => r.status === 'fulfilled')) setLastRefreshAt(Date.now())
     } finally {
       if (mountedRef.current && seq === seqRef.current) setLoading(false)
@@ -237,7 +252,8 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
 
   // Sources that failed the last load — surfaced in the LIVE pill tooltip so
   // a partially-degraded dashboard never presents as fully fresh.
-  const failedSources = ['daily', 'ops', 'anom'].filter((k) => sec[k].error).length
+  const failedSources = ['daily', 'ops', 'anom', 'visit', 'matrix', 'centres'].filter((k) => sec[k].error).length
+  const sourceTotal = 6
   // KPI tiles must never render a healthy 0 for a section that failed to
   // load: "—" in amber says "unknown", 0 says "nobody came". The amber tone
   // rides on each tile's `tone` prop.
@@ -267,6 +283,29 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
     return { ...r, status, lastScanMs: scanEpoch(r.last_scan_time, date) }
   }), [scannerRows, date, now])
   const activeScanners = useMemo(() => scannerHealth.filter((s) => s.status === 'active').length, [scannerHealth])
+
+  // ── Bhati Visit picture: the visit window is the only column source, so
+  // a previsit scan can never grow a column here. Windowless schedules get
+  // no visit rows at all — the sections below render their honest empty
+  // state instead of fixture-shaped zeros.
+  const windowUsable = Boolean(visitWin.start && visitWin.end)
+  const windowDates = useMemo(() => expandDateRange(visitWin.start, visitWin.end), [visitWin])
+  const visitRows = useMemo(
+    () => (rowsAreCurrent && windowUsable ? sec.visit.rows : []),
+    [sec.visit.rows, rowsAreCurrent, windowUsable]
+  )
+  const visitByDay = useMemo(() => previsitByDay(visitRows), [visitRows])
+  const visitMaxPresent = useMemo(() => visitByDay.reduce((m, d) => Math.max(m, d.present), 0), [visitByDay])
+  const visitMatrix = useMemo(
+    () => sewaCentreMatrix({ mode: SEWA_MODE_VISIT, visitRows, windowDates }),
+    [visitRows, windowDates]
+  )
+  const matrixRows = rowsAreCurrent ? sec.matrix.rows : []
+  // A centres failure only flattens the parent rollup — the matrix rows
+  // still render.
+  const matrixCentres = rowsAreCurrent ? sec.centres.rows : []
+  const matrixError = rowsAreCurrent ? sec.matrix.error : null
+  const visitError = rowsAreCurrent ? sec.visit.error : null
 
   // ─── Alerts. At most three: severity first, then urgency. ───
   const alerts = useMemo(() => {
@@ -343,7 +382,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
           <>
             <span
               className="pill pill-green"
-              title={lastRefreshAt ? `Last successful reload at ${new Date(lastRefreshAt).toLocaleTimeString('en-IN')}${failedSources ? ` · ${failedSources} of 3 sources failed` : ''}` : 'Not loaded yet'}
+              title={lastRefreshAt ? `Last successful reload at ${new Date(lastRefreshAt).toLocaleTimeString('en-IN')}${failedSources ? ` · ${failedSources} of ${sourceTotal} sources failed` : ''}` : 'Not loaded yet'}
               style={{ fontWeight: 600 }}
             >
               <LiveDot /> LIVE · updated {timeAgo(lastRefreshAt, now)}
@@ -451,6 +490,66 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
           title="Open Attendance Anomalies"
         />
       </div>
+
+      {/* ── Present by visit day ── */}
+      {visitError ? (
+        <div className="card" role="alert" style={{ borderColor: '#fca5a5', background: '#fef2f2', marginTop: '0.75rem' }}>
+          <div style={{ fontSize: '0.85rem', color: '#b91c1c' }}>
+            Visit day totals could not be loaded. The figures above are unaffected.
+            <button onClick={load} className="btn btn-ghost" style={{ marginLeft: '0.5rem', padding: '0.15rem 0.45rem', fontSize: '0.72rem' }}>
+              Retry
+            </button>
+          </div>
+        </div>
+      ) : visitByDay.length === 0 ? (
+        <div className="card" style={{ marginTop: '0.75rem' }}><div className="empty">
+          <div className="empty-title">{windowUsable ? 'No Bhati Visit attendance yet' : 'No visit dates set for this schedule'}</div>
+          <div className="empty-text">{windowUsable ? 'Nobody has scanned on a visit day for this schedule yet.' : 'Ask an ASO to set the visit window before reading this dashboard.'}</div>
+        </div></div>
+      ) : (
+        <>
+          <div className="card" style={{ marginTop: '0.75rem' }}>
+            <div className="card-title">Present by visit day</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.5rem' }}>
+              {visitByDay.map((d) => (
+                <div key={d.date} className="pd-day">
+                  <span className="pd-day-label" title={d.date}>{shortDayLabel(d.date)}</span>
+                  <span className="progress" title={`${d.present} present`}>
+                    <span
+                      className="progress-bar"
+                      style={{ width: `${visitMaxPresent > 0 ? Math.round((d.present / visitMaxPresent) * 100) : 0}%` }}
+                    />
+                  </span>
+                  <span className="pd-day-count">
+                    {d.present} present{d.openNow > 0 ? ` · ${d.openNow} open` : ''}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="card" style={{ marginTop: '0.75rem' }}>
+            <div className="card-title">Attendance by centre</div>
+            <div className="card-sub">
+              Present / deployed for every centre, one column per visit day
+            </div>
+            <CentreDayHeatmap
+              columns={visitMatrix.columns}
+              rows={visitMatrix.rows}
+              totals={visitMatrix.totals}
+              emptyText="No Bhati Visit attendance yet."
+            />
+          </div>
+        </>
+      )}
+
+      <CentreDeptMatrixCard
+        rows={matrixRows}
+        centres={matrixCentres}
+        error={matrixError}
+        onRetry={load}
+        style={{ marginTop: '0.75rem' }}
+      />
     </div>
   )
 }

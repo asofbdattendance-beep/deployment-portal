@@ -23,6 +23,8 @@ export type PortalRow = {
   centre?: string | null
   custom_role_id?: string | null
   created_at?: string | null
+  archived_at?: string | null
+  location?: string | null
 }
 
 export type OverlapPlan =
@@ -64,6 +66,13 @@ export function preflightOverlap(opts: {
   const { rows, email, badge } = opts
   const picked = pickRow(rows, email, badge)
   if (!picked) return { kind: 'fresh' }
+
+  // An archived login is never resumed — the admin must restore it from
+  // the Users page first (v69). Checked before every other rule so the
+  // archived row always gets the actionable message.
+  if (picked.archived_at) {
+    return { kind: 'conflict', message: 'archived — restore it' }
+  }
 
   const emailMatches = norm(picked.email) === norm(email)
   const rowBadge = String(picked.badge_number || '').trim()

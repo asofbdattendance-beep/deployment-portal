@@ -38,12 +38,20 @@ const TABLES = {
   deployments: [],
   deployment_departments: [{ id: 'dept-1', name: 'MEDICAL' }],
   dp_attendance_sessions: [],
+  // Static centres for the Home heatmap / dept matrix (visit specs). No
+  // existing spec reads dp_centres, so this changes nothing for them.
+  dp_centres: [
+    { id: 'c-delhi', name: 'DELHI', parent_centre: '' },
+    { id: 'c-delhi-sc1', name: 'DELHI SC1', parent_centre: 'DELHI' },
+    { id: 'c-mumbai', name: 'MUMBAI', parent_centre: '' },
+  ],
 }
 
 const state = {
   calls: [], // { rpc, params, at }
   seed: {}, // rpcName -> 'error' | 'hang' | { data, error }
   profileOverride: null, // { role, centre, ... } merged over PROFILE by seed
+  scheduleOverride: null, // { visit_start_date, visit_end_date, ... } merged over schedules[0]
 }
 
 // ── opt-in rig variation ─────────────────────────────────────────────
@@ -112,13 +120,34 @@ function rpcResult(name, params) {
   const perBadge = state.seed[`${name}_error_for`]
   const failure = perBadge && params && perBadge[params.p_badge]
   if (failure) return { __status: 400, __body: failure }
+  // Per-(params) dispatch: { attendance_day_badges: { __byParams: {
+  // '2026-10-07|present': [...] } } }. Key defaults to p_date|p_mode,
+  // overridable via __byParamsKey: [...]. Miss falls through to the
+  // generic seed / default below. Sits after per-badge so targeted
+  // failures still win; before the generic object seed.
+  const byParams = seed && typeof seed === 'object' ? seed.__byParams : null
+  if (byParams && typeof byParams === 'object' && params && typeof params === 'object') {
+    const keys = Array.isArray(seed.__byParamsKey) && seed.__byParamsKey.length > 0
+      ? seed.__byParamsKey
+      : ['p_date', 'p_mode']
+    const hit = byParams[keys.map((k) => params?.[k] ?? '').join('|')]
+    if (hit !== undefined) {
+      if (typeof hit === 'string') return { __status: 200, __body: hit }
+      if (hit && typeof hit === 'object' && typeof hit.__status === 'number') {
+        return { __status: hit.__status, __body: hit.__body ?? null }
+      }
+      return { __status: 200, __body: hit }
+    }
+  }
+  // A bare-string seed is the success body directly (e.g. version 'v74').
+  if (typeof seed === 'string') return { __status: 200, __body: seed }
   // A seed object is the success body — unless it carries __status/__body,
   // which simulate an exact server failure (poison rows, stale open_ids).
-  // A seed holding ONLY *_error_for control keys falls through to the
+  // A seed holding ONLY control keys falls through to the
   // default behaviour below so unlisted badges still succeed.
   const onlyControl = seed && typeof seed === 'object'
     && Object.keys(seed).length > 0
-    && Object.keys(seed).every((k) => k.endsWith('_error_for'))
+    && Object.keys(seed).every((k) => k.endsWith('_error_for') || k === '__byParams' || k === '__byParamsKey')
   if (seed && typeof seed === 'object' && !onlyControl) {
     if (typeof seed.__status === 'number') return { __status: seed.__status, __body: seed.__body ?? null }
     return { __status: 200, __body: seed }
@@ -148,6 +177,10 @@ function rpcResult(name, params) {
           dept_name: 'MEDICAL',
         },
       }
+    // Version handshake: the rig pretends to be current (silent banner)
+    // unless a spec seeds another version. Seeds still win (handled above).
+    case 'portal_app_version':
+      return { __status: 200, __body: 'v74' }
     default:
       return { __status: 200, __body: null }
   }
@@ -168,6 +201,7 @@ const server = http.createServer(async (req, res) => {
     state.calls = []
     state.seed = {}
     state.profileOverride = null
+    state.scheduleOverride = null
     json(res, 200, { ok: true })
     return
   }
@@ -181,6 +215,12 @@ const server = http.createServer(async (req, res) => {
     // USER/session identity is untouched, so the queue owner still matches.
     if (body?.profile && typeof body.profile === 'object') {
       state.profileOverride = body.profile
+    }
+    // Schedule override: per-spec visit window (cutover specs need windows
+    // relative to the real today). Merged over schedules[0] on read;
+    // cleared by /__test/reset like everything else.
+    if (body?.schedule && typeof body.schedule === 'object') {
+      state.scheduleOverride = body.schedule
     }
     json(res, 200, { ok: true })
     return
@@ -223,7 +263,10 @@ const server = http.createServer(async (req, res) => {
   // ── REST tables ──
   const restMatch = pathname.match(/^\/rest\/v1\/([A-Za-z0-9_]+)$/)
   if (restMatch && req.method === 'GET') {
-    const rows = TABLES[restMatch[1]] ?? []
+    let rows = TABLES[restMatch[1]] ?? []
+    if (restMatch[1] === 'deployment_schedules' && state.scheduleOverride) {
+      rows = rows.map((r, i) => (i === 0 ? { ...r, ...state.scheduleOverride } : r))
+    }
     void searchParams
     json(res, 200, rows, { 'content-range': `*/${rows.length}` })
     return

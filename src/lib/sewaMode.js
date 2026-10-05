@@ -85,17 +85,52 @@ export function expandDateRange(start, end, maxDays = 31) {
  * Which sewa a date belongs to for a window. No usable window (or no
  * readable today) ⇒ previsit — the mode fails toward the previsit view,
  * matching is_visit_date's NULL-window ⇒ FALSE.
+ *
+ * Product cutover: previsit is only available strictly before the day
+ * before the visit starts. From visit_start − PREVISIT_LEAD_DAYS onward
+ * (including after visit_end) the view stays on Bhati Visit.
  * @param {string} start 'YYYY-MM-DD'
  * @param {string} end 'YYYY-MM-DD'
  * @param {string} today 'YYYY-MM-DD' (caller's "today", IST)
  * @returns {'visit'|'previsit'}
  */
+export const PREVISIT_LEAD_DAYS = 1
+
+/**
+ * The last calendar date on which the previsit view may be used.
+ * @param {string} start visit_start_date 'YYYY-MM-DD'
+ * @returns {string} 'YYYY-MM-DD' or '' when start is unusable
+ */
+export function previsitCutoff(start) {
+  const s = toISODate(start)
+  if (!s) return ''
+  const d = new Date(`${s}T00:00:00Z`)
+  if (Number.isNaN(d.getTime())) return ''
+  return new Date(d.getTime() - 86400000).toISOString().slice(0, 10)
+}
+
+/**
+ * Whether the previsit view may be used at all on a date. True only
+ * strictly before the cutoff day (visit_start − PREVISIT_LEAD_DAYS).
+ * @param {string} start visit_start_date 'YYYY-MM-DD'
+ * @param {string} today 'YYYY-MM-DD' (caller's "today", IST)
+ * @returns {boolean}
+ */
+export function isPrevisitAvailable(start, today) {
+  const cutoff = previsitCutoff(start)
+  const t = toISODate(today)
+  if (!cutoff || !t) return false
+  return t < cutoff
+}
+
 export function resolveSewaMode(start, end, today) {
   const s = toISODate(start)
   const e = toISODate(end)
   const t = toISODate(today)
   if (!s || !e || e < s || !t) return SEWA_MODE_PREVISIT
-  if (t < s || t > e) return SEWA_MODE_PREVISIT
+  const cutoff = previsitCutoff(s)
+  if (!cutoff) return SEWA_MODE_PREVISIT
+  if (t < cutoff) return SEWA_MODE_PREVISIT
   return SEWA_MODE_VISIT
 }
 
