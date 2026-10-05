@@ -110,3 +110,29 @@ export async function exportWorkbook(filename, sheets, opts = {}) {
   saveBlob(blob, filename)
   return written
 }
+
+/**
+ * Read the first sheet of an uploaded .xlsx file into normalised row objects.
+ * Header keys are lowercased, trimmed, and have non-alphanumeric runs replaced
+ * with underscores so downstream code can rely on stable field names.
+ *
+ * Returns an array of plain objects (one per data row). Empty cells get ''.
+ * Throws if the file cannot be parsed or has no sheets.
+ */
+export async function readWorkbookRows(file) {
+  const XLSX = await loadXlsx()
+  const buf = await file.arrayBuffer()
+  const wb = XLSX.read(buf, { type: 'array' })
+  const firstSheetName = wb.SheetNames[0]
+  if (!firstSheetName) throw new Error('Workbook has no sheets')
+  const ws = wb.Sheets[firstSheetName]
+  const raw = XLSX.utils.sheet_to_json(ws, { defval: '' })
+  return raw.map((row) => {
+    const normalised = {}
+    for (const [key, val] of Object.entries(row)) {
+      const norm = String(key).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+      normalised[norm] = val
+    }
+    return normalised
+  })
+}
