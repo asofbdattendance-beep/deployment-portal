@@ -18,7 +18,7 @@ import { Download, Upload, FileSpreadsheet, CheckCircle2, XCircle, AlertTriangle
  */
 
 // Template column order — the only columns the import reads.
-export const TEMPLATE_HEADERS = ['email', 'badge', 'password', 'name', 'role', 'centre']
+export const TEMPLATE_HEADERS = ['email', 'badge', 'password', 'name', 'role', 'centre', 'location']
 
 // One example row shipped in the template. The password is a placeholder the
 // user replaces — it is written to the file, never logged.
@@ -29,6 +29,7 @@ export const TEMPLATE_EXAMPLE_ROW = {
   name: 'Example Sewadar',
   role: 'centre_user',
   centre: 'Bhati',
+  location: 'Bhati Gate 2',
 }
 
 const EMAIL_RE = /^\S+@\S+\.\S+$/
@@ -36,7 +37,8 @@ const EMAIL_RE = /^\S+@\S+\.\S+$/
 /**
  * Parse raw sheet rows (from readWorkbookRows) into valid user objects.
  * Reuses passwordErrors from userAdmin so the min-6 rule stays in sync.
- * Returns { valid, errors }; valid rows carry all six template columns.
+ * Returns { valid, errors }; valid rows carry all seven template columns
+ * (location is optional free text — no validation beyond trimming).
  * Errors are { row, message } with row = 1-indexed spreadsheet row (header = 1).
  */
 export function parseImportRows(rows) {
@@ -50,6 +52,7 @@ export function parseImportRows(rows) {
     const badge = String(row.badge || '').trim()
     const centre = String(row.centre || '').trim()
     const password = String(row.password || '').trim()
+    const location = String(row.location || '').trim()
 
     if (!name) {
       errors.push({ row: rowNum, message: 'Missing name' })
@@ -76,7 +79,7 @@ export function parseImportRows(rows) {
       errors.push({ row: rowNum, message: pwErrs[0] })
       return
     }
-    valid.push({ name, email, role, badge, centre, password })
+    valid.push({ name, email, role, badge, centre, password, location })
   })
   return { valid, errors }
 }
@@ -254,7 +257,7 @@ export default function UserImportDialog({ open, onClose, onBulkCreate, busy }) 
               <div style={{ maxHeight: 240, overflow: 'auto', border: '1px solid var(--border)', borderRadius: 10 }}>
                 <table className="table" style={{ width: '100%', fontSize: '0.8rem' }}>
                   <thead>
-                    <tr>{['Name', 'Email', 'Role', 'Badge', 'Centre'].map((h) => <th key={h}>{h}</th>)}</tr>
+                    <tr>{['Name', 'Email', 'Role', 'Badge', 'Centre', 'Location'].map((h) => <th key={h}>{h}</th>)}</tr>
                   </thead>
                   <tbody>
                     {parse.valid.map((r, i) => (
@@ -264,6 +267,7 @@ export default function UserImportDialog({ open, onClose, onBulkCreate, busy }) 
                         <td>{r.role}</td>
                         <td>{r.badge || '—'}</td>
                         <td>{r.centre || '—'}</td>
+                        <td>{r.location || '—'}</td>
                       </tr>
                     ))}
                   </tbody>

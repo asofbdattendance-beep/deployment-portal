@@ -24,6 +24,7 @@ export type PortalRow = {
   custom_role_id?: string | null
   created_at?: string | null
   archived_at?: string | null
+  location?: string | null
 }
 
 export type OverlapPlan =

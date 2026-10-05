@@ -29,7 +29,7 @@ Soft-audit for destructive actions: schedule/`centre_allocation`/department dele
 
 - `sewadars` — centre scope, badge_number, sewadar_name, is_initiated, badge_status (ELDERLY excluded)
 - `centres` — `name`, `parent_centre` (empty = parent centre); used to resolve parent/child subtree for shared quotas
-- `portal_users` — auth, centre, role, `is_active`, `archived_at`/`archived_by` (v69), `force_logout_at` (v70)
+- `portal_users` — auth, centre, role, `is_active`, `archived_at`/`archived_by` (v69), `force_logout_at` (v70), `location` free text (v71, display-only)
 
 ## Key Rules & Helpers
 

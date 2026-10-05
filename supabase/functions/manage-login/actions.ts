@@ -294,6 +294,7 @@ async function bulkCreateOne(ctx: Ctx, raw: unknown): Promise<ActionResult> {
   const role = String(r?.role || '')
   const centre = String(r?.centre || '').trim() || null
   const badge = String(r?.badge_number || '').trim() || null
+  const location = String((r as any)?.location || '').trim() || null
   if (!name) return { ...base, status: 'error', error: 'Enter the person’s name' }
   if (!ROLES.includes(role)) return { ...base, status: 'error', error: 'Pick a valid role' }
   if (CENTRE_ROLES.includes(role) && !centre) return { ...base, status: 'error', error: 'Pick a centre for this role' }
@@ -333,6 +334,7 @@ async function bulkCreateOne(ctx: Ctx, raw: unknown): Promise<ActionResult> {
     role,
     centre,
     badge_number: badge,
+    location,
     is_active: true,
   })
   if (rowErr) {

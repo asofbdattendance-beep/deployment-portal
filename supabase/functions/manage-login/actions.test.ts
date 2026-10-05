@@ -394,6 +394,24 @@ describe('actionBulkCreate', () => {
     expect(ctx.portalRows[0].is_active).toBe(true)
   })
 
+  it('stores the optional free-text location on the portal row', async () => {
+    const ctx = makeCtx()
+    const res = await actionBulkCreate(ctx, {
+      users: [{ email: 'gate@b.c', name: 'Gate Scanner', role: 'scanner', badge_number: 'SC9', location: 'Bhati Gate 2' }],
+    })
+    expect(res.created).toBe(1)
+    expect(ctx.portalRows[0].location).toBe('Bhati Gate 2')
+  })
+
+  it('stores null location when none is provided', async () => {
+    const ctx = makeCtx()
+    const res = await actionBulkCreate(ctx, {
+      users: [{ email: 'plain@b.c', name: 'Plain', role: 'centre_user', centre: 'MAIN' }],
+    })
+    expect(res.created).toBe(1)
+    expect(ctx.portalRows[0].location).toBeNull()
+  })
+
   it('generates a one-time tempPassword when none is provided', async () => {
     const ctx = makeCtx()
     const res = await actionBulkCreate(ctx, {

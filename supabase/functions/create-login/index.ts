@@ -107,6 +107,7 @@ async function handler(req) {
     const role = String(body.role || '')
     const centre = role === 'dept_incharge' ? null : (String(body.centre || '').trim() || null)
     const badge = String(body.badge_number || '').trim() || null
+    const location = String(body.location || '').trim() || null
     const customId = body.custom_role_id || null
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: 'Enter a valid email address' }, 400)
     if (!name) return json({ error: 'Enter the person’s name' }, 400)
@@ -131,7 +132,7 @@ async function handler(req) {
       if (!deptSchedule) return json({ error: 'Pick the schedule this department applies to' }, 400)
       if (deptIds.length === 0) return json({ error: 'Pick at least one department for this role' }, 400)
     }
-    const ROW_COLS = 'id, email, badge_number, auth_id, is_active, name, role, centre, custom_role_id, created_at, archived_at'
+    const ROW_COLS = 'id, email, badge_number, auth_id, is_active, name, role, centre, custom_role_id, created_at, archived_at, location'
     const [emailRows, badgeRows] = await Promise.all([
       admin.from('portal_users').select(ROW_COLS).ilike('email', email).order('created_at', { ascending: true }),
       badge
@@ -201,6 +202,7 @@ async function handler(req) {
       custom_role_id: customId,
       centre,
       badge_number: badge,
+      location,
       is_active: true,
     }
     // A failed step restores the PREVIOUS row state on resume (never deletes
@@ -212,6 +214,7 @@ async function handler(req) {
           auth_id: resumeRow.auth_id, email: resumeRow.email, name: resumeRow.name,
           role: resumeRow.role, custom_role_id: resumeRow.custom_role_id,
           centre: resumeRow.centre, badge_number: resumeRow.badge_number,
+          location: (resumeRow as Record<string, unknown>).location ?? null,
           is_active: resumeRow.is_active,
         }).eq('id', resumeRow.id).catch(() => {})
       } else {

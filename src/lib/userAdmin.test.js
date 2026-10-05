@@ -47,6 +47,10 @@ describe('userPhaseGroup', () => {
     expect(userPhaseGroup('dept_incharge')).toBe('attendance')
   })
 
+  it('returns "deployment" for centre_admin (deployment-side, not scanning)', () => {
+    expect(userPhaseGroup('centre_admin')).toBe('deployment')
+  })
+
   it('returns "both" for unknown roles (fallback)', () => {
     expect(userPhaseGroup('nonexistent')).toBe('both')
   })
@@ -138,6 +142,15 @@ describe('usersToSheetRows', () => {
 
   it('handles empty array', () => {
     expect(usersToSheetRows([])).toEqual([])
+  })
+
+  it('carries the optional location through to the sheet row', () => {
+    const rows = usersToSheetRows([
+      { name: 'S', email: 's@x.com', role: 'scanner', badge_number: 'FB9', is_active: true, location: 'Bhati Gate 2' },
+      { name: 'T', email: 't@x.com', role: 'scanner', badge_number: 'FB10', is_active: true },
+    ])
+    expect(rows[0].location).toBe('Bhati Gate 2')
+    expect(rows[1].location).toBe('')
   })
 
   it('handles nullish input', () => {

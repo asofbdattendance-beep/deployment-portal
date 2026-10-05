@@ -180,7 +180,7 @@ export default function UsersPage() {
   const [badgeHits, setBadgeHits] = useState([])
   const [badgeSearching, setBadgeSearching] = useState(false)
   const [picked, setPicked] = useState(null) // { badge_number, sewadar_name, centre, is_vss }
-  const [directForm, setDirectForm] = useState({ email: '', role: 'centre_user', customId: '', password: '', showPw: false, deptSchedule: '', deptIds: [] })
+  const [directForm, setDirectForm] = useState({ email: '', role: 'centre_user', customId: '', password: '', showPw: false, deptSchedule: '', deptIds: [], location: '' })
   const [directBusy, setDirectBusy] = useState(false)
   const [createdCred, setCreatedCred] = useState(null) // { email, tempPassword } — shown once
 
@@ -402,6 +402,7 @@ export default function UsersPage() {
       customId: u.custom_role_id || '',
       centre: u.centre || '',
       badge,
+      location: u.location || '',
       deptSchedule: u.role === 'dept_incharge' ? (assignments.find(a => a.badge_number === badge)?.schedule_id || schedules[0]?.id || '') : '',
       deptIds: seeded,
     })
@@ -453,8 +454,17 @@ export default function UsersPage() {
         custom_role_id: custom ? custom.id : null,
         centre: editForm.role === 'dept_incharge' ? null : (editForm.centre.trim() || null),
         badge_number: editForm.badge.trim() || null,
+        location: editForm.location.trim() || null,
       }
-      const { error } = await supabase.from('portal_users').update(payload).eq('id', editUser.id)
+      // v71 tolerance: location may not exist server-side until the migration
+      // is applied. Retry without it rather than failing the whole save.
+      let { error } = await supabase.from('portal_users').update(payload).eq('id', editUser.id)
+      if (error && /location/i.test(error.message)) {
+        const { location: _dropped, ...withoutLocation } = payload
+        const retry = await supabase.from('portal_users').update(withoutLocation).eq('id', editUser.id)
+        error = retry.error
+        if (!error) toast.info('Saved — apply sql/v71_portal_user_location.sql to keep the location field')
+      }
       if (error) { toast.error(error.message); return }
       // v51: replace the department grant for this badge + schedule. A role
       // change away from dept_incharge clears the grant entirely, otherwise a
@@ -874,6 +884,7 @@ export default function UsersPage() {
           custom_role_id: custom ? custom.id : null,
           centre: INVITE_CENTRE_ROLES.includes(directForm.role) ? picked.centre : null,
           badge_number: picked.badge_number,
+          location: directForm.location.trim() || null,
           password,
           // v51: the department grant, applied by the function in one
           // privileged transaction. The OLD deployed function ignores these two
@@ -939,7 +950,7 @@ export default function UsersPage() {
         toast.success(`Login created for ${picked.sewadar_name} — they can sign in now`)
       }
       clearPicked()
-      setDirectForm({ email: '', role: 'centre_user', customId: '', password: '', showPw: false, deptSchedule: '', deptIds: [] })
+      setDirectForm({ email: '', role: 'centre_user', customId: '', password: '', showPw: false, deptSchedule: '', deptIds: [], location: '' })
       load().catch(() => {})
     } catch (e) {
       toast.error(e?.message || 'Could not create login')
@@ -1311,6 +1322,7 @@ export default function UsersPage() {
               <button onClick={() => setDirectForm(f => ({ ...f, password: genPassword(), showPw: true }))} className="btn btn-ghost" style={smallBtn} title="Generate a strong password">Generate</button>
             </div>
           </div>
+          <div><label style={labelStyle}>Location (optional)</label><input value={directForm.location} onChange={e => setDirectForm(f => ({ ...f, location: e.target.value }))} placeholder="e.g. Bhati Gate 2" autoComplete="off" style={inputStyle} /></div>
         </div>
         <div style={{ marginTop: '0.75rem' }}>
           <button onClick={createLoginDirect} disabled={directBusy} className="btn btn-primary"><UserPlus size={14} /> {directBusy ? 'Creating…' : 'Create login'}</button>
@@ -1550,6 +1562,7 @@ export default function UsersPage() {
                 </div>
                 <div><label style={labelStyle}>Badge</label><input value={editForm.badge} onChange={e => setEditForm(f => ({ ...f, badge: e.target.value, deptIds: [] }))} style={{ ...inputStyle, fontFamily: 'monospace' }} /></div>
               </div>
+              <div><label style={labelStyle}>Location (optional)</label><input value={editForm.location} onChange={e => setEditForm(f => ({ ...f, location: e.target.value }))} placeholder="e.g. Bhati Gate 2" autoComplete="off" style={inputStyle} /></div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '0.7rem' }}>
                 <DeptAssignFields
                   role={editForm.role} schedules={schedules} departments={departments}
@@ -1591,6 +1604,7 @@ export default function UsersPage() {
         auditRows={drawerAudit}
         onSetPassword={drawerSetPassword}
         onSignOutAll={drawerSignOutAll}
+        onEdit={(u) => { setDrawerUser(null); openEdit(u) }}
         onSuspend={drawerSuspend}
         onArchive={drawerArchive}
         onRestore={drawerRestore}

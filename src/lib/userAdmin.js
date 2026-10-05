@@ -26,9 +26,12 @@ export function passwordErrors(password) {
 /**
  * Maps a role to its phase group label: 'deployment', 'attendance', or 'both'.
  * Uses phasesForRole from lib/phase so the mapping stays in sync with the
- * page registry.
+ * page registry — with one deliberate override: centre_admin resolves to
+ * 'deployment'. Centre admins work the deployment (consent/deploy) side, not
+ * scanning, even though the shared attendance screen lists their role.
  */
 export function userPhaseGroup(role) {
+  if (role === 'centre_admin') return 'deployment'
   const phases = phasesForRole(role)
   if (phases.length === 0) return 'both'
   if (phases.includes(1) && phases.includes(2)) return 'both'
@@ -93,6 +96,7 @@ export function usersToSheetRows(users) {
     role: u.role || '',
     centre: u.centre || '',
     badge_number: u.badge_number || '',
+    location: u.location || '',
     status: statusOf(u),
     phase_group: userPhaseGroup(u.role),
     is_active: u.is_active,

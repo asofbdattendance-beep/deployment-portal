@@ -40,14 +40,22 @@ afterEach(() => { cleanup() })
 // ── parseImportRows (pure) ───────────────────────────────────────────────
 
 describe('parseImportRows', () => {
-  it('accepts a full valid row carrying all six template columns', () => {
+  it('accepts a full valid row carrying all seven template columns', () => {
     const { valid, errors } = parseImportRows([
-      { name: 'A', email: 'a@x.com', role: 'centre_user', badge: 'FB1', centre: 'Bhati', password: 'secret1' },
+      { name: 'A', email: 'a@x.com', role: 'centre_user', badge: 'FB1', centre: 'Bhati', password: 'secret1', location: 'Bhati Gate 2' },
     ])
     expect(errors).toHaveLength(0)
     expect(valid).toEqual([
-      { name: 'A', email: 'a@x.com', role: 'centre_user', badge: 'FB1', centre: 'Bhati', password: 'secret1' },
+      { name: 'A', email: 'a@x.com', role: 'centre_user', badge: 'FB1', centre: 'Bhati', password: 'secret1', location: 'Bhati Gate 2' },
     ])
+  })
+
+  it('treats location as optional — missing location still validates', () => {
+    const { valid, errors } = parseImportRows([
+      { name: 'A', email: 'a@x.com', role: 'scanner', badge: 'FB1', centre: '', password: 'secret1' },
+    ])
+    expect(errors).toHaveLength(0)
+    expect(valid[0].location).toBe('')
   })
 
   it('rejects missing name, email and role with 1-indexed spreadsheet rows', () => {
@@ -91,7 +99,7 @@ describe('parseImportRows', () => {
 
 describe('template', () => {
   it('declares the exact headers in order', () => {
-    expect(TEMPLATE_HEADERS).toEqual(['email', 'badge', 'password', 'name', 'role', 'centre'])
+    expect(TEMPLATE_HEADERS).toEqual(['email', 'badge', 'password', 'name', 'role', 'centre', 'location'])
   })
 
   it('ships one fully-populated example row', () => {
@@ -169,7 +177,7 @@ describe('UserImportDialog flow', () => {
     fireEvent.click(screen.getByText('Import 1 user'))
     await waitFor(() => expect(onBulkCreate).toHaveBeenCalled())
     expect(onBulkCreate).toHaveBeenCalledWith([
-      { name: 'A', email: 'a@x.com', role: 'centre_user', badge: '', centre: '', password: 'secret1' },
+      { name: 'A', email: 'a@x.com', role: 'centre_user', badge: '', centre: '', password: 'secret1', location: '' },
     ])
   })
 

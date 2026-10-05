@@ -226,4 +226,28 @@ describe('UserDetailDrawer', () => {
     expect(screen.queryByRole('button', { name: /set password/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /delete/i })).toBeNull()
   })
+
+  it('calls onEdit when Edit / Change Role is clicked', () => {
+    const onEdit = vi.fn()
+    render(<UserDetailDrawer {...defaultProps} onEdit={onEdit} />)
+    fireEvent.click(screen.getByRole('button', { name: /edit \/ change role/i }))
+    expect(onEdit).toHaveBeenCalledWith(baseUser)
+  })
+
+  it('hides the Edit button when onEdit is not provided', () => {
+    const { onEdit: _dropped, ...withoutEdit } = defaultProps
+    render(<UserDetailDrawer {...withoutEdit} />)
+    expect(screen.queryByRole('button', { name: /edit \/ change role/i })).toBeNull()
+  })
+
+  it('shows the location when the user has one', () => {
+    render(<UserDetailDrawer {...defaultProps} user={{ ...baseUser, location: 'Bhati Gate 2' }} />)
+    expect(screen.getByText('Location')).toBeTruthy()
+    expect(screen.getByText('Bhati Gate 2')).toBeTruthy()
+  })
+
+  it('hides the location row when the user has none', () => {
+    render(<UserDetailDrawer {...defaultProps} />)
+    expect(screen.queryByText('Location')).toBeNull()
+  })
 })

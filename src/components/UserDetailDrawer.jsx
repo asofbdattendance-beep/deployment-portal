@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { X, KeyRound, LogOut, Ban, Archive, RotateCcw, Trash2, ShieldCheck } from 'lucide-react'
+import { X, KeyRound, LogOut, Pencil, Ban, Archive, RotateCcw, Trash2, ShieldCheck } from 'lucide-react'
 import { userPhaseGroup, statusOf } from '../lib/userAdmin'
 import { ROLE_LABELS } from '../lib/supabase'
 
@@ -20,6 +20,7 @@ import { ROLE_LABELS } from '../lib/supabase'
  * @param {Array<{id:string, action:string, created_at:string, detail?:string}>} [props.auditRows]
  * @param {(user:object) => void} [props.onSetPassword]
  * @param {(user:object) => void} [props.onSignOutAll]
+ * @param {(user:object) => void} [props.onEdit] — open the Edit dialog (role, centre, badge, location)
  * @param {(user:object) => void} [props.onSuspend]
  * @param {(user:object) => void} [props.onArchive]
  * @param {(user:object) => void} [props.onRestore]
@@ -35,6 +36,7 @@ export default function UserDetailDrawer({
   auditRows = [],
   onSetPassword,
   onSignOutAll,
+  onEdit,
   onSuspend,
   onArchive,
   onRestore,
@@ -124,6 +126,12 @@ export default function UserDetailDrawer({
               <dd className="mono">{user.badge_number || '—'}</dd>
               <dt>Centre</dt>
               <dd>{user.centre || '—'}</dd>
+              {user.location && (
+                <>
+                  <dt>Location</dt>
+                  <dd>{user.location}</dd>
+                </>
+              )}
               {user.sewadar_name && (
                 <>
                   <dt>Sewadar</dt>
@@ -231,6 +239,18 @@ export default function UserDetailDrawer({
           <section aria-label="Admin actions">
             <div className="drawer-section-title">Admin Actions</div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
+              {onEdit && (
+                <button
+                  type="button"
+                  className={actionBtn}
+                  style={actionStyle}
+                  disabled={busy}
+                  onClick={() => onEdit(user)}
+                >
+                  <Pencil size={13} style={{ marginRight: 4, verticalAlign: '-2px' }} />
+                  Edit / Change Role
+                </button>
+              )}
               {onSetPassword && (
                 <button
                   type="button"

@@ -261,6 +261,25 @@ describe('UsersPage — direct provisioning', () => {
     await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith(expect.stringMatching(/Login created/i)))
   })
 
+  it('sends the optional location on the create-login body', async () => {
+    invokeMock.mockResolvedValue({ data: { ok: true, user_id: 'u9' }, error: null })
+    await renderPage()
+    fireEvent.change(screen.getByLabelText('Search sewadar by badge number or name'), { target: { value: 'FB5971' } })
+    await waitFor(() => expect(within(screen.getByRole('listbox')).getByRole('option')).toBeTruthy())
+    fireEvent.click(within(screen.getByRole('listbox')).getByRole('option'))
+    fireEvent.change(screen.getByPlaceholderText('login@example.com'), { target: { value: 'newram@example.com' } })
+    fireEvent.change(screen.getByPlaceholderText('Set a password'), { target: { value: 'ram-pass-1' } })
+    fireEvent.change(screen.getByPlaceholderText('e.g. Bhati Gate 2'), { target: { value: 'Bhati Gate 2' } })
+    fireEvent.click(screen.getByRole('button', { name: /Create login/i }))
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
+      'create-login',
+      expect.objectContaining({ body: expect.objectContaining({
+        email: 'newram@example.com',
+        location: 'Bhati Gate 2',
+      }) })
+    ))
+  })
+
   // ── v51: a dept_incharge is created WITH its department grant ──────────
   const deptInchargeCreate = async () => {
     await renderPage()
@@ -423,6 +442,16 @@ describe('UsersPage — phase group filter', () => {
     await waitFor(() => expect(screen.getByText('Ram Centre')).toBeTruthy())
     expect(screen.queryByText('Old Scanner')).toBeNull()
   })
+
+  it('groups centre_admin under Deployment, never Both (deployment-side, not scanning)', async () => {
+    usersFixture = [...USERS, { id: 'u3', auth_id: 'a3', name: 'Anil Admin', email: 'anil@example.com', role: 'centre_admin', custom_role_id: null, centre: 'DELHI', badge_number: null, is_active: true, created_at: '2026-07-01T00:00:00Z' }]
+    await renderPage()
+    expect(screen.getByText('Deployment (1)')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Deployment' }))
+    await waitFor(() => expect(screen.getByText('Anil Admin')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Both' }))
+    await waitFor(() => expect(screen.queryByText('Anil Admin')).toBeNull())
+  })
 })
 
 describe('UsersPage — archived status', () => {
@@ -566,6 +595,17 @@ describe('UsersPage — drawer lifecycle (archive / restore / delete)', () => {
     fireEvent.click(within(drawer).getByRole('button', { name: 'Archive' }))
     await waitFor(() => expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/cannot be archived/)))
     expect(screen.queryByRole('dialog', { name: /Archive/ })).toBeNull()
+  })
+
+  it('opens the role-changing Edit dialog from the drawer Edit button', async () => {
+    await renderPage()
+    const drawer = await openDrawerFor('Ram Centre')
+    fireEvent.click(within(drawer).getByRole('button', { name: /Edit \/ Change Role/ }))
+    // drawer closes, Edit modal opens with role + location fields
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /User details/ })).toBeNull())
+    const editModal = screen.getByText('Edit login').closest('.modal')
+    expect(within(editModal).getByText('Role (permissions)')).toBeTruthy()
+    expect(within(editModal).getByText('Location (optional)')).toBeTruthy()
   })
 })
 
