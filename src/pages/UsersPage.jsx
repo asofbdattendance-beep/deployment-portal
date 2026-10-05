@@ -1,14 +1,19 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, Fragment } from 'react'
 import { supabase, fetchAllRows, fetchCentres, ROLE_LABELS, ROLE_COLORS } from '../lib/supabase'
 import { invitationErrors, INVITE_ROLES, INVITE_CENTRE_ROLES } from '../lib/logic'
 import { PAGES } from '../lib/pages'
+import { passwordErrors, userPhaseGroup, statusOf, canDeleteUser, canArchiveUser, usersToSheetRows } from '../lib/userAdmin'
+import { useManageLogin } from '../hooks/useManageLogin'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import PageHeader from '../components/PageHeader'
 import KpiTile from '../components/KpiTile'
 import EmptyState from '../components/EmptyState'
 import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
-import { Users, UserPlus, Search, Pencil, Ban, CheckCircle2, Copy, Trash2, KeyRound, Tag, RefreshCw, X, ShieldCheck, Eye, EyeOff } from 'lucide-react'
+import UserDetailDrawer from '../components/UserDetailDrawer'
+import UserImportDialog from '../components/UserImportDialog'
+import ExportButton from '../components/ExportButton'
+import { Users, UserPlus, Search, Pencil, Ban, CheckCircle2, Copy, Trash2, KeyRound, Tag, RefreshCw, X, ShieldCheck, Eye, EyeOff, Upload, Archive, RotateCcw, Mail } from 'lucide-react'
 
 // ─── Users (v48, super_admin only) ───────────────────────────────────
 // Logins, invites and custom roles. Security model, read before touching:
@@ -25,6 +30,12 @@ import { Users, UserPlus, Search, Pencil, Ban, CheckCircle2, Copy, Trash2, KeyRo
 const SYSTEM_ROLES = ['centre_user', 'centre_admin', 'aso', 'super_admin', 'dept_incharge', 'scanner', 'vss_operator']
 const CENTRE_ROLES = ['centre_user', 'centre_admin']
 const BADGE_ROLES = ['dept_incharge', 'scanner']
+
+// Phase-group filter chips (labels match the drawer's phase pills). The group
+// itself comes from userPhaseGroup so the chips can never drift from the page
+// registry.
+const PHASE_CHIPS = [['all', 'All'], ['deployment', 'Deployment'], ['attendance', 'Attendance'], ['both', 'Both']]
+const PHASE_GROUP_LABELS = { deployment: 'Deployment', attendance: 'Attendance', both: 'Deployment + Attendance' }
 
 function roleLabel(role) {
   if (role === 'super_admin') return 'ASO · admin'
@@ -143,6 +154,17 @@ export default function UsersPage() {
   const [q, setQ] = useState('')
   const [roleFilter, setRoleFilter] = useState('all')
   const [statusFilter, setStatusFilter] = useState('all')
+  const [phaseFilter, setPhaseFilter] = useState('all')
+  // v69 lifecycle: bulk selection (user ids), the open detail drawer, the
+  // bulk-import dialog and the drawer's set-password modal.
+  const [selected, setSelected] = useState(() => new Set())
+  const [drawerUser, setDrawerUser] = useState(null)
+  const [drawerMeta, setDrawerMeta] = useState({})
+  const [drawerAudit, setDrawerAudit] = useState([])
+  const [importOpen, setImportOpen] = useState(false)
+  const [pwUser, setPwUser] = useState(null)
+  const [pwForm, setPwForm] = useState({ password: '', showPw: false })
+  const manage = useManageLogin()
 
   const [editUser, setEditUser] = useState(null)
   const [editForm, setEditForm] = useState(null)
@@ -252,7 +274,10 @@ export default function UsersPage() {
         fetchAllRows('deployment_departments', 'id, name', null, 'name').catch(() => []),
         fetchAllRows('department_incharge_assignments', '*', null, 'id').catch(() => []),
       ])
-      setUsers(u || [])
+      // v69: the DB stamps archived_at/archived_by; statusOf() reads the
+      // is_archived flag. Normalize once on load so every helper (statusOf,
+      // usersToSheetRows) sees the same shape the rest of the app already has.
+      setUsers((u || []).map(x => ({ ...x, is_archived: !!x.archived_at })))
       setCustomRoles(r || [])
       setInvites((inv || []).slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at)))
       setCentres((c || []).map(x => x.name || x).filter(Boolean).sort())
@@ -330,21 +355,37 @@ export default function UsersPage() {
   }, [profile?.auth_id, profile?.email])
 
   const stats = useMemo(() => {
-    const active = users.filter(u => u.is_active !== false).length
+    const active = users.filter(u => statusOf(u) === 'active').length
+    const suspended = users.filter(u => statusOf(u) === 'suspended').length
     const now = Date.now()
     const pending = invites.filter(i => !i.claimed_at && new Date(i.expires_at).getTime() > now).length
-    return { active, suspended: users.length - active, pending, roles: customRoles.length }
+    return { active, suspended, pending, roles: customRoles.length }
   }, [users, invites, customRoles])
 
   const filteredUsers = useMemo(() => {
     const term = q.trim().toLowerCase()
     return users
       .filter(u => roleFilter === 'all' || u.role === roleFilter)
-      .filter(u => statusFilter === 'all' || (statusFilter === 'active' ? u.is_active !== false : u.is_active === false))
+      // statusOf: archived wins over suspended, so an archived login never
+      // leaks into the "suspended" filter.
+      .filter(u => statusFilter === 'all' || statusOf(u) === statusFilter)
+      .filter(u => phaseFilter === 'all' || userPhaseGroup(u.role) === phaseFilter)
       .filter(u => !term || [u.name, u.email, u.badge_number, u.centre, roleName(u)].some(v => String(v || '').toLowerCase().includes(term)))
       .slice()
       .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
-  }, [users, q, roleFilter, statusFilter, roleName])
+  }, [users, q, roleFilter, statusFilter, phaseFilter, roleName])
+
+  // Group the filtered rows by phase group for the section headers. Order is
+  // fixed (deployment → attendance → both) so the table reads the same way
+  // every render.
+  const groupedUsers = useMemo(() => {
+    const groups = []
+    for (const key of ['deployment', 'attendance', 'both']) {
+      const rows = filteredUsers.filter(u => userPhaseGroup(u.role) === key)
+      if (rows.length) groups.push({ key, label: PHASE_GROUP_LABELS[key], rows })
+    }
+    return groups
+  }, [filteredUsers])
 
   const openEdit = (u) => {
     setEditUser(u)
@@ -471,6 +512,232 @@ export default function UsersPage() {
     load().catch(() => {})
   }
 
+  // ── v69 lifecycle: archive / restore / delete ────────────────────────────
+  // Archive is the reversible off-switch (archived_at stamp, login locked out,
+  // restorable). Delete is permanent — it removes the auth login via the
+  // manage-login function and the portal row cascades.
+  const isLastActiveSuper = (u) => u.role === 'super_admin' && u.is_active !== false && activeSupers.length <= 1
+  const canArchive = (u) => !isSelf(u) && canArchiveUser(u, profile) && !isLastActiveSuper(u)
+  const canDelete = (u) => !isSelf(u) && canDeleteUser(u, profile) && !isLastActiveSuper(u)
+
+  const doArchiveRestore = async (u, archive) => {
+    setConfirm(null)
+    const patch = archive
+      ? { archived_at: new Date().toISOString(), archived_by: profile?.name || null, is_active: false }
+      : { archived_at: null, archived_by: null, is_active: true }
+    const { error } = await supabase.from('portal_users').update(patch).eq('id', u.id)
+    if (error) { toast.error(error.message); return }
+    await audit(archive ? 'ARCHIVE_USER' : 'RESTORE_USER', 'portal_users', u.id, { email: u.email })
+    toast.success(archive ? 'Login archived — restore it anytime' : 'Login restored')
+    if (drawerUser?.id === u.id) setDrawerUser(null)
+    load().catch(() => {})
+  }
+
+  const askArchive = (u) => {
+    if (!canArchive(u)) { toast.error('Blocked: this login cannot be archived'); return }
+    setConfirm({
+      title: `Archive ${u.name || u.email}?`,
+      body: 'Archived logins are hidden from active lists and locked out at once. Their data is kept — you can restore them later.',
+      confirmLabel: 'Archive',
+      onConfirm: () => doArchiveRestore(u, true),
+    })
+  }
+
+  const askRestore = (u) => {
+    setConfirm({
+      title: `Restore ${u.name || u.email}?`,
+      body: 'The login regains its role immediately on next request.',
+      confirmLabel: 'Restore',
+      onConfirm: () => doArchiveRestore(u, false),
+    })
+  }
+
+  const askDelete = (u) => {
+    if (!canDelete(u)) { toast.error('Blocked: this login cannot be deleted'); return }
+    setConfirm({
+      title: `Delete ${u.name || u.email} permanently?`,
+      body: 'This removes their auth login and portal record — it cannot be undone. Archive instead if you may need them back.',
+      confirmLabel: 'Delete permanently',
+      danger: true,
+      onConfirm: async () => {
+        setConfirm(null)
+        const { error } = await manage.deleteUser(u.id)
+        if (error) { toast.error(error); return }
+        await audit('DELETE_USER', 'portal_users', u.id, { email: u.email })
+        toast.success('Login deleted permanently')
+        if (drawerUser?.id === u.id) setDrawerUser(null)
+        load().catch(() => {})
+      },
+    })
+  }
+
+  // ── Bulk selection ──────────────────────────────────────────────────────
+  const selectedUsers = useMemo(() => users.filter(u => selected.has(u.id)), [users, selected])
+  const allVisibleSelected = filteredUsers.length > 0 && filteredUsers.every(u => selected.has(u.id))
+  const someSelected = selected.size > 0
+  const toggleSelect = (u) => setSelected(prev => {
+    const next = new Set(prev)
+    if (next.has(u.id)) next.delete(u.id); else next.add(u.id)
+    return next
+  })
+  const toggleSelectAll = () => setSelected(
+    allVisibleSelected ? new Set() : new Set(filteredUsers.map(u => u.id))
+  )
+
+  // One entry point for the bulk bar. Per-item guards run first: self, the
+  // last active super_admin, and no-op states (archiving an archived login)
+  // are skipped and REPORTED — a silent skip reads as a broken button.
+  const runBulk = (kind) => {
+    const targets = selectedUsers.filter(u => {
+      if (isSelf(u) || isLastActiveSuper(u)) return false
+      if (kind === 'archive') return canArchiveUser(u, profile) && statusOf(u) !== 'archived'
+      if (kind === 'restore') return statusOf(u) !== 'active'
+      if (kind === 'delete') return canDeleteUser(u, profile)
+      if (kind === 'suspend') return statusOf(u) === 'active'
+      return false
+    })
+    const skipped = selectedUsers.filter(u => !targets.includes(u))
+    if (skipped.length > 0) {
+      toast.warning(`Skipped ${skipped.map(u => u.name || u.email).join(', ')}`)
+    }
+    if (targets.length === 0) return
+    const n = targets.length
+    const label = kind === 'delete' ? 'Delete' : kind === 'archive' ? 'Archive' : kind === 'restore' ? 'Restore' : 'Suspend'
+    setConfirm({
+      title: `${label} ${n} login${n === 1 ? '' : 's'}?`,
+      body: kind === 'delete'
+        ? 'Deleting is permanent — every selected auth login and portal record is removed. This cannot be undone.'
+        : kind === 'archive'
+          ? 'Archived logins are hidden from active lists and locked out. You can restore them later.'
+          : kind === 'restore'
+            ? 'Each login regains its role immediately on next request.'
+            : 'Suspended logins fail every permission check server-side at once. Their data is kept.',
+      confirmLabel: kind === 'delete' ? 'Delete permanently' : label,
+      danger: kind === 'delete' || kind === 'suspend',
+      onConfirm: () => doBulk(kind, targets),
+    })
+  }
+
+  const doBulk = async (kind, targets) => {
+    setConfirm(null)
+    if (kind === 'delete') {
+      let failed = 0
+      for (const u of targets) {
+        const { error } = await manage.deleteUser(u.id)
+        if (error) { failed++; toast.error(`${u.name || u.email}: ${error}`); continue }
+        await audit('DELETE_USER', 'portal_users', u.id, { email: u.email })
+      }
+      toast.success(failed > 0 ? `Deleted ${targets.length - failed} of ${targets.length} — ${failed} failed` : `Deleted ${targets.length} login${targets.length === 1 ? '' : 's'}`)
+    } else {
+      const patch = kind === 'archive'
+        ? { archived_at: new Date().toISOString(), archived_by: profile?.name || null, is_active: false }
+        : kind === 'restore'
+          ? { archived_at: null, archived_by: null, is_active: true }
+          : { is_active: false }
+      const action = kind === 'archive' ? 'ARCHIVE_USER' : kind === 'restore' ? 'RESTORE_USER' : 'SUSPEND_USER'
+      for (const u of targets) {
+        const { error } = await supabase.from('portal_users').update(patch).eq('id', u.id)
+        if (error) { toast.error(error.message); continue }
+        await audit(action, 'portal_users', u.id, { email: u.email })
+      }
+      const done = kind === 'archive' ? 'archived' : kind === 'restore' ? 'restored' : 'suspended'
+      toast.success(`${targets.length} login${targets.length === 1 ? '' : 's'} ${done}`)
+    }
+    setSelected(new Set())
+    load().catch(() => {})
+  }
+
+  // ── Detail drawer ────────────────────────────────────────────────────────
+  const openDrawer = (u) => {
+    setDrawerUser(u)
+    setDrawerMeta({})
+    setDrawerAudit([])
+    // Auth metadata for the open user + their audit trail. Best-effort: a
+    // failure here must not block the drawer itself.
+    manage.loadMeta(u.id).then(({ data }) => setDrawerMeta(data || {})).catch(() => {})
+    supabase.from('audit_log').select('*').eq('record_id', u.id)
+      .order('created_at', { ascending: false }).limit(50)
+      .then(({ data }) => setDrawerAudit(Array.isArray(data) ? data : []))
+      .catch(() => {})
+  }
+
+  const drawerDeptGrants = useMemo(() => {
+    if (!drawerUser?.badge_number) return []
+    return assignments
+      .filter(a => a.badge_number === drawerUser.badge_number)
+      .map(a => ({
+        ...a,
+        department_name: deptName(a.department_id),
+        schedule_name: schedules.find(s => s.id === a.schedule_id)?.name || null,
+      }))
+  }, [drawerUser, assignments, schedules, deptName])
+
+  const drawerSetPassword = (u) => { setPwUser(u); setPwForm({ password: '', showPw: false }) }
+  const drawerSignOutAll = async (u) => {
+    const { error } = await manage.signOutAll(u.id)
+    if (error) { toast.error(error); return }
+    await audit('SIGN_OUT_ALL', 'portal_users', u.id, { email: u.email })
+    toast.success('Signed out on every device')
+  }
+  const drawerSuspend = (u) => { setDrawerUser(null); askToggleActive(u, false) }
+  const drawerArchive = (u) => { setDrawerUser(null); askArchive(u) }
+  const drawerRestore = (u) => { setDrawerUser(null); askRestore(u) }
+  const drawerDelete = (u) => { setDrawerUser(null); askDelete(u) }
+
+  const saveDrawerPassword = async () => {
+    if (!pwUser) return
+    const errs = passwordErrors(pwForm.password)
+    if (errs.length > 0) { toast.error(errs[0]); return }
+    const { error } = await manage.setPassword(pwUser.id, pwForm.password)
+    if (error) { toast.error(error); return }
+    await audit('SET_PASSWORD', 'portal_users', pwUser.id, { email: pwUser.email })
+    toast.success('Password set')
+    setPwUser(null)
+    setPwForm({ password: '', showPw: false })
+  }
+
+  // ── Export / import / invite resend ──────────────────────────────────────
+  const buildExportSheets = useCallback(() => [
+    { name: 'Users', rows: usersToSheetRows(filteredUsers) },
+    {
+      name: 'Invites',
+      rows: invites.map(inv => ({
+        name: inv.name || '',
+        email: inv.email || '',
+        role: inv.custom_role_id && customById[inv.custom_role_id] ? customById[inv.custom_role_id].name : roleLabel(inv.role),
+        code: inv.code || '',
+        status: inv.claimed_at ? 'Claimed' : (new Date(inv.expires_at).getTime() > Date.now() ? 'Pending' : 'Expired'),
+        expires_at: inv.expires_at || '',
+        created_at: inv.created_at || '',
+      })),
+    },
+  ], [filteredUsers, invites, customById])
+
+  const handleBulkCreate = async (validRows) => {
+    const { data, error } = await manage.bulkCreate(validRows)
+    if (error) return validRows.map(r => ({ email: r.email, status: 'error', error }))
+    const results = Array.isArray(data?.results) && data.results.length > 0
+      ? data.results
+      : Array.isArray(data) && data.length > 0
+        ? data
+        : validRows.map(r => ({ email: r.email, status: 'created', error: null }))
+    return results
+  }
+
+  // Resend the invite email; when the email provider is not configured (or
+  // the send fails) fall back to copying the code so the admin can share it
+  // manually — the invite itself stays open either way.
+  const resendInvite = async (inv) => {
+    const { data, error } = await manage.sendInvite(inv.email, inv.role)
+    if (error || data?.invited === false) {
+      copyText(inv.code, 'Invite code')
+      toast.warning(error ? `Could not send the invite email (${error}) — code copied instead` : 'Email provider not configured — invite code copied instead')
+      return
+    }
+    await audit('RESEND_INVITE', 'portal_invitations', inv.id, { email: inv.email })
+    toast.success(`Invite email sent to ${inv.email}`)
+  }
+
   const sendReset = async (u) => {
     if (!u.email) { toast.error('No email on this login'); return }
     const { error } = await supabase.auth.resetPasswordForEmail(u.email.trim(), { redirectTo: window.location.origin })
@@ -574,7 +841,7 @@ export default function UsersPage() {
     const email = directForm.email.trim()
     const password = directForm.password
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { toast.error('Enter a valid email address'); return }
-    if (!password || password.length < 8) { toast.error('Set a password of at least 8 characters'); return }
+    if (!password || password.length < 6) { toast.error('Set a password of at least 6 characters'); return }
     if (!INVITE_ROLES.includes(directForm.role)) { toast.error('Pick a valid role'); return }
     const custom = directForm.customId ? customById[directForm.customId] : null
     if (directForm.customId && (!custom || custom.base_role !== directForm.role)) { toast.error('That custom role belongs to a different base role'); return }
@@ -773,9 +1040,9 @@ export default function UsersPage() {
       <PanelCard
         title="Logins"
         icon={Users}
-        sub="Edit role, centre, badge and name. Suspend locks out at once on every policy; nothing is ever deleted."
+        sub="Edit role, centre, badge and name. Suspend locks out at once; archive hides a login you can restore; delete is permanent and removes their auth login."
         action={(
-          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
             <div style={{ position: 'relative' }}>
               <Search size={14} style={{ position: 'absolute', left: '0.55rem', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
               <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search name / email / badge…" aria-label="Search logins" style={{ ...inputStyle, paddingLeft: '1.9rem', width: 230 }} />
@@ -788,17 +1055,59 @@ export default function UsersPage() {
               <option value="all">Active + suspended</option>
               <option value="active">Active only</option>
               <option value="suspended">Suspended only</option>
+              <option value="archived">Archived only</option>
             </select>
+            <ExportButton
+              filename="users_logins.xlsx"
+              buildSheets={buildExportSheets}
+              label="Export"
+              onExported={(written) => { if (written === 0) toast.info('Nothing to export') }}
+              onExportError={(err) => toast.error(err?.message || 'Export failed')}
+            />
+            <button type="button" onClick={() => setImportOpen(true)} className="btn" title="Bulk-create logins from an .xlsx"><Upload size={14} /> Import</button>
           </div>
         )}
       >
+        {/* Phase-group chips — the same grouping the section headers below use. */}
+        <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '0.75rem' }} role="group" aria-label="Filter by phase group">
+          {PHASE_CHIPS.map(([val, label]) => (
+            <button
+              key={val}
+              type="button"
+              className={`pill ${phaseFilter === val ? 'pill-blue' : 'pill-gray'}`}
+              style={{ cursor: 'pointer', border: 'none', fontSize: '0.72rem' }}
+              aria-pressed={phaseFilter === val}
+              onClick={() => setPhaseFilter(val)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         {filteredUsers.length === 0 ? (
           <EmptyState title={null} hint="No logins match these filters." />
         ) : (
           <div className="table-wrap">
+            {someSelected && (
+              <div className="bulk-bar">
+                <span className="bulk-bar__count">{selected.size} selected</span>
+                <button type="button" className="bulk-bar__btn" onClick={() => runBulk('archive')}>Archive</button>
+                <button type="button" className="bulk-bar__btn" onClick={() => runBulk('restore')}>Restore</button>
+                <button type="button" className="bulk-bar__btn" onClick={() => runBulk('suspend')}>Suspend</button>
+                <button type="button" className="bulk-bar__btn bulk-bar__btn--danger" onClick={() => runBulk('delete')} disabled={manage.busy}>Delete</button>
+              </div>
+            )}
             <table className="table">
               <thead>
                 <tr>
+                  <th style={{ width: 36, textAlign: 'center' }}>
+                    <input
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      ref={el => { if (el) el.indeterminate = !allVisibleSelected && someSelected }}
+                      onChange={toggleSelectAll}
+                      aria-label="Select all logins"
+                    />
+                  </th>
                   <th style={{ position: 'sticky', left: 0, background: '#fff', zIndex: 1 }}>Name</th>
                   <th>Email</th>
                   <th style={{ textAlign: 'center' }}>Role</th>
@@ -810,51 +1119,84 @@ export default function UsersPage() {
                 </tr>
               </thead>
               <tbody>
-                {filteredUsers.map(u => {
-                  const active = u.is_active !== false
-                  const custom = u.custom_role_id ? customById[u.custom_role_id] : null
-                  const self = isSelf(u)
-                  return (
-                    <tr key={u.id} style={!active ? { opacity: 0.65 } : undefined}>
-                      <td data-label="Name" style={{ position: 'sticky', left: 0, background: '#fff', zIndex: 1, fontWeight: 600 }}>
-                        {u.name || '—'}{self && <span className="pill pill-blue" style={{ marginLeft: '0.4rem', fontSize: '0.62rem' }}>you</span>}
-                      </td>
-                      <td data-label="Email" style={{ fontSize: '0.8rem', color: '#475569' }}>{u.email || '—'}</td>
-                      <td data-label="Role" style={{ textAlign: 'center' }}>
-                        <span className="pill" style={{ background: ROLE_COLORS[u.role] ? `${ROLE_COLORS[u.role]}1a` : '#f1f5f9', color: ROLE_COLORS[u.role] || '#64748b', fontWeight: 700 }}>
-                          {custom ? custom.name : roleLabel(u.role)}
-                        </span>
-                        {custom && <div style={{ fontSize: '0.65rem', color: '#94a3b8', marginTop: '0.15rem' }}>{roleLabel(custom.base_role)}</div>}
-                        {u.role === 'super_admin' && <span className="pill pill-red" style={{ marginLeft: '0.35rem', fontSize: '0.6rem' }}>ADMIN</span>}
-                      </td>
-                      <td data-label="Centre">{u.centre || '—'}</td>
-                      <td data-label="Badge" style={{ textAlign: 'center', fontFamily: 'monospace', fontSize: '0.8rem' }}>{u.badge_number || '—'}</td>
-                      <td data-label="Departments" style={{ fontSize: '0.75rem' }}>
-                        {u.role === 'dept_incharge'
-                          ? (() => {
-                              const held = assignments.filter(a => a.badge_number === u.badge_number)
-                              if (!held.length) return <span style={{ color: '#b45309', fontWeight: 600 }}>none assigned</span>
-                              return held.map(a => (
-                                <span key={a.id} className="pill pill-indigo" style={{ marginRight: '0.25rem', fontSize: '0.66rem' }}>
-                                  {deptName(a.department_id)}
-                                </span>
-                              ))
-                            })()
-                          : <span style={{ color: '#94a3b8' }}>—</span>}
-                      </td>
-                      <td data-label="Status" style={{ textAlign: 'center' }}>
-                        <span className={`pill ${active ? 'pill-green' : 'pill-red'}`}>{active ? 'Active' : 'Suspended'}</span>
-                      </td>
-                      <td data-label="Actions" style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                        <button onClick={() => openEdit(u)} className="btn btn-ghost" style={smallBtn} title="Edit login"><Pencil size={13} /> Edit</button>{' '}
-                        <button onClick={() => sendReset(u)} className="btn btn-ghost" style={smallBtn} title="Email a password-reset link"><KeyRound size={13} /> Reset PW</button>{' '}
-                        {active
-                          ? <button onClick={() => askToggleActive(u, false)} className="btn btn-ghost" style={{ ...smallBtn, color: '#b91c1c' }} title="Suspend login"><Ban size={13} /> Suspend</button>
-                          : <button onClick={() => askToggleActive(u, true)} className="btn btn-ghost" style={{ ...smallBtn, color: '#15803d' }} title="Reinstate login"><CheckCircle2 size={13} /> Reinstate</button>}
-                      </td>
-                    </tr>
-                  )
-                })}
+                {groupedUsers.map(g => (
+                  <Fragment key={g.key}>
+                    {phaseFilter === 'all' && (
+                      <tr>
+                        <td colSpan={9} style={{ padding: 0, border: 'none' }}>
+                          <div className="user-group-header">{g.label} ({g.rows.length})</div>
+                        </td>
+                      </tr>
+                    )}
+                    {g.rows.map(u => {
+                      const st = statusOf(u)
+                      const active = st === 'active'
+                      const custom = u.custom_role_id ? customById[u.custom_role_id] : null
+                      const self = isSelf(u)
+                      return (
+                        <tr
+                          key={u.id}
+                          onClick={() => openDrawer(u)}
+                          onKeyDown={e => { if (e.key === 'Enter' && e.target === e.currentTarget) openDrawer(u) }}
+                          tabIndex={0}
+                          style={{ cursor: 'pointer', ...(!active ? { opacity: 0.65 } : undefined) }}
+                        >
+                          <td data-label="Select" style={{ textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              checked={selected.has(u.id)}
+                              onChange={() => toggleSelect(u)}
+                              onClick={e => e.stopPropagation()}
+                              aria-label={`Select ${u.name || u.email}`}
+                            />
+                          </td>
+                          <td data-label="Name" style={{ position: 'sticky', left: 0, background: '#fff', zIndex: 1, fontWeight: 600 }}>
+                            {u.name || '—'}{self && <span className="pill pill-blue" style={{ marginLeft: '0.4rem', fontSize: '0.62rem' }}>you</span>}
+                          </td>
+                          <td data-label="Email" style={{ fontSize: '0.8rem', color: '#475569' }}>{u.email || '—'}</td>
+                          <td data-label="Role" style={{ textAlign: 'center' }}>
+                            <span className="pill" style={{ background: ROLE_COLORS[u.role] ? `${ROLE_COLORS[u.role]}1a` : '#f1f5f9', color: ROLE_COLORS[u.role] || '#64748b', fontWeight: 700 }}>
+                              {custom ? custom.name : roleLabel(u.role)}
+                            </span>
+                            {custom && <div style={{ fontSize: '0.65rem', color: '#94a3b8', marginTop: '0.15rem' }}>{roleLabel(custom.base_role)}</div>}
+                            {u.role === 'super_admin' && <span className="pill pill-red" style={{ marginLeft: '0.35rem', fontSize: '0.6rem' }}>ADMIN</span>}
+                          </td>
+                          <td data-label="Centre">{u.centre || '—'}</td>
+                          <td data-label="Badge" style={{ textAlign: 'center', fontFamily: 'monospace', fontSize: '0.8rem' }}>{u.badge_number || '—'}</td>
+                          <td data-label="Departments" style={{ fontSize: '0.75rem' }}>
+                            {u.role === 'dept_incharge'
+                              ? (() => {
+                                  const held = assignments.filter(a => a.badge_number === u.badge_number)
+                                  if (!held.length) return <span style={{ color: '#b45309', fontWeight: 600 }}>none assigned</span>
+                                  return held.map(a => (
+                                    <span key={a.id} className="pill pill-indigo" style={{ marginRight: '0.25rem', fontSize: '0.66rem' }}>
+                                      {deptName(a.department_id)}
+                                    </span>
+                                  ))
+                                })()
+                              : <span style={{ color: '#94a3b8' }}>—</span>}
+                          </td>
+                          <td data-label="Status" style={{ textAlign: 'center' }}>
+                            <span className={`pill ${st === 'active' ? 'pill-green' : st === 'archived' ? 'pill-gray' : 'pill-red'}`}>
+                              {st === 'active' ? 'Active' : st === 'archived' ? 'Archived' : 'Suspended'}
+                            </span>
+                          </td>
+                          <td data-label="Actions" style={{ textAlign: 'right', whiteSpace: 'nowrap' }} onClick={e => e.stopPropagation()}>
+                            <button onClick={() => openEdit(u)} className="btn btn-ghost" style={smallBtn} title="Edit login"><Pencil size={13} /> Edit</button>{' '}
+                            <button onClick={() => sendReset(u)} className="btn btn-ghost" style={smallBtn} title="Email a password-reset link"><KeyRound size={13} /> Reset PW</button>{' '}
+                            {active
+                              ? <button onClick={() => askToggleActive(u, false)} className="btn btn-ghost" style={{ ...smallBtn, color: '#b91c1c' }} title="Suspend login"><Ban size={13} /> Suspend</button>
+                              : st === 'suspended'
+                                ? <button onClick={() => askToggleActive(u, true)} className="btn btn-ghost" style={{ ...smallBtn, color: '#15803d' }} title="Reinstate login"><CheckCircle2 size={13} /> Reinstate</button>
+                                : <button onClick={() => askRestore(u)} className="btn btn-ghost" style={{ ...smallBtn, color: '#15803d' }} title="Restore login"><RotateCcw size={13} /> Restore</button>}{' '}
+                            {st !== 'archived' && <button onClick={() => askArchive(u)} className="btn btn-ghost" style={smallBtn} title="Archive login"><Archive size={13} /> Archive</button>}{' '}
+                            {canDelete(u) && <button onClick={() => askDelete(u)} className="btn btn-ghost" style={{ ...smallBtn, color: '#b91c1c' }} title="Delete login permanently"><Trash2 size={13} /> Delete</button>}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </Fragment>
+                ))}
               </tbody>
             </table>
           </div>
@@ -953,7 +1295,7 @@ export default function UsersPage() {
               {customRoles.filter(r => r.base_role === directForm.role).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
             </select>
           </div>
-          <div><label style={labelStyle}>Password (min 8 characters)</label>
+          <div><label style={labelStyle}>Password (min 6 characters)</label>
             <div style={{ display: 'flex', gap: '0.4rem' }}>
               <input
                 type={directForm.showPw ? 'text' : 'password'}
@@ -1040,10 +1382,11 @@ export default function UsersPage() {
                     <td data-label="Role" style={{ textAlign: 'center' }}>{custom ? custom.name : roleLabel(inv.role)}</td>
                     <td data-label="Code" style={{ textAlign: 'center', fontFamily: 'monospace', fontWeight: 700 }}>{inv.code}</td>
                     <td data-label="Expires" style={{ textAlign: 'center', fontSize: '0.8rem' }}>{daysLeft}d left</td>
-                    <td data-label="Actions" style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                      <button onClick={() => copyText(inv.code, 'Invite code')} className="btn btn-ghost" style={smallBtn}><Copy size={13} /> Copy</button>{' '}
-                      <button onClick={() => revokeInvite(inv)} className="btn btn-ghost" style={{ ...smallBtn, color: '#b91c1c' }}><Trash2 size={13} /> Revoke</button>
-                    </td>
+                      <td data-label="Actions" style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        <button onClick={() => copyText(inv.code, 'Invite code')} className="btn btn-ghost" style={smallBtn}><Copy size={13} /> Copy</button>{' '}
+                        <button onClick={() => resendInvite(inv)} className="btn btn-ghost" style={smallBtn} title="Email the invite link again"><Mail size={13} /> Resend</button>{' '}
+                        <button onClick={() => revokeInvite(inv)} className="btn btn-ghost" style={{ ...smallBtn, color: '#b91c1c' }}><Trash2 size={13} /> Revoke</button>
+                      </td>
                   </tr>
                 )
               })}
@@ -1238,10 +1581,63 @@ export default function UsersPage() {
         </div>
       )}
 
+      {/* ── User detail drawer ── */}
+      <UserDetailDrawer
+        user={drawerUser}
+        open={!!drawerUser}
+        onClose={() => setDrawerUser(null)}
+        meta={drawerMeta}
+        deptGrants={drawerDeptGrants}
+        auditRows={drawerAudit}
+        onSetPassword={drawerSetPassword}
+        onSignOutAll={drawerSignOutAll}
+        onSuspend={drawerSuspend}
+        onArchive={drawerArchive}
+        onRestore={drawerRestore}
+        onDelete={drawerDelete}
+        busy={manage.busy}
+      />
+
+      {/* ── Set password (from the drawer) ── */}
+      {pwUser && (
+        <div className="modal-overlay" onClick={() => setPwUser(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 420 }}>
+            <h4 style={{ margin: '0 0 0.25rem' }}>Set password</h4>
+            <p style={{ color: '#64748b', fontSize: '0.82rem', margin: '0 0 0.75rem' }}>For {pwUser.name || pwUser.email} — minimum 6 characters.</p>
+            <div style={{ display: 'flex', gap: '0.4rem' }}>
+              <input
+                type={pwForm.showPw ? 'text' : 'password'}
+                value={pwForm.password}
+                onChange={e => setPwForm(f => ({ ...f, password: e.target.value }))}
+                placeholder="New password"
+                autoComplete="new-password"
+                style={{ ...inputStyle, fontFamily: pwForm.showPw ? 'monospace' : undefined }}
+              />
+              <button onClick={() => setPwForm(f => ({ ...f, showPw: !f.showPw }))} className="btn btn-ghost" style={smallBtn} title={pwForm.showPw ? 'Hide password' : 'Show password'} aria-label={pwForm.showPw ? 'Hide password' : 'Show password'}>
+                {pwForm.showPw ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+              <button onClick={() => setPwForm(f => ({ ...f, password: genPassword(), showPw: true }))} className="btn btn-ghost" style={smallBtn} title="Generate a strong password">Generate</button>
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', marginTop: '1rem' }}>
+              <button onClick={() => setPwUser(null)} className="btn">Cancel</button>
+              <button onClick={saveDrawerPassword} disabled={manage.busy} className="btn btn-primary">{manage.busy ? 'Setting…' : 'Set password'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Bulk import ── */}
+      <UserImportDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onBulkCreate={handleBulkCreate}
+        busy={manage.busy}
+      />
+
       {/* ── Confirm modal ── */}
       {confirm && (
         <div className="modal-overlay" onClick={() => setConfirm(null)}>
-          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 440 }}>
+          <div className="modal" role="dialog" aria-modal="true" aria-label={confirm.title} onClick={e => e.stopPropagation()} style={{ maxWidth: 440 }}>
             <h4 style={{ margin: '0 0 0.5rem' }}>{confirm.title}</h4>
             <p style={{ color: '#64748b', fontSize: '0.85rem' }}>{confirm.body}</p>
             <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', marginTop: '1.25rem' }}>

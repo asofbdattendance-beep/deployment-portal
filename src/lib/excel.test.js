@@ -49,12 +49,6 @@ beforeEach(() => {
   }
 })
 
-// Helper: get the real xlsx for building test fixtures (bypasses the mock)
-const getRealXlsx = async () => {
-  const mod = await vi.importActual('xlsx')
-  return mod.default || mod
-}
-
 describe('sheetName', () => {
   it('replaces illegal characters and caps at 31 chars', () => {
     expect(sheetName('A/B\\C*D?E:F[G]H')).toBe('A-B-C-D-E-F-G-H')

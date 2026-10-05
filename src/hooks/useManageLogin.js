@@ -62,7 +62,7 @@ export function useManageLogin() {
   )
 
   const loadMeta = useCallback(
-    () => run({ action: 'load_meta' }),
+    (userId) => run({ action: 'load_meta', user_id: userId }),
     [run]
   )
 

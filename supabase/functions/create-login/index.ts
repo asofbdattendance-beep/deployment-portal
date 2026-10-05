@@ -13,7 +13,7 @@
 //   DEPARTMENT grant it oversees, applied in the same privileged step (the anon
 //   client cannot write it; see 5b).
 //   When the superadmin sets a password it is used as-is
-//   (min 8 chars); otherwise a one-time temporary password is generated.
+//   (min 6 chars); otherwise a one-time temporary password is generated.
 // Success:      { ok, user_id, mode, tempPassword? }
 //   mode: 'fresh' (row created) | 'overlap-completed' (an existing
 //   portal_users row — the attendance overlap — was reinstated/repaired and
@@ -131,7 +131,7 @@ async function handler(req) {
       if (!deptSchedule) return json({ error: 'Pick the schedule this department applies to' }, 400)
       if (deptIds.length === 0) return json({ error: 'Pick at least one department for this role' }, 400)
     }
-    const ROW_COLS = 'id, email, badge_number, auth_id, is_active, name, role, centre, custom_role_id, created_at'
+    const ROW_COLS = 'id, email, badge_number, auth_id, is_active, name, role, centre, custom_role_id, created_at, archived_at'
     const [emailRows, badgeRows] = await Promise.all([
       admin.from('portal_users').select(ROW_COLS).ilike('email', email).order('created_at', { ascending: true }),
       badge
@@ -151,8 +151,8 @@ async function handler(req) {
     //    apply the password the admin is setting right now — that is the
     //    point of this action.
     const adminPassword = String(body.password || '')
-    if (adminPassword && adminPassword.length < 8) {
-      return json({ error: 'Password needs at least 8 characters' }, 400)
+    if (adminPassword && adminPassword.length < 6) {
+      return json({ error: 'Password must be at least 6 characters' }, 400)
     }
     const password = adminPassword || tempPassword()
     const generated = !adminPassword

@@ -29,7 +29,7 @@ Soft-audit for destructive actions: schedule/`centre_allocation`/department dele
 
 - `sewadars` — centre scope, badge_number, sewadar_name, is_initiated, badge_status (ELDERLY excluded)
 - `centres` — `name`, `parent_centre` (empty = parent centre); used to resolve parent/child subtree for shared quotas
-- `portal_users` — auth, centre, role
+- `portal_users` — auth, centre, role, `is_active`, `archived_at`/`archived_by` (v69), `force_logout_at` (v70)
 
 ## Key Rules & Helpers
 
@@ -40,6 +40,7 @@ Soft-audit for destructive actions: schedule/`centre_allocation`/department dele
 - Consent/deployment edits blocked by `block_after_deadline` trigger once the schedule deadline has passed, status is `done`, or the relevant master switch (`sewadar_deployment_open` / `vss_deployment_open`) is closed. A NULL deadline does NOT block (deadline optional). Centre roles cannot set `deployments.deployed_department_id` — only super_admin can (aso lost that with v20). A v21 Control Panel override (`is_centre_override_open`) bypasses the lock/switch/deadline for its scope — never `done`.
 - **v32 deployed-sewadar freeze** (`sql/v32_freeze_deployed_sewadars.sql`): centre-role UPDATE/DELETE on a deployed regular sewadar's `deployments` or `sewadar_consents` row raises (`freeze_deployed_rows()`, triggers `trg_a_freeze_deployed_deploy`/`trg_a_freeze_consent_of_deployed`). Exemptions: aso/super_admin; a normal `is_centre_override_open(schedule, centre, dept)` — passed the ROW's department for `deployments`, `NULL::uuid` (centre-wide only) for consents; VSS badges. Undeployed-only override rows never bypass. INSERT of a brand-new deployment unaffected.
 - **`fetchAllRpc` + `RPC_PAGE_SPECS`** (`src/lib/supabase.js`, release 2026-10-03): PostgREST's `db-max-rows` (1000) truncates SETOF RPC results too, so every per-badge attendance/previsit feed pages through `fetchAllRpc` with `count:'exact'` (retry once, then throw on count mismatch; an unknown spec throws — fail-closed) and KPIs, expected denominators, workbook sheets and previsit totals stay complete. Registered: `attendance_sewadar_summary`, `attendance_day_badges`, `previsit_sewadars`, `previsit_deployed`; `previsit_summary` stays single-shot (server-aggregated). A new RPC returning per-badge rows MUST be added to `RPC_PAGE_SPECS` or its caller fails loudly instead of silently rendering a 1000-row prefix.
+- **v69 archive + v70 force-logout enforcement** (`sql/v69_user_lifecycle.sql`, `sql/v70_force_logout.sql`): `portal_users.archived_at`/`archived_by` (v69) soft-delete a login — `get_portal_user_role`/`get_portal_user_centre`/`get_portal_profile` all add `AND archived_at IS NULL`, so an archived login resolves to NULL role/centre/profile → every RLS policy and helper denies it (fail-closed). `claim_portal_invite` refuses archived logins ("archived — restore from Users page"); a legit re-provision clears the stamp. `portal_users.force_logout_at` (v70) is a per-user kill switch: the three helpers add `AND (force_logout_at IS NULL OR COALESCE((auth.jwt()->>'iat')::bigint,0) >= EXTRACT(EPOCH FROM force_logout_at)::bigint)` — any JWT issued before that instant stops working everywhere; the user simply re-signs for a fresh token. Both migrations are non-destructive, safe to re-run, and additive (NULL = live).
 
 ## Database Tables (Control Panel, v21)
 

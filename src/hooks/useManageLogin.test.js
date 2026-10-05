@@ -70,10 +70,10 @@ describe('useManageLogin', () => {
     mocks.invoke.mockResolvedValue({ data: { roles: [] }, error: null })
     const { result } = renderHook(() => useManageLogin())
     await act(async () => {
-      await result.current.loadMeta()
+      await result.current.loadMeta('user-7')
     })
     expect(mocks.invoke).toHaveBeenCalledWith('manage-login', {
-      body: { action: 'load_meta' },
+      body: { action: 'load_meta', user_id: 'user-7' },
     })
   })
 
