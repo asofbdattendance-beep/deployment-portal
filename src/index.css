@@ -2016,8 +2016,7 @@ select.previsit-control { max-width: 15rem; }
    device the landscape support exists for. Keep these two in sync. */
 @media (min-width: 769px) and (min-height: 501px) {
   .mobile-tabbar,
-  .mobile-sheet-overlay,
-  .install-banner { display: none !important; }
+  .mobile-sheet-overlay { display: none !important; }
 }
 
 @media (max-width: 768px) {

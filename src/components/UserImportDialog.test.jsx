@@ -82,6 +82,40 @@ describe('parseImportRows', () => {
     expect(errors[0].message).toContain('Unknown role')
   })
 
+  it('rejects an unknown role with the original label in the message', () => {
+    const { valid, errors } = parseImportRows([{ name: 'A', email: 'a@x.com', role: 'wizard', password: 'secret1' }])
+    expect(valid).toHaveLength(0)
+    expect(errors[0].message).toBe('Unknown role "wizard"')
+  })
+
+  it('resolves role labels to their canonical base role and stores it on the valid row', () => {
+    const { valid, errors } = parseImportRows([
+      { name: 'A', email: 'a@x.com', role: 'ASO', password: 'secret1' },
+      { name: 'B', email: 'b@x.com', role: 'SCANNER', password: 'secret1' },
+      { name: 'C', email: 'c@x.com', role: 'DEPTINC (LANGAR)', password: 'secret1' },
+      { name: 'D', email: 'd@x.com', role: 'VSS OPERATOR', password: 'secret1' },
+      { name: 'E', email: 'e@x.com', role: 'SUPER ADMIN', password: 'secret1' },
+      { name: 'F', email: 'f@x.com', role: 'CENTRE USER', password: 'secret1' },
+    ])
+    expect(errors).toHaveLength(0)
+    expect(valid.map((r) => r.role)).toEqual([
+      'aso',
+      'scanner',
+      'dept_incharge',
+      'vss_operator',
+      'super_admin',
+      'centre_user',
+    ])
+  })
+
+  it('still accepts canonical base roles unchanged', () => {
+    const { valid, errors } = parseImportRows([
+      { name: 'A', email: 'a@x.com', role: 'centre_admin', password: 'secret1' },
+    ])
+    expect(errors).toHaveLength(0)
+    expect(valid[0].role).toBe('centre_admin')
+  })
+
   it('rejects a password shorter than 6 characters (min-6 hint)', () => {
     const { valid, errors } = parseImportRows([{ name: 'A', email: 'a@x.com', role: 'centre_user', password: '123' }])
     expect(valid).toHaveLength(0)

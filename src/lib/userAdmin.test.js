@@ -7,6 +7,7 @@ import {
   canArchiveUser,
   usersToSheetRows,
   parseImportRows,
+  normalizeRole,
 } from './userAdmin'
 
 describe('passwordErrors', () => {
@@ -199,5 +200,74 @@ describe('parseImportRows', () => {
     const { valid, errors } = parseImportRows([])
     expect(valid).toEqual([])
     expect(errors).toEqual([])
+  })
+})
+
+describe('normalizeRole', () => {
+  it('passes base roles through lowercased', () => {
+    for (const role of ['centre_user', 'centre_admin', 'aso', 'super_admin', 'dept_incharge', 'scanner', 'vss_operator']) {
+      expect(normalizeRole(role)).toBe(role)
+    }
+  })
+
+  it('passes base roles through regardless of case and surrounding whitespace', () => {
+    expect(normalizeRole('CENTRE_USER')).toBe('centre_user')
+    expect(normalizeRole('  AsO  ')).toBe('aso')
+    expect(normalizeRole('Vss_Operator')).toBe('vss_operator')
+  })
+
+  it('maps ASO to aso', () => {
+    expect(normalizeRole('ASO')).toBe('aso')
+  })
+
+  it('maps SCANNER to scanner', () => {
+    expect(normalizeRole('SCANNER')).toBe('scanner')
+  })
+
+  it('maps every DEPTINC department label to dept_incharge', () => {
+    expect(normalizeRole('DEPTINC (CANTEEN)')).toBe('dept_incharge')
+    expect(normalizeRole('DEPTINC (SECURITY)')).toBe('dept_incharge')
+    expect(normalizeRole('DEPTINC (LANGAR)')).toBe('dept_incharge')
+    expect(normalizeRole('DEPTINC (OLD ENCLOSURE)')).toBe('dept_incharge')
+    expect(normalizeRole('DEPTINC (Luggage)')).toBe('dept_incharge')
+    expect(normalizeRole('DEPTINC (OE ESCORTS)')).toBe('dept_incharge')
+    expect(normalizeRole('DEPTINC (SEWA SAMITI)')).toBe('dept_incharge')
+    expect(normalizeRole('DEPTINC (TRAFFIC INSIDE)')).toBe('dept_incharge')
+    expect(normalizeRole('DEPTINC (tRAFFIC outside bhati)')).toBe('dept_incharge')
+  })
+
+  it('maps DEPT INCH / DEPT_INCHARGE / DEPT INCHARGE spellings to dept_incharge', () => {
+    expect(normalizeRole('DEPT INCH')).toBe('dept_incharge')
+    expect(normalizeRole('DEPT_INCHARGE')).toBe('dept_incharge')
+    expect(normalizeRole('DEPT INCHARGE')).toBe('dept_incharge')
+  })
+
+  it('maps VSS-prefixed labels to vss_operator', () => {
+    expect(normalizeRole('VSS')).toBe('vss_operator')
+    expect(normalizeRole('VSS OPERATOR')).toBe('vss_operator')
+  })
+
+  it('maps SUPER ADMIN variants to super_admin', () => {
+    expect(normalizeRole('SUPER ADMIN')).toBe('super_admin')
+    expect(normalizeRole('SUPER_ADMIN')).toBe('super_admin')
+  })
+
+  it('maps CENTRE USER / CENTRE ADMIN variants to their base roles', () => {
+    expect(normalizeRole('CENTRE_USER')).toBe('centre_user')
+    expect(normalizeRole('CENTRE USER')).toBe('centre_user')
+    expect(normalizeRole('CENTRE_ADMIN')).toBe('centre_admin')
+    expect(normalizeRole('CENTRE ADMIN')).toBe('centre_admin')
+  })
+
+  it('returns empty string for unknown labels', () => {
+    expect(normalizeRole('wizard')).toBe('')
+    expect(normalizeRole('DEPT')).toBe('')
+  })
+
+  it('returns empty string for empty or nullish input', () => {
+    expect(normalizeRole('')).toBe('')
+    expect(normalizeRole('   ')).toBe('')
+    expect(normalizeRole(null)).toBe('')
+    expect(normalizeRole(undefined)).toBe('')
   })
 })

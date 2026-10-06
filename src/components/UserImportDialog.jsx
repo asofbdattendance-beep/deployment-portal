@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { loadXlsx, newWorkbook, addSheet, workbookToBlob, saveBlob, readWorkbookRows } from '../lib/excel'
-import { passwordErrors } from '../lib/userAdmin'
-import { INVITE_ROLES } from '../lib/logic'
+import { passwordErrors, normalizeRole } from '../lib/userAdmin'
 import { Download, Upload, FileSpreadsheet, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react'
 
 /**
@@ -36,7 +35,9 @@ const EMAIL_RE = /^\S+@\S+\.\S+$/
 
 /**
  * Parse raw sheet rows (from readWorkbookRows) into valid user objects.
- * Reuses passwordErrors from userAdmin so the min-6 rule stays in sync.
+ * Reuses passwordErrors from userAdmin so the min-6 rule stays in sync, and
+ * normalizeRole so sheet role labels (ASO, SCANNER, DEPTINC (…), SUPER ADMIN,
+ * CENTRE USER, …) resolve to their canonical base role on the valid row.
  * Returns { valid, errors }; valid rows carry all seven template columns
  * (location is optional free text — no validation beyond trimming).
  * Errors are { row, message } with row = 1-indexed spreadsheet row (header = 1).
@@ -70,7 +71,8 @@ export function parseImportRows(rows) {
       errors.push({ row: rowNum, message: 'Missing role' })
       return
     }
-    if (!INVITE_ROLES.includes(role)) {
+    const canonicalRole = normalizeRole(role)
+    if (!canonicalRole) {
       errors.push({ row: rowNum, message: `Unknown role "${role}"` })
       return
     }
@@ -79,7 +81,7 @@ export function parseImportRows(rows) {
       errors.push({ row: rowNum, message: pwErrs[0] })
       return
     }
-    valid.push({ name, email, role, badge, centre, password, location })
+    valid.push({ name, email, role: canonicalRole, badge, centre, password, location })
   })
   return { valid, errors }
 }
@@ -236,6 +238,9 @@ export default function UserImportDialog({ open, onClose, onBulkCreate, busy }) 
 
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
               Passwords must be at least 6 characters. They are imported but never shown or logged.
+            </div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+              Role accepts: centre_user, centre_admin, aso, super_admin, dept_incharge, scanner, vss_operator — or labels: ASO, SCANNER, VSS…, DEPTINC / DEPT INCHARGE (e.g. DEPTINC (LANGAR)), SUPER ADMIN, CENTRE USER, CENTRE ADMIN. Case-insensitive.
             </div>
           </div>
         )}

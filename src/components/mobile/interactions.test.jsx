@@ -87,6 +87,18 @@ describe('InstallPrompt', () => {
     const { container } = render(<InstallPrompt />)
     expect(container.firstChild).toBeNull()
   })
+
+  it('renders on desktop when the install event was captured pre-hydration', () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 1366 })
+    window.__portalInstallEvent = { prompt: vi.fn(), userChoice: Promise.resolve({ outcome: 'accepted' }) }
+    try {
+      const { container } = render(<InstallPrompt />)
+      expect(container.querySelector('.install-banner')).not.toBeNull()
+      expect(screen.getByText('Install Sewadar Portal as an app for faster scanning.')).not.toBeNull()
+    } finally {
+      delete window.__portalInstallEvent
+    }
+  })
 })
 
 describe('VirtualList', () => {

@@ -1,4 +1,5 @@
 import { phasesForRole } from '../lib/phase'
+import { INVITE_ROLES } from '../lib/logic'
 
 /**
  * userAdmin.js — pure helpers for the Users management surface.
@@ -103,6 +104,33 @@ export function usersToSheetRows(users) {
     is_archived: u.is_archived ? 'yes' : 'no',
     created_at: u.created_at || '',
   }))
+}
+
+// ─── Role normalization ───
+
+/**
+ * Normalizes a raw role label (e.g. from an imported sheet) to a canonical
+ * base role. Trims and uppercases the input, then:
+ *  - base roles (INVITE_ROLES) pass through lowercased;
+ *  - prefix labels: ASO…, SCANNER…, DEPTINC… / DEPT INCH… / DEPT_INCHARGE… /
+ *    DEPT INCHARGE…, VSS… map to their base role;
+ *  - exact variants: SUPER ADMIN / SUPER_ADMIN, CENTRE_USER / CENTRE USER,
+ *    CENTRE_ADMIN / CENTRE ADMIN map to their underscore base role.
+ * Returns '' for anything unrecognized.
+ */
+export function normalizeRole(raw) {
+  const norm = String(raw ?? '').trim().toUpperCase()
+  if (!norm) return ''
+  const lower = norm.toLowerCase()
+  if (INVITE_ROLES.includes(lower)) return lower
+  if (norm.startsWith('ASO')) return 'aso'
+  if (norm.startsWith('SCANNER')) return 'scanner'
+  if (norm.startsWith('DEPTINC') || norm.startsWith('DEPT INCH') || norm.startsWith('DEPT_INCHARGE') || norm.startsWith('DEPT INCHARGE')) return 'dept_incharge'
+  if (norm.startsWith('VSS')) return 'vss_operator'
+  if (norm === 'SUPER ADMIN' || norm === 'SUPER_ADMIN') return 'super_admin'
+  if (norm === 'CENTRE_USER' || norm === 'CENTRE USER') return 'centre_user'
+  if (norm === 'CENTRE_ADMIN' || norm === 'CENTRE ADMIN') return 'centre_admin'
+  return ''
 }
 
 // ─── Import parsing ───

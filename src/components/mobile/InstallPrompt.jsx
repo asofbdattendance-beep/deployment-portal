@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react'
 import { Download, X, Share } from 'lucide-react'
-import { useIsMobile } from '../../hooks/useMediaQuery'
 import { isStandalone, safeBottom } from '../../lib/mobile'
 
 const DISMISS_KEY = 'portal_install_dismissed'
@@ -22,11 +21,18 @@ function isIos() {
  * button that fires the deferred prompt on tap (a real user gesture).
  * iOS Safari (no install prompt API): shows a one-line "Share → Add to
  * Home Screen" hint instead. Never shows when already standalone, never
- * on desktop, dismissible (persisted in localStorage).
+ * when no install path exists, dismissible (persisted in localStorage).
+ * Desktop Chrome is supported: the event is captured pre-hydration by the
+ * inline script in index.html (seeded here) or by the listeners below.
  */
 export default function InstallPrompt() {
-  const isMobile = useIsMobile()
-  const [deferred, setDeferred] = useState(null)
+  const [deferred, setDeferred] = useState(() => {
+    try {
+      return window.__portalInstallEvent || null
+    } catch {
+      return null
+    }
+  })
   const [dismissed, setDismissed] = useState(false)
   const [installed, setInstalled] = useState(false)
 
@@ -37,23 +43,25 @@ export default function InstallPrompt() {
       }
     } catch { /* ignore */ }
     if (typeof window === 'undefined') return undefined
-    const onBip = (e) => {
+    const store = (e) => {
       try { e.preventDefault() } catch { /* ignore */ }
-      setDeferred(e)
+      setDeferred((prev) => prev || e)
     }
     const onInstalled = () => {
       setInstalled(true)
       setDeferred(null)
     }
-    window.addEventListener('beforeinstallprompt', onBip)
+    window.addEventListener('portal-bip', store)
+    window.addEventListener('beforeinstallprompt', store)
     window.addEventListener('appinstalled', onInstalled)
     return () => {
-      window.removeEventListener('beforeinstallprompt', onBip)
+      window.removeEventListener('portal-bip', store)
+      window.removeEventListener('beforeinstallprompt', store)
       window.removeEventListener('appinstalled', onInstalled)
     }
   }, [])
 
-  if (!isMobile || dismissed || installed) return null
+  if (dismissed || installed) return null
   const standalone = (() => {
     try {
       return isStandalone()

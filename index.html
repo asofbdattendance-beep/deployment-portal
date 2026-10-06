@@ -14,6 +14,18 @@
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Deployment Portal</title>
+    <script>
+      // Capture beforeinstallprompt BEFORE the module bundle runs — the event
+      // can fire during parse, and a useEffect listener mounts too late.
+      ;(function () {
+        window.__portalInstallEvent = null
+        window.addEventListener('beforeinstallprompt', function (e) {
+          try { e.preventDefault() } catch (_) { /* ignore */ }
+          if (!window.__portalInstallEvent) window.__portalInstallEvent = e
+          window.dispatchEvent(new CustomEvent('portal-bip'))
+        })
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

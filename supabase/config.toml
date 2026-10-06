@@ -1,0 +1,6 @@
+# Supabase Edge Functions config — deployment settings only (no secrets).
+# manage-login must skip gateway JWT verification: the function self-verifies
+# an ACTIVE super_admin session itself (see supabase/functions/manage-login/index.ts).
+
+[functions.manage-login]
+verify_jwt = false
