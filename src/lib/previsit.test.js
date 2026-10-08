@@ -17,6 +17,7 @@ import {
   previsitExportRow,
   previsitExportRows,
   previsitAttentionExportRows,
+  previsitAbsentRows,
 } from './previsit'
 
 const SUMMARY = [
@@ -350,5 +351,54 @@ describe('previsitCentreMatrix', () => {
       rows: [],
       totals: { byDate: {}, present: 0, deployed: 0, possible: 0 },
     })
+  })
+})
+
+describe('previsitAbsentRows', () => {
+  const DEPLOYED = [
+    { badge_number: 'B1', sewadar_name: 'Asha', sewadar_centre: 'CENTRE A', department_id: 'd1', dept_name: 'MEDICAL', is_vss: false },
+    { badge_number: 'B2', sewadar_name: 'Bina', sewadar_centre: 'CENTRE A', department_id: 'd2', dept_name: 'TRAFFIC', is_vss: false },
+    { badge_number: 'B3', sewadar_name: 'Chand', sewadar_centre: 'CENTRE A', department_id: null, dept_name: null, is_vss: false },
+    { badge_number: 'B4', sewadar_name: 'Dev', sewadar_centre: 'CENTRE B', department_id: 'd1', dept_name: 'MEDICAL', is_vss: false },
+  ]
+  // B1 scanned 10-06, B2 scanned 10-05, B4 scanned 10-06 (CENTRE B); B3 never.
+  const LIVE = [
+    { event_date: '2026-10-06', badge_number: 'B1', sewadar_centre: 'CENTRE A' },
+    { event_date: '2026-10-05', badge_number: 'B2', sewadar_centre: 'CENTRE A' },
+    { event_date: '2026-10-06', badge_number: 'B4', sewadar_centre: 'CENTRE B' },
+  ]
+
+  it('single day: absent = deployed minus present on that day', () => {
+    const out = previsitAbsentRows({ deployed: DEPLOYED, liveRows: LIVE, effDate: '2026-10-06' })
+    expect(out.map((r) => r.badge_number)).toEqual(['B2', 'B3'])
+  })
+
+  it('all days: absent = deployed with presentCount === 0', () => {
+    const out = previsitAbsentRows({ deployed: DEPLOYED, liveRows: LIVE, effDate: null })
+    expect(out.map((r) => r.badge_number)).toEqual(['B3'])
+  })
+
+  it('respects the centre filter on both the roster and the day scans', () => {
+    const outB = previsitAbsentRows({ deployed: DEPLOYED, liveRows: LIVE, effDate: '2026-10-06', centre: 'CENTRE B' })
+    expect(outB.map((r) => r.badge_number)).toEqual([])
+    const outA = previsitAbsentRows({ deployed: DEPLOYED, liveRows: LIVE, effDate: '2026-10-06', centre: 'CENTRE A' })
+    expect(outA.map((r) => r.badge_number)).toEqual(['B2', 'B3'])
+  })
+
+  it('accepts a precomputed presentMap instead of liveRows', () => {
+    const out = previsitAbsentRows({ deployed: DEPLOYED, presentMap: previsitPresentMap(LIVE), effDate: '2026-10-05' })
+    expect(out.map((r) => r.badge_number)).toEqual(['B1', 'B3', 'B4'])
+  })
+
+  it('returns deployed-shaped rows compatible with the export', () => {
+    const out = previsitAbsentRows({ deployed: DEPLOYED, liveRows: LIVE, effDate: '2026-10-06' })
+    expect(out[0]).toMatchObject({
+      badge_number: 'B2', sewadar_name: 'Bina', sewadar_centre: 'CENTRE A', dept_name: 'TRAFFIC',
+    })
+  })
+
+  it('treats missing scan data as nobody present', () => {
+    const out = previsitAbsentRows({ deployed: DEPLOYED, effDate: '2026-10-06' })
+    expect(out.map((r) => r.badge_number)).toEqual(['B1', 'B2', 'B3', 'B4'])
   })
 })

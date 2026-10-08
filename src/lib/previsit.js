@@ -317,6 +317,40 @@ export function previsitPresentMap(rows) {
 }
 
 /**
+ * Absent-tab rows — the deployed roster minus whoever scanned, pure.
+ *
+ * Single day (effDate set): replicates the Present tab's notPresent exactly —
+ * centre-scoped deployed badges whose badge never appears in that day's
+ * centre-filtered scan rows. All days (effDate null/''): a badge is absent
+ * only when it never scanned on any sewa day (presentCount === 0 in the
+ * Total-tab matrix). Rows keep the deployed shape (badge_number,
+ * sewadar_name, sewadar_centre, dept_name, is_vss) so the Absent tab can
+ * render, name and export them like Present rows.
+ * @param {object} p
+ * @param {Array<object>} p.deployed previsit_deployed rows
+ * @param {Map<string, Set<string>>} [p.presentMap] badge → present days
+ * @param {Array<object>} [p.liveRows] previsit_sewadars rows (drives exact single-day centre scoping)
+ * @param {string|null} [p.effDate] 'YYYY-MM-DD'; null/'' = whole visit
+ * @param {string} [p.centre] centre filter ('all' = everywhere)
+ * @returns {Array<object>}
+ */
+export function previsitAbsentRows({ deployed, presentMap, liveRows, effDate = null, centre = 'all' } = {}) {
+  const scoped = filterPrevisitTotal(deployed, { centre })
+  const day = typeof effDate === 'string' && effDate ? effDate : null
+  if (day && Array.isArray(liveRows)) {
+    const present = previsitPresentSet(filterPrevisitRows(liveRows, { centre }), day)
+    return scoped.filter((r) => r && !present.has(r.badge_number))
+  }
+  const map = presentMap instanceof Map ? presentMap : previsitPresentMap(liveRows)
+  return scoped.filter((r) => {
+    if (!r) return false
+    const days = map.get(r.badge_number)
+    if (day) return !days || !days.has(day)
+    return !days || days.size === 0
+  })
+}
+
+/**
  * The Attention lists behind the register's third tab: sessions left
  * open, scans with no deployment row, and badges with more than one
  * session on a day. Each list is newest-day first, badge A–Z within a day.
