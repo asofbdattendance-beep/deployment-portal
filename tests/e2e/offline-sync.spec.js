@@ -57,7 +57,7 @@ test.describe('app-level offline sync', () => {
     // Leave the scanner: the scanner page (and the old page-scoped drainer
     // with it) unmounts here. Reconnecting now must still sync.
     await gotoTab(page, 'Dashboard')
-    await expect(page.getByPlaceholder('Enter badge manually (FB/BH/VS)')).toHaveCount(0)
+    await expect(page.getByPlaceholder('Enter badge manually (FB/VS)')).toHaveCount(0)
 
     await context.setOffline(false)
     // The app-level engine replays the queued row with p_nonce = the queue
@@ -111,7 +111,7 @@ test.describe('app-level offline sync', () => {
     // navigation, no waiting for an interval tick.
     await context.setOffline(false)
     await page.goto('/')
-    await expect(page.getByPlaceholder('Manual FB/BH/VS badge')).toBeVisible()
+    await expect(page.getByPlaceholder('Manual FB/VS badge')).toBeVisible()
 
     await expect
       .poll(

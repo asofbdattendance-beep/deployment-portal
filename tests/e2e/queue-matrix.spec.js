@@ -70,9 +70,9 @@ test.describe('queue matrix', () => {
     // window and is refused.
     const tap = (badge) =>
       page
-        .getByPlaceholder('Manual FB/BH/VS badge')
+        .getByPlaceholder('Manual FB/VS badge')
         .fill(badge)
-        .then(() => page.getByPlaceholder('Manual FB/BH/VS badge').press('Enter'))
+        .then(() => page.getByPlaceholder('Manual FB/VS badge').press('Enter'))
     const choose = (name) =>
       expect(page.getByRole('dialog').getByRole('button', { name, exact: true })).toBeVisible().then(() => page.getByRole('dialog').getByRole('button', { name, exact: true }).click())
     await tap('FB5971GA1003')
@@ -263,7 +263,7 @@ test.describe('queue matrix', () => {
       liveRow({ id: 'doomed-1', badge: 'FB5971GA1903', failed: true, status: 'failed', failReason: 'x' }),
     ])
     await page.reload()
-    await expect(page.getByPlaceholder('Manual FB/BH/VS badge')).toBeVisible()
+    await expect(page.getByPlaceholder('Manual FB/VS badge')).toBeVisible()
     await page.getByRole('button', { name: /^Clear failed \(/ }).click()
     await expect.poll(async () => (await queueRows(page)).length, { timeout: 15000 }).toBe(0)
     guard.assertEmpty()
@@ -285,7 +285,7 @@ test.describe('queue matrix', () => {
     await seedMock(request, { scan_in: 'hang' })
     await context.setOffline(false)
     await page.reload()
-    await expect(page.getByPlaceholder('Manual FB/BH/VS badge')).toBeVisible()
+    await expect(page.getByPlaceholder('Manual FB/VS badge')).toBeVisible()
     // IndexedDB is independent of boot — the row must still be there.
     await expect
       .poll(async () => (await queueRows(page)).find((r) => r.id === before.id), { timeout: 15000 })

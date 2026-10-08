@@ -83,7 +83,7 @@ test.describe('device tiers', () => {
   test('text inputs are ≥16px so iOS never zooms on focus', async ({ page }) => {
     const guard = collectPageErrors(page)
     await loginAsScanner(page)
-    const input = page.getByPlaceholder('Manual FB/BH/VS badge')
+    const input = page.getByPlaceholder('Manual FB/VS badge')
     await expect(input).toBeVisible()
     const size = await input.evaluate((el) => parseFloat(getComputedStyle(el).fontSize))
     expect(size).toBeGreaterThanOrEqual(16)

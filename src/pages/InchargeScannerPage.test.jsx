@@ -124,7 +124,7 @@ describe('InchargeScannerPage render', () => {
     await settle()
     expect(screen.getByText('Attendance')).toBeTruthy()
     expect(screen.getByText('Visit')).toBeTruthy()
-    expect(screen.getByPlaceholderText('Enter badge manually (FB/BH/VS)')).toBeTruthy()
+    expect(screen.getByPlaceholderText('Enter badge manually (FB/VS)')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Mark' })).toBeTruthy()
     expect(screen.getByText('No scans today')).toBeTruthy()
   })
@@ -146,7 +146,7 @@ describe('InchargeScannerPage scanner success path', () => {
     await settle()
     expect(screen.getByText('No scans today')).toBeTruthy()
 
-    const input = screen.getByPlaceholderText('Enter badge manually (FB/BH/VS)')
+    const input = screen.getByPlaceholderText('Enter badge manually (FB/VS)')
     await act(async () => {
       fireEvent.change(input, { target: { value: 'FB123' } })
     })

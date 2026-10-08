@@ -59,10 +59,10 @@ test.describe('offline reload identity', () => {
     // The app boots offline from the precached shell + the localStorage
     // caches (profile, schedules) — the scanner is reachable with no
     // network at all.
-    await expect(page.getByPlaceholder('Manual FB/BH/VS badge')).toBeVisible({ timeout: 20000 })
+    await expect(page.getByPlaceholder('Manual FB/VS badge')).toBeVisible({ timeout: 20000 })
 
     // The scanner is alive: scan → the unreachable lookup offers Mark IN.
-    const manual = page.getByPlaceholder('Manual FB/BH/VS badge')
+    const manual = page.getByPlaceholder('Manual FB/VS badge')
     await manual.fill('FB5971GA3001')
     await manual.press('Enter')
     const dialog = page.getByRole('dialog')

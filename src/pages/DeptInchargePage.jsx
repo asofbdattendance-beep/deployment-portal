@@ -447,7 +447,7 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
             pills={<>{deptLabel} · {schedule?.name||''}</>}
             camera={<BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />}
             action={<button onClick={()=>{ handleScan(manualBadge, { manual: true }) }} className="btn btn-primary scan-shell-go" disabled={busy || !manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark</button>}
-            manual={<input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input scan-shell-input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} onKeyDown={e=>{ if(e.key==='Enter'){ handleScan(manualBadge, { manual: true }) } }} />}
+            manual={<input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/VS)" className="input scan-shell-input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} onKeyDown={e=>{ if(e.key==='Enter'){ handleScan(manualBadge, { manual: true }) } }} />}
             feedTitle={<div style={{fontWeight:700, display:'flex', alignItems:'center', gap:6}}><Clock size={14}/> My last 10 scans (today)</div>}
             feed={<MobileScanFeed rows={recentSessions} deptNameById={deptNameById} limit={10} emptyMessage="No scans today" />}
             queueBar={queueBarNode}
@@ -461,7 +461,7 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
           <div className="card" style={{padding:'1rem'}}>
             <BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />
             <div style={{display:'flex', gap:8, marginTop:10}}>
-              <input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input" style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ handleScan(manualBadge, { manual: true }) } }} />
+              <input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/VS)" className="input" style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ handleScan(manualBadge, { manual: true }) } }} />
               <button onClick={()=>{ handleScan(manualBadge, { manual: true }) }} className="btn btn-primary" disabled={busy || !manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark</button>
             </div>
           </div>

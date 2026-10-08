@@ -44,6 +44,7 @@ vi.mock('../lib/supabase', () => ({
         select: (...a) => { mocks.fromCalls.push(['select', ...a]); return q },
         eq: (...a) => { mocks.fromCalls.push(['eq', ...a]); return q },
         or: (...a) => { mocks.fromCalls.push(['or', ...a]); return q },
+        and: (...a) => { mocks.fromCalls.push(['and', ...a]); return q },
         order: (...a) => { mocks.fromCalls.push(['order', ...a]); return q },
         limit: (...a) => { mocks.fromCalls.push(['limit', ...a]); return q },
         then: (res) => Promise.resolve(res({ data: [] })),
@@ -146,15 +147,25 @@ afterEach(() => {
 const SCHEDULES = [{ id: 'sched-1', name: 'Visit' }]
 
 describe('ScannerPage session query (L-41)', () => {
-  it('queries sessions with the event-date or() predicate, never in_date-only', async () => {
+  it('queries sessions with the either-badge nested or() predicate, never in_date-only', async () => {
     render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
     await settle()
     const today = todayStrIST()
+    const badge = mocks.profile.badge_number
     expect(mocks.fromCalls).toContainEqual(['from', 'dp_attendance_sessions'])
-    expect(mocks.fromCalls).toContainEqual(['or', `in_date.eq.${today},out_date.eq.${today}`])
+    // Either-badge nested or(): (in_date=T AND in_scanner=B) OR (in_date=T AND
+    // out_scanner=B) OR (out_date=T AND in_scanner=B) OR (out_date=T AND
+    // out_scanner=B) — an OUT by this operator counts even when the IN was
+    // done by a different scanner.
+    const expectedOr = `(and(in_date.eq.${today},in_scanner_badge.eq.${badge}),and(in_date.eq.${today},out_scanner_badge.eq.${badge}),and(out_date.eq.${today},in_scanner_badge.eq.${badge}),and(out_date.eq.${today},out_scanner_badge.eq.${badge}))`
+    expect(mocks.fromCalls).toContainEqual(['or', expectedOr])
     // An in_date-only read misses overnight sessions (IN yesterday, OUT
     // today) and contradicts the Incharge page and the Daily tab.
     expect(mocks.fromCalls.filter(c => c[0] === 'eq' && c[1] === 'in_date')).toHaveLength(0)
+    // updated_at is selected and is the primary sort key (created_at fallback).
+    const selectCall = mocks.fromCalls.find(c => c[0] === 'select')
+    expect(selectCall[1]).toContain('updated_at')
+    expect(mocks.fromCalls).toContainEqual(['order', 'updated_at', { ascending: false }])
   })
 
   it('loads departments through fetchAllRows with a stable key (R8)', async () => {
@@ -177,7 +188,7 @@ describe('ScannerPage render', () => {
     await settle()
     expect(screen.getByText('Scanner')).toBeTruthy()
     expect(screen.getByText('No scans by you yet today')).toBeTruthy()
-    expect(screen.getByPlaceholderText('Manual FB/BH/VS badge')).toBeTruthy()
+    expect(screen.getByPlaceholderText('Manual FB/VS badge')).toBeTruthy()
   })
 
   // V10 failing-first: with the old './scanner/cameraManager' mock path the
@@ -247,7 +258,7 @@ describe('ScannerPage desktop layout + stale-data paths', () => {
       expect(screen.getByText('My last 10 scans (today, any dept incl. VSS)')).toBeTruthy()
 
       // The desktop manual entry still drives the same scan state machine.
-      const input = screen.getByPlaceholderText('Manual FB/BH/VS badge')
+      const input = screen.getByPlaceholderText('Manual FB/VS badge')
       await act(async () => {
         const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
         setter.call(input, 'FB5971GA0001')
@@ -287,7 +298,7 @@ describe('ScannerPage desktop layout + stale-data paths', () => {
       render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
       await settle()
 
-      const input = screen.getByPlaceholderText('Manual FB/BH/VS badge')
+      const input = screen.getByPlaceholderText('Manual FB/VS badge')
       await act(async () => {
         const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
         setter.call(input, 'FB5971GA0001')

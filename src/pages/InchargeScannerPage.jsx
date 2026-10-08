@@ -225,7 +225,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
           pills={pillsNode}
           camera={<BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />}
           action={<button onClick={manualSubmit} className="btn btn-primary scan-shell-go" disabled={busy || !manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark</button>}
-          manual={<input value={manualBadge} onChange={e => setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input scan-shell-input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} onKeyDown={e => { if (e.key === 'Enter') { manualSubmit() } }} />}
+          manual={<input value={manualBadge} onChange={e => setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/VS)" className="input scan-shell-input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} onKeyDown={e => { if (e.key === 'Enter') { manualSubmit() } }} />}
           feedTitle={<div className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Clock size={14} /> Recent scans (today) {pendingCount ? <span className="pill pill-amber">{pendingCount} queued</span> : null}</div>}
           feed={<MobileScanFeed rows={recentSessions} deptNameById={deptNameById} limit={5} emptyMessage="No scans today" />}
           queueBar={queueBarNode}
@@ -252,7 +252,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
           <div className="card-title" style={{ marginBottom: '0.75rem' }}>New scan</div>
           <BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />
           <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-            <input value={manualBadge} onChange={e => setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/BH/VS)" className="input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} style={{ flex: 1 }} onKeyDown={e => { if (e.key === 'Enter') { manualSubmit() } }} />
+            <input value={manualBadge} onChange={e => setManualBadge(e.target.value)} placeholder="Enter badge manually (FB/VS)" className="input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} style={{ flex: 1 }} onKeyDown={e => { if (e.key === 'Enter') { manualSubmit() } }} />
             <button onClick={manualSubmit} className="btn btn-primary" disabled={busy || !manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark</button>
           </div>
         </div>

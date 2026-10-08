@@ -39,7 +39,7 @@ test.describe('mobile attendance shell', () => {
     expect(box.height).toBeGreaterThanOrEqual(44)
 
     // Manual entry never triggers the iOS zoom (≥16px).
-    const size = await page.getByPlaceholder('Manual FB/BH/VS badge').evaluate(
+    const size = await page.getByPlaceholder('Manual FB/VS badge').evaluate(
       (el) => parseFloat(getComputedStyle(el).fontSize)
     )
     expect(size).toBeGreaterThanOrEqual(16)

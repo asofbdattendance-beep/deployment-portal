@@ -66,11 +66,11 @@ export async function loginAsScanner(page) {
   await page.getByRole('button', { name: 'Sign In' }).click()
   // Role `scanner` sees only the Scanner tab, so a successful login lands
   // directly on the scan surface with its manual entry.
-  await expect(page.getByPlaceholder('Manual FB/BH/VS badge')).toBeVisible()
+  await expect(page.getByPlaceholder('Manual FB/VS badge')).toBeVisible()
 }
 
 export async function manualScan(page, badge) {
-  await page.getByPlaceholder('Manual FB/BH/VS badge').fill(badge)
+  await page.getByPlaceholder('Manual FB/VS badge').fill(badge)
   await page.getByRole('button', { name: 'Mark In/Out' }).click()
 }
 
@@ -85,7 +85,7 @@ export async function loginAsIncharge(page) {
   await page.getByPlaceholder('Enter password').fill('secret')
   await page.getByRole('button', { name: 'Sign In' }).click()
   await gotoTab(page, 'Attendance')
-  await expect(page.getByPlaceholder('Enter badge manually (FB/BH/VS)')).toBeVisible()
+  await expect(page.getByPlaceholder('Enter badge manually (FB/VS)')).toBeVisible()
 }
 
 /** Click a desktop nav tab (scoped to .tab-btn so the mobile bar never collides). */
@@ -95,8 +95,8 @@ export async function gotoTab(page, label) {
 
 /** Manual scan on the incharge surface (Enter key — the Go button shifts under popups). */
 export async function inchargeScan(page, badge) {
-  await page.getByPlaceholder('Enter badge manually (FB/BH/VS)').fill(badge)
-  await page.getByPlaceholder('Enter badge manually (FB/BH/VS)').press('Enter')
+  await page.getByPlaceholder('Enter badge manually (FB/VS)').fill(badge)
+  await page.getByPlaceholder('Enter badge manually (FB/VS)').press('Enter')
 }
 
 /** All rows in the app's real IndexedDB offline queue. */

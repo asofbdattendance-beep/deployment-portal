@@ -32,7 +32,7 @@ test.describe('offline ladder', () => {
     await loginAsScanner(page)
     await expect(page.getByText('Scanner One')).toBeVisible()
     await expect(page.getByText('Online', { exact: true })).toBeVisible()
-    await expect(page.getByPlaceholder('Manual FB/BH/VS badge')).toBeVisible()
+    await expect(page.getByPlaceholder('Manual FB/VS badge')).toBeVisible()
     guard.assertEmpty()
   })
 
@@ -129,7 +129,7 @@ test.describe('offline ladder', () => {
     const guard = collectPageErrors(page)
     await loginAsScanner(page)
     await context.setOffline(true)
-    const manual = page.getByPlaceholder('Manual FB/BH/VS badge')
+    const manual = page.getByPlaceholder('Manual FB/VS badge')
     await manual.fill('FB5971GA4005')
     await manual.press('Enter')
     // A second scan while the decision popup is open is dropped, not queued.
@@ -322,7 +322,7 @@ test.describe('offline ladder', () => {
     await context.setOffline(false)
     const pageB = await context.newPage()
     await pageB.goto('/')
-    await expect(pageB.getByPlaceholder('Manual FB/BH/VS badge')).toBeVisible()
+    await expect(pageB.getByPlaceholder('Manual FB/VS badge')).toBeVisible()
     await expect
       .poll(
         async () => {

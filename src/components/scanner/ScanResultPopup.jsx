@@ -113,7 +113,7 @@ VARIANT.offline = VARIANT.queued
  *  action          'IN' | 'OUT' — for `choose`: the one valid direction. The
  *                  popup shows ONLY this button; the opposite direction is
  *                  never offered, so an invalid write is unrepresentable.
- *  badge           string — FB/BH/VS badge number
+  *  badge           string — FB/VS badge number
  *  name            string — sewadar name (optional)
  *  centre          string — centre name (optional)
  *  deptName        string — department name (optional)

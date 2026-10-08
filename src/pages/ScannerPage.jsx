@@ -65,18 +65,23 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
       // Incharge page and the Daily tab — in_date-only reads miss overnight
       // sessions (IN yesterday, OUT today).
       const today = todayStrIST()
+      // Either-badge nested or(): an OUT scan by this operator counts even when
+      // the IN was done by a different scanner (and vice versa). PostgREST allows
+      // one top-level or() — use nested and() groups for the four combinations.
+      const badgeOr = myBadge
+        ? `(and(in_date.eq.${today},in_scanner_badge.eq.${myBadge}),and(in_date.eq.${today},out_scanner_badge.eq.${myBadge}),and(out_date.eq.${today},in_scanner_badge.eq.${myBadge}),and(out_date.eq.${today},out_scanner_badge.eq.${myBadge}))`
+        : `in_date.eq.${today},out_date.eq.${today}`
       // Narrow column list — this is all RecentScansTable + the header read.
       // `select('*')` would also drag in any future fat column on every poll.
       let q = supabase.from('dp_attendance_sessions')
-        .select('id,badge_number,sewadar_name,sewadar_dept,in_date,out_date,in_time,out_time,is_vss,undeployed_scan')
-        .eq('schedule_id',scheduleId).or(`in_date.eq.${today},out_date.eq.${today}`)
-      if(myBadge) q = q.eq('in_scanner_badge',myBadge)
+        .select('id,badge_number,sewadar_name,sewadar_dept,in_date,out_date,in_time,out_time,is_vss,undeployed_scan,updated_at')
+        .eq('schedule_id',scheduleId).or(badgeOr)
       // supabase-js RESOLVES with { data, error } — it never rejects — so a
       // `.then(r => r.data || [])` here turned a denied/failed read into a
       // calm "No scans by you yet today", and the amber offline pin below
       // could only ever fire on a thrown network error.
       const { data: sess, error: sessError } = await q
-        .order('created_at',{ascending:false}).limit(10)
+        .order('updated_at',{ascending:false}).order('created_at',{ascending:false}).limit(10)
       if (sessError) throw new Error(`Recent scans: ${sessError.message || sessError.code || 'failed'}`)
       setSessions(Array.isArray(sess) ? sess : [])
       setOffline(false)
@@ -192,7 +197,7 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
           camera={<BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />}
           action={<button onClick={manualSubmit} className="btn btn-primary scan-shell-go" disabled={busy || !manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark In/Out</button>}
           manual={<>
-            <input value={manualBadge} onChange={e => setManualBadge(e.target.value)} placeholder="Manual FB/BH/VS badge" className="input scan-shell-input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} onKeyDown={e => { if (e.key === 'Enter') { manualSubmit() } }} />
+            <input value={manualBadge} onChange={e => setManualBadge(e.target.value)} placeholder="Manual FB/VS badge" className="input scan-shell-input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} onKeyDown={e => { if (e.key === 'Enter') { manualSubmit() } }} />
             {canPick && <SewadarPicker scheduleId={scheduleId} onPick={pickSubmit} />}
           </>}
           queueBar={queueBarNode}
@@ -219,7 +224,7 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
       <div className="card" style={{padding:'1rem', marginBottom:12}}>
         <div className="card-title" style={{ marginBottom: '0.75rem' }}>New scan</div>
         <BarcodeScanner ref={scannerRef} onScan={handleCameraScan} />
-        <div style={{display:'flex', gap:8, marginTop:10}}><input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Manual FB/BH/VS badge" className="input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ manualSubmit() }}}/><button onClick={manualSubmit} className="btn btn-primary" disabled={busy||!manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark In/Out</button></div>
+        <div style={{display:'flex', gap:8, marginTop:10}}><input value={manualBadge} onChange={e=>setManualBadge(e.target.value)} placeholder="Manual FB/VS badge" className="input" aria-label="Badge number" inputMode="text" enterKeyHint="go" autoComplete="off" autoCapitalize="characters" spellCheck={false} style={{flex:1}} onKeyDown={e=>{ if(e.key==='Enter'){ manualSubmit() }}}/><button onClick={manualSubmit} className="btn btn-primary" disabled={busy||!manualBadge.trim()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}Mark In/Out</button></div>
       </div>
       {canPick && <div style={{marginBottom:12}}><SewadarPicker scheduleId={scheduleId} onPick={pickSubmit} /></div>}
       <div className="card" style={{padding:'1rem'}}>

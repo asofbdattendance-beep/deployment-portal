@@ -507,7 +507,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
     const b = sanitizeScannedBadge(badge)
     if (!b) return { ok: false, reason: 'empty' }
     if (!BADGE_REGEX.test(b)) {
-      showPopup({ status: 'error', badge: b, message: 'Invalid badge format — check FB/BH/VS', time: new Date().toLocaleTimeString() })
+      showPopup({ status: 'error', badge: b, message: 'Invalid badge format — check FB/VS', time: new Date().toLocaleTimeString() })
       return { ok: false, reason: 'invalid_badge' }
     }
 
