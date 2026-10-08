@@ -164,7 +164,7 @@ export function isVssBadge(badge) {
   return typeof badge === 'string' && /^VS/i.test(badge)
 }
 
-export const BADGE_REGEX = /^(FB(597[1-9]|59[89]\d|600\d|601[01])(GA|LA)\d{4}|BH\d{4}[A-Z]{1,2}\d{4}|VS[A-Z0-9]+)$/i
+export const BADGE_REGEX = /^(FB(597[1-9]|59[89]\d|600\d|601[01])(GA|LA)\d{4}|VS[A-Z0-9]+)$/i
 export function isValidBadgeFormat(badge) {
   return typeof badge === 'string' && BADGE_REGEX.test(badge.trim())
 }
@@ -188,16 +188,16 @@ export function isUndeployedScan(badge, deployedSet) {
 
 // Decoder confusions observed in badge-like alphanumeric codes. Correction is
 // POSITIONAL, never global: letters are load-bearing in these badges (the
-// "FB"/"BH" prefixes, the "GA"/"LA" middle), so a blind S→5 or B→8 would
+// "FB" prefix, the "GA"/"LA" middle), so a blind S→5 or B→8 would
 // retype a valid badge as a DIFFERENT sewadar's badge — a wrong-but-valid
 // scan is worse than a rejected one.
 const BADGE_LETTER_TO_DIGIT = { O: '0', I: '1', L: '1', S: '5', B: '8', Z: '2' }
 const BADGE_DIGIT_TO_LETTER = { 0: 'O', 1: 'I', 5: 'S', 8: 'B', 2: 'Z' }
 
 // Per-position character-class requirements derived from BADGE_REGEX, keyed
-// by LENGTH: 'D' = digit required, 'L' = letter required. Both 12-char
-// families (FB + 4 digits + GA/LA + 4 digits, and BH + 4 digits + 2 letters +
-// 4 digits) share one class map, so BADGE_REGEX — not the prefix — is the
+// by LENGTH: 'D' = digit required, 'L' = letter required. The 12-char
+// FB family (FB + 4 digits + GA/LA + 4 digits) is the only non-VSS shape
+// BADGE_REGEX accepts, so BADGE_REGEX — not the prefix — is the
 // discriminator. Returns null for shapes we cannot derive positions from: VSS
 // accepts anything after "VS" (nothing to repair), and any other length is
 // not a noisy read of a known badge, so we must not guess.
@@ -205,10 +205,6 @@ function badgePositionClasses(value) {
   if (isVssBadge(value)) return null
   if (value.length === 12) {
     return ['L', 'L', 'D', 'D', 'D', 'D', 'L', 'L', 'D', 'D', 'D', 'D']
-  }
-  // The 11-char BH family: BH + 4 digits + 1 letter + 4 digits.
-  if (value.length === 11) {
-    return ['L', 'L', 'D', 'D', 'D', 'D', 'L', 'D', 'D', 'D', 'D']
   }
   return null
 }
