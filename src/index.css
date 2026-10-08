@@ -1375,7 +1375,7 @@ select.previsit-control { max-width: 15rem; }
 }
 .scans-table tbody tr:last-child td { border-bottom: none; }
 
-/* Badges are identifiers — monospace so FB5971GA0001 and BH7788 line up. */
+/* Badges are identifiers — monospace so FB5971GA0001 and FB6011LA0042 line up. */
 .scans-table .scans-badge {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.75rem;
