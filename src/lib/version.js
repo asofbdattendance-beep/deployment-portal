@@ -10,7 +10,9 @@
  */
 
 /** Oldest DB this frontend works with. Bump when the frontend starts
- *  calling RPCs/columns a migration introduces. v74: attendance_centre_daily
+ *  calling RPCs/columns a migration introduces. v75: attendance_visit_summary
+ *  counts deployed badges only — without it the matrix TOTAL open_now /
+ *  ever_present can read above the tiles. v74: attendance_centre_daily
  *  powers the Bhati Visit dashboard heatmap — without it the heatmap section
  *  degrades to an explicit error while the KPI tiles keep working. v68:
  *  attendance_search_sewadars powers the ASO scanner picker — without it
@@ -24,7 +26,7 @@
  *  session_count/is_open (Total, Present and Attention tabs + the day-count
  *  export depend on it), alongside the v60 window, v61 window-scoped
  *  visit RPCs, v62 previsit RPCs and v63 previsit_deployed. */
-export const MIN_SUPPORTED_DB_VERSION = 'v74'
+export const MIN_SUPPORTED_DB_VERSION = 'v75'
 
 /**
  * 'v50' → 50. Letter suffixes ('v38b') compare by their number — the

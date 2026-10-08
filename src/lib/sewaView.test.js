@@ -32,6 +32,26 @@ describe('sewaCentreMatrix — visit mode', () => {
     expect(m.columns).toEqual(WINDOW)
     expect(m.rows).toEqual([])
   })
+
+  it('folds distinct visit-wide sewadars per centre from the visit summary', () => {
+    const summaryRows = [
+      { centre: 'DELHI', department_id: 'd1', dept_name: 'MEDICAL', deployed: 4, ever_present: 3, never_present: 1, open_now: 0 },
+      { centre: 'MUMBAI', department_id: 'd2', dept_name: 'TRAFFIC', deployed: 3, ever_present: 2, never_present: 1, open_now: 0 },
+    ]
+    const m = sewaCentreMatrix({ mode: SEWA_MODE_VISIT, visitRows: VISIT_ROWS, windowDates: WINDOW, visitSummaryRows: summaryRows })
+    // Same badge on two days counts once here but twice in the day columns.
+    expect(m.rows.find((r) => r.centre === 'DELHI')).toMatchObject({ everPresent: 3, everDeployed: 4, presentTotal: 3 })
+    expect(m.rows.find((r) => r.centre === 'MUMBAI')).toMatchObject({ everPresent: 2, everDeployed: 3 })
+    expect(m.totals).toMatchObject({ everPresent: 5, everDeployed: 7 })
+    // The badge-day sums stay untouched beside the new fields.
+    expect(m.totals).toMatchObject({ present: 6 })
+  })
+
+  it('nulls the ever fields — falling back to badge-day sums — without a summary feed', () => {
+    const m = sewaCentreMatrix({ mode: SEWA_MODE_VISIT, visitRows: VISIT_ROWS, windowDates: WINDOW })
+    expect(m.rows.find((r) => r.centre === 'DELHI')).toMatchObject({ everPresent: null, everDeployed: null, presentTotal: 3 })
+    expect(m.totals).toMatchObject({ everPresent: null, everDeployed: null, present: 6 })
+  })
 })
 
 describe('sewaCentreMatrix — previsit mode', () => {

@@ -37,7 +37,10 @@ function DayCell({ date, present, deployed }) {
   )
 }
 
-export default function CentreDayHeatmap({ columns = [], rows = [], totals = null, emptyText = 'No centre has previsit sewa yet.' }) {
+export default function CentreDayHeatmap({ columns = [], rows = [], totals = null, emptyText = 'No centre has previsit sewa yet.', scope = 'visit' }) {
+  // Scope switch mirrors the matrix card: 'visit' end totals read
+  // "scanned on at least one visit day", 'day' reads "scanned today".
+  const everTitle = (present, deployed) => `${present} of ${deployed} scanned ${scope === 'day' ? 'today' : 'on at least one visit day'}`
   if (!columns.length || !rows.length) {
     return (
       <div className="att-matrix">
@@ -94,7 +97,7 @@ export default function CentreDayHeatmap({ columns = [], rows = [], totals = nul
                 {columns.map((d) => (
                   <DayCell key={d} date={d} present={r.byDate[d] || 0} deployed={r.deployed} />
                 ))}
-                <td className="att-days">{r.deployed > 0 ? `${r.presentTotal}/${r.possible}` : '—'}</td>
+                <td className="att-days" title={r.everPresent != null ? everTitle(r.everPresent, r.everDeployed) : `${r.presentTotal} badge-days of ${r.possible} possible`}>{r.deployed > 0 ? (r.everPresent != null ? `${r.everPresent}/${r.everDeployed}` : `${r.presentTotal}/${r.possible}`) : '—'}</td>
               </tr>
             ))}
 
@@ -110,7 +113,7 @@ export default function CentreDayHeatmap({ columns = [], rows = [], totals = nul
                     </td>
                   )
                 })}
-                <td className="att-days">{totals.present}/{totals.possible}</td>
+                <td className="att-days" title={totals.everPresent != null ? everTitle(totals.everPresent, totals.everDeployed) : `${totals.present} badge-days of ${totals.possible} possible`}>{totals.everPresent != null ? `${totals.everPresent}/${totals.everDeployed}` : `${totals.present}/${totals.possible}`}</td>
               </tr>
             )}
           </tbody>

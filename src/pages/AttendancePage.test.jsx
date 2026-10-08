@@ -480,9 +480,10 @@ vi.mock('xlsx', () => ({
 
 // L-45: the header tiles must describe the same filter set as the tables
 // and the export (ReportsPage already totals its visible rows — I1), not
-// the whole schedule behind a filtered view.
+// the whole schedule behind a filtered view. The whole-visit tile keeps
+// that contract; the day tile has its own block below.
 const scannedTile = () => {
-  const label = screen.getByText('Scanned')
+  const label = screen.getByText('Scanned (visit)')
   return label.closest('.stat').querySelector('.stat-value').textContent
 }
 
@@ -499,6 +500,69 @@ describe('L-45 — header tiles follow the active filters', () => {
     expect(scannedTile()).toBe('1')
     // The table agrees — tiles and rows describe one filter set.
     expect(screen.queryByText('SHAM')).toBeNull()
+  })
+})
+
+// Day-scoped headline — one pattern everywhere: each day shows that day's
+// scanned count only (any scan event that day, deployed-only, from
+// attendance_daily_summary for the picked day — the same law as Home's
+// "Present today"), never the whole-visit accumulation.
+const todayTile = () => {
+  const label = screen.getByText('Present today')
+  return label.closest('.stat').querySelector('.stat-value').textContent
+}
+const openNowTile = () => {
+  const label = screen.getByText('Open now')
+  return label.closest('.stat').querySelector('.stat-value').textContent
+}
+
+describe('Day-scoped headline — each day shows that day only', () => {
+  it('shows the picked day\u2019s scanned count from the daily RPC, not the visit total', async () => {
+    await renderPage()
+    // DAILY fixture: 3 DELHI + 2 FARIDABAD present; the whole-visit unique
+    // count is only 2 badges — a day tile reading the visit rows would say 2.
+    expect(todayTile()).toBe('5')
+  })
+
+  it('narrows the day tile with the centre filter, like every other tile', async () => {
+    await renderPage()
+    fireEvent.change(screen.getByLabelText('Filter by centre'), { target: { value: 'DELHI' } })
+    await settle()
+    expect(todayTile()).toBe('3')
+    expect(openNowTile()).toBe('0')
+  })
+
+  it('re-queries the day when the scan day changes', async () => {
+    const NEXT = '2026-09-24'
+    const NEXT_DAILY = [{ centre: 'DELHI', dept_name: 'MEDICAL', expected: 4, present: 1, absent: 3, open_now: 2 }]
+    rpc.mockImplementation((name, params) => {
+      if (name === 'attendance_sewadar_summary') return Promise.resolve({ data: [SEWADAR, OTHER_CENTRE], error: null })
+      if (name === 'attendance_daily_summary') return Promise.resolve({ data: params?.p_date === NEXT ? NEXT_DAILY : DAILY, error: null })
+      if (name === 'attendance_scanner_ops') return Promise.resolve({ data: SCANNER, error: null })
+      if (name === 'dp_attendance_sessions') return Promise.resolve({ data: LOG, error: null })
+      return Promise.resolve({ data: [], error: null })
+    })
+    await renderPage()
+    expect(todayTile()).toBe('5')
+    fireEvent.change(screen.getByLabelText('Scan day'), { target: { value: NEXT } })
+    await waitFor(() => expect(todayTile()).toBe('1'))
+    expect(openNowTile()).toBe('2')
+    expect(rpc).toHaveBeenCalledWith('attendance_daily_summary', expect.objectContaining({ p_date: NEXT }))
+  })
+
+  it('dashes the day tiles when the daily RPC fails — never a stale figure', async () => {
+    rpc.mockImplementation((name) =>
+      name === 'attendance_daily_summary'
+        ? Promise.resolve({ data: null, error: { message: 'daily is gone' } })
+        : name === 'attendance_sewadar_summary'
+          ? Promise.resolve({ data: [SEWADAR, OTHER_CENTRE], error: null })
+          : Promise.resolve({ data: SCANNER, error: null })
+    )
+    await renderPage()
+    expect(todayTile()).toBe('—')
+    expect(openNowTile()).toBe('—')
+    // The visit tiles still stand — only the day they belong to is unknown.
+    expect(screen.getByText('Scanned (visit)')).toBeTruthy()
   })
 })
 

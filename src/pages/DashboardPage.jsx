@@ -94,9 +94,11 @@ function scanEpoch(lastScanTime, dateStr) {
  * KPI tiles + alerts up top (every tile navigates to its single-owner detail
  * page), then the Bhati Visit picture: a present-by-visit-day strip, the
  * centre × visit-day heatmap (v74 attendance_centre_daily) and the centre ×
- * department matrix (attendance_visit_summary, shared with PrevisitDashboard).
- * Six sources feed the page (daily, ops, anomalies, visit-day, visit summary,
- * centres reference); each degrades in place, never as a healthy zero.
+ * department matrix (the TODAY daily feed re-shaped to summary grain, so the
+ * card counts distinct sewadars scanned today — visit-wide stays on the
+ * PrevisitDashboard mount). Five sources feed the page (daily, ops,
+ * anomalies, visit-day, centres reference); each degrades in place, never
+ * as a healthy zero.
  *
  * Status, above the fold, and nothing to fill in. Every figure comes from
  * read-only RPCs (plus the unscoped centres reference list); the page never
@@ -127,7 +129,6 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
     ops: { rows: [], error: null },
     anom: { rows: [], error: null },
     visit: { rows: [], error: null },
-    matrix: { rows: [], error: null },
     centres: { rows: [], error: null },
   })
   // Which schedule the rows in state belong to. Rows from the previous schedule
@@ -161,7 +162,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
     return () => clearInterval(t)
   }, [])
 
-  // ─── Load. One Promise.allSettled over the six sources. ───
+  // ─── Load. One Promise.allSettled over the five sources. ───
   const load = useCallback(async () => {
     // Clear the spinner on the no-schedule path too. Leaving `loading` true
     // here latched the page on its spinner with no timeout and no error.
@@ -178,15 +179,13 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
         withTimeout(rpcRows('attendance_anomalies', { p_schedule: scheduleId, p_date: null }), 15000, 'attendance_anomalies'),
         // v74: one row per centre × visit date — the day strip + heatmap.
         withTimeout(rpcRows('attendance_centre_daily', { p_schedule: scheduleId }), 15000, 'attendance_centre_daily'),
-        // Whole-visit centre × department denominators for the matrix card.
-        withTimeout(rpcRows('attendance_visit_summary', { p_schedule: scheduleId }), 15000, 'attendance_visit_summary'),
         // Unscoped reference data for the matrix parent-centre rollup; a
         // failure here degrades to a flat grid, never blanks the matrix.
         withTimeout(fetchCentres(), 15000, 'dp_centres'),
       ])
       if (!mountedRef.current || seq !== seqRef.current) return
       const next = {}
-      ;['daily', 'ops', 'anom', 'visit', 'matrix', 'centres'].forEach((key, i) => {
+      ;['daily', 'ops', 'anom', 'visit', 'centres'].forEach((key, i) => {
         const r = results[i]
         if (r.status === 'fulfilled') {
           next[key] = { rows: r.value, error: null }
@@ -199,7 +198,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
       setSec(next)
       setRowsScheduleId(scheduleId)
       // No silent freshness: the LIVE pill only advances when at least one
-      // source actually answered — six rejections leave the old timestamp.
+      // source actually answered — five rejections leave the old timestamp.
       if (results.some((r) => r.status === 'fulfilled')) setLastRefreshAt(Date.now())
     } finally {
       if (mountedRef.current && seq === seqRef.current) setLoading(false)
@@ -252,8 +251,8 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
 
   // Sources that failed the last load — surfaced in the LIVE pill tooltip so
   // a partially-degraded dashboard never presents as fully fresh.
-  const failedSources = ['daily', 'ops', 'anom', 'visit', 'matrix', 'centres'].filter((k) => sec[k].error).length
-  const sourceTotal = 6
+  const failedSources = ['daily', 'ops', 'anom', 'visit', 'centres'].filter((k) => sec[k].error).length
+  const sourceTotal = 5
   // KPI tiles must never render a healthy 0 for a section that failed to
   // load: "—" in amber says "unknown", 0 says "nobody came". The amber tone
   // rides on each tile's `tone` prop.
@@ -296,15 +295,36 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   )
   const visitByDay = useMemo(() => previsitByDay(visitRows), [visitRows])
   const visitMaxPresent = useMemo(() => visitByDay.reduce((m, d) => Math.max(m, d.present), 0), [visitByDay])
-  const visitMatrix = useMemo(
-    () => sewaCentreMatrix({ mode: SEWA_MODE_VISIT, visitRows, windowDates }),
-    [visitRows, windowDates]
+  // Day-scoped matrix feed: the same daily rows re-shaped into the
+  // visit-summary grain (one row per centre × department) — deployed carries
+  // `expected`, present carries today's `present`. The day feed covers every
+  // centre × department combo (zero-present included), so the card keeps full
+  // denominators on today's scope.
+  const dayMatrixRows = useMemo(
+    () => (rowsAreCurrent ? sec.daily.rows : []).map((r) => ({
+      centre: r?.centre || UNASSIGNED_CENTRE,
+      department_id: r?.department_id ?? null,
+      dept_name: r?.dept_name,
+      deployed: Number(r?.expected) || 0,
+      ever_present: Number(r?.present) || 0,
+      never_present: Number(r?.absent) || 0,
+      open_now: Number(r?.open_now) || 0,
+    })),
+    [sec.daily.rows, rowsAreCurrent]
   )
-  const matrixRows = rowsAreCurrent ? sec.matrix.rows : []
+  const visitMatrix = useMemo(
+    // The day-mapped rows fold today's distinct scanned sewadars per centre
+    // into the heatmap end totals — the same fold as the department strip,
+    // so the two agree on today's scope. Absent (stale schedule) it falls
+    // back to badge-days.
+    () => sewaCentreMatrix({ mode: SEWA_MODE_VISIT, visitRows, windowDates, visitSummaryRows: dayMatrixRows }),
+    [visitRows, windowDates, dayMatrixRows]
+  )
+  const matrixRows = dayMatrixRows
   // A centres failure only flattens the parent rollup — the matrix rows
   // still render.
   const matrixCentres = rowsAreCurrent ? sec.centres.rows : []
-  const matrixError = rowsAreCurrent ? sec.matrix.error : null
+  const matrixError = rowsAreCurrent ? sec.daily.error : null
   const visitError = rowsAreCurrent ? sec.visit.error : null
 
   // ─── Alerts. At most three: severity first, then urgency. ───
@@ -531,13 +551,14 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
           <div className="card" style={{ marginTop: '0.75rem' }}>
             <div className="card-title">Attendance by centre</div>
             <div className="card-sub">
-              Present / deployed for every centre, one column per visit day
+              Present / deployed for every centre, one column per visit day; totals count distinct sewadars scanned today
             </div>
             <CentreDayHeatmap
               columns={visitMatrix.columns}
               rows={visitMatrix.rows}
               totals={visitMatrix.totals}
               emptyText="No Bhati Visit attendance yet."
+              scope="day"
             />
           </div>
         </>
@@ -549,6 +570,8 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
         error={matrixError}
         onRetry={load}
         style={{ marginTop: '0.75rem' }}
+        scope="day"
+        scopeDayLabel={shortDayLabel(date)}
       />
     </div>
   )

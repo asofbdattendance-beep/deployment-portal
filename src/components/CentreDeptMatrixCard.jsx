@@ -47,16 +47,28 @@ function rateLabel(rate) {
  * dashboard card. Restored from the baf8f34 Reports matrix (commit on
  * feat/aso-superadmin-reports), minus the Reports filter machinery: this card
  * is PRESENTATIONAL — the mount site owns fetching, so the dashboard's RPC
- * contract (exactly the five attendance_* RPCs, no hidden table reads) stays
- * testable. `rows` are raw `attendance_visit_summary` rows; `centres` is the
+ * contract (only attendance_* RPCs, no hidden table reads) stays
+ * testable. `rows` are summary-grain rows: raw `attendance_visit_summary`
+ * (visit scope), or the day feed re-shaped to that grain with `scope="day"`;
+ * `centres` is the
  * dp_centres list used to roll SC_SP children up under their parent centre.
  *
  * Grid: departments across the top, centres down the side, parent centres
  * collapsed to their subtree aggregate with an expand toggle, plus a TOTAL
  * row and a per-department summary strip above the grid.
  */
-export default function CentreDeptMatrixCard({ rows = [], centres = [], error = null, onRetry = null, style = undefined }) {
+export default function CentreDeptMatrixCard({ rows = [], centres = [], error = null, onRetry = null, style = undefined, scope = 'visit', scopeDayLabel = '' }) {
   const [expanded, setExpanded] = useState(() => new Set())
+  // Scope switch: 'visit' counts distinct sewadars scanned on at least one
+  // visit day (PrevisitDashboard mount); 'day' counts distinct sewadars
+  // scanned on the dashboard's today (Home mount). Only the copy changes —
+  // the grid math is identical.
+  const isDayScope = scope === 'day'
+  const scopeTag = isDayScope ? 'today' : 'visit'
+  const scopeTitle = isDayScope ? '(today)' : '(visit-wide)'
+  const scopeSub = isDayScope
+    ? `Today (${scopeDayLabel}): scanned today, per centre and department`
+    : 'Visit-wide: scanned on at least one day, per centre and department'
 
   /**
    * One uniform row shape so the grid and the totals never branch on the
@@ -146,13 +158,13 @@ export default function CentreDeptMatrixCard({ rows = [], centres = [], error = 
     const rate = pct(t.present, t.deployed)
     return (
       <>
-        <td key={`${keyPrefix}-t`} data-label="Total" style={{ textAlign: 'center', whiteSpace: 'nowrap', borderLeft: '2px solid #cbd5e1', background: '#f8fafc' }}>
+        <td key={`${keyPrefix}-t`} data-label={`Total (${scopeTag})`} title={`${t.present} of ${t.deployed} scanned ${scopeTitle}`} style={{ textAlign: 'center', whiteSpace: 'nowrap', borderLeft: '2px solid #cbd5e1', background: '#f8fafc' }}>
           <span style={{ fontWeight: 700 }}>{t.present}</span>
           <span style={{ color: '#94a3b8' }}>/{t.deployed}</span>{' '}
           <span className={`pill ${bandPill(rateBand(rate ?? 0))}`}>{rateLabel(rate)}</span>
         </td>
-        <td key={`${keyPrefix}-a`} data-label="Absent" style={{ textAlign: 'center', fontWeight: t.absent ? 700 : undefined, color: t.absent ? '#b91c1c' : undefined }}>{t.absent}</td>
-        <td key={`${keyPrefix}-o`} data-label="Open now" style={{ textAlign: 'center', color: t.openNow ? '#b45309' : undefined }}>{t.openNow}</td>
+        <td key={`${keyPrefix}-a`} data-label={`Absent (${scopeTag})`} title={`${t.absent} never scanned ${scopeTitle}`} style={{ textAlign: 'center', fontWeight: t.absent ? 700 : undefined, color: t.absent ? '#b91c1c' : undefined }}>{t.absent}</td>
+        <td key={`${keyPrefix}-o`} data-label={`Open now (${scopeTag})`} title={`${t.openNow} still IN ${scopeTitle}`} style={{ textAlign: 'center', color: t.openNow ? '#b45309' : undefined }}>{t.openNow}</td>
       </>
     )
   }
@@ -203,7 +215,7 @@ export default function CentreDeptMatrixCard({ rows = [], centres = [], error = 
             <BarChart3 size={15} style={{ marginRight: '0.35rem', verticalAlign: '-2px' }} />
             Centre × department matrix
           </div>
-          <div className="page-sub" style={{ margin: 0 }}>Visit-wide: scanned on at least one day, per centre and department</div>
+          <div className="page-sub" style={{ margin: 0 }}>{scopeSub}</div>
         </div>
       </div>
 
@@ -229,7 +241,7 @@ export default function CentreDeptMatrixCard({ rows = [], centres = [], error = 
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.6rem' }}>
           <span style={{ fontSize: '0.75rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.06em', color: '#64748b' }}>Departments</span>
           <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
-            {deptCols.length} department{deptCols.length === 1 ? '' : 's'} · {totals.present} of {totals.deployed} scanned
+            {deptCols.length} department{deptCols.length === 1 ? '' : 's'} · {totals.present} of {totals.deployed} scanned {isDayScope ? 'today' : ''}
           </span>
           <span className={`pill ${bandPill(rateBand(totalRate ?? 0))}`} style={{ marginLeft: 'auto' }}>{rateLabel(totalRate)} overall</span>
         </div>
@@ -247,7 +259,7 @@ export default function CentreDeptMatrixCard({ rows = [], centres = [], error = 
                   </div>
                   <div style={{ marginTop: '0.15rem', fontVariantNumeric: 'tabular-nums', fontSize: '0.85rem' }}>
                     <span style={{ fontWeight: 800 }}>{c.present}</span>
-                    <span style={{ color: '#64748b' }}> of {c.deployed} scanned</span>
+                    <span style={{ color: '#64748b' }}> of {c.deployed} scanned{isDayScope ? ' today' : ''}</span>
                   </div>
                   <div style={{ height: 6, borderRadius: 999, background: '#eef2f7', marginTop: '0.35rem', overflow: 'hidden' }}>
                     <div style={{ height: '100%', borderRadius: 999, background: BAND_FILL[heat.band], width: `${rate ?? 0}%` }} />
@@ -342,13 +354,13 @@ export default function CentreDeptMatrixCard({ rows = [], centres = [], error = 
                     </td>
                   )
                 })}
-                <td data-label="Total" style={{ textAlign: 'center', fontWeight: 800, whiteSpace: 'nowrap', borderLeft: '2px solid #cbd5e1' }}>
+                <td data-label={`Total (${scopeTag})`} title={`${totals.present} of ${totals.deployed} scanned ${scopeTitle}`} style={{ textAlign: 'center', fontWeight: 800, whiteSpace: 'nowrap', borderLeft: '2px solid #cbd5e1' }}>
                   <span>{totals.present}</span>
                   <span style={{ color: '#94a3b8' }}>/{totals.deployed}</span>{' '}
                   <span className={`pill ${bandPill(rateBand(totalRate ?? 0))}`}>{rateLabel(totalRate)}</span>
                 </td>
-                <td data-label="Absent" style={{ textAlign: 'center', fontWeight: 800 }}>{totals.absent}</td>
-                <td data-label="Open now" style={{ textAlign: 'center', fontWeight: 800, color: totals.openNow ? '#b45309' : undefined }}>{totals.openNow}</td>
+                <td data-label={`Absent (${scopeTag})`} title={`${totals.absent} never scanned ${scopeTitle}`} style={{ textAlign: 'center', fontWeight: 800 }}>{totals.absent}</td>
+                <td data-label={`Open now (${scopeTag})`} title={`${totals.openNow} still IN ${scopeTitle}`} style={{ textAlign: 'center', fontWeight: 800, color: totals.openNow ? '#b45309' : undefined }}>{totals.openNow}</td>
               </tr>
             </tbody>
           </table>

@@ -36,10 +36,16 @@ function cleanCentre(value) {
  * @param {Array<object>} [args.summaryRows] previsit_summary rows
  * @param {Array<object>} [args.deployedRows] previsit_deployed rows
  * @param {Array<object>} [args.visitRows] attendance_centre_daily rows
+ * @param {Array<object>} [args.visitSummaryRows] summary-grain rows
+ *   (visit only) — folded per centre into distinct sewadars so the grid's
+ *   end totals read the same unit as the centre × department strip. Either
+ *   raw `attendance_visit_summary` (visit-wide) or the day feed re-shaped
+ *   to that grain (today's scope) — the fold is identical either way.
+ *   Omitted → the end cells fall back to the badge-day sums, exactly as before.
  * @param {string[]} [args.windowDates] visit window dates (ascending)
  * @returns {{columns: string[], rows: Array, totals: object}}
  */
-export function sewaCentreMatrix({ mode, summaryRows, deployedRows, visitRows, windowDates } = {}) {
+export function sewaCentreMatrix({ mode, summaryRows, deployedRows, visitRows, windowDates, visitSummaryRows } = {}) {
   if (mode === SEWA_MODE_PREVISIT) {
     return previsitCentreMatrix(summaryRows, deployedRows)
   }
@@ -61,6 +67,27 @@ export function sewaCentreMatrix({ mode, summaryRows, deployedRows, visitRows, w
     if (dep > (deployed.get(c) || 0)) deployed.set(c, dep)
   }
 
+  // Distinct visit-wide sewadars per centre. The summary holds one row per
+  // centre × department with DISTINCT-ON-badge counts upstream, so a
+  // straight sum per centre is distinct badges — the same fold the
+  // department strip performs, which is what makes the two agree.
+  const summaryList = Array.isArray(visitSummaryRows) ? visitSummaryRows : null
+  const ever = new Map() // centre → { present, deployed }
+  if (summaryList) {
+    for (const r of summaryList) {
+      if (!r) continue
+      const c = cleanCentre(r.centre)
+      let e = ever.get(c)
+      if (!e) {
+        e = { present: 0, deployed: 0 }
+        ever.set(c, e)
+      }
+      e.present += Number(r.ever_present) || 0
+      e.deployed += Number(r.deployed) || 0
+    }
+  }
+  const hasEver = summaryList !== null && summaryList.length > 0
+
   const matrixRows = [...deployed.keys()]
     .map((centre) => {
       const byDate = {}
@@ -71,7 +98,11 @@ export function sewaCentreMatrix({ mode, summaryRows, deployedRows, visitRows, w
         presentTotal += p
       }
       const dep = deployed.get(centre) || 0
-      return { centre, deployed: dep, byDate, presentTotal, possible: dep * columns.length }
+      const e = ever.get(centre)
+      return {
+        centre, deployed: dep, byDate, presentTotal, possible: dep * columns.length,
+        everPresent: e ? e.present : null, everDeployed: e ? e.deployed : null,
+      }
     })
     .sort((a, b) => {
       const au = a.centre === UNASSIGNED_CENTRE
@@ -92,7 +123,14 @@ export function sewaCentreMatrix({ mode, summaryRows, deployedRows, visitRows, w
   return {
     columns,
     rows: matrixRows,
-    totals: { byDate, present: presentCount, deployed: deployedCount, possible: deployedCount * columns.length },
+    totals: {
+      byDate,
+      present: presentCount,
+      deployed: deployedCount,
+      possible: deployedCount * columns.length,
+      everPresent: hasEver ? matrixRows.reduce((s, r) => s + (r.everPresent || 0), 0) : null,
+      everDeployed: hasEver ? matrixRows.reduce((s, r) => s + (r.everDeployed || 0), 0) : null,
+    },
   }
 }
 

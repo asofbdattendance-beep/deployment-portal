@@ -25,7 +25,7 @@ afterEach(() => { cleanup() })
 
 describe('DbVersionBanner', () => {
   it('renders nothing when the database is current', async () => {
-    mocks.fetchDbVersion.mockResolvedValue('v74')
+    mocks.fetchDbVersion.mockResolvedValue('v75')
     const { container } = render(<DbVersionBanner />)
     await waitFor(() => expect(mocks.fetchDbVersion).toHaveBeenCalled())
     expect(container.firstChild).toBeNull()
@@ -37,7 +37,7 @@ describe('DbVersionBanner', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
     const text = screen.getByRole('alert').textContent
     expect(text).toContain('v45')
-    expect(text).toContain('v74')
+    expect(text).toContain('v75')
   })
 
   it('warns generically when the version cannot be confirmed', async () => {

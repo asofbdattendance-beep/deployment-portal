@@ -191,6 +191,28 @@ describe('PrevisitDashboard — centre × department matrix (aso/super_admin)', 
     expect(within(matrix).getByText('CENTRE A-1')).toBeTruthy()
   })
 
+  it('labels every matrix Total cell with its visit-wide meaning, so same-shape counts stop looking comparable', async () => {
+    rpc.mockImplementation(async (name) => {
+      if (name === 'attendance_visit_summary') return { data: VISIT, error: null }
+      if (name === 'previsit_summary') return { data: SUMMARY, error: null }
+      if (name === 'previsit_sewadars') return { data: [], error: null }
+      if (name === 'previsit_deployed') return { data: DEPLOYED, error: null }
+      return { data: [], error: null }
+    })
+    render(<PrevisitDashboard schedules={SCHEDULES} scheduleId="sched-1" />)
+    await waitFor(() => expect(screen.getByText('Centre × department matrix')).toBeTruthy())
+    const matrix = screen.getByTestId('matrix-table')
+    // Collapsed CENTRE A parent: 3 of 6 scanned, visit-wide — the title says
+    // the unit out loud so it is never compared with a today tile.
+    const parentRow = within(matrix).getByText('CENTRE A').closest('tr')
+    const parentTotal = parentRow.querySelector('td[data-label="Total (visit)"]')
+    expect(parentTotal.getAttribute('title')).toBe('3 of 6 scanned (visit-wide)')
+    // The TOTAL row carries the same meaning label.
+    const totalRow = within(matrix).getByText('TOTAL').closest('tr')
+    const grandTotal = totalRow.querySelector('td[data-label="Total (visit)"]')
+    expect(grandTotal.getAttribute('title')).toBe('3 of 6 scanned (visit-wide)')
+  })
+
   it('shows the matrix to aso as well', async () => {
     mockRole = 'aso'
     render(<PrevisitDashboard schedules={SCHEDULES} scheduleId="sched-1" />)

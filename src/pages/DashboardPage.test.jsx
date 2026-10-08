@@ -6,7 +6,7 @@
 // inputs, so the failure modes worth pinning are narrow and structural:
 //
 //   1. It renders at all — title, the LIVE freshness pill, and a KPI tile.
-//   2. It calls EXACTLY the five v45/v61/v74 RPCs it is contracted to call,
+//   2. It calls EXACTLY the four v45/v61/v74 RPCs it is contracted to call,
 //      and never reads a scoped table directly. Scope is enforced inside the
 //      RPCs, so a direct scoped-table read here would be both a contract
 //      break and a security regression (the centres reference read is
@@ -93,19 +93,14 @@ const VISIT_DAILY = [
   { event_date: '2026-10-08', centre: 'DELHI', present: 4, open_now: 0, deployed: 10 },
   { event_date: '2026-10-07', centre: 'MUMBAI', present: 3, open_now: 0, deployed: 5 },
 ]
-const VISIT_SUMMARY = [
-  { centre: 'DELHI', department_id: 'd1', dept_name: 'MEDICAL', deployed: 10, ever_present: 8, never_present: 2, open_now: 1 },
-]
-
 /** Queue one resolved result per RPC, or an error for anything in `fail`. */
-function respondWith({ daily = DAILY, ops = SCANNER, anomalies = [], visitDaily = VISIT_DAILY, visitSummary = VISIT_SUMMARY, fail = [] } = {}) {
+function respondWith({ daily = DAILY, ops = SCANNER, anomalies = [], visitDaily = VISIT_DAILY, fail = [] } = {}) {
   rpc.mockImplementation((name) => {
     if (fail.includes(name)) return Promise.resolve({ data: null, error: { message: `${name} does not exist`, code: 'PGRST202' } })
     if (name === 'attendance_daily_summary') return Promise.resolve({ data: daily, error: null })
     if (name === 'attendance_scanner_ops') return Promise.resolve({ data: ops, error: null })
     if (name === 'attendance_anomalies') return Promise.resolve({ data: anomalies, error: null })
     if (name === 'attendance_centre_daily') return Promise.resolve({ data: visitDaily, error: null })
-    if (name === 'attendance_visit_summary') return Promise.resolve({ data: visitSummary, error: null })
     return Promise.resolve({ data: [], error: null })
   })
 }
@@ -165,7 +160,7 @@ describe('DashboardPage — renders', () => {
 })
 
 describe('DashboardPage — RPC contract', () => {
-  it('calls exactly the five documented RPCs, all against this schedule', async () => {
+  it('calls exactly the four documented RPCs, all against this schedule', async () => {
     await renderPage()
     const names = rpc.mock.calls.map((c) => c[0])
     expect(names.slice().sort()).toEqual([
@@ -173,7 +168,6 @@ describe('DashboardPage — RPC contract', () => {
       'attendance_centre_daily',
       'attendance_daily_summary',
       'attendance_scanner_ops',
-      'attendance_visit_summary',
     ])
     for (const [, params] of rpc.mock.calls) {
       expect(params.p_schedule).toBe('sched-1')
@@ -237,7 +231,7 @@ describe('DashboardPage — a failed section renders "—", never a healthy 0', 
 
 describe('DashboardPage — freshness accounting', () => {
   it('leaves the LIVE pill un-advanced when every source fails', async () => {
-    respondWith({ fail: ['attendance_daily_summary', 'attendance_scanner_ops', 'attendance_anomalies', 'attendance_centre_daily', 'attendance_visit_summary'] })
+    respondWith({ fail: ['attendance_daily_summary', 'attendance_scanner_ops', 'attendance_anomalies', 'attendance_centre_daily'] })
     fetchCentres.mockRejectedValueOnce(new Error('dp_centres: boom'))
     await renderPage()
     // timeAgo(null) is '—': no successful reload ever happened, so the pill
@@ -250,7 +244,7 @@ describe('DashboardPage — freshness accounting', () => {
     respondWith({ fail: ['attendance_daily_summary', 'attendance_anomalies'] })
     await renderPage()
     const pill = screen.getByText(/LIVE · updated \d+s ago/)
-    expect(pill.closest('span').title).toMatch(/2 of 6 sources failed/)
+    expect(pill.closest('span').title).toMatch(/2 of 5 sources failed/)
   })
 
   it('reports no failures in the tooltip when everything loaded', async () => {
@@ -265,19 +259,19 @@ describe('DashboardPage — realtime max-wait', () => {
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => 1_000_000)
     try {
       await renderPage()
-      expect(rpc).toHaveBeenCalledTimes(5)
+      expect(rpc).toHaveBeenCalledTimes(4)
       expect(pgHandlers.length).toBeGreaterThan(0)
       const reload = pgHandlers[0]
 
       // 500ms after the load: inside the window → trailing 400ms debounce.
       nowSpy.mockImplementation(() => 1_000_500)
       reload()
-      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(10))
+      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(8))
 
       // 5s after the last load: past max-wait → immediate, no timer wait.
       nowSpy.mockImplementation(() => 1_010_000)
       reload()
-      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(15))
+      await waitFor(() => expect(rpc).toHaveBeenCalledTimes(12))
     } finally {
       nowSpy.mockRestore()
     }
@@ -293,6 +287,24 @@ describe('DashboardPage — Bhati Visit heatmap', () => {
     // Heatmap caption + a present/deployed cell from the fixture.
     expect(screen.getByText('Present by centre and sewa day')).toBeTruthy()
     expect(screen.getByTitle('6 of 10 present')).toBeTruthy()
+    // End totals count DISTINCT sewadars scanned TODAY from the day-mapped
+    // feed (DELHI fixture: 8 of 10) — the same unit as the department strip,
+    // so the two surfaces agree on today's scope. The DELHI row and the
+    // All-centres grand total carry it together.
+    expect(screen.getAllByTitle('8 of 10 scanned today')).toHaveLength(2)
+  })
+
+  it('drives the department matrix from the same today feed, never the visit summary', async () => {
+    await renderPage()
+    expect(screen.getByText('Centre × department matrix')).toBeTruthy()
+    // Strip header + card sub both say today (DELHI fixture: 8 of 10).
+    expect(screen.getByText('1 department · 8 of 10 scanned today')).toBeTruthy()
+    expect(screen.getByText(/Today \(.*\): scanned today, per centre and department/)).toBeTruthy()
+    // DELHI row Total and the TOTAL row share one title — the same unit as
+    // the tiles, so a today tile and a matrix cell stop looking comparable
+    // when they are not.
+    const matrix = screen.getByTestId('matrix-table')
+    expect(within(matrix).getAllByTitle('8 of 10 scanned (today)')).toHaveLength(2)
   })
 
   it('shows an alert — never fake zeros — when attendance_centre_daily fails', async () => {

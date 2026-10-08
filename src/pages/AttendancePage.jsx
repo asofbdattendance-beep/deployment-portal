@@ -790,8 +790,28 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
         )}
       />
 
+      {/* ── Today: the day-scoped headline. Same attendance_daily_summary law
+          as Home ("Present today") — any scan event on the picked day, one
+          badge one centre, deployed-only. Never the whole visit. A failed or
+          missing day shows "—", never a stale or zeroed figure. */}
       <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-        <KpiTile label="Scanned" value={stats.sewadars} sub={`across ${stats.centres} centres`} />
+        <KpiTile
+          label="Present today"
+          value={(dayErr || !date) ? <span title="Today's attendance could not be loaded">—</span> : visibleTotals.present}
+          sub={`of ${(dayErr || !date) ? '—' : visibleTotals.expected} deployed · ${shortDayLabel(date)}`}
+          tone={(dayErr || !date) ? '#b45309' : undefined}
+        />
+        <KpiTile
+          label="Open now"
+          value={(dayErr || !date) ? <span title="Open sessions could not be loaded">—</span> : visibleTotals.open_now}
+          sub={`IN, not yet OUT · ${shortDayLabel(date)}`}
+          tone={(dayErr || !date) ? '#b45309' : (visibleTotals.open_now ? '#b45309' : undefined)}
+        />
+      </div>
+
+      {/* ── Whole visit: cumulative by design — none of these is "today". */}
+      <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', marginTop: '1rem' }}>
+        <KpiTile label="Scanned (visit)" value={stats.sewadars} sub={`across ${stats.centres} centres`} />
         <KpiTile label="Present ≥1 day" value={stats.presentToday} sub={`of ${stats.sewadars} scanned`} />
         {/* A7: `stats.full` counts rate >= 100, which for an OE ESCORTS sewadar
             is 3/3 — not a full 5-day visit. The label therefore says "every
@@ -801,7 +821,6 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
           value={stats.full}
           sub={`every expected day${stats.full !== stats.full5 ? ` · ${stats.full5} on ${FULL_VISIT_DAYS}-day depts` : ''}`}
         />
-        <KpiTile label="Open now" value={stats.openNow} tone={stats.openNow ? '#b45309' : undefined} sub="IN, not yet OUT" />
         <KpiTile label="Undeployed" value={stats.flagged} tone={stats.flagged ? 'var(--err)' : undefined} sub="scanned but not deployed" />
       </div>
 
