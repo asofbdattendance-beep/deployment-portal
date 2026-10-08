@@ -26,9 +26,9 @@
  *    the pool forever — after a run of clean misses it hands off to the
  *    other ready engine exactly once, mirroring fallback()'s anti-flapping.
  *  - hardPass(surface): the "hard path" second look — every ready engine,
- *    normal then inverted luminance, merged + deduped, never throws.
+ *    normal, inverted, and rotated luminance, merged + deduped, never throws.
  */
-import { rgbaToGray } from '../../lib/scannerUtils'
+import { rgbaToGray, rotateGray, SCAN_ROTATIONS } from '../../lib/scannerUtils'
 import { BASE_1D_FORMATS, EXTENDED_1D_FORMATS, HARD_PATH_2D_FORMATS } from '../../lib/deviceCapabilities'
 
 /**
@@ -247,7 +247,9 @@ export function createEnginePool(debug, opts = {}) {
         baseHints,
         hardHints,
         /**
-         * @param {{data: Uint8ClampedArray, width: number, height: number}} imageData
+         * @param {{data: Uint8ClampedArray, width: number, height: number} | {gray: Uint8ClampedArray, width: number, height: number}} imageData
+         *   — a pre-rotated {gray, ...} descriptor (rotateGray output) is
+         *   already 1 byte/px and skips rgbaToGray entirely.
          * @param {Map} [hints] — defaults to the base (tier) set; the hard path
          *   passes hardHints. Never undefined: a bare decode(bitmap) is exactly
          *   the bug this replaced.
@@ -255,7 +257,7 @@ export function createEnginePool(debug, opts = {}) {
         decode: (imageData, hints = baseHints) => {
           // MUST be 1 byte/px — see rgbaToGray for why raw RGBA silently
           // produces a frame the binarizer can never read.
-          const gray = rgbaToGray(imageData)
+          const gray = imageData?.gray || rgbaToGray(imageData)
           const lum = new zx.RGBLuminanceSource(gray, imageData.width, imageData.height)
           return reader.decode(new zx.BinaryBitmap(new zx.HybridBinarizer(lum)), hints)
         },
@@ -407,6 +409,24 @@ export function createEnginePool(debug, opts = {}) {
           { imageData, zxHints: zxingReader?.hardHints },
           { imageData: inverted, zxHints: zxingReader?.hardHints },
         )
+        // Rotated normal-gray variants (normal gray ONLY — the inverted
+        // frame is never rotated). 90° first: a sideways badge is the common
+        // case and the dedupe loop keeps the first hit, so the cheapest
+        // useful angle is tried before the expensive ones. Computed
+        // synchronously up front because rgbaToGray shares one scratch
+        // buffer across calls — every rotateGray must finish before the
+        // first decode below overwrites it.
+        const { data, width, height } = imageData || {}
+        if (data && width && height) {
+          const gray = rgbaToGray(imageData)
+          for (const deg of SCAN_ROTATIONS) {
+            const r = rotateGray(gray, width, height, deg)
+            variants.push({
+              imageData: { gray: r.gray, width: r.width, height: r.height },
+              zxHints: zxingReader?.hardHints,
+            })
+          }
+        }
       } else {
         variants.push({ canvas: source })
         const invCanvas = invertCanvas(imageData)

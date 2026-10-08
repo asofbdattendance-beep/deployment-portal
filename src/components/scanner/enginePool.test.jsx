@@ -10,7 +10,8 @@
  *
  * Also covers the empty-result handoff (a clean-miss run hands the active
  * engine off to the other ready one exactly once), tier-driven format mapping,
- * and hardPass (every ready engine, normal + inverted, merged + deduped).
+ * and hardPass (every ready engine, normal + inverted + rotated, merged +
+ * deduped).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
@@ -297,6 +298,38 @@ describe('enginePool hardPass', () => {
     const { barcodes, engine } = await pool.hardPass(surface)
     expect(barcodes).toHaveLength(1)
     expect(barcodes[0].rawValue).toBe('INV456')
+    expect(engine).toBe('ZXing')
+  })
+
+  it('detects a sideways (rotated 90°) barcode a normal pass misses', async () => {
+    // Synthetic 1D barcode held sideways: 2px black / 2px white HORIZONTAL
+    // stripes — the bars run along y, so no horizontal scanline ever crosses
+    // a bar transition and ZXing's 1D readers can never see it. Rotating the
+    // frame 90° turns the stripes vertical and the same pixels decode.
+    const w = 24, h = 8
+    const data = new Uint8ClampedArray(w * h * 4)
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4
+        const v = (y % 4 < 2) ? 0 : 255
+        data[i] = v; data[i + 1] = v; data[i + 2] = v; data[i + 3] = 255
+      }
+    }
+    const surface = { canvas: {}, read: () => ({ data, width: w, height: h }) }
+
+    // ZXing-only pool. The mock decode inspects the frame dimensions: the
+    // sideways frame is landscape (24x8); after the hard pass rotates it 90°
+    // the same bytes arrive portrait (8x24) — that is the rotated variant.
+    const pool = createEnginePool(false)
+    await pool.init()
+    mocks.decodeImpl = (bitmap) => {
+      const src = bitmap?.b?.s
+      if (src && src.w === 8 && src.h === 24) return zxingResult('ROT789')
+      notFound()
+    }
+    const { barcodes, engine } = await pool.hardPass(surface)
+    expect(barcodes).toHaveLength(1)
+    expect(barcodes[0].rawValue).toBe('ROT789')
     expect(engine).toBe('ZXing')
   })
 

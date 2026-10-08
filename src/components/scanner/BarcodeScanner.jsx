@@ -505,9 +505,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         return
       }
       // Hard-pass second look: base detect() runs ONE engine with 1D-only
-      // hints. hardPass tries every ready engine x normal+inverted (+ widened
-      // 2D for ZXing) — the only path that reads inverted/2D badges. Gated by
-      // miss count + stride so its ~2-4x cost never taxes normal reads.
+      // hints. hardPass tries every ready engine x normal+inverted+rotated (+
+      // widened 2D for ZXing) — the only path that reads inverted/rotated/2D
+      // badges. Gated by miss count + stride so its ~2-4x cost never taxes
+      // normal reads.
       if (consecutiveFailsRef.current >= HARD_PASS_AFTER && frameCountRef.current % HARD_PASS_EVERY === 0) {
         try {
           const hard = await engineRef.current?.hardPass?.(surfaceRef.current)
