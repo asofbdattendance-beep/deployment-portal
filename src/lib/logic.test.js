@@ -147,11 +147,11 @@ describe('shouldHideFromConsent', () => {
 
 
 describe('badge format helpers (v25-v27)', () => {
-  it('BADGE_REGEX matches FB / BH / VS patterns (as implemented)', () => {
+  it('BADGE_REGEX matches FB / VS patterns (as implemented)', () => {
     // FB pattern requires trailing 4 digits after GA/LA (real badges: FB5982GA0025)
     expect(BADGE_REGEX.test('FB5971GA0001')).toBe(true)
     expect(BADGE_REGEX.test('FB6000LA0002')).toBe(true)
-    expect(BADGE_REGEX.test('BH1234AB0001')).toBe(true)
+    expect(BADGE_REGEX.test('BH1234AB0001')).toBe(false)
     expect(BADGE_REGEX.test('VSABC123')).toBe(true)
     expect(BADGE_REGEX.test('VS123')).toBe(true)
     expect(BADGE_REGEX.test('INVALID')).toBe(false)
@@ -162,7 +162,7 @@ describe('badge format helpers (v25-v27)', () => {
   it('isValidBadgeFormat validates FB/BH/VS and is null-safe', () => {
     expect(isValidBadgeFormat('FB5971GA0001')).toBe(true)
     expect(isValidBadgeFormat(' VS123 ')).toBe(true)
-    expect(isValidBadgeFormat('BH1234AB0001')).toBe(true)
+    expect(isValidBadgeFormat('BH1234AB0001')).toBe(false)
     expect(isValidBadgeFormat('bad')).toBe(false)
     expect(isValidBadgeFormat(null)).toBe(false)
     expect(isValidBadgeFormat(undefined)).toBe(false)
@@ -171,7 +171,7 @@ describe('badge format helpers (v25-v27)', () => {
   it('isFaridabadBadge mirrors isValidBadgeFormat (currently)', () => {
     expect(isFaridabadBadge('FB5971GA0001')).toBe(true)
     expect(isFaridabadBadge('VS123')).toBe(true)
-    expect(isFaridabadBadge('BH1234AB0001')).toBe(true)
+    expect(isFaridabadBadge('BH1234AB0001')).toBe(false)
     expect(isFaridabadBadge('bad')).toBe(false)
     expect(isFaridabadBadge(null)).toBe(false)
   })
@@ -1350,19 +1350,19 @@ describe('sanitizeScannedBadge', () => {
     expect(sanitizeScannedBadge('F85978GA0005')).toBe('FB5978GA0005')
   })
 
-  it('repairs a positional 8→B confusion', () => {
-    expect(sanitizeScannedBadge('8H1234A5678')).toBe('BH1234A5678')
+  it('returns original for 8→B confusion (BH fails validation)', () => {
+    expect(sanitizeScannedBadge('8H1234A5678')).toBe('8H1234A5678')
   })
 
-  it('repairs a positional S→5 confusion in a BH digit run', () => {
-    expect(sanitizeScannedBadge('BH1234AS678')).toBe('BH1234A5678')
+  it('returns original for S→5 confusion in a BH digit run (BH fails validation)', () => {
+    expect(sanitizeScannedBadge('BH1234AS678')).toBe('BH1234AS678')
   })
 
   it('repairs multiple positional confusions at once', () => {
     expect(sanitizeScannedBadge('F85978GAOO05')).toBe('FB5978GA0005')
   })
 
-  it('does NOT corrupt a clean valid badge (no blind replacement)', () => {
+  it('does NOT corrupt an already-valid or unrecognized badge (no blind replacement)', () => {
     // S and B are load-bearing letters — a blind S→5 / B→8 would retype these.
     expect(sanitizeScannedBadge('FB5978GA0005')).toBe('FB5978GA0005')
     expect(sanitizeScannedBadge('BH1234AB5678')).toBe('BH1234AB5678')
