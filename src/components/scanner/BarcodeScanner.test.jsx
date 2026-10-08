@@ -461,3 +461,87 @@ describe('BarcodeScanner camera suppressor acceptance (T11)', () => {
     }
   })
 })
+
+// T4: the camera decode gate runs through sanitizeScannedBadge. Code-39
+// start/stop guards, lower case and O↔0-style confusion misreads used to die
+// silently at the BADGE_REGEX gate (raw `*FB5971GA0001*` never matched, so a
+// perfectly good badge scanned nothing). Now: guards/confusions are recovered
+// and the CLEANED value flows downstream; unreadable values surface a dedicated
+// transient reject hint instead of vanishing.
+describe('BarcodeScanner decode gate routes through the sanitizer (T4)', () => {
+  function renderDecoding(rawValue, { rejectCalls = Infinity, onScan = vi.fn() } = {}) {
+    const stream = makeStream()
+    mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+    let calls = 0
+    window.BarcodeDetector = class {
+      static getSupportedFormats = () => Promise.resolve(['code_39'])
+      // Reject the first `rejectCalls` detects, then go quiet — so the hint's
+      // hide-timeout has nothing to re-show it. NB: the component's
+      // device-profiling warmup (ensureEngines) consumes the first 3 detects
+      // before the decode loop starts, so the loop only sees rejects from
+      // call #4 — rejectCalls must exceed 3 or the loop never sees a barcode.
+      detect = () => Promise.resolve(++calls <= rejectCalls ? [{ rawValue, cornerPoints: [] }] : [])
+    }
+    const view = render(<BarcodeScanner onScan={onScan} />)
+    const video = view.container.querySelector('video')
+    Object.defineProperty(video, 'videoWidth', { value: 1280, configurable: true })
+    Object.defineProperty(video, 'videoHeight', { value: 720, configurable: true })
+    return view
+  }
+
+  it('strips Code-39 guards — onScan fires with the cleaned badge', async () => {
+    vi.useFakeTimers()
+    try {
+      const onScan = vi.fn()
+      const view = renderDecoding('*FB5971GA0001*', { onScan })
+      await act(async () => { await vi.advanceTimersByTimeAsync(800) })
+      expect(onScan).toHaveBeenCalledWith('FB5971GA0001')
+      expect(onScan).toHaveBeenCalledTimes(1)
+      // The debug pill keeps showing the RAW read (guards included).
+      expect(view.getByText('*FB5971GA0001*')).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('repairs a 1-char confusion misread — onScan fires with the repaired badge', async () => {
+    vi.useFakeTimers()
+    try {
+      const onScan = vi.fn()
+      // Letter O read for zero at both digit slots: repairBadgeConfusions
+      // fixes exactly those two positions and the result matches BADGE_REGEX.
+      renderDecoding('FB5971GAOO01', { onScan })
+      await act(async () => { await vi.advanceTimersByTimeAsync(800) })
+      expect(onScan).toHaveBeenCalledWith('FB5971GA0001')
+      expect(onScan).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a 1-char misread shows the reject hint once, then hides — no throw, no onScan', async () => {
+    vi.useFakeTimers()
+    try {
+      const onScan = vi.fn()
+      const view = renderDecoding('F', { rejectCalls: 6, onScan })
+      await act(async () => { await vi.advanceTimersByTimeAsync(800) })
+
+      // Rejected: never reaches onScan, and the hint is up.
+      expect(onScan).not.toHaveBeenCalled()
+      const hint = view.getByText(/invalid badge/i)
+      expect(hint).toBeTruthy()
+
+      // Throttle: within the 2s window the same hint element persists — no
+      // re-set, no blink, no throw, no matter how many frames reject.
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+      expect(view.getByText(/invalid badge/i)).toBe(hint)
+
+      // Timeout state: once rejects stop, the hide-timeout takes the pill down.
+      await act(async () => { await vi.advanceTimersByTimeAsync(2200) })
+      expect(view.queryByText(/invalid badge/i)).toBeNull()
+      expect(onScan).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

@@ -41,7 +41,7 @@ import {
   describeCamera,
   platform,
 } from './cameraManager'
-import { BADGE_REGEX } from '../../lib/logic'
+import { BADGE_REGEX, sanitizeScannedBadge } from '../../lib/logic'
 
 
 // ─── Device Profiles ──────────────────────────────────────────────────────────
@@ -225,6 +225,11 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   // once the preview is live, cleared in teardown().
   const refocusTimerRef = useRef(null)
   const lastRawRef = useRef(null)
+  // Reject-hint throttle (epoch ms of the last shown hint) and its hide
+  // timeout — the "invalid badge" pill is transient and must not re-flash on
+  // every rejected frame.
+  const rejectHintAtRef = useRef(0)
+  const rejectHintTimerRef = useRef(null)
   const engineLabelRef = useRef('')
   const guidanceRef = useRef(null)
   const detectMsRef = useRef({ avg: 0, last: 0 })
@@ -242,6 +247,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const [torchOn, setTorchOn] = useState(false)
   const [torchSupported, setTorchSupported] = useState(false)
   const [lastRaw, setLastRaw] = useState(null)
+  // Dedicated reject-hint state. NOT guidanceMsg: that is recomputed from
+  // quality/fail counters every frame (setGuidance in detectLoop) and would
+  // wipe a reject hint within one frame of showing it.
+  const [rejectHint, setRejectHint] = useState(null)
   const [debugLogs, setDebugLogs] = useState([])
   const [tapFocusActive, setTapFocusActive] = useState(false)
   const [aimBox, setAimBox] = useState(null)
@@ -348,12 +357,37 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     return { confirmed: c >= cfg.confirmThreshold, count: c }
   }, [])
 
+  // Dedicated transient hint for reads the sanitizer could not recover.
+  // Ref-throttled to one show per 2s (a steady misread stream otherwise
+  // re-flashes the pill every frame) and self-hiding via timeout — guidanceMsg
+  // cannot carry this: detectLoop recomputes it every frame.
+  const throttledRejectHint = useCallback(() => {
+    const now = Date.now()
+    if (now - rejectHintAtRef.current < 2000) return
+    rejectHintAtRef.current = now
+    if (rejectHintTimerRef.current) { clearTimeout(rejectHintTimerRef.current); rejectHintTimerRef.current = null }
+    setRejectHint('Invalid badge — try again')
+    rejectHintTimerRef.current = setTimeout(() => {
+      rejectHintTimerRef.current = null
+      setRejectHint(null)
+    }, 2000)
+  }, [])
+
   const handleBarcodes = useCallback((barcodes, roi, engine) => {
     const cfg = configRef.current
     for (const b of barcodes) {
       const raw = String(b.rawValue || '').trim().toUpperCase()
-      if (raw !== lastRawRef.current) { lastRawRef.current = raw; setLastRaw(raw) }
-      if (!BADGE_REGEX.test(raw)) continue
+      // The decode gate runs through the sanitizer: Code-39 guards, case and
+      // confusion misreads are recovered here instead of dying at the regex.
+      // The sanitizer returns the ORIGINAL (normalised) value when nothing
+      // can be recovered — its codified contract (logic.test.js) — so
+      // validity is still judged on the cleaned result, never the raw read.
+      const cleaned = sanitizeScannedBadge(b.rawValue)
+      // Every dedupe key below is the CLEANED value: '*FB…*' and 'FB…*' are
+      // one badge, so window counts, the 2s suppressor and the pill's
+      // change-detection must not re-arm when only the guards differ.
+      if (cleaned !== lastRawRef.current) { lastRawRef.current = cleaned; setLastRaw(raw) }
+      if (!cleaned || !BADGE_REGEX.test(cleaned)) { throttledRejectHint(); continue }
 
       // Reject detections hugging the frame edge. cornerPoints arrive in
       // detect-canvas coordinates, so map them back to video pixels first.
@@ -378,35 +412,35 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       }
 
       hasEverDetectedRef.current = true
-      const { confirmed, count } = updateWindow(raw, cfg)
-      if (debugOn) pushDebug(`window ${raw}: ${count}/${cfg.confirmThreshold} ${confirmed ? 'CONFIRMED' : ''}`)
+      const { confirmed, count } = updateWindow(cleaned, cfg)
+      if (debugOn) pushDebug(`window ${cleaned}: ${count}/${cfg.confirmThreshold} ${confirmed ? 'CONFIRMED' : ''}`)
       if (!confirmed) continue
 
       const now = Date.now()
-      if (lastScanRef.current.badge === raw && now - lastScanRef.current.time < 2000) break
+      if (lastScanRef.current.badge === cleaned && now - lastScanRef.current.time < 2000) break
       // Declined-vibrate damp: a badge declined moments ago (busy /
       // decision-pending) keeps re-offering onScan every confirmed frame per
       // the T11 contract — but the per-frame vibrate is pure storm, so damp
       // vibrate only, never the offer itself.
-      const declinedDamped = lastDeclinedRef.current.badge === raw && now - lastDeclinedRef.current.time < DECLINED_DAMP_MS
+      const declinedDamped = lastDeclinedRef.current.badge === cleaned && now - lastDeclinedRef.current.time < DECLINED_DAMP_MS
       if (!declinedDamped) { try { navigator.vibrate?.(80) } catch {} }
-      pushDebug(`SCAN OK [${engine}]: ${raw}`)
+      pushDebug(`SCAN OK [${engine}]: ${cleaned}`)
       // Camera-suppressor contract (see the busy guard in useScanHandler.js):
       // the suppressor records only on ACCEPTANCE. A declined scan (the
       // handler returned exactly `false` — busy or decision-pending) never
       // ran, so burning the 2s window on it would swallow the retry as a
       // duplicate. Any other return (undefined, true, a promise) records.
       // Declined scans record into the short damp above instead.
-      const accepted = onScanRef.current?.(raw)
+      const accepted = onScanRef.current?.(cleaned)
       if (accepted !== false) {
-        lastScanRef.current = { badge: raw, time: now }
+        lastScanRef.current = { badge: cleaned, time: now }
         lastDeclinedRef.current = { badge: null, time: 0 }
       } else {
-        lastDeclinedRef.current = { badge: raw, time: now }
+        lastDeclinedRef.current = { badge: cleaned, time: now }
       }
       break
     }
-  }, [debugOn, pushDebug, updateWindow, publishAim])
+  }, [debugOn, pushDebug, updateWindow, publishAim, throttledRejectHint])
 
   // ─── Frame scheduling ───────────────────────────────────────────────
 
@@ -701,6 +735,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     sessionRef.current++            // invalidate every in-flight continuation
     cancelFrame()
     if (refocusTimerRef.current) { clearInterval(refocusTimerRef.current); refocusTimerRef.current = null }
+    if (rejectHintTimerRef.current) { clearTimeout(rejectHintTimerRef.current); rejectHintTimerRef.current = null }
     channelRef.current?.close(); channelRef.current = null
     if (tapFocusCleanupRef.current) { try { tapFocusCleanupRef.current() } catch {} tapFocusCleanupRef.current = null }
     if (stopCamera) {
@@ -755,6 +790,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     // watchdog error re-errors instantly on the stale timestamp (L-22).
     lastScanRef.current = { badge: null, time: 0 }
     lastRawRef.current = null
+    rejectHintAtRef.current = 0
     slidingWindowRef.current = []
     frameCountRef.current = 0
     hasEverDetectedRef.current = false
@@ -1119,9 +1155,23 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         </div>
       )}
 
-      {guidanceMsg && (
+      {/* Reject hint — a decode the sanitizer could not recover. Amber to read
+          as "rejected" against the black guidance pill; dedicated state because
+          guidanceMsg is recomputed every frame and would wipe this instantly.
+          Transient: throttledRejectHint arms the 2s hide-timeout. */}
+      {rejectHint && (
         <div style={{
           position: 'absolute', bottom: 10, left: '50%', transform: 'translateX(-50%)',
+          background: 'rgba(245,158,11,0.95)', color: '#fff',
+          padding: '0.35rem 0.7rem', borderRadius: 999,
+          fontSize: '0.78rem', fontWeight: 600,
+          whiteSpace: 'normal', maxWidth: 'calc(100% - 20px)', textAlign: 'center',
+        }}>{rejectHint}</div>
+      )}
+
+      {guidanceMsg && (
+        <div style={{
+          position: 'absolute', bottom: rejectHint ? 44 : 10, left: '50%', transform: 'translateX(-50%)',
           background: 'rgba(0,0,0,0.7)', color: '#fff',
           padding: '0.35rem 0.7rem', borderRadius: 999,
           fontSize: '0.78rem', fontWeight: 600,
