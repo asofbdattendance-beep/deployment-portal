@@ -88,13 +88,19 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
   // Light session poll (L-42): refresh sessions only — never the full load.
   // Same event-date predicate as the initial load (I4); sequenced like the
   // load so a slow poll cannot overwrite a newer one.
+  // v77 perf: NO count:'exact' on this 15 s poll ({ count: 'none' }) — the
+  // count on dp_attendance_sessions cost ~3.2 s mean / ~66% of all DB time
+  // production-wide, and this poll fires it from every open scanner page.
+  // The initial load() above keeps the count (and its mismatch guard) so a
+  // truncated first paint still fails loudly; the poll only overwrites
+  // already-rendered rows and keeps last data on error.
   const refreshSessions = useCallback(async () => {
     if (!selectedScheduleId) return
     const seq = ++seqRef.current
     const alive = () => mountedRef.current && seq === seqRef.current
     try {
       const today = todayStrIST()
-      const sess = await fetchAllRows('dp_attendance_sessions', SESSION_COLS, (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id')
+      const sess = await fetchAllRows('dp_attendance_sessions', SESSION_COLS, (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id', { count: 'none' })
       if (!alive()) return
       setSessions(sess || [])
       setOffline(false)

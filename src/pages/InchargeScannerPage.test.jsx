@@ -138,6 +138,21 @@ describe('InchargeScannerPage render', () => {
     // today) and contradicts the Incharge page and the Daily tab.
     expect(mocks.filterCalls.filter(c => c[0] === 'eq' && c[1] === 'in_date')).toHaveLength(0)
   })
+
+  // v77 perf: the 15 s poll must not pay count:'exact' (~3.2 s mean on
+  // dp_attendance_sessions prod-wide). The refresh (post-scan re-read exercises
+  // the same path) passes { count: 'none' }; the initial load keeps the
+  // default so a truncated first paint still fails loudly.
+  it('refresh skips count:exact while the initial load keeps it', async () => {
+    render(<InchargeScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+    await settle()
+    const sessCalls = () => mocks.fetchAllRows.mock.calls.filter(c => c[0] === 'dp_attendance_sessions')
+    expect(sessCalls()).toHaveLength(1)
+    expect(sessCalls()[0][4]).toBeUndefined()
+    await act(async () => { await mocks.scannerCfg.onAfterScan() })
+    expect(sessCalls()).toHaveLength(2)
+    expect(sessCalls()[1][4]).toEqual({ count: 'none' })
+  })
 })
 
 describe('InchargeScannerPage scanner success path', () => {

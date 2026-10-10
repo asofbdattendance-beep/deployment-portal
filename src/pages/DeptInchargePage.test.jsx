@@ -345,6 +345,32 @@ describe('DeptInchargePage load race (T3)', () => {
 // T4: a late poll must not overwrite newer sessions, and a successful poll
 // clears the stale-data pin.
 describe('DeptInchargePage session poll guards (T4)', () => {
+  // v77 perf: the 15 s session poll must not pay count:'exact' (~3.2 s mean
+  // on dp_attendance_sessions prod-wide). The poll passes { count: 'none' };
+  // the initial load keeps the default so a truncated first paint still
+  // fails loudly.
+  it('session poll skips count:exact while the initial load keeps it', async () => {
+    vi.useFakeTimers()
+    try {
+      mocks.rpc.mockResolvedValue({ data: ['dept-1'] })
+      mocks.fetchAllRows.mockImplementation(async (table) => {
+        if (table === 'deployment_departments') return [{ id: 'dept-1', name: 'Traffic' }]
+        if (table === 'deployments') return []
+        return []
+      })
+      render(<DeptInchargePage schedules={SCHEDULES} scheduleId="sched-1" />)
+      await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+      const sessCalls = () => mocks.fetchAllRows.mock.calls.filter(c => c[0] === 'dp_attendance_sessions')
+      expect(sessCalls().length).toBeGreaterThanOrEqual(1)
+      expect(sessCalls()[0][4]).toBeUndefined()
+      await act(async () => { await vi.advanceTimersByTimeAsync(15000) })
+      expect(sessCalls().length).toBeGreaterThanOrEqual(2)
+      expect(sessCalls()[sessCalls().length - 1][4]).toEqual({ count: 'none' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('late poll cannot overwrite newer sessions', async () => {
     vi.useFakeTimers()
     try {

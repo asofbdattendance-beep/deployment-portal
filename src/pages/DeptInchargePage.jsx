@@ -197,12 +197,16 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
   // refresh would regress the list right after a scan.
   // T4: sequenced like the load — a slow poll that resolves after a newer
   // one must not overwrite its sessions — and a success clears the stale pin.
+  // v77 perf: NO count:'exact' on this 15 s poll ({ count: 'none' }) — the
+  // count on dp_attendance_sessions cost ~3.2 s mean / ~66% of all DB time
+  // production-wide. The initial load() above keeps the count (and its
+  // mismatch guard) so a truncated first paint still fails loudly.
   const refreshSessions = useCallback(async () => {
     const seq = ++seqRef.current
     const alive = () => mountedRef.current && seq === seqRef.current
     try {
       const today = todayStrIST()
-      const sess = await fetchAllRows('dp_attendance_sessions', 'id,badge_number,sewadar_name,sewadar_centre,sewadar_dept,in_date,out_date,in_time,out_time,is_vss,undeployed_scan,created_at', (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id')
+      const sess = await fetchAllRows('dp_attendance_sessions', 'id,badge_number,sewadar_name,sewadar_centre,sewadar_dept,in_date,out_date,in_time,out_time,is_vss,undeployed_scan,created_at', (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id', { count: 'none' })
       if (!alive()) return
       setSessions(sess||[])
       setOffline(false)

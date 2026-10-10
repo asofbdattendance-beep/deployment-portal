@@ -79,14 +79,27 @@ export async function getMyDeptIds(scheduleId) {
 // is legal; dedupe needs the values).
 // For tables: deployments/sewadar_consents/centre_allocations/... -> 'id';
 // dp_sewadars/prev_year_deployments/vss_sewadars -> 'badge_number'.
+//
+// opts (v77 perf follow-up, optional 5th arg):
+//   { count: 'none' } SKIPS the page-1 count:'exact' (no Prefer: count=exact
+//   header, no count-mismatch retry). The pagination loop still runs to a
+//   short page, so the result is still complete — only the server-count
+//   cross-check is gone. USE IT for high-frequency refresh polls (the 15 s
+//   session polls on the scanner pages): on dp_attendance_sessions the count
+//   alone cost ~3.2 s mean / ~66% of all DB time (v77 header), because the
+//   (in_date OR out_date) predicate heap-scanned without the out_date index.
+//   Initial/full loads MUST keep the default (count on) — a truncated first
+//   paint must fail loudly, while a poll only overwrites already-rendered
+//   rows and keeps last data on error.
 const MAX_FETCH_PAGES = 500
 function stableKeyCols(stableKey) {
   if (!stableKey) return []
   return (Array.isArray(stableKey) ? stableKey : [stableKey]).filter(Boolean)
 }
-export async function fetchAllRows(table, selectColumns = '*', applyFilters = null, stableKey = null) {
+export async function fetchAllRows(table, selectColumns = '*', applyFilters = null, stableKey = null, opts = null) {
   const pageSize = 1000
   const keys = stableKeyCols(stableKey)
+  const wantCount = !opts || opts.count !== 'none'
   let select = selectColumns
   if (select.trim() !== '*' && keys.length) {
     const missing = keys.filter(k => !new RegExp(`(^|[\\s,(])${k}($|[\\s,)])`).test(select))
@@ -100,7 +113,7 @@ export async function fetchAllRows(table, selectColumns = '*', applyFilters = nu
     let pages = 0
     while (true) {
       if (++pages > MAX_FETCH_PAGES) throw new Error(`fetchAllRows(${table}): page guard tripped (> ${MAX_FETCH_PAGES} pages)`)
-      let q = supabase.from(table).select(select, pages === 1 ? { count: 'exact' } : undefined)
+      let q = supabase.from(table).select(select, (pages === 1 && wantCount) ? { count: 'exact' } : undefined)
       if (typeof applyFilters === 'function') {
         const maybe = applyFilters(q)
         if (maybe) q = maybe

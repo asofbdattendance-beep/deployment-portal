@@ -128,4 +128,28 @@ describe('fetchAllRows hardened pagination', () => {
     makeBuilder([{ rows: rows(1000), count: 999999 }])
     await expect(fetchAllRows('t', '*', null, 'id')).rejects.toThrow(/page guard tripped|count mismatch/)
   }, 15000)
+
+  it('requests count:exact on page 1 by default (initial loads keep the guard)', async () => {
+    const { calls } = makeBuilder([{ rows: rows(5), count: 5 }])
+    const out = await fetchAllRows('t', '*', null, 'id')
+    expect(calls[0].countOpt).toEqual({ count: 'exact' })
+    expect(out).toHaveLength(5)
+  })
+
+  // v77 perf: the 15 s session polls must not pay count:'exact' (~3.2 s mean
+  // on dp_attendance_sessions). { count: 'none' } skips the Prefer header AND
+  // the count-mismatch retry, while the pagination loop still runs to a short
+  // page — the result is still complete, only the cross-check is gone.
+  it("skips the count on every page when opts.count is 'none'", async () => {
+    const all = rows(1500)
+    const { calls } = makeBuilder([
+      { rows: all.slice(0, 1000) }, // no count — must NOT throw
+      { rows: all.slice(1000) },
+    ])
+    const out = await fetchAllRows('t', '*', null, 'id', { count: 'none' })
+    expect(calls[0].countOpt).toBeUndefined()
+    expect(calls[1].countOpt).toBeUndefined()
+    expect(out).toHaveLength(1500)
+    expect(new Set(out.map(r => r.id)).size).toBe(1500)
+  })
 })
