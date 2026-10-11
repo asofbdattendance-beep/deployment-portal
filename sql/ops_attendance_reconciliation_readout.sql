@@ -109,3 +109,15 @@ SELECT count(*) AS fresh_today_open,
    AND status = 'OPEN'
    AND in_date = DATE '2026-10-11'
    AND in_time >= TIME '03:30:00';
+
+-- 6b. TODAY's PRE-03:30 bucket (in_date = 2026-10-11, in_time < 03:30).
+--    Information only: midnight–03:30 arrivals the 03:30 cutoff line runs
+--    through. Decide per the count whether these are last-night late
+--    arrivals (close them) or today's early batch (leave them).
+SELECT count(*) AS pre_330_open,
+       min(in_time) AS earliest_in, max(in_time) AS latest_in
+  FROM public.dp_attendance_sessions
+ WHERE schedule_id = 'b1f448a4-e5b3-4aa3-a915-ca2ee82cdd53'
+   AND status = 'OPEN'
+   AND in_date = DATE '2026-10-11'
+   AND in_time < TIME '03:30:00';
