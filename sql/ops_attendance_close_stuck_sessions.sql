@@ -23,30 +23,60 @@
 -- ============================================================
 
 -- PARAMETERS (edit all three):
---   <CLOSED_STATUS> : exact value from readout q0, e.g. 'CLOSED'
+--   <CLOSED_STATUS> : 'CLOSED' — corroborated in-repo by
+--     sql/v56_scan_in_guard_and_rpc_hardening.sql:316, where scan_out
+--     itself writes status='CLOSED'. Still eyeball readout q0: if it
+--     shows any non-OPEN value other than CLOSED, stop and ask.
 --   <OUT_TIME>      : stated closing time, e.g. TIME '18:00:00'
---   <BADGE, ...>    : badges from readout q1 who already left
+--   <BADGE, ...>    : badges from readout q1 who already left (per-badge
+--     variant only; the bulk variant needs no badge list)
 
--- Step B — PREVIEW (read-only). Must show exactly the people you intend
--- to close, each with in_time earlier than your stated OUT time.
+-- Step B — PREVIEW (read-only). Two variants, pick one:
+--   B1 per-badge (a handful of people):
 SELECT badge_number, sewadar_name, in_date, in_time, status
   FROM public.dp_attendance_sessions
  WHERE schedule_id = 'b1f448a4-e5b3-4aa3-a915-ca2ee82cdd53'
    AND status = 'OPEN'
    AND in_date = DATE '2026-10-11'
    AND badge_number IN ('<BADGE>', '<BADGE2>');
--- DELETE the dummy badges above and list real ones. If any in_time is
--- LATER than your <OUT_TIME>, remove that badge from the list (its OUT
--- needs its own later time) — otherwise the guard trigger rejects the
--- whole statement.
-
--- Step C — CLOSE (writes). Check "rows affected" equals the preview count,
--- then re-run Step B and expect zero rows.
--- UPDATE public.dp_attendance_sessions
---    SET out_time = TIME '<OUT_TIME>',
---        out_date = DATE '2026-10-11',
---        status   = '<CLOSED_STATUS>'
+-- DELETE the dummy badges above and list real ones from readout q1.
+--   B2 bulk (whole day is over, everyone gone — e.g. the 1710 stuck rows):
+-- SELECT count(*) AS will_close,
+--        min(in_time) AS earliest_in, max(in_time) AS latest_in
+--   FROM public.dp_attendance_sessions
 --  WHERE schedule_id = 'b1f448a4-e5b3-4aa3-a915-ca2ee82cdd53'
 --    AND status = 'OPEN'
 --    AND in_date = DATE '2026-10-11'
+--    AND in_time < TIME '<OUT_TIME>';
+-- If will_close is LOWER than the stuck count, the difference is rows
+-- with in_time after your <OUT_TIME> — those need their own later time,
+-- the guard trigger would reject them. Pick a later <OUT_TIME> or fall
+-- back to B1 for the stragglers.
+
+-- Step C — CLOSE (writes). Uncomment ONE variant. The in_time guard makes
+-- a too-early <OUT_TIME> close fewer rows instead of erroring halfway.
+-- Check "rows affected" equals the preview count, then re-run the
+-- matching Step B preview and expect zero rows (B2: will_close = 0).
+-- --- C1 per-badge ---
+-- UPDATE public.dp_attendance_sessions
+--    SET out_time = TIME '<OUT_TIME>',
+--        out_date = DATE '2026-10-11',
+--        status   = 'CLOSED',
+--        updated_at = now()
+--  WHERE schedule_id = 'b1f448a4-e5b3-4aa3-a915-ca2ee82cdd53'
+--    AND status = 'OPEN'
+--    AND in_date = DATE '2026-10-11'
+--    AND in_time < TIME '<OUT_TIME>'
 --    AND badge_number IN ('<BADGE>', '<BADGE2>');
+-- --- C2 bulk (whole day over) ---
+-- UPDATE public.dp_attendance_sessions
+--    SET out_time = TIME '<OUT_TIME>',
+--        out_date = DATE '2026-10-11',
+--        status   = 'CLOSED',
+--        updated_at = now()
+--  WHERE schedule_id = 'b1f448a4-e5b3-4aa3-a915-ca2ee82cdd53'
+--    AND status = 'OPEN'
+--    AND in_date = DATE '2026-10-11'
+--    AND in_time < TIME '<OUT_TIME>';
+-- Columns mirror scan_out (v56:316) minus scanner identity, which is
+-- unknowable after the fact — out_scanner_* stay NULL on these rows.
