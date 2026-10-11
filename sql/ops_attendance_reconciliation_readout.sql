@@ -72,3 +72,40 @@ SELECT count(*) AS sessions,
   FROM public.dp_attendance_sessions
  WHERE schedule_id = 'b1f448a4-e5b3-4aa3-a915-ca2ee82cdd53'
    AND (in_date = DATE '2026-10-11' OR out_date = DATE '2026-10-11');
+
+-- 4. OPEN SPLIT BY IN-DATE (run this first in the OUT+IN flow).
+--    Yesterday's row = needs OUT-for-last-night + fresh IN today.
+--    Today's row after 03:30 = fresh, DO NOT TOUCH.
+SELECT in_date,
+       count(*) FILTER (WHERE status = 'OPEN') AS still_open,
+       count(*) AS total_rows,
+       min(in_time) AS earliest_in, max(in_time) AS latest_in
+  FROM public.dp_attendance_sessions
+ WHERE schedule_id = 'b1f448a4-e5b3-4aa3-a915-ca2ee82cdd53'
+ GROUP BY in_date
+ ORDER BY in_date;
+
+-- 5. YESTERDAY'S STUCK LIST (in_date = 2026-10-10, still OPEN).
+--    THE OUT+IN LIST: close these for last night (close file, variant C3),
+--    then each person scans IN fresh in the app today. Order matters — the
+--    fresh IN only works AFTER yesterday's row is CLOSED (one OPEN per
+--    badge). Anyone here who already tried today's IN got "Already IN" and
+--    must rescan after the close lands.
+SELECT badge_number, sewadar_name, sewadar_centre, sewadar_dept,
+       in_date, in_time, in_scanner_badge, created_at
+  FROM public.dp_attendance_sessions
+ WHERE schedule_id = 'b1f448a4-e5b3-4aa3-a915-ca2ee82cdd53'
+   AND status = 'OPEN'
+   AND in_date = DATE '2026-10-10'
+ ORDER BY in_time;
+
+-- 6. TODAY'S FRESH INs (in_date = 2026-10-11, in_time >= 03:30).
+--    HANDS OFF — legitimate today attendance. Count only; if any row here
+--    looks wrong, handle it per-badge, never bulk.
+SELECT count(*) AS fresh_today_open,
+       min(in_time) AS earliest_in, max(in_time) AS latest_in
+  FROM public.dp_attendance_sessions
+ WHERE schedule_id = 'b1f448a4-e5b3-4aa3-a915-ca2ee82cdd53'
+   AND status = 'OPEN'
+   AND in_date = DATE '2026-10-11'
+   AND in_time >= TIME '03:30:00';

@@ -69,6 +69,10 @@ SELECT badge_number, sewadar_name, in_date, in_time, status
 --    AND in_time < TIME '<OUT_TIME>'
 --    AND badge_number IN ('<BADGE>', '<BADGE2>');
 -- --- C2 bulk (whole day over) ---
+-- ON HOLD while today's fresh INs exist: this variant filters
+-- in_date = 2026-10-11 and would close today's legitimate rows too.
+-- Do NOT run C2 until/unless the day is over AND readout q6 shows no
+-- fresh rows worth protecting. The yesterday-OUT job is C3 below.
 -- UPDATE public.dp_attendance_sessions
 --    SET out_time = TIME '<OUT_TIME>',
 --        out_date = DATE '2026-10-11',
@@ -80,3 +84,31 @@ SELECT badge_number, sewadar_name, in_date, in_time, status
 --    AND in_time < TIME '<OUT_TIME>';
 -- Columns mirror scan_out (v56:316) minus scanner identity, which is
 -- unknowable after the fact — out_scanner_* stay NULL on these rows.
+
+-- --- C3 yesterday-OUT (the OUT half of OUT+IN) ---
+-- Closes ONLY yesterday's stuck rows (in_date = 2026-10-10) with last
+-- night's closing hour. Today's fresh INs (in_date = 2026-10-11) are
+-- untouched by this WHERE clause no matter what.
+-- After C3 lands, each person scans IN fresh in the app — that is the IN
+-- half, no SQL for it. Anyone who tried today's IN early and got
+-- "Already IN" must rescan AFTER C3 (their retry never recorded).
+-- Preview first (expect the readout-q5 count), then uncomment the UPDATE,
+-- check "rows affected", re-run the preview (expect zero).
+-- Preview:
+-- SELECT count(*) AS will_close,
+--        min(in_time) AS earliest_in, max(in_time) AS latest_in
+--   FROM public.dp_attendance_sessions
+--  WHERE schedule_id = 'b1f448a4-e5b3-4aa3-a915-ca2ee82cdd53'
+--    AND status = 'OPEN'
+--    AND in_date = DATE '2026-10-10'
+--    AND in_time < TIME '<NIGHT_CLOSE>';
+-- Close (set <NIGHT_CLOSE> to last night's closing hour, e.g. '23:00:00'):
+-- UPDATE public.dp_attendance_sessions
+--    SET out_time = TIME '<NIGHT_CLOSE>',
+--        out_date = DATE '2026-10-10',
+--        status   = 'CLOSED',
+--        updated_at = now()
+--  WHERE schedule_id = 'b1f448a4-e5b3-4aa3-a915-ca2ee82cdd53'
+--    AND status = 'OPEN'
+--    AND in_date = DATE '2026-10-10'
+--    AND in_time < TIME '<NIGHT_CLOSE>';
