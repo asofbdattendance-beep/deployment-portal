@@ -106,6 +106,7 @@ export default function AnomalyDetailPopup({ row, scheduleId, related = [], rule
                 </span>
                 {s.is_manual && <span className="pill pill-grey">manual</span>}
                 {s.undeployed_scan && <span className="pill pill-red">undeployed</span>}
+                {s.is_auto_out && <span className="pill pill-blue" title="Closed by the 21:00 auto-out sweep — no OUT scan was recorded, so this OUT time is assumed">auto out</span>}
                 {s.status === 'OPEN' && <span className="pill pill-amber">OPEN</span>}
               </li>
             ))}

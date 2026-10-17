@@ -751,6 +751,24 @@ describe('Logs — the whole-schedule scan record, one compact line per session'
     expect(table.textContent).toContain('Manual')
   })
 
+  it('tags a session the 21:00 sweep closed, so it never reads as a real OUT scan', async () => {
+    respondWith({
+      log: [{
+        ...LOG[0], id: 'log-auto', badge_number: 'FB5971GA0003', sewadar_name: 'GEETA',
+        is_auto_out: true, is_manual: false, status: 'CLOSED',
+        out_time: '21:00:00', out_scanner_badge: null, out_scanner_name: null,
+      }],
+    })
+    await renderPage()
+    fireEvent.click(screen.getByText('Logs'))
+    const table = screen.getByRole('table', { name: 'Scan log' })
+    expect(table.textContent).toContain('Auto out')
+    // Nobody performed this close, so there is no OUT-by name to show…
+    expect(table.textContent).not.toContain('Scanner Two')
+    // …and it is never dressed up as an operator-entered close.
+    expect(table.textContent).not.toContain('Manual')
+  })
+
   it('honours the shared centre filter and the search box', async () => {
     await renderPage()
     fireEvent.click(screen.getByText('Logs'))

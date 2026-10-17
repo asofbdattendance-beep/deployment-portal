@@ -23,6 +23,7 @@ import {
   previsitExportRows,
   previsitTotalExportRows,
   previsitAttentionExportRows,
+  previsitAbsentRows,
 } from '../lib/previsit'
 
 /**
@@ -35,22 +36,26 @@ import {
  *               present on the selected day (or a day count for All days);
  *   Present   — the register: ONE row per sewadar per day (first IN,
  *               last OUT, summed minutes, session count);
+ *   Absent    — the deployed roster minus whoever scanned: centre-scoped
+ *               for the selected day, never-scanned for All days;
  *   Attention — what needs a follow-up: sessions left open, scans with
  *               no deployment row, badges scanned more than once a day.
  *
- * Deliberately NO Absent tab (product decision). Sibling
- * PrevisitDashboard (dashboard tabs) owns the KPI/strip/breakdown
- * summary. Both read through the shared usePrevisitData hook, so reports
- * and dashboard can never disagree about what the server said.
+ * The Absent tab is the one list the dashboard does not own: a flat
+ * who-did-not-scan register (PrevisitDashboard keeps the KPI/strip/
+ * breakdown summary). Both read through the shared usePrevisitData
+ * hook, so reports and dashboard can never disagree about what the
+ * server said.
  *
  * Read-only by design: scanning lives on the scanner pages and writes
  * the same session row in both modes (the scan date classifies it).
  */
 const TAB_TOTAL = 'total'
 const TAB_PRESENT = 'present'
+const TAB_ABSENT = 'absent'
 const TAB_ATTENTION = 'attention'
 const TAB_LOGS = 'logs'
-const TABS = [TAB_TOTAL, TAB_PRESENT, TAB_ATTENTION, TAB_LOGS]
+const TABS = [TAB_TOTAL, TAB_PRESENT, TAB_ABSENT, TAB_ATTENTION, TAB_LOGS]
 const DAY_ALL = 'all'
 
 // Mode vocab: the register UI is identical in both lenses — only the dates
@@ -91,6 +96,7 @@ const SEWA_RULE_META = {
   'Undeployed scan': { label: 'Undeployed scan', pill: 'pill-red', text: 'Badge scanned with no deployment for this schedule' },
   'Scanned more than once': { label: 'Scanned more than once', pill: 'pill-amber', text: 'Same badge scanned IN more than once on one date' },
   'Present register': { label: 'Present register', pill: 'pill-gray', text: 'First IN, last OUT and summed minutes for the day' },
+  'Absent register': { label: 'Absent register', pill: 'pill-gray', text: 'Deployed but not scanned on the selected day (or on any day)' },
   'Deployed roster': { label: 'Deployed roster', pill: 'pill-gray', text: 'Deployed strength with per-day presence ticks' },
   'Scan log': { label: 'Scan log', pill: 'pill-gray', text: 'One line per session: IN/IN-by with OUT/OUT-by' },
 }
@@ -145,8 +151,20 @@ function previsitLogExportRows(rows) {
       Duration: mins == null ? (r.status === 'OPEN' ? 'still IN' : '—') : formatDuration(mins),
       Status: r.status || '—', Manual: r.is_manual ? 'yes' : 'no',
       Undeployed: r.undeployed_scan ? 'yes' : 'no',
+      'Auto out': r.is_auto_out ? 'yes' : 'no',
     }
   })
+}
+
+// Absent export: deployed-shaped rows carry no scan times — the sheet
+// mirrors the tab (who did not scan), with the VSS flag carried across.
+function previsitAbsentExportRows(rows) {
+  return (rows || []).map((r, i) => ({
+    'S.No.': i + 1,
+    Badge: r.badge_number, Name: r.sewadar_name || '—',
+    Centre: r.sewadar_centre || '—', Department: r.dept_name || '—',
+    VSS: r.is_vss ? 'yes' : 'no',
+  }))
 }
 
 function AttentionSection({ title, rows, showDate, detail, onSelect }) {
@@ -315,6 +333,14 @@ export default function PrevisitView({
   const presentCount = presentBadges.size
   const notPresent = Math.max(0, totalCount - deployedPresent)
 
+  // Absent tab: the deployed roster minus whoever scanned — single-day
+  // centre scope, or never-scanned for All days. previsitAbsentRows owns
+  // both derivations (effDate '' = All days); never re-derive inline.
+  const absentRows = useMemo(
+    () => previsitAbsentRows({ deployed: liveDeployed, presentMap, liveRows, effDate, centre: centreSel }),
+    [liveDeployed, presentMap, liveRows, effDate, centreSel]
+  )
+
   const totalVisible = useMemo(
     () => filterPrevisitTotal(liveDeployed, { centre: centreSel, query }),
     [liveDeployed, centreSel, query]
@@ -323,6 +349,12 @@ export default function PrevisitView({
     () => filterPrevisitRows(liveRows, { date: effDate, centre: centreSel, query }),
     [liveRows, effDate, centreSel, query]
   )
+  const absentVisible = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return absentRows.filter((r) =>
+      !q || [r.badge_number, r.sewadar_name, r.sewadar_centre]
+        .some((f) => String(f || '').toLowerCase().includes(q)))
+  }, [absentRows, query])
   const attVisible = useMemo(
     () => previsitAttention(filterPrevisitRows(liveRows, { date: effDate, centre: centreSel, query })),
     [liveRows, effDate, centreSel, query]
@@ -351,30 +383,32 @@ export default function PrevisitView({
         .some((f) => String(f || '').toLowerCase().includes(q)))
     )
   }, [logRows, centreSel, query])
-  const visible = tab === TAB_TOTAL ? totalVisible : tab === TAB_ATTENTION ? attentionVisible : tab === TAB_LOGS ? logVisible : presentVisible
-  const totalOfTab = tab === TAB_TOTAL ? liveDeployed.length : tab === TAB_ATTENTION ? attentionUnion(previsitAttention(liveRows)).length : tab === TAB_LOGS ? logRows.length : liveRows.length
-  const sheetName = tab === TAB_TOTAL ? 'Total' : tab === TAB_ATTENTION ? 'Attention' : tab === TAB_LOGS ? 'Logs' : 'Present'
+  const visible = tab === TAB_TOTAL ? totalVisible : tab === TAB_ABSENT ? absentVisible : tab === TAB_ATTENTION ? attentionVisible : tab === TAB_LOGS ? logVisible : presentVisible
+  const totalOfTab = tab === TAB_TOTAL ? liveDeployed.length : tab === TAB_ABSENT ? absentRows.length : tab === TAB_ATTENTION ? attentionUnion(previsitAttention(liveRows)).length : tab === TAB_LOGS ? logRows.length : liveRows.length
+  const sheetName = tab === TAB_TOTAL ? 'Total' : tab === TAB_ABSENT ? 'Absent' : tab === TAB_ATTENTION ? 'Attention' : tab === TAB_LOGS ? 'Logs' : 'Present'
   // Same-badge rows behind the popup's "related" section, whatever tab it
   // opened from.
   const relatedForSelected = selected
-    ? [...presentVisible, ...attentionVisible, ...logVisible].filter((r) => r !== selected && r.badge_number === selected.badge_number)
+    ? [...presentVisible, ...absentVisible, ...attentionVisible, ...logVisible].filter((r) => r !== selected && r.badge_number === selected.badge_number)
     : []
 
   // ONE builder for both delivery paths — desktop downloads the workbook,
   // phones share it (the only reliable "save" on iOS Safari). They can never
   // drift because they are the same rows in the same call.
   const exportFilename = `${fileSlug(schedule?.name || 'schedule')}_${vocab.slug}_${
-    tab === TAB_TOTAL ? 'total' : tab === TAB_ATTENTION ? 'attention' : tab === TAB_LOGS ? 'logs' : (effDate || 'all-days')
+    tab === TAB_TOTAL ? 'total' : tab === TAB_ABSENT ? 'absent' : tab === TAB_ATTENTION ? 'attention' : tab === TAB_LOGS ? 'logs' : (effDate || 'all-days')
   }.xlsx`
   const buildExportSheets = () => ([{
     name: sheetName,
     rows: tab === TAB_TOTAL
       ? previsitTotalExportRows(totalVisible, presentMap, dates)
-      : tab === TAB_ATTENTION
-        ? previsitAttentionExportRows(attVisible)
-        : tab === TAB_LOGS
-          ? previsitLogExportRows(logVisible)
-          : previsitExportRows(presentVisible),
+      : tab === TAB_ABSENT
+        ? previsitAbsentExportRows(absentVisible)
+        : tab === TAB_ATTENTION
+          ? previsitAttentionExportRows(attVisible)
+          : tab === TAB_LOGS
+            ? previsitLogExportRows(logVisible)
+            : previsitExportRows(presentVisible),
   }])
 
   const isMobile = useIsMobile()
@@ -497,6 +531,15 @@ export default function PrevisitView({
             <button
               type="button"
               role="tab"
+              aria-selected={tab === TAB_ABSENT}
+              onClick={() => setTab(TAB_ABSENT)}
+              className={`seg-btn ${tab === TAB_ABSENT ? 'seg-active' : ''}`}
+            >
+              Absent ({absentRows.length})
+            </button>
+            <button
+              type="button"
+              role="tab"
               aria-selected={tab === TAB_ATTENTION}
               onClick={() => setTab(TAB_ATTENTION)}
               className={`seg-btn ${tab === TAB_ATTENTION ? 'seg-active' : ''}`}
@@ -574,20 +617,26 @@ export default function PrevisitView({
         ) : visible.length === 0 ? (
           <div className="empty">
             <div className="empty-title">
-              {tab === TAB_TOTAL ? 'Nobody deployed in scope' : tab === TAB_ATTENTION ? 'Nothing needs attention' : tab === TAB_LOGS ? (logErr ? 'Scan log could not be loaded' : 'No scans logged') : vocab.emptyPresent}
+              {tab === TAB_TOTAL ? 'Nobody deployed in scope' : tab === TAB_ABSENT ? 'No absentees in scope' : tab === TAB_ATTENTION ? 'Nothing needs attention' : tab === TAB_LOGS ? (logErr ? 'Scan log could not be loaded' : 'No scans logged') : vocab.emptyPresent}
             </div>
             <div className="empty-text">
               {tab === TAB_TOTAL
                 ? 'No deployed sewadars found for this schedule and centre.'
-                : tab === TAB_ATTENTION
-                  ? 'No open sessions, undeployed scans or repeat scans match the current filters.'
-                  : tab === TAB_LOGS
-                    ? (logErr
-                      ? 'The scan record could not be read from the server. The other tabs are unaffected.'
-                      : 'No scans have been recorded for this schedule yet.')
-                    : (liveRows.length === 0
-                      ? vocab.emptyPresentHint
-                      : 'Nothing matches the current filters.')}
+                : tab === TAB_ABSENT
+                  ? (liveDeployed.length === 0
+                    ? 'Nobody is deployed for this schedule.'
+                    : effDate
+                      ? 'Every deployed sewadar scanned on this day.'
+                      : 'Every deployed sewadar has scanned on at least one sewa day.')
+                  : tab === TAB_ATTENTION
+                    ? 'No open sessions, undeployed scans or repeat scans match the current filters.'
+                    : tab === TAB_LOGS
+                      ? (logErr
+                        ? 'The scan record could not be read from the server. The other tabs are unaffected.'
+                        : 'No scans have been recorded for this schedule yet.')
+                      : (liveRows.length === 0
+                        ? vocab.emptyPresentHint
+                        : 'Nothing matches the current filters.')}
             </div>
             {(centreSel !== 'all' || query) && (
               <button type="button" className="btn" style={{ marginTop: '0.75rem' }} onClick={() => { setCentreSel('all'); setQuery('') }}>
@@ -779,9 +828,10 @@ export default function PrevisitView({
                           <td data-label="Flags">
                             <span className="cluster">
                               {r.status === 'OPEN' && <span className="pill pill-amber">Open</span>}
+                              {r.is_auto_out && <span className="pill pill-blue" title="Closed by the 21:00 auto-out sweep — no OUT scan was recorded">Auto out</span>}
                               {r.is_manual && <span className="pill pill-gray">Manual</span>}
                               {r.undeployed_scan && <span className="pill pill-red">Undeployed</span>}
-                              {r.status !== 'OPEN' && !r.is_manual && !r.undeployed_scan && <span className="pill pill-gray">—</span>}
+                              {r.status !== 'OPEN' && !r.is_auto_out && !r.is_manual && !r.undeployed_scan && <span className="pill pill-gray">—</span>}
                             </span>
                           </td>
                           <td data-label="Details" aria-hidden="true" style={{ color: '#94a3b8' }}>›</td>
@@ -792,6 +842,40 @@ export default function PrevisitView({
                 </table>
               </div>
             )}
+          </div>
+        ) : tab === TAB_ABSENT ? (
+          <div role="tabpanel" aria-label="Absent sewadars" aria-busy={loading}>
+            <div className="table-wrap table-wrap-rows">
+              <table className="table rows-on-phone">
+                <caption className="sr-only">Absent sewadars — deployed but not scanned</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Badge</th>
+                    <th scope="col">Name</th>
+                    <th scope="col">Centre</th>
+                    <th scope="col">Department</th>
+                    <th scope="col">Flags</th>
+                    <th scope="col"><span className="sr-only">Details</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {absentVisible.map((r) => (
+                    <tr key={r.badge_number} {...clickableRowProps(r, (row) => openTrail(row, 'Absent register'))}>
+                      <td data-label="Badge" style={{ fontFamily: 'monospace' }}>{r.badge_number}</td>
+                      <td data-label="Name">{r.sewadar_name || ''}</td>
+                      <td data-label="Centre">{r.sewadar_centre || ''}</td>
+                      <td data-label="Department">{r.dept_name || '—'}</td>
+                      <td data-label="Flags">
+                        <span className="cluster">
+                          {r.is_vss && <span className="pill pill-indigo">VSS</span>}
+                        </span>
+                      </td>
+                      <td data-label="Details" aria-hidden="true" style={{ color: '#94a3b8' }}>›</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         ) : (
           <div role="tabpanel" aria-label="Present register" aria-busy={loading}>

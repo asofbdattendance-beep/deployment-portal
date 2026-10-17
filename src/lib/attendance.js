@@ -468,7 +468,7 @@ export const SCAN_LOG_SESSION_COLS = [
   'id', 'badge_number', 'sewadar_name', 'sewadar_centre', 'sewadar_dept',
   'is_vss', 'status', 'centre',
   'in_date', 'in_time', 'in_scanner_badge', 'in_scanner_name',
-  'is_manual', 'undeployed_scan',
+  'is_manual', 'undeployed_scan', 'is_auto_out',
   'out_date', 'out_time', 'out_scanner_badge', 'out_scanner_name',
 ].join(',')
 
@@ -503,6 +503,7 @@ export function toLogRow(r, deptByBadge) {
     out_by: r?.out_scanner_name || r?.out_scanner_badge || '',
     is_manual: !!r?.is_manual,
     undeployed_scan: !!r?.undeployed_scan,
+    is_auto_out: !!r?.is_auto_out,
     venue: r?.centre || '',
   }
 }

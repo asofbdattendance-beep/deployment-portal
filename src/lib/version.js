@@ -10,7 +10,11 @@
  */
 
 /** Oldest DB this frontend works with. Bump when the frontend starts
- *  calling RPCs/columns a migration introduces. v75: attendance_visit_summary
+ *  calling RPCs/columns a migration introduces. v79: the scan-log select
+ *  reads dp_attendance_sessions.is_auto_out — the 21:00 IST auto-out tag —
+ *  without it the shared SCAN_LOG_SESSION_COLS select fails with PGRST204
+ *  and BOTH logs (Attendance Logs, Previsit Logs) go empty rather than
+ *  losing one column. v75: attendance_visit_summary
  *  counts deployed badges only — without it the matrix TOTAL open_now /
  *  ever_present can read above the tiles. v74: attendance_centre_daily
  *  powers the Bhati Visit dashboard heatmap — without it the heatmap section
@@ -26,7 +30,7 @@
  *  session_count/is_open (Total, Present and Attention tabs + the day-count
  *  export depend on it), alongside the v60 window, v61 window-scoped
  *  visit RPCs, v62 previsit RPCs and v63 previsit_deployed. */
-export const MIN_SUPPORTED_DB_VERSION = 'v75'
+export const MIN_SUPPORTED_DB_VERSION = 'v79'
 
 /**
  * 'v50' → 50. Letter suffixes ('v38b') compare by their number — the

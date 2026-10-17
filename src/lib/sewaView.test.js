@@ -128,6 +128,33 @@ describe('buildVisitRows', () => {
       '2026-10-07|B1',
     ])
   })
+
+  it('never fills the days between an IN and an OUT (Wed IN, Sun OUT = two days present)', () => {
+    // The reported bug: a sewadar scans IN on Wednesday and OUT on Sunday,
+    // and the report marks him present for all five days. The server reports
+    // him present on EXACTLY the two days something happened on
+    // (sql/v61_visit_window_scope.sql: `in_date = p_date OR out_date = p_date`),
+    // so the register below may show two days and must leave THU/FRI/SAT
+    // empty. Any range-fill here would be the bug coming back.
+    const week = ['2026-10-07', '2026-10-08', '2026-10-09', '2026-10-10', '2026-10-11']
+    const wed = [{ badge_number: 'FB1', sewadar_name: 'RAM', sewadar_centre: 'DELHI' }]
+    const pairs = [
+      [wed, []],   // Wed 7th — scanned IN
+      [[], []],    // Thu 8th — not present
+      [[], []],    // Fri 9th — not present
+      [[], []],    // Sat 10th — not present
+      [wed, []],   // Sun 11th — scanned OUT
+    ]
+    const rows = buildVisitRows(pairs, week)
+
+    expect(rows).toHaveLength(2)
+    expect(rows.map((r) => r.event_date).sort()).toEqual(['2026-10-07', '2026-10-11'])
+    for (const day of ['2026-10-08', '2026-10-09', '2026-10-10']) {
+      expect(rows.some((r) => r.event_date === day)).toBe(false)
+    }
+    // Every day it does emit is a real scan day, never a synthesized span.
+    expect(rows.every((r) => r.session_count === 1 && r.duration_min === null)).toBe(true)
+  })
 })
 
 describe('buildVisitDeployed', () => {

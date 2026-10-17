@@ -321,6 +321,112 @@ describe('DashboardPage — Bhati Visit heatmap', () => {
   })
 })
 
+describe('DashboardPage — centre + department filters', () => {
+  const FILTERED_DAILY = [
+    { centre: 'DELHI', department_id: 'd1', dept_name: 'MEDICAL', expected: 10, present: 8, absent: 2, open_now: 1 },
+    { centre: 'DELHI', department_id: 'd2', dept_name: 'TRAFFIC', expected: 6, present: 4, absent: 2, open_now: 0 },
+    { centre: 'MUMBAI', department_id: 'd1', dept_name: 'MEDICAL', expected: 5, present: 3, absent: 2, open_now: 0 },
+  ]
+  const FILTERED_VISIT = [
+    { event_date: '2026-10-07', centre: 'DELHI', present: 6, open_now: 1, deployed: 10 },
+    { event_date: '2026-10-08', centre: 'DELHI', present: 4, open_now: 0, deployed: 10 },
+    { event_date: '2026-10-07', centre: 'MUMBAI', present: 3, open_now: 0, deployed: 5 },
+  ]
+
+  it('renders centre and department filter selects', async () => {
+    respondWith({ daily: FILTERED_DAILY, visitDaily: FILTERED_VISIT })
+    await renderPage()
+    // Scope to the filter selects: table headers also render 'Centre', so a
+    // bare getByText('Centre') matches twice. The two filter <select>s are
+    // the contract (first = centre, second = department).
+    const selects = document.querySelectorAll('select')
+    expect(selects.length).toBe(2)
+    expect(selects[0].textContent).toContain('All centres')
+    expect(selects[1].textContent).toContain('All departments')
+    expect(screen.getAllByText('Department').length).toBeGreaterThan(0)
+  })
+
+  it('filters KPI tiles by centre', async () => {
+    respondWith({ daily: FILTERED_DAILY, visitDaily: FILTERED_VISIT })
+    await renderPage()
+    // All centres: 8+4+3 = 15 present of 10+6+5 = 21 expected
+    expect(screen.getByText('Present today').closest('button').textContent).toContain('15')
+    // Pick DELHI only — use the first select (centre filter)
+    const centreSelect = document.querySelectorAll('select')[0]
+    centreSelect.value = 'DELHI'
+    centreSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await waitFor(() => {
+      // DELHI only: 8+4 = 12 present of 10+6 = 16 expected
+      expect(screen.getByText('Present today').closest('button').textContent).toContain('12')
+    })
+  })
+
+  it('filters KPI tiles by department', async () => {
+    respondWith({ daily: FILTERED_DAILY, visitDaily: FILTERED_VISIT })
+    await renderPage()
+    // Pick MEDICAL only — use the second select (dept filter)
+    const deptSelect = document.querySelectorAll('select')[1]
+    deptSelect.value = 'MEDICAL'
+    deptSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await waitFor(() => {
+      // MEDICAL only: 8+3 = 11 present of 10+5 = 15 expected
+      expect(screen.getByText('Present today').closest('button').textContent).toContain('11')
+    })
+  })
+
+  it('filters by centre AND department combined', async () => {
+    respondWith({ daily: FILTERED_DAILY, visitDaily: FILTERED_VISIT })
+    await renderPage()
+    // Pick DELHI + MEDICAL
+    const centreSelect = document.querySelectorAll('select')[0]
+    centreSelect.value = 'DELHI'
+    centreSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await waitFor(() => {
+      expect(screen.getByText('Present today').closest('button').textContent).toContain('12')
+    })
+    const deptSelect = document.querySelectorAll('select')[1]
+    deptSelect.value = 'MEDICAL'
+    deptSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await waitFor(() => {
+      // DELHI + MEDICAL only: 8 present of 10 expected
+      expect(screen.getByText('Present today').closest('button').textContent).toContain('8')
+    })
+  })
+
+  it('filters the centre heatmap by centre only (no dept dimension)', async () => {
+    respondWith({ daily: FILTERED_DAILY, visitDaily: FILTERED_VISIT })
+    await renderPage()
+    // All centres: heatmap shows DELHI and MUMBAI columns
+    expect(screen.getByText('Attendance by centre')).toBeTruthy()
+    // Pick DELHI only — heatmap should still render (centre-filtered)
+    const centreSelect = document.querySelectorAll('select')[0]
+    centreSelect.value = 'DELHI'
+    centreSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await waitFor(() => {
+      expect(screen.getByText('Attendance by centre')).toBeTruthy()
+    })
+  })
+
+  it('does NOT add new RPC calls when filtering', async () => {
+    respondWith({ daily: FILTERED_DAILY, visitDaily: FILTERED_VISIT })
+    await renderPage()
+    const centreSelect = document.querySelectorAll('select')[0]
+    centreSelect.value = 'DELHI'
+    centreSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await waitFor(() => {
+      expect(screen.getByText('Present today').closest('button').textContent).toContain('12')
+    })
+    // Still exactly 4 RPCs — filtering is client-side only
+    const names = rpc.mock.calls.map((c) => c[0])
+    expect(names.slice().sort()).toEqual([
+      'attendance_anomalies',
+      'attendance_centre_daily',
+      'attendance_daily_summary',
+      'attendance_scanner_ops',
+    ])
+  })
+})
+
 describe('DashboardPage — a hung RPC degrades its tiles instead of latching loading', () => {
   it('times out attendance_scanner_ops and keeps the other tiles live', async () => {
     respondWith()
