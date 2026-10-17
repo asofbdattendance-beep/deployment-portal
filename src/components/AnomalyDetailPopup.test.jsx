@@ -92,6 +92,24 @@ describe('AnomalyDetailPopup', () => {
     expect(screen.getByText(/only one for the badge/)).toBeTruthy()
   })
 
+  it('tags a session the 21:00 sweep closed, so the assumed OUT never reads as scanned', async () => {
+    trail.detail = {
+      ...DETAIL,
+      sessions: [{
+        ...DETAIL.sessions[0],
+        out_time: '21:00:00',
+        out_scanner_badge: null,
+        out_scanner_name: null,
+        is_manual: false,
+        is_auto_out: true,
+      }],
+    }
+    open()
+    expect(await screen.findByRole('dialog')).toBeTruthy()
+    expect(screen.getByText('auto out')).toBeTruthy()
+    expect(screen.queryByText(/Scanner Two/)).toBeNull()
+  })
+
   it('closes via button, overlay and Escape', async () => {
     const onClose = vi.fn()
     const { unmount } = open({ onClose })

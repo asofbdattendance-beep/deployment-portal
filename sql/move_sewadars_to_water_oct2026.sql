@@ -1,5 +1,5 @@
 -- ============================================================
--- ONE-OFF DATA FIX: two unplanned Faridabad dept moves, Oct 2026 Visit
+-- ONE-OFF DATA FIX: three unplanned Faridabad dept moves, Oct 2026 Visit
 -- Schedule : see §0b config (default 'October Visit 2026')
 -- SET 1    : Faridabad Deployed in Water.xlsx (Sheet1, 30 rows;
 --            deployed_department=WATER is the NEW dept,
@@ -7,6 +7,9 @@
 -- SET 2    : Faridabad from Medical to Sewa Samiti.xlsx (Sheet1, 29 rows;
 --            deployed_department=SEWA SAMITI is the NEW dept,
 --            parent_department_name is the CURRENT/old dept)
+-- SET 3    : Sewa Collection (1).xlsx (sheet 'Sewa collection', 22 rows;
+--            target SEWA COLLECTION is implied (no target column in sheet),
+--            'Current Deployment' is the CURRENT/old dept)
 --
 -- WHAT IT DOES
 --   1. Stages the 30 badges (additive staging table, re-runnable).
@@ -27,6 +30,9 @@
 --   7. SET 2 (§0c staging, §A2 pre-flight, §E move, §F verify, §G rollback):
 --      identical treatment for 29 ladies into SEWA SAMITI — own staging /
 --      backup tables, 0-count allocations, no grants either.
+--   8. SET 3 (§0d staging, §A3 pre-flight, §H move, §I verify, §J rollback):
+--      identical treatment for 22 sewadars into SEWA COLLECTION — own
+--      staging / backup tables, 0-count allocations, no grants either.
 --
 -- WHAT IT DOES *NOT* DO
 --   - No DELETE / DROP / TRUNCATE executes at all. The only cleanup
@@ -58,8 +64,9 @@
 --                    Pre-flight grids display inline; B1/E1 abort their own
 --                    transaction on any guard failure (nothing half-applied,
 --                    and the editor stops at the first ERROR).
---                    Expect: UPDATE 30 (§B) + UPDATE 29 (§E); then review
---                    the §C/§F grids top-to-bottom against EXPECTED notes.
+--                    Expect: UPDATE 30 (§B) + UPDATE 29 (§E) + UPDATE 22 (§H);
+--                    then review the §C/§F/§I grids top-to-bottom against
+--                    EXPECTED notes. Guard blocks are B1, E1, H1.
 --
 -- KNOWN SIDE EFFECT (accepted): a 0-count WATER allocation makes
 -- check_centre_lock require a WATER incharge (department_incharges,
@@ -921,3 +928,390 @@ SELECT count(*) AS backup_rows
 --   the Allocation page and delete the 0-rows E8 would create.
 -- N7 (re-runs): §0c/§E-upsert/E4/E8 are ON CONFLICT DO NOTHING (first run
 --   wins); E1/E6 abort loudly instead of half-applying. Safe to re-run.
+
+
+-- ================= §0d — SET 3 STAGING (additive, re-runnable) =================
+-- Third move-set: 22 sewadars (mixed GA/LA), current depts -> SEWA COLLECTION
+-- (same schedule). Target dept is implied by the workbook (no target column).
+CREATE TABLE IF NOT EXISTS public.sewacollection_move_list_oct2026 (
+  badge_number text PRIMARY KEY,
+  full_name    text NOT NULL
+);
+
+INSERT INTO public.sewacollection_move_list_oct2026 (badge_number, full_name) VALUES
+  ('FB6002GA0012', 'Bhagwant'),
+  ('FB6002GA0023', 'Deepak Bhatia'),
+  ('FB6002LA0044', 'Manisha Verma'),
+  ('FB6002LA0046', 'Pooja Marwah'),
+  ('FB5971GA0045', 'Om Prakash'),
+  ('FB5971GA0056', 'Ravinder Kumar'),
+  ('FB5971LA0121', 'Divya Wadhwa'),
+  ('FB5971LA0041', 'Gurupyari Dwivedi'),
+  ('FB5982GA0026', 'Shivcharan Baghotiya'),
+  ('FB5982GA0143', 'Vipin Kumar Sachdeva'),
+  ('FB5982LA0035', 'Rekha'),
+  ('FB5982LA0059', 'Sangita Saini'),
+  ('FB6008GA0022', 'Jugesh Chitkara'),
+  ('FB6008GA0015', 'Satish Narula'),
+  ('FB5993LA0003', 'Kanta Ahuja'),
+  ('FB5993LA0004', 'Sunita Devi'),
+  ('FB5992GA0030', 'Pawan Jindal'),
+  ('FB5992GA0016', 'Satya Prakash'),
+  ('FB5991GA0029', 'Deva Singh Chauhan'),
+  ('FB5991GA0030', 'Mahipal Awana'),
+  ('FB6003GA0013', 'Manohar Lal'),
+  ('FB5991GA0050', 'Jatin singh')
+ON CONFLICT DO NOTHING;
+-- EXPECTED first run: INSERT 0 22. Re-run: INSERT 0 0.
+
+SELECT count(*) AS staged_badges_set3 FROM public.sewacollection_move_list_oct2026;
+-- EXPECTED: 22.
+
+
+-- ================= §A3 — SET 3 PRE-FLIGHT (read-only; run all, review all) =================
+
+-- P13 — every badge's current row (22 'ok' required; any '*** NO ROW ***' aborts §H).
+SELECT l.badge_number,
+       l.full_name,
+       d.centre,
+       d.sewadar_name,
+       rd.name AS requested_dept,
+       fd.name AS final_dept,
+       d.status,
+       CASE WHEN d.badge_number IS NULL THEN '*** NO ROW — §H will abort ***' ELSE 'ok' END AS state
+  FROM public.sewacollection_move_list_oct2026 l
+  LEFT JOIN public.deployments d
+    ON d.schedule_id = (SELECT id FROM public.deployment_schedules WHERE lower(btrim(name)) = lower(btrim((SELECT schedule_name FROM public.water_move_cfg_oct2026))))
+   AND d.badge_number = l.badge_number
+  LEFT JOIN public.deployment_departments rd ON rd.id = d.department_id
+  LEFT JOIN public.deployment_departments fd ON fd.id = d.deployed_department_id
+ ORDER BY l.badge_number;
+
+-- P14 — request-only vs ASO-finalized split (finalized + requested_only must equal 22).
+SELECT count(*) FILTER (WHERE d.deployed_department_id IS NOT NULL) AS finalized,
+       count(*) FILTER (WHERE d.deployed_department_id IS NULL)     AS requested_only
+  FROM public.sewacollection_move_list_oct2026 l
+  JOIN public.deployments d
+    ON d.schedule_id = (SELECT id FROM public.deployment_schedules WHERE lower(btrim(name)) = lower(btrim((SELECT schedule_name FROM public.water_move_cfg_oct2026))))
+   AND d.badge_number = l.badge_number;
+
+-- P15 — SEWA COLLECTION dept rules + existing footprint.
+-- If the dept row EXISTS (any casing variant counts — check the name exactly),
+-- §H leaves its rules untouched.
+SELECT id, name, is_active, min_days, requires_stay_at_bhati, requires_initiated, include_vss
+  FROM public.deployment_departments
+ WHERE lower(name) = lower('SEWA COLLECTION');
+
+SELECT (SELECT count(*) FROM public.deployments
+         WHERE schedule_id = (SELECT id FROM public.deployment_schedules WHERE lower(btrim(name)) = lower(btrim((SELECT schedule_name FROM public.water_move_cfg_oct2026))))
+           AND (department_id = (SELECT id FROM public.deployment_departments WHERE name = 'SEWA COLLECTION')
+             OR deployed_department_id = (SELECT id FROM public.deployment_departments WHERE name = 'SEWA COLLECTION'))) AS sewacollection_rows,
+       (SELECT count(*) FROM public.centre_allocations
+         WHERE schedule_id = (SELECT id FROM public.deployment_schedules WHERE lower(btrim(name)) = lower(btrim((SELECT schedule_name FROM public.water_move_cfg_oct2026))))
+           AND department_id = (SELECT id FROM public.deployment_departments WHERE name = 'SEWA COLLECTION')) AS sewacollection_allocs,
+       (SELECT count(*) FROM public.department_incharge_assignments
+         WHERE schedule_id = (SELECT id FROM public.deployment_schedules WHERE lower(btrim(name)) = lower(btrim((SELECT schedule_name FROM public.water_move_cfg_oct2026))))
+           AND department_id = (SELECT id FROM public.deployment_departments WHERE name = 'SEWA COLLECTION')) AS sewacollection_grants;
+-- EXPECTED before the move: 0 / 0 / 0.
+
+-- P16 — master-table flags + incharge records naming any of the 22 (informative).
+-- (This workbook carries no is_initiated column, so initiation is NOT checked.)
+SELECT s.badge_number, s.badge_status
+  FROM public.dp_sewadars s
+ WHERE s.badge_number IN (SELECT badge_number FROM public.sewacollection_move_list_oct2026)
+ ORDER BY s.badge_number;
+
+SELECT i.centre, dd.name AS incharge_for_dept, i.badge_number
+  FROM public.department_incharges i
+  JOIN public.deployment_departments dd ON dd.id = i.department_id
+ WHERE i.schedule_id = (SELECT id FROM public.deployment_schedules WHERE lower(btrim(name)) = lower(btrim((SELECT schedule_name FROM public.water_move_cfg_oct2026))))
+   AND i.badge_number IN (SELECT badge_number FROM public.sewacollection_move_list_oct2026)
+ ORDER BY 1, 2;
+
+
+-- ================= §H — SET 3 MOVE (run H0..COMMIT as ONE block) =================
+BEGIN;
+
+-- H0 — confirm the config row (schedule_name). Fix §0b first if wrong.
+SELECT * FROM public.water_move_cfg_oct2026;
+
+-- H1 — guards (same fail-closed pattern; error lists real schedule names).
+DO $$
+DECLARE
+  v_sched_name text;
+  v_sched      uuid;
+  v_missing    text[];
+  v_names      text;
+BEGIN
+  SELECT schedule_name INTO v_sched_name FROM public.water_move_cfg_oct2026;
+  SELECT id INTO v_sched
+    FROM public.deployment_schedules
+   WHERE lower(btrim(name)) = lower(btrim(v_sched_name));
+  IF v_sched IS NULL THEN
+    SELECT string_agg(name, ' | ' ORDER BY name) INTO v_names FROM public.deployment_schedules;
+    RAISE EXCEPTION 'Schedule ''%'' not found (schedules in DB: %). Fix water_move_cfg_oct2026.schedule_name and re-run. Nothing changed.',
+      v_sched_name, COALESCE(v_names, '(none)');
+  END IF;
+
+  SELECT array_agg(l.badge_number) INTO v_missing
+    FROM public.sewacollection_move_list_oct2026 l
+    LEFT JOIN public.deployments d
+      ON d.schedule_id = v_sched AND d.badge_number = l.badge_number
+   WHERE d.badge_number IS NULL;
+  IF v_missing IS NOT NULL THEN
+    RAISE EXCEPTION 'Badges with NO deployments row in this schedule: % — fix the list and re-run. Nothing changed.',
+      array_to_string(v_missing, ', ');
+  END IF;
+END $$;
+
+-- H2 — ensure SEWA COLLECTION exists (values apply ONLY to a newly inserted row;
+-- an existing row is left UNTOUCHED).
+INSERT INTO public.deployment_departments
+      (name, description, is_active, min_days,
+       requires_stay_at_bhati, requires_initiated,
+       include_vss, vss_min_days, vss_requires_stay_at_bhati, vss_requires_initiated)
+VALUES ('SEWA COLLECTION',
+        'Unplanned SEWA COLLECTION deployment point (Oct 2026 Visit) — 0-count allocations, every row surplus.',
+        true, 1,
+        false, false,
+        false, 1, false, false)
+ON CONFLICT DO NOTHING;
+
+-- H3 — park the same 5 UPDATE-blocking triggers (guarded).
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_a_freeze_deployed_deploy' AND tgrelid = 'public.deployments'::regclass) THEN
+    ALTER TABLE public.deployments DISABLE TRIGGER trg_a_freeze_deployed_deploy;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_block_finalized_deploy_edit' AND tgrelid = 'public.deployments'::regclass) THEN
+    ALTER TABLE public.deployments DISABLE TRIGGER trg_block_finalized_deploy_edit;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_check_deployment' AND tgrelid = 'public.deployments'::regclass) THEN
+    ALTER TABLE public.deployments DISABLE TRIGGER trg_check_deployment;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_check_deployment_batch_upd' AND tgrelid = 'public.deployments'::regclass) THEN
+    ALTER TABLE public.deployments DISABLE TRIGGER trg_check_deployment_batch_upd;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_block_after_deadline_deploy' AND tgrelid = 'public.deployments'::regclass) THEN
+    ALTER TABLE public.deployments DISABLE TRIGGER trg_block_after_deadline_deploy;
+  END IF;
+END $$;
+
+-- H4 — snapshot pre-move state (first run wins on re-run).
+CREATE TABLE IF NOT EXISTS public.sewacollection_move_backup_oct2026 (
+  schedule_id                  uuid        NOT NULL,
+  badge_number                 text        NOT NULL,
+  centre                       text        NOT NULL,
+  old_department_id            uuid,
+  old_deployed_department_id   uuid,
+  moved_at                     timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (schedule_id, badge_number)
+);
+
+INSERT INTO public.sewacollection_move_backup_oct2026
+      (schedule_id, badge_number, centre, old_department_id, old_deployed_department_id)
+SELECT d.schedule_id, d.badge_number, d.centre, d.department_id, d.deployed_department_id
+  FROM public.deployments d
+  JOIN public.sewacollection_move_list_oct2026 l ON l.badge_number = d.badge_number
+ WHERE d.schedule_id = (SELECT id FROM public.deployment_schedules WHERE lower(btrim(name)) = lower(btrim((SELECT schedule_name FROM public.water_move_cfg_oct2026))))
+ON CONFLICT DO NOTHING;
+-- EXPECTED first run: INSERT 0 22.
+
+-- H5 — THE MOVE (mirror-state CASE + blank-name fill, pinned to 22 badges).
+UPDATE public.deployments d
+   SET department_id = (SELECT id FROM public.deployment_departments WHERE name = 'SEWA COLLECTION'),
+       deployed_department_id = CASE
+         WHEN d.deployed_department_id IS NOT NULL
+         THEN (SELECT id FROM public.deployment_departments WHERE name = 'SEWA COLLECTION')
+         ELSE NULL
+       END,
+       sewadar_name = COALESCE(NULLIF(btrim(d.sewadar_name), ''), l.full_name)
+  FROM public.sewacollection_move_list_oct2026 l
+ WHERE d.schedule_id = (SELECT id FROM public.deployment_schedules WHERE lower(btrim(name)) = lower(btrim((SELECT schedule_name FROM public.water_move_cfg_oct2026))))
+   AND d.badge_number = l.badge_number;
+-- EXPECTED: UPDATE 22.
+
+-- H6 — assert (mismatch EXCEPTIONs everything).
+DO $$
+DECLARE
+  v_sched   uuid;
+  v_target  uuid;
+  v_list    integer;
+  v_got     integer;
+BEGIN
+  SELECT id INTO v_sched FROM public.deployment_schedules
+   WHERE lower(btrim(name)) = lower(btrim((SELECT schedule_name FROM public.water_move_cfg_oct2026)));
+  SELECT id INTO v_target FROM public.deployment_departments WHERE name = 'SEWA COLLECTION';
+  SELECT count(*) INTO v_list FROM public.sewacollection_move_list_oct2026;
+  SELECT count(*) INTO v_got
+    FROM public.deployments
+   WHERE schedule_id = v_sched
+     AND department_id = v_target
+     AND badge_number IN (SELECT badge_number FROM public.sewacollection_move_list_oct2026);
+  IF v_got <> v_list THEN
+    RAISE EXCEPTION 'Only % of % badges are SEWA COLLECTION — rolling everything back.', v_got, v_list;
+  END IF;
+  RAISE NOTICE 'Move ok: %/% rows now SEWA COLLECTION.', v_got, v_list;
+END $$;
+
+-- H7 — triggers back on (same 5, guarded).
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_a_freeze_deployed_deploy' AND tgrelid = 'public.deployments'::regclass) THEN
+    ALTER TABLE public.deployments ENABLE TRIGGER trg_a_freeze_deployed_deploy;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_block_finalized_deploy_edit' AND tgrelid = 'public.deployments'::regclass) THEN
+    ALTER TABLE public.deployments ENABLE TRIGGER trg_block_finalized_deploy_edit;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_check_deployment' AND tgrelid = 'public.deployments'::regclass) THEN
+    ALTER TABLE public.deployments ENABLE TRIGGER trg_check_deployment;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_check_deployment_batch_upd' AND tgrelid = 'public.deployments'::regclass) THEN
+    ALTER TABLE public.deployments ENABLE TRIGGER trg_check_deployment_batch_upd;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_block_after_deadline_deploy' AND tgrelid = 'public.deployments'::regclass) THEN
+    ALTER TABLE public.deployments ENABLE TRIGGER trg_block_after_deadline_deploy;
+  END IF;
+END $$;
+
+-- H8 — 0-count allocations per root centre (same unplanned/surplus marker).
+INSERT INTO public.centre_allocations (schedule_id, department_id, centre, max_count)
+SELECT k.sched, k.target, public.get_root_centre(d.centre), 0
+  FROM public.deployments d
+ CROSS JOIN (SELECT (SELECT id FROM public.deployment_schedules WHERE lower(btrim(name)) = lower(btrim((SELECT schedule_name FROM public.water_move_cfg_oct2026)))) AS sched,
+                    (SELECT id FROM public.deployment_departments WHERE name = 'SEWA COLLECTION') AS target) k
+ WHERE d.schedule_id = k.sched
+   AND d.department_id = k.target
+ GROUP BY k.sched, k.target, public.get_root_centre(d.centre)
+ON CONFLICT DO NOTHING;
+-- EXPECTED: INSERT 0 <distinct root-centre count, up to 8>.
+
+COMMIT;
+
+
+-- ================= §I — SET 3 VERIFICATION (read-only; run after COMMIT) =================
+
+-- I1 — the 22 with new effective dept (expect requested=SEWA COLLECTION for all).
+SELECT l.badge_number,
+       d.centre,
+       rd.name AS requested,
+       fd.name AS final,
+       COALESCE(fd.name, rd.name) AS effective,
+       d.status
+  FROM public.sewacollection_move_list_oct2026 l
+  JOIN public.deployments d
+    ON d.schedule_id = (SELECT id FROM public.deployment_schedules WHERE lower(btrim(name)) = lower(btrim((SELECT schedule_name FROM public.water_move_cfg_oct2026))))
+   AND d.badge_number = l.badge_number
+  LEFT JOIN public.deployment_departments rd ON rd.id = d.department_id
+  LEFT JOIN public.deployment_departments fd ON fd.id = d.deployed_department_id
+ ORDER BY l.badge_number;
+
+-- I2 — per-centre SEWA COLLECTION counts (sheet split for cross-check; DB centre
+-- spellings may differ in case — totals must equal 22).
+-- Sheet: Ankheer 4, Dlf City Gurgaon 4, Gurgaon 4, Nit-2 2, Palwal 2,
+-- Rajendra Park 2, Suraj Kund 2 (+ 2 rows with blank centre in the sheet).
+SELECT d.centre, count(*) AS sewacollection_count
+  FROM public.deployments d
+ WHERE d.schedule_id = (SELECT id FROM public.deployment_schedules WHERE lower(btrim(name)) = lower(btrim((SELECT schedule_name FROM public.water_move_cfg_oct2026))))
+   AND d.department_id = (SELECT id FROM public.deployment_departments WHERE name = 'SEWA COLLECTION')
+ GROUP BY d.centre
+ ORDER BY sewacollection_count DESC, d.centre;
+
+-- I3 — old depts released (counts should have DROPPED by: OLD ENCLOSURE 9,
+-- LUGGAGE 3, SEWA SAMITI 3, TRAFFIC 2, SECURITY 2, MEDICAL 1; 'ASO' 2 only if
+-- ASO is a real department — otherwise those 2 rows surface in P13 instead).
+SELECT dd.name, count(*) AS remaining
+  FROM public.deployments d
+  JOIN public.deployment_departments dd ON dd.id = d.department_id
+ WHERE d.schedule_id = (SELECT id FROM public.deployment_schedules WHERE lower(btrim(name)) = lower(btrim((SELECT schedule_name FROM public.water_move_cfg_oct2026))))
+   AND dd.name IN ('OLD ENCLOSURE','LUGGAGE','SEWA SAMITI','TRAFFIC','SECURITY','MEDICAL','ASO')
+ GROUP BY dd.name
+ ORDER BY remaining DESC, dd.name;
+
+-- I4 — the 0-count allocations (expect one row per root centre, all 0).
+SELECT a.centre, a.max_count
+  FROM public.centre_allocations a
+ WHERE a.schedule_id = (SELECT id FROM public.deployment_schedules WHERE lower(btrim(name)) = lower(btrim((SELECT schedule_name FROM public.water_move_cfg_oct2026))))
+   AND a.department_id = (SELECT id FROM public.deployment_departments WHERE name = 'SEWA COLLECTION')
+ ORDER BY a.centre;
+
+-- I5 — triggers ALL back on (EVERY row must read ENABLED).
+SELECT tgname,
+       CASE tgenabled WHEN 'O' THEN 'ENABLED' WHEN 'D' THEN 'DISABLED' ELSE tgenabled::text END AS state
+  FROM pg_trigger
+ WHERE tgrelid = 'public.deployments'::regclass
+   AND NOT tgisinternal
+ ORDER BY tgname;
+
+-- I6 — backup intact (expect 22).
+SELECT count(*) AS backup_rows
+  FROM public.sewacollection_move_backup_oct2026
+ WHERE schedule_id = (SELECT id FROM public.deployment_schedules WHERE lower(btrim(name)) = lower(btrim((SELECT schedule_name FROM public.water_move_cfg_oct2026))));
+
+
+-- ================= §J — SET 3 ROLLBACK (COMMENTED OUT; run ONLY to undo §H) =================
+-- Restores department_id + deployed_department_id from the §H snapshot.
+-- Re-run I1 afterwards: requested/final must read the OLD departments again.
+-- NOTE: this does NOT remove the 0-count allocations, the SEWA COLLECTION
+-- department row, or the staging/backup tables — remove those explicitly only
+-- if you truly want them gone.
+--
+-- BEGIN;
+-- DO $$
+-- BEGIN
+--   IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_a_freeze_deployed_deploy' AND tgrelid = 'public.deployments'::regclass) THEN
+--     ALTER TABLE public.deployments DISABLE TRIGGER trg_a_freeze_deployed_deploy;
+--   END IF;
+--   IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_block_finalized_deploy_edit' AND tgrelid = 'public.deployments'::regclass) THEN
+--     ALTER TABLE public.deployments DISABLE TRIGGER trg_block_finalized_deploy_edit;
+--   END IF;
+--   IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_check_deployment' AND tgrelid = 'public.deployments'::regclass) THEN
+--     ALTER TABLE public.deployments DISABLE TRIGGER trg_check_deployment;
+--   END IF;
+--   IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_check_deployment_batch_upd' AND tgrelid = 'public.deployments'::regclass) THEN
+--     ALTER TABLE public.deployments DISABLE TRIGGER trg_check_deployment_batch_upd;
+--   END IF;
+--   IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_block_after_deadline_deploy' AND tgrelid = 'public.deployments'::regclass) THEN
+--     ALTER TABLE public.deployments DISABLE TRIGGER trg_block_after_deadline_deploy;
+--   END IF;
+-- END $$;
+-- UPDATE public.deployments d
+--    SET department_id = b.old_department_id,
+--        deployed_department_id = b.old_deployed_department_id
+--   FROM public.sewacollection_move_backup_oct2026 b
+--  WHERE d.schedule_id = b.schedule_id
+--    AND d.badge_number = b.badge_number
+--    AND b.schedule_id = (SELECT id FROM public.deployment_schedules WHERE lower(btrim(name)) = lower(btrim((SELECT schedule_name FROM public.water_move_cfg_oct2026))));
+-- -- EXPECTED: UPDATE 22.
+-- DO $$
+-- BEGIN
+--   IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_a_freeze_deployed_deploy' AND tgrelid = 'public.deployments'::regclass) THEN
+--     ALTER TABLE public.deployments ENABLE TRIGGER trg_a_freeze_deployed_deploy;
+--   END IF;
+--   IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_block_finalized_deploy_edit' AND tgrelid = 'public.deployments'::regclass) THEN
+--     ALTER TABLE public.deployments ENABLE TRIGGER trg_block_finalized_deploy_edit;
+--   END IF;
+--   IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_check_deployment' AND tgrelid = 'public.deployments'::regclass) THEN
+--     ALTER TABLE public.deployments ENABLE TRIGGER trg_check_deployment;
+--   END IF;
+--   IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_check_deployment_batch_upd' AND tgrelid = 'public.deployments'::regclass) THEN
+--     ALTER TABLE public.deployments ENABLE TRIGGER trg_check_deployment_batch_upd;
+--   END IF;
+--   IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_block_after_deadline_deploy' AND tgrelid = 'public.deployments'::regclass) THEN
+--     ALTER TABLE public.deployments ENABLE TRIGGER trg_block_after_deadline_deploy;
+--   END IF;
+-- END $$;
+-- COMMIT;
+
+-- ================= NOTES (SET 3) =================
+-- N8 (overlap): FB6002LA0044 + FB6002LA0046 are ALSO in SET 2 (SEWA SAMITI).
+--   Run order §B -> §E -> §H moves them WATER? no — SET 2 -> SET 3, ending in
+--   SEWA COLLECTION. Each UPDATE retargets absolutely (never relative), so any
+--   order converges; §B->§E->§H keeps every backup snapshot truthful for its
+--   own rollback (§G restores SEWA SAMITI, §J restores whatever §H saw).
+-- N9 (source gaps): this workbook has no is_initiated column and no target
+--   column; 2 rows have blank centre, 2 list 'ASO' as current deployment, and
+--   centre spellings vary in case vs the DB. Matching is by badge (immune to
+--   all of that); P13/P16 surface anything unmatched BEFORE §H touches rows.
+-- N10 (re-runs): §0d/§H-upsert/H4/H8 are ON CONFLICT DO NOTHING (first run
+--   wins); H1/H6 abort loudly instead of half-applying. Safe to re-run.

@@ -491,8 +491,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: none;
 
 /* ─── dedicated tab navbar ─── */
 .tab-nav {
-  position: sticky;
-  top: 0;
+  position: relative;
   z-index: 40;
   display: flex;
   gap: 0.35rem;

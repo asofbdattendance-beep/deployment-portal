@@ -5,7 +5,7 @@ const SESSION_COLS = [
   'id', 'badge_number', 'sewadar_name', 'sewadar_centre', 'sewadar_dept',
   'is_vss', 'status', 'centre',
   'in_date', 'in_time', 'in_scanner_badge', 'in_scanner_name', 'in_scanner_centre',
-  'is_manual', 'undeployed_scan',
+  'is_manual', 'undeployed_scan', 'is_auto_out',
   'out_date', 'out_time', 'out_scanner_badge', 'out_scanner_name', 'out_scanner_centre',
 ].join(',')
 

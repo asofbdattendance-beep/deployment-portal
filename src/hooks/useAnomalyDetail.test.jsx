@@ -10,10 +10,11 @@ import { renderHook, waitFor } from '@testing-library/react'
 import { useAnomalyDetail } from './useAnomalyDetail'
 
 const tables = vi.hoisted(() => ({ data: {}, error: {} }))
+const selects = vi.hoisted(() => ({ byTable: {} }))
 
 function chainable(table) {
   const q = {
-    select: () => q,
+    select: (cols) => { (selects.byTable[table] ||= []).push(cols); return q },
     eq: () => q,
     order: () => q,
     limit: () => q,
@@ -43,6 +44,7 @@ const DEPLOYMENT = { id: 'd1', badge_number: 'FB5971GA0001', department_id: 'dep
 const CONSENT = { id: 'c1', badge_number: 'FB5971GA0001', consent_given: true, available_days_count: 5, stay_at_bhati: true, chair_pass: false }
 
 beforeEach(() => {
+  selects.byTable = {}
   tables.data = {
     dp_attendance_sessions: [SESSION],
     deployments: [DEPLOYMENT],
@@ -52,6 +54,12 @@ beforeEach(() => {
 })
 
 describe('useAnomalyDetail', () => {
+  it('reads the auto-out tag with the session columns, so a sweep close can be labelled', async () => {
+    const { result } = renderHook(() => useAnomalyDetail('sched-1', 'FB5971GA0001'))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(selects.byTable.dp_attendance_sessions.join(' ')).toContain('is_auto_out')
+  })
+
   it('composes sessions, deployment and consent for the badge', async () => {
     const { result } = renderHook(() => useAnomalyDetail('sched-1', 'FB5971GA0001'))
     await waitFor(() => expect(result.current.loading).toBe(false))

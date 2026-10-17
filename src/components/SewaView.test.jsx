@@ -131,14 +131,15 @@ describe('SewaView — visit mode', () => {
     expect(exportWorkbook.mock.calls[0][0]).not.toContain('previsit')
   })
 
-  it('honours the dashboard centre deep-link and has no Absent tab', async () => {
+  it('honours the dashboard centre deep-link and shows the Absent tab', async () => {
     render(<SewaView schedules={SCHEDULES} scheduleId="sched-1" initialTab="present" initialCentre="FARIDABAD" />)
     await waitFor(() => expect(screen.getByRole('heading', { name: /Bhati Visit Register/ })).toBeTruthy())
     fireEvent.click(screen.getByRole('button', { name: /^All/ }))
     await waitFor(() => expect(screen.getAllByText('SHAM')).toHaveLength(2))
     expect(screen.queryByText('RAM')).toBeNull()
     expect(screen.getByLabelText('Centre filter').value).toBe('FARIDABAD')
-    expect(screen.queryByRole('tab', { name: /absent/i })).toBeNull()
+    // The shared register carries the Absent tab in both lenses.
+    expect(screen.getByRole('tab', { name: /Absent/ })).toBeTruthy()
     expect(screen.getByLabelText('Search visit rows')).toBeTruthy()
   })
 

@@ -1329,6 +1329,26 @@ describe('toLogRow / buildLogRows', () => {
     expect(r.venue).toBe('Bhati - Delhi MC')
   })
 
+  it('carries the 21:00 auto-out tag, distinctly from a manual close', () => {
+    const auto = toLogRow({
+      ...SESSION, is_auto_out: true, is_manual: false,
+      out_scanner_badge: null, out_scanner_name: null,
+    }, {})
+    expect(auto.is_auto_out).toBe(true)
+    expect(auto.status).toBe('CLOSED')
+    // No portal user performed this close, so there is nobody to name.
+    expect(auto.out_by).toBe('')
+    expect(auto.is_manual).toBe(false)
+
+    // A real scan close is never tagged, and a missing column reads false.
+    expect(toLogRow(SESSION, {}).is_auto_out).toBe(false)
+    expect(toLogRow({ badge_number: 'FB2' }, {}).is_auto_out).toBe(false)
+    // The two facts stay independent: an operator-typed IN the sweep then
+    // closed is BOTH manual and auto-out — never merged into one flag.
+    expect(toLogRow({ ...SESSION, is_auto_out: true, is_manual: true }, {}))
+      .toMatchObject({ is_auto_out: true, is_manual: true })
+  })
+
   it('nulls become safe display values, never blanks that read as missing', () => {
     const r = toLogRow({ badge_number: 'FB2' }, {})
     expect(r.sewadar_name).toBe('')

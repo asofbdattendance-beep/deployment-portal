@@ -208,15 +208,58 @@ describe('PrevisitView', () => {
     expect(toastSuccess).toHaveBeenCalled()
   })
 
-  it('shows Total, Present and Attention tabs with counts — and never an Absent tab', async () => {
+  it('shows Total, Present, Absent and Attention tabs with counts', async () => {
     mockRpc()
     render(<PrevisitView schedules={SCHEDULES} scheduleId="sched-1" />)
     await waitFor(() => expect(screen.getByText('Asha')).toBeTruthy())
-    // Newest day 2026-10-06: Total 3 deployed, Present 2 sewadars, Attention 1 (Bina open).
+    // Newest day 2026-10-06: Total 3 deployed, Present 2 sewadars, Absent 1
+    // (Dev never scanned), Attention 1 (Bina open).
     expect(screen.getByText('Total (3)')).toBeTruthy()
     expect(screen.getByText('Present (2)')).toBeTruthy()
+    expect(screen.getByText('Absent (1)')).toBeTruthy()
     expect(screen.getByText('Attention (1)')).toBeTruthy()
-    expect(screen.queryByText(/absent/i)).toBeNull()
+  })
+
+  it('the Absent tab lists deployed-but-unscanned badges, day-scoped and All-days', async () => {
+    mockRpc()
+    render(<PrevisitView schedules={SCHEDULES} scheduleId="sched-1" />)
+    await waitFor(() => expect(screen.getByText('Absent (1)')).toBeTruthy())
+    fireEvent.click(screen.getByText('Absent (1)'))
+    // Single day 10-06: Dev (B4) deployed but not scanned; Asha/Bina scanned.
+    await waitFor(() => expect(screen.getByText('Dev')).toBeTruthy())
+    expect(screen.queryByText('Asha')).toBeNull()
+    expect(screen.queryByText('Bina')).toBeNull()
+    // All days: still only Dev — Asha/Bina each scanned on 10-06.
+    fireEvent.click(screen.getByRole('button', { name: 'All (2)' }))
+    await waitFor(() => expect(screen.getByText('Absent (1)')).toBeTruthy())
+    expect(screen.getByText('Dev')).toBeTruthy()
+    expect(screen.queryByText('Asha')).toBeNull()
+  })
+
+  it('the Absent tab exports an Absent sheet with the deployed rows', async () => {
+    mockRpc()
+    exportWorkbook.mockResolvedValue(3)
+    render(<PrevisitView schedules={SCHEDULES} scheduleId="sched-1" />)
+    await waitFor(() => expect(screen.getByText('Absent (1)')).toBeTruthy())
+    fireEvent.click(screen.getByText('Absent (1)'))
+    await waitFor(() => expect(screen.getByText('Dev')).toBeTruthy())
+    fireEvent.click(screen.getByText('Export Excel'))
+    await waitFor(() => expect(exportWorkbook).toHaveBeenCalledTimes(1))
+    const [filename, sheets] = exportWorkbook.mock.calls[0]
+    expect(filename).toContain('_absent')
+    expect(sheets[0].name).toBe('Absent')
+    expect(sheets[0].rows).toHaveLength(1)
+    expect(sheets[0].rows[0].Badge).toBe('B4')
+    expect(sheets[0].rows[0].Name).toBe('Dev')
+  })
+
+  it('the Absent tab empty state says everybody scanned', async () => {
+    mockRpc()
+    render(<PrevisitView schedules={SCHEDULES} scheduleId="sched-1" initialCentre="CENTRE B" />)
+    await waitFor(() => expect(screen.getByText('Absent (0)')).toBeTruthy())
+    fireEvent.click(screen.getByText('Absent (0)'))
+    await waitFor(() => expect(screen.getByText('No absentees in scope')).toBeTruthy())
+    expect(screen.getByText('Every deployed sewadar scanned on this day.')).toBeTruthy()
   })
 
   it('the Total tab is a badge × day matrix with green present / red absent tiles', async () => {
@@ -405,6 +448,28 @@ describe('PrevisitView drill-in + Logs', () => {
     expect(table.textContent).toContain('still IN')
     // Department names resolve through the previsit feeds, not the raw id.
     expect(table.textContent).toContain('MEDICAL')
+  })
+
+  it('tags a session the 21:00 sweep closed, so it never reads as a real OUT scan', async () => {
+    mockRpc()
+    // The Logs tab reads dp_attendance_sessions directly; the sweep's rows
+    // carry no OUT scanner, because no portal user closed them.
+    fetchAllRows.mockImplementation(async (table) => (
+      table === 'dp_attendance_sessions'
+        ? [{
+          ...LOGSESSIONS[0], id: 'log-auto', badge_number: 'B3', sewadar_name: 'Chand',
+          is_auto_out: true, is_manual: false, status: 'CLOSED',
+          out_time: '21:00:00', out_scanner_badge: null, out_scanner_name: null,
+        }]
+        : []
+    ))
+    render(<PrevisitView schedules={SCHEDULES} scheduleId="sched-1" />)
+    await waitFor(() => expect(screen.getByText('Asha')).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: /Logs/ }))
+    const table = await waitFor(() => screen.getByRole('table', { name: 'Scan log — one line per session' }))
+    expect(table.textContent).toContain('Auto out')
+    expect(table.textContent).not.toContain('Scanner Two')
+    expect(table.textContent).not.toContain('Manual')
   })
 
   it('a failed log read shows an error with a retry, never a clean empty view', async () => {

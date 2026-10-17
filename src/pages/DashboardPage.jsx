@@ -8,6 +8,8 @@ import {
   scannerStatus,
   timeAgo,
   rateBand,
+  filterByDept,
+  deptOptions,
   UNASSIGNED_CENTRE,
   VISIT_DAYS,
   shortDayLabel,
@@ -22,6 +24,8 @@ import EmptyState from '../components/EmptyState'
 import CentreDayHeatmap from '../components/CentreDayHeatmap'
 import CentreDeptMatrixCard from '../components/CentreDeptMatrixCard'
 import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
+import { useIsMobile } from '../hooks/useMediaQuery'
+import FilterSheet, { MobileFilterBar } from '../components/mobile/FilterSheet'
 import {
   LayoutDashboard, Users, Clock, AlertTriangle, ArrowUpRight,
   CalendarClock, RefreshCw, Loader2,
@@ -30,6 +34,18 @@ import {
 // Trend bars reuse the `.progress-bar` modifiers rather than a chart library.
 const BAND_BAR = { full: 'success', partial: '', low: 'warn', none: 'danger' }
 const bandBar = (band) => (BAND_BAR[band] === '' ? '' : ` ${BAND_BAR[band] || ''}`.trim())
+
+// Centre matching for the Home filters (module-level: stable identity, no
+// memo deps). Both daily rows (toDailyRow) and visit rows
+// (attendance_centre_daily v74) carry `centre` — NOT `sewadar_centre` (that
+// field lives on per-badge rows, which is what lib filterByCentre matches).
+const dashboardRowCentre = (r) => r?.centre || r?.sewadar_centre || UNASSIGNED_CENTRE
+const dashboardMatchCentre = (rows, centre) => {
+  const list = Array.isArray(rows) ? rows : []
+  if (!centre || centre === 'all') return list
+  if (centre === UNASSIGNED_CENTRE) return list.filter((r) => !r?.centre && !r?.sewadar_centre)
+  return list.filter((r) => dashboardRowCentre(r) === centre)
+}
 
 /**
  * Unwrap a supabase-js PostgREST result into rows, THROWING on a returned
@@ -139,6 +155,21 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   // overwrite a fast newer one.
   const seqRef = useRef(0)
 
+  // ─── Centre + department filters (client-side only) ───
+  // Mirrors AttendancePage's filterCentre/filterDept pattern. Daily rows carry
+  // both centre and department_id; visit-day rows (attendance_centre_daily v74)
+  // carry centre ONLY — no department dimension. So:
+  //   - KPI tiles, centre rows, day matrix, centre×dept matrix ← filtered by BOTH
+  //   - Present-by-day strip + CentreDayHeatmap ← filtered by CENTRE ONLY
+  // FLAG: dept cannot narrow the heatmap/strip without a new v76 RPC that adds
+  // a department dimension to attendance_centre_daily. The data simply has no
+  // dept field to filter on.
+  const [filterCentre, setFilterCentre] = useState('all')
+  const [filterDept, setFilterDept] = useState('all')
+  const isMobile = useIsMobile()
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const clearFilters = useCallback(() => { setFilterCentre('all'); setFilterDept('all') }, [])
+
   // Bhati Visit shows visit-days data only: the dashboard always reports
   // a clamped today (windowless schedules pass through untouched).
   const visitWin = useMemo(() => scheduleWindow(schedule), [schedule])
@@ -245,7 +276,6 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   const scannerRows = useMemo(() => buildScannerRows(rowsAreCurrent ? sec.ops.rows : []), [sec.ops.rows, rowsAreCurrent])
   const anomalyRows = useMemo(() => (rowsAreCurrent ? sec.anom.rows : []).filter((r) => r && r.rule), [sec.anom.rows, rowsAreCurrent])
 
-  const totals = useMemo(() => dailyTotals(dailyRows), [dailyRows])
   const counts = useMemo(() => anomalyCounts(anomalyRows), [anomalyRows])
   const anomalyTotal = useMemo(() => Object.values(counts).reduce((a, b) => a + b, 0), [counts])
 
@@ -257,10 +287,72 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   // load: "—" in amber says "unknown", 0 says "nobody came". The amber tone
   // rides on each tile's `tone` prop.
 
-  // Centre leaderboard: the daily rows folded up to one row per centre.
+  // ── Bhati Visit picture: the visit window is the only column source, so
+  // a previsit scan can never grow a column here. Windowless schedules get
+  // no visit rows at all — the sections below render their honest empty
+  // state instead of fixture-shaped zeros.
+  const windowUsable = Boolean(visitWin.start && visitWin.end)
+  const windowDates = useMemo(() => expandDateRange(visitWin.start, visitWin.end), [visitWin])
+  const visitRows = useMemo(
+    () => (rowsAreCurrent && windowUsable ? sec.visit.rows : []),
+    [sec.visit.rows, rowsAreCurrent, windowUsable]
+  )
+
+  // ─── Filtered derivations ───
+  // NOTE: centre filtering here is local via dashboardMatchCentre; dept
+  // filtering reuses lib filterByDept (dept_name).
+  // Centres = union of daily-row centres and visit-row centres (visit data has
+  // centre but no dept, so it contributes to the centre dropdown only).
+  const centres = useMemo(() => {
+    const set = new Set()
+    for (const r of dailyRows) set.add(dashboardRowCentre(r))
+    for (const r of visitRows) set.add(dashboardRowCentre(r))
+    return [...set].sort((a, b) => a.localeCompare(b))
+  }, [dailyRows, visitRows])
+
+  // Depts scoped to the chosen centre from daily rows (the only source with
+  // a department dimension).
+  const depts = useMemo(() => {
+    if (!filterCentre || filterCentre === 'all') return deptOptions(dailyRows)
+    return deptOptions(dashboardMatchCentre(dailyRows, filterCentre))
+  }, [dailyRows, filterCentre])
+
+  // Daily rows filtered by BOTH centre + dept — feeds KPI tiles, centre rows,
+  // day matrix, and centre×dept matrix.
+  const filteredDaily = useMemo(() => {
+    let rows = dailyRows
+    if (filterCentre && filterCentre !== 'all') rows = dashboardMatchCentre(rows, filterCentre)
+    if (filterDept && filterDept !== 'all') rows = filterByDept(rows, filterDept)
+    return rows
+  }, [dailyRows, filterCentre, filterDept])
+
+  // Visit rows filtered by CENTRE ONLY — feeds the present-by-day strip and
+  // the CentreDayHeatmap. FLAG: dept cannot narrow these without a v76 RPC.
+  const filteredVisit = useMemo(() => {
+    if (!filterCentre || filterCentre === 'all') return visitRows
+    return dashboardMatchCentre(visitRows, filterCentre)
+  }, [visitRows, filterCentre])
+
+  const filtering = (filterCentre !== 'all') || (filterDept !== 'all')
+  const filterSummary = filtering
+    ? `${filteredDaily.length} of ${dailyRows.length} daily rows`
+    : null
+
+  // KPI totals from the FILTERED daily rows.
+  const totals = useMemo(() => dailyTotals(filteredDaily), [filteredDaily])
+
+  // Reset dept to 'all' when centre changes and the current dept is not in
+  // the new centre's dept list.
+  useEffect(() => {
+    if (filterDept && filterDept !== 'all' && !depts.includes(filterDept)) {
+      setFilterDept('all')
+    }
+  }, [filterCentre, depts, filterDept])
+
+  // Centre leaderboard: the filtered daily rows folded up to one row per centre.
   const centreRows = useMemo(() => {
     const map = new Map()
-    for (const r of dailyRows) {
+    for (const r of filteredDaily) {
       const key = r.centre || UNASSIGNED_CENTRE
       const cur = map.get(key) || { centre: key, expected: 0, present: 0, absent: 0, open_now: 0 }
       cur.expected += r.expected
@@ -273,7 +365,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
       const rate = c.expected > 0 ? Math.round((c.present / c.expected) * 100) : 0
       return { ...c, rate, band: rateBand(rate) }
     })
-  }, [dailyRows])
+  }, [filteredDaily])
 
   // Scanner health, judged on the SAME ≤15-minute rule the Live Scanners page
   // uses, so the two never disagree.
@@ -283,17 +375,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   }), [scannerRows, date, now])
   const activeScanners = useMemo(() => scannerHealth.filter((s) => s.status === 'active').length, [scannerHealth])
 
-  // ── Bhati Visit picture: the visit window is the only column source, so
-  // a previsit scan can never grow a column here. Windowless schedules get
-  // no visit rows at all — the sections below render their honest empty
-  // state instead of fixture-shaped zeros.
-  const windowUsable = Boolean(visitWin.start && visitWin.end)
-  const windowDates = useMemo(() => expandDateRange(visitWin.start, visitWin.end), [visitWin])
-  const visitRows = useMemo(
-    () => (rowsAreCurrent && windowUsable ? sec.visit.rows : []),
-    [sec.visit.rows, rowsAreCurrent, windowUsable]
-  )
-  const visitByDay = useMemo(() => previsitByDay(visitRows), [visitRows])
+  const visitByDay = useMemo(() => previsitByDay(filteredVisit), [filteredVisit])
   const visitMaxPresent = useMemo(() => visitByDay.reduce((m, d) => Math.max(m, d.present), 0), [visitByDay])
   // Day-scoped matrix feed: the same daily rows re-shaped into the
   // visit-summary grain (one row per centre × department) — deployed carries
@@ -301,7 +383,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   // centre × department combo (zero-present included), so the card keeps full
   // denominators on today's scope.
   const dayMatrixRows = useMemo(
-    () => (rowsAreCurrent ? sec.daily.rows : []).map((r) => ({
+    () => (rowsAreCurrent ? filteredDaily : []).map((r) => ({
       centre: r?.centre || UNASSIGNED_CENTRE,
       department_id: r?.department_id ?? null,
       dept_name: r?.dept_name,
@@ -310,15 +392,15 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
       never_present: Number(r?.absent) || 0,
       open_now: Number(r?.open_now) || 0,
     })),
-    [sec.daily.rows, rowsAreCurrent]
+    [filteredDaily, rowsAreCurrent]
   )
   const visitMatrix = useMemo(
     // The day-mapped rows fold today's distinct scanned sewadars per centre
     // into the heatmap end totals — the same fold as the department strip,
     // so the two agree on today's scope. Absent (stale schedule) it falls
     // back to badge-days.
-    () => sewaCentreMatrix({ mode: SEWA_MODE_VISIT, visitRows, windowDates, visitSummaryRows: dayMatrixRows }),
-    [visitRows, windowDates, dayMatrixRows]
+    () => sewaCentreMatrix({ mode: SEWA_MODE_VISIT, visitRows: filteredVisit, windowDates, visitSummaryRows: dayMatrixRows }),
+    [filteredVisit, windowDates, dayMatrixRows]
   )
   const matrixRows = dayMatrixRows
   // A centres failure only flattens the parent rollup — the matrix rows
@@ -433,6 +515,84 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
           </>
         )}
       />
+
+      {/* ── Centre + department filters ── */}
+      {(() => {
+        const filtersNode = (
+          <>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+              <span style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--muted)' }}>Centre</span>
+              <select
+                value={filterCentre}
+                onChange={(e) => setFilterCentre(e.target.value)}
+                className="input"
+                style={{ fontSize: '0.8rem', padding: '0.35rem 0.5rem' }}
+              >
+                <option value="all">All centres</option>
+                {centres.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+              <span style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--muted)' }}>Department</span>
+              <select
+                value={filterDept}
+                onChange={(e) => setFilterDept(e.target.value)}
+                className="input"
+                style={{ fontSize: '0.8rem', padding: '0.35rem 0.5rem' }}
+              >
+                <option value="all">All departments</option>
+                {depts.map((d) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+            </label>
+          </>
+        )
+        const chips = [
+          ...(filterCentre !== 'all' ? [{ key: 'centre', label: filterCentre }] : []),
+          ...(filterDept !== 'all' ? [{ key: 'dept', label: filterDept }] : []),
+        ]
+        return (
+          <>
+            {/* Desktop: inline selects */}
+            {!isMobile && (
+              <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-end', marginBottom: '1rem', flexWrap: 'wrap' }}>
+                {filtersNode}
+                {filtering && (
+                  <button onClick={clearFilters} className="btn btn-ghost" style={{ fontSize: '0.75rem', padding: '0.35rem 0.6rem' }}>
+                    Clear filters
+                  </button>
+                )}
+              </div>
+            )}
+            {/* Mobile: filter bar + sheet */}
+            {isMobile && (
+              <MobileFilterBar
+                onOpen={() => setFiltersOpen(true)}
+                chips={chips}
+                onClearChip={(key) => { if (key === 'centre') setFilterCentre('all'); if (key === 'dept') setFilterDept('all') }}
+                onClearAll={clearFilters}
+                resultText={filterSummary}
+                activeCount={chips.length}
+              />
+            )}
+            {isMobile && (
+              <FilterSheet
+                open={filtersOpen}
+                onClose={() => setFiltersOpen(false)}
+                title="Filters"
+                resultText={filterSummary}
+                onClearAll={clearFilters}
+                hasActive={filtering}
+              >
+                {filtersNode}
+              </FilterSheet>
+            )}
+          </>
+        )
+      })()}
 
       {/* ── Alerts (max 3) ── */}
       {alerts.length > 0 && (
