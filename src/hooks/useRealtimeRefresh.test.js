@@ -67,7 +67,8 @@ describe('useRealtimeRefresh', () => {
 
   it('subscribes once with the channel name and one binding per subscription', () => {
     setup()
-    expect(onCalls[0]).toEqual(['__channel', 'attendance-s1'])
+    expect(onCalls[0][0]).toBe('__channel')
+    expect(onCalls[0][1]).toMatch(/^attendance-s1-\d+$/)
     const bindings = onCalls.filter(([e]) => e === 'postgres_changes')
     expect(bindings).toHaveLength(2)
     expect(bindings[0][1]).toMatchObject({ event: '*', schema: 'public', table: 'dp_attendance_sessions', filter: 'schedule_id=eq.s1' })
@@ -99,6 +100,35 @@ describe('useRealtimeRefresh', () => {
     expect(removeChannel).toHaveBeenCalledTimes(1)
     await act(async () => { fire(); vi.advanceTimersByTime(1000) })
     expect(onReload).not.toHaveBeenCalled()
+  })
+
+  it('re-subscribing the same schedule never reuses the (still leaving) topic', () => {
+    // realtime-js channel(topic) hands back an existing channel with that
+    // topic — including one we just removed whose leave is not acked yet.
+    const first = setup()
+    act(() => { first.hook.unmount() })
+    setup()
+    const names = onCalls.filter(([e]) => e === '__channel').map(([, n]) => n)
+    expect(names).toHaveLength(2)
+    expect(names[0]).not.toBe(names[1])
+  })
+
+  it('never stacks a second reload on one still in flight; runs ONE follow-up after it', async () => {
+    let finish
+    const onReload = vi.fn(() => new Promise((r) => { finish = r }))
+    setup({ onReload, maxWaitMs: 2000 })
+    await act(async () => { vi.advanceTimersByTime(2500) })
+    await act(async () => { pgHandlers[0]() })
+    expect(onReload).toHaveBeenCalledTimes(1)
+    // a sustained burst while the slow reload is still running
+    for (let i = 0; i < 5; i += 1) {
+      await act(async () => { vi.advanceTimersByTime(2500); pgHandlers[0]() })
+    }
+    expect(onReload).toHaveBeenCalledTimes(1)
+    // the slow reload settles → exactly one follow-up picks up the burst
+    await act(async () => { finish() })
+    await act(async () => { vi.advanceTimersByTime(400) })
+    expect(onReload).toHaveBeenCalledTimes(2)
   })
 
   it('a throwing onReload never breaks the channel', async () => {

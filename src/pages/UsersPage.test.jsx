@@ -526,6 +526,34 @@ describe('UsersPage — bulk selection and guards', () => {
     expect(qbs.flatMap(qb => qb.eq.mock.calls)).toEqual([['id', 'u1'], ['id', 'u2']])
   })
 
+  it('never reports a failed bulk row as done', async () => {
+    // u2's update fails — the summary must not claim "2 logins archived"
+    fromMock.mockImplementation((table) => {
+      const b = qb()
+      if (table === 'portal_users') {
+        const eq = b.eq
+        b.eq = vi.fn((k, v) => {
+          eq(k, v)
+          if (v === 'u2') b.then = (res, rej) => Promise.resolve({ data: null, error: { message: 'denied' } }).then(res, rej)
+          return b
+        })
+      }
+      return b
+    })
+    try {
+      await renderPage()
+      selectAll()
+      fireEvent.click(within(bulkBar()).getByRole('button', { name: 'Archive' }))
+      const dialog = await waitFor(() => screen.getByRole('dialog', { name: 'Archive 2 logins?' }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Archive' }))
+      await waitFor(() => expect(toastWarning).toHaveBeenCalledWith(expect.stringMatching(/1 of 2 logins archived — 1 failed/)))
+      expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/denied/))
+      expect(toastSuccess).not.toHaveBeenCalledWith(expect.stringMatching(/2 logins archived/))
+    } finally {
+      fromMock.mockImplementation(() => qb())
+    }
+  })
+
   it('bulk-deletes via the manage-login function', async () => {
     await renderPage()
     selectAll()

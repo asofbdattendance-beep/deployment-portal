@@ -442,6 +442,43 @@ describe('DeptInchargePage session poll guards (T4)', () => {
   })
 })
 
+// A poll (or a post-scan refresh) that lands while the initial load is still
+// in flight must not cancel that load. They shared one sequence counter, so on
+// a weak network — load slower than 15 s, or the incharge scanning straight
+// away — the load threw its rows away and the lists stayed empty for good.
+describe('DeptInchargePage — poll during a slow initial load', () => {
+  it('the 15s poll does not discard the in-flight initial load', async () => {
+    vi.useFakeTimers()
+    try {
+      mocks.rpc.mockResolvedValue({ data: ['dept-1'] })
+      let releaseDeployments
+      const gate = new Promise((r) => { releaseDeployments = r })
+      mocks.fetchAllRows.mockImplementation(async (table) => {
+        if (table === 'deployment_departments') return [{ id: 'dept-1', name: 'Traffic' }]
+        if (table === 'deployments') {
+          await gate
+          return [{ id: 'r1', schedule_id: 'sched-1', centre: 'DELHI', badge_number: 'SLOW1', department_id: 'dept-1' }]
+        }
+        if (table === 'dp_sewadars') return [{ badge_number: 'SLOW1', sewadar_name: 'Ram', centre: 'DELHI', is_initiated: true, gender: 'M' }]
+        return []
+      })
+      render(<DeptInchargePage schedules={SCHEDULES} scheduleId="sched-1" />)
+      await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+      // the poll fires while deployments are still loading
+      await act(async () => { await vi.advanceTimersByTimeAsync(15000) })
+      expect(sessionCalls()).toBeGreaterThanOrEqual(2)
+      // now the slow load lands — its rows must be kept
+      await act(async () => { releaseDeployments(); await vi.advanceTimersByTimeAsync(100) })
+      fireEvent.click(screen.getByRole('button', { name: /Complete list/i }))
+      await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+      expect(screen.getByRole('button', { name: /Complete list \(1\)/i })).toBeTruthy()
+      expect(screen.getByText(/SLOW1/)).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 // T5: the same badge in two centres must stay distinct — one Present, one
 // Absent, with per-centre In/Out and no duplicate-key warning.
 describe('DeptInchargePage centre-qualified presence (T5)', () => {

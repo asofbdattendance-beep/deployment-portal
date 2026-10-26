@@ -276,6 +276,18 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
   useEffect(() => {
     if (!selectedScheduleId) return
     let mounted = true
+    // Re-check at FIRE time: loadData replaces rows and clears dirtyRef, so an
+    // edit made between the event and the timer would be silently wiped.
+    // While edits are pending / saving, defer again instead of reloading.
+    const fireReload = () => {
+      reloadTimer.current = null
+      if (!mounted) return
+      if (dirtyRef.current || savingRef.current) {
+        reloadTimer.current = setTimeout(fireReload, 1300)
+        return
+      }
+      loadData()
+    }
     const scheduleReload = () => {
       if (!mounted || dirtyRef.current || savingRef.current) return
       // I8: defer, don't drop — an event swallowed inside our own echo window
@@ -283,11 +295,11 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
       // the upsert race in saveAll above.
       if (Date.now() - lastSaveAtRef.current < 1200) {
         if (reloadTimer.current) clearTimeout(reloadTimer.current)
-        reloadTimer.current = setTimeout(() => { if (mounted) loadData() }, 1300)
+        reloadTimer.current = setTimeout(fireReload, 1300)
         return
       }
       if (reloadTimer.current) clearTimeout(reloadTimer.current)
-      reloadTimer.current = setTimeout(() => { if (mounted) loadData() }, 500)
+      reloadTimer.current = setTimeout(fireReload, 500)
     }
     const channel = supabase
       .channel(`deploy-alloc-${selectedScheduleId}`)
@@ -435,7 +447,12 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
       //      deployment) → DELETE the row, matching centre-page semantics
       const CHUNK = 250
       const toInsert = entries.filter(r => r.consent_given && !r.deployment_id && r.deployed_dept_id)
-      const toDelete = entries.filter(r => !r.consent_given && r.deployment_id)
+      // Delete only rows whose consent THIS session flipped Yes→No (baseline
+      // consent was Yes). A consent-No row with a deployment is legitimate
+      // (v21 override / vss_operator / bypass deploys) — sweeping every such
+      // row deleted those deployments on any unrelated save.
+      const toDelete = entries.filter(r => !r.consent_given && r.deployment_id
+        && savedConsentRef.current[r.centre + '|' + r.badge_number]?.consent_given === true)
       const deleteKeys = new Set(toDelete.map(r => `${r.centre}|${r.badge_number}`))
       const toUpdate = entries.filter(r =>
         r.deployment_id

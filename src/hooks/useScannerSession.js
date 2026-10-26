@@ -191,6 +191,12 @@ export function useScannerSession({
   const commitScan = useCallback(async () => {
     const p = popup
     if (!p || p.status !== 'choose') return
+    // Double-tap on Mark IN/OUT: the popup stays up while the first commit is
+    // in flight, so a second tap reached the busy guard, which replaced the
+    // prompt with "Scanner busy — retry this badge" — an instruction to scan
+    // again that, once the IN lands, offers Mark OUT and invites closing the
+    // session just opened. The first tap's result replaces the popup; ignore.
+    if (getBusy()) return
     // V15: a popup that survived a schedule switch must never write against
     // the new schedule — drop it loudly instead of committing.
     if (p.scheduleId && p.scheduleId !== scheduleId) {
@@ -205,8 +211,12 @@ export function useScannerSession({
       display: { name: p.name, centre: p.centre, deptName: p.deptName },
       manual: p.manual === true,
     })
-  }, [popup, handleScan, scheduleId, toast])
+  }, [popup, handleScan, scheduleId, toast, getBusy])
 
+  // Re-entrancy guard for the forgot confirm: a double-tap issued two
+  // scan_out writes and armed two follow-up INs, the second of which raced
+  // the first (busy → "follow-up IN did not land — re-scan", or Already IN).
+  const forgotInFlightRef = useRef(false)
   const confirmForgot = useCallback(async () => {
     if (!popup || popup.status !== 'forgot') return
     // V15: same schedule-stamp guard as commitScan — a stale forgot form must
@@ -228,10 +238,17 @@ export function useScannerSession({
         : `OUT time was before the IN — using ${out.value} IST`)
     }
     const ts = new Date(out.ts).toISOString()
+    if (forgotInFlightRef.current) return
+    forgotInFlightRef.current = true
     // L-36: the OUT write goes through the hook's submitForgotOut — the same
     // RPC attempt + offline enqueue as the main OUT flow. The popup's identity
     // rides along so a queued forgot-OUT still names the sewadar.
-    const r = await submitForgotOut({ badge: popup.badge, openId: popup.openId, ts, display: { name: popup.name ?? null, centre: popup.centre ?? null, deptName: popup.deptName ?? null } })
+    let r
+    try {
+      r = await submitForgotOut({ badge: popup.badge, openId: popup.openId, ts, display: { name: popup.name ?? null, centre: popup.centre ?? null, deptName: popup.deptName ?? null } })
+    } finally {
+      forgotInFlightRef.current = false
+    }
     if (!r.ok && r.reason === 'server') { toast.error(r.message); return }
     if (!r.ok) return // queued/duplicate/queue errors already surfaced; no follow-up while the OUT hasn't synced
     toast.success(forgotSuccessToast)

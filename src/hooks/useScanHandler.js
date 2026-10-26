@@ -98,6 +98,25 @@ function newNonce() {
 }
 
 /**
+ * Does this device's local queue END with an unsynced IN for badge+schedule?
+ * The newest live row decides the offline direction: a trailing IN means the
+ * next scan is the OUT; a trailing OUT means the sewadar already left on this
+ * device, so the next scan is a fresh IN. "Any pending IN" kept offering Mark
+ * OUT after an offline IN→OUT pair, so an offline re-entry could never be
+ * recorded (and a second OUT was queued instead, quarantined at drain).
+ */
+function lastLocalIsIn(queued, b, scheduleId) {
+  let last = null
+  for (const q of queued || []) {
+    if (!q || q.synced === true || q.failed === true || q.status === 'failed') continue
+    if (q.badge !== b || q.schedule_id !== scheduleId) continue
+    if (q.action !== 'IN' && q.action !== 'OUT') continue
+    if (!last || (Number(q.createdAt) || 0) >= (Number(last.createdAt) || 0)) last = q
+  }
+  return last?.action === 'IN'
+}
+
+/**
  * The date/time row the scan popup renders for the event it is describing.
  *
  * IST, not the device zone — the same reason `hhmmIST` exists: every stamp this
@@ -630,9 +649,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
         let pendingIn = false
         try {
           const queued = await getQueuedScans()
-          pendingIn = (queued || []).some(q =>
-            q && q.synced !== true && q.failed !== true && q.status !== 'failed'
-            && q.action === 'IN' && q.badge === b && q.schedule_id === scheduleId)
+          pendingIn = lastLocalIsIn(queued, b, scheduleId)
         } catch { /* queue unreadable — default to the IN choice below */ }
         const dir = displayOf(dirFor(b))
         const timedOut = lookup.kind === 'timeout'
@@ -663,9 +680,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
           let pendingIn = false
           try {
             const queued = await getQueuedScans()
-            pendingIn = (queued || []).some(q =>
-              q && q.synced !== true && q.failed !== true && q.status !== 'failed'
-              && q.action === 'IN' && q.badge === b && q.schedule_id === scheduleId)
+            pendingIn = lastLocalIsIn(queued, b, scheduleId)
           } catch { /* queue unreadable — default to the IN choice below */ }
           console.warn('[Scanner] get_scan_state failed, offering explicit choice:', e.message)
           // Same directory identity as the offline/timeout branch above — a

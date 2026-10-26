@@ -10,7 +10,9 @@ import { RefreshCw } from 'lucide-react'
  * waiting worker and reloads once it activates — never mid-scan without
  * the user's tap.
  */
-export default function SwUpdatePrompt() {
+const hardReload = () => window.location.reload()
+
+export default function SwUpdatePrompt({ reloadPage = hardReload } = {}) {
   const [waiting, setWaiting] = useState(null)
 
   useEffect(() => {
@@ -37,17 +39,28 @@ export default function SwUpdatePrompt() {
   const reload = () => {
     try {
       if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
-        navigator.serviceWorker.getRegistration().then((reg) => {
+        const sw = navigator.serviceWorker
+        // Reload once the NEW worker controls the page. A fixed 400ms beat
+        // raced activation: on a slow phone (worker cold-started to receive
+        // the message) the reload was served by the OLD worker's index.html,
+        // then the new worker activated and purged the old precache — the
+        // page ran the old build with its lazy chunks (Scanner, ZXing) gone.
+        let done = false
+        const go = () => { if (done) return; done = true; reloadPage() }
+        if (typeof sw.addEventListener === 'function') sw.addEventListener('controllerchange', go)
+        sw.getRegistration().then((reg) => {
           if (reg && reg.waiting) {
             reg.waiting.postMessage({ type: 'SKIP_WAITING' })
+            // Fallback if controllerchange never fires (engine quirk).
+            setTimeout(go, 4000)
+          } else {
+            go()
           }
-          // Reload after a beat so the new worker can take control.
-          setTimeout(() => window.location.reload(), 400)
-        }).catch(() => window.location.reload())
+        }).catch(go)
         return
       }
     } catch { /* ignore */ }
-    window.location.reload()
+    reloadPage()
   }
 
   return (

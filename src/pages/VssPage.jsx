@@ -607,12 +607,15 @@ function VssDeployTable({ schedules, scheduleId }) {
     // Read-only page (deadline passed / schedule done / centre locked / master
     // switch closed): the DB rejects these writes, so skip the round-trip —
     // otherwise a legacy-days normalization on load would spam error toasts.
-    // Clear the dirty flag: nothing on this page is saveable.
+    // Load-only normalization (no user edit yet) is dropped quietly; real
+    // user edits made before the gate closed stay dirty (ConsentPage parity)
+    // so Save Draft / beforeunload still see them, and the user is told.
+    // Never touch savingRef here — a save may still be in flight.
     if (!editableRef.current) {
-      dirtyRef.current = false
+      if (editVersionRef.current === 0) dirtyRef.current = false
+      else if (dirtyRef.current) toast.error('VSS editing is closed — your latest changes were not saved')
       retryCountRef.current = 0
       if (retryTimer.current) { clearTimeout(retryTimer.current); retryTimer.current = null }
-      savingRef.current = false
       return
     }
     if (savingRef.current) { pendingSaveRef.current = snap; return }
@@ -1040,7 +1043,9 @@ function VssDeployTable({ schedules, scheduleId }) {
       return {
         ...prev,
         [key]: value
-          ? { ...prev[key], consent_given: true }
+          // No→Yes restores the auto-set days (5 / 3 for OE ESCORTS) — the
+          // No branch nulls them, which rendered "null day" (ConsentPage parity)
+          ? { ...prev[key], consent_given: true, available_days_count: daysForDept(deptNameOf(prev[key]?.requested_dept || '')) }
           : { ...prev[key], consent_given: false, stay_at_bhati: false, chair_pass: false, available_days_count: null, requested_dept: '' },
       }
     })

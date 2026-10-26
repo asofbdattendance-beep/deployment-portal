@@ -45,16 +45,23 @@ import { BADGE_REGEX, sanitizeScannedBadge } from '../../lib/logic'
 
 
 // ─── Device Profiles ──────────────────────────────────────────────────────────
+// frameSkip is 0 everywhere: scheduleNext already paces every pass by
+// min/maxInterval and the last decode time, so skipping frames on top of that
+// cut a slow phone to ~1 decode/s. maxWidth caps the detection surface: 1080
+// keeps a portrait 1080p frame at full resolution (Code 39 bars need ~2 px to
+// survive soft focus); only a phone measured slow drops back to the old 720.
 const DEVICE_PROFILES = {
-  fast:   { confirmWindow: 3, confirmThreshold: 2, minInterval: 50,  maxInterval: 150, frameSkip: 0 },
-  medium: { confirmWindow: 4, confirmThreshold: 2, minInterval: 100, maxInterval: 300, frameSkip: 1 },
-  slow:   { confirmWindow: 3, confirmThreshold: 1, minInterval: 200, maxInterval: 500, frameSkip: 2 },
+  fast:   { confirmWindow: 3, confirmThreshold: 2, minInterval: 50,  maxInterval: 150, frameSkip: 0, maxWidth: 1280 },
+  medium: { confirmWindow: 4, confirmThreshold: 2, minInterval: 100, maxInterval: 300, frameSkip: 0, maxWidth: 1080 },
+  slow:   { confirmWindow: 3, confirmThreshold: 1, minInterval: 200, maxInterval: 500, frameSkip: 0, maxWidth: 720 },
 }
 
 const ENGINE_LABELS = { Native: 'Optimized', ZXing: 'Universal' }
 
-// Max detection surface width. Lower = faster on weak hardware.
-const DETECT_MAX_WIDTH = 720
+// getUserMedia's wait includes the permission prompt. 10s is plenty for an
+// already-granted camera, but a first-time operator reading the prompt is not
+// a stuck camera — give an ungranted camera a minute before calling it a hang.
+const CAMERA_PROMPT_TIMEOUT = 60000
 // Consecutive misses before the crop widens from the band to the whole frame.
 // 25 (was 15): full-frame costs ~1.75x pixels for the same 1D-only hints, so
 // widen later — the hard-pass second look below buys capability instead.
@@ -203,8 +210,6 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const hasEverDetectedRef = useRef(false)
   const consecutiveFailsRef = useRef(0)
   const roiModeRef = useRef('band')
-  const engineReadyAtRef = useRef(0)      // when detection first became possible
-  const anyDecodeRef = useRef(false)      // has a raw value EVER been decoded?
   const startTimeRef = useRef(Date.now())
   // V8: the single paused flag is split in two. A visibility pause (hidden
   // tab) and a decision pause (confirm/forgot popup via pause()/resume()) are
@@ -490,7 +495,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
 
     const roi = computeRoi(video.videoWidth, video.videoHeight, {
       mode: roiModeRef.current,
-      maxWidth: DETECT_MAX_WIDTH,
+      maxWidth: cfg.maxWidth,
     })
     const surface = surfaceRef.current?.grab(video, roi)
     if (!surface) { scheduleNext(); return }
@@ -518,7 +523,6 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
 
     if (barcodes?.length) {
       consecutiveFailsRef.current = 0
-      anyDecodeRef.current = true
       // Re-narrow the crop once a badge reads, so a full-frame pass doesn't
       // permanently halve the frame rate on a low-end phone.
       if (roiModeRef.current === 'full') roiModeRef.current = 'band'
@@ -531,13 +535,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       if (consecutiveFailsRef.current >= AIM_HINT_AFTER && frameCountRef.current % AIM_HINT_EVERY === 0) {
         publishLocalizerAim(roi, video)
       }
-      // Watchdog: a live preview that has never decoded anything is the
-      // signature of a broken engine. Say so instead of hinting forever.
-      if (engineReadyAtRef.current && !anyDecodeRef.current && Date.now() - engineReadyAtRef.current > 20000) {
-        setStatus('error')
-        setErrorMsg('This browser cannot read badges — try Chrome or Edge')
-        return
-      }
+      // No "never decoded" watchdog: an empty frame is the normal state of a
+      // scanner between sewadars, and the old 20s error killed idle and
+      // slow-focusing phones. A broken engine is handled by the pool's own
+      // failure fallback; the operator gets guidance, never a dead camera.
       // Hard-pass second look: base detect() runs ONE engine with 1D-only
       // hints. hardPass tries every ready engine x normal+inverted+rotated (+
       // widened 2D for ZXing) — the only path that reads inverted/rotated/2D
@@ -551,7 +552,6 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
           if (visibilityPausedRef.current || decisionPausedRef.current) return
           if (hard?.barcodes?.length) {
             consecutiveFailsRef.current = 0
-            anyDecodeRef.current = true
             if (roiModeRef.current === 'full') roiModeRef.current = 'band'
             handleBarcodes(hard.barcodes, roi, hard.engine || 'hard')
           }
@@ -663,16 +663,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
    * starts from stacking duplicate imports.
    */
   const ensureEngines = useCallback(async (session) => {
-    if (engineRef.current?.isReady()) {
-      // Re-arm the watchdog clock for the live session (L-22): the pool
-      // survives a restart, so without this a Retry inherits the previous
-      // run's timestamp and the watchdog re-errors on the first pass.
-      if (isCurrent(session) && mountedRef.current) {
-        engineReadyAtRef.current = Date.now()
-        anyDecodeRef.current = false
-      }
-      return
-    }
+    if (engineRef.current?.isReady()) return
     if (engineLoadingRef.current) return
     engineLoadingRef.current = true
     try {
@@ -687,8 +678,6 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         engineRef.current = pool
         engineLabelRef.current = pool.getActiveId()
         setEngineLabel(engineLabelRef.current)
-        engineReadyAtRef.current = Date.now()
-        anyDecodeRef.current = false
         pushDebug(`engine ready: ${pool.getActiveId()}`)
       }
 
@@ -711,7 +700,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       const frames = []
       for (let i = 0; i < 3 && v?.videoWidth; i++) {
         if (!isCurrent(session)) break   // don't burn decodes for a dead session
-        const roi = computeRoi(v.videoWidth, v.videoHeight, { mode: roiModeRef.current, maxWidth: DETECT_MAX_WIDTH })
+        const roi = computeRoi(v.videoWidth, v.videoHeight, { mode: roiModeRef.current, maxWidth: configRef.current.maxWidth })
         if (!surfaceRef.current?.grab(v, roi)) break
         const t0 = performance.now()
         await pool.detect(surfaceRef.current)
@@ -757,8 +746,6 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     hasEverDetectedRef.current = false
     consecutiveFailsRef.current = 0
     roiModeRef.current = 'band'
-    engineReadyAtRef.current = 0
-    anyDecodeRef.current = false
     // Same fresh-scan reset as startScanner (L-20): a stop() followed by an
     // external restart must not inherit the suppressor either.
     lastScanRef.current = { badge: null, time: 0 }
@@ -785,9 +772,8 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     visibilityPausedRef.current = false
     // Fresh detection state (L-20): a Retry/restart must not inherit the
     // previous run's 2s duplicate-suppressor, its last-raw pill, its sliding
-    // window, or its watchdog clock — otherwise the first post-restart scan
-    // of the same badge is silently dropped, and a restart after the
-    // watchdog error re-errors instantly on the stale timestamp (L-22).
+    // window — otherwise the first post-restart scan of the same badge is
+    // silently dropped.
     lastScanRef.current = { badge: null, time: 0 }
     lastRawRef.current = null
     rejectHintAtRef.current = 0
@@ -796,8 +782,6 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     hasEverDetectedRef.current = false
     consecutiveFailsRef.current = 0
     roiModeRef.current = 'band'
-    engineReadyAtRef.current = 0
-    anyDecodeRef.current = false
     // A restart must not inherit the previous run's aim rectangle either.
     clearAim()
 
@@ -847,19 +831,26 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       }
     }
 
-    if (debugOn) {
-      pushDebug(`start session #${session} · secure=${window.isSecureContext} · ${platform.isIOS ? 'iOS' : 'other'}`)
-      try {
-        const perm = await navigator.permissions?.query?.({ name: 'camera' })
-        if (!isCurrent(session) || !mountedRef.current) return
-        pushDebug(`permission: ${perm?.state || 'unknown'}`)
-      } catch { /* permissions API unavailable */ }
-    }
+    // Only an already-granted camera gets the short timeout; 'prompt', 'denied'
+    // (the browser may still ask) and an unsupported Permissions API all wait
+    // as long as a person needs to answer the prompt.
+    let permState = 'unknown'
+    try {
+      // Bounded: an in-app WebView that never settles the query must not be
+      // able to hold the camera start hostage.
+      const perm = navigator.permissions?.query
+        ? await withTimeout(navigator.permissions.query({ name: 'camera' }), 1000, 'Permission query')
+        : null
+      if (perm?.state) permState = perm.state
+    } catch { /* permissions API unavailable (Firefox, older Safari) or slow */ }
+    if (!isCurrent(session) || !mountedRef.current) return
+    if (debugOn) pushDebug(`start session #${session} · secure=${window.isSecureContext} · ${platform.isIOS ? 'iOS' : 'other'} · permission: ${permState}`)
 
     // ── 1. Camera first. Nothing else may delay the preview.
     let opened
     try {
-      opened = await withTimeout(openCamera({ debug: debugOn }), CAMERA_INIT_TIMEOUT, 'Camera')
+      const openTimeout = permState === 'granted' ? CAMERA_INIT_TIMEOUT : CAMERA_PROMPT_TIMEOUT
+      opened = await withTimeout(openCamera({ debug: debugOn }), openTimeout, 'Camera')
     } catch (err) {
       // An abandoned open is a normal cancellation, never a user-facing error.
       if (err?.name === 'AbortError' || !isCurrent(session) || !mountedRef.current) return
@@ -931,6 +922,12 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       applyFocusConstraints(trackRef.current, { applyZoom: true, debug: debugOn }).then(r => {
         if (!isCurrent(session) || !mountedRef.current) return
         if (debugOn) pushDebug(`focus: ${r.poiApplied ? 'roi' : r.focusApplied ? 'continuous' : 'device default'}, zoom: ${r.zoomApplied ? 'yes' : 'no'}`)
+        // Chrome on Android often reports an empty capability set until the
+        // track is delivering frames, so the pre-play torch probe misses a real
+        // torch — exactly the dim-hall phones that need it. Re-read once live.
+        if (!opened.torchSupported) {
+          try { if (trackRef.current?.getCapabilities?.()?.torch) setTorchSupported(true) } catch {}
+        }
       }).catch(() => {})
       // Re-assert AF every 4s until the first decode: some devices drop
       // continuous focus after the initial lock attempt. Stops itself on the

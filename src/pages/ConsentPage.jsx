@@ -480,11 +480,13 @@ export default function ConsentPage({ schedules, scheduleId }) {
     // switch closed): the DB rejects these writes, so skip the round-trip —
     // otherwise a legacy-days normalization on load would spam error toasts.
     // Leave the dirty flag SET so the edits stay queued for retry once editing
-    // reopens (e.g. the ASO opens an override).
+    // reopens (e.g. the ASO opens an override). Never touch savingRef here —
+    // a save may still be in flight, and clearing it let a second persist run
+    // concurrently (and the schedule-switch drain stop waiting early).
     if (!editableRef.current) {
+      if (editVersionRef.current > 0 && dirtyRef.current) toast.error('Editing is closed — your latest changes were not saved')
       retryCountRef.current = 0
       if (retryTimer.current) { clearTimeout(retryTimer.current); retryTimer.current = null }
-      savingRef.current = false
       return
     }
     if (savingRef.current) { pendingSaveRef.current = snap; return }

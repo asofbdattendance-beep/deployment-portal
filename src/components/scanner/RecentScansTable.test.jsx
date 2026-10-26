@@ -158,4 +158,15 @@ describe('RecentScansTable', () => {
     expect(wrap.getAttribute('tabindex')).toBe('0')
     expect(wrap.getAttribute('aria-label')).toBeTruthy()
   })
+
+  it('shows HH:MM:SS, never the fractional seconds Postgres `time` columns carry', () => {
+    const { container } = render(
+      <RecentScansTable
+        rows={[{ id: 't1', badge_number: 'FB2', sewadar_name: 'T', sewadar_dept: null, in_time: '14:30:05.123', out_time: '18:02:59.987654' }]}
+        deptNameById={DEPTS}
+      />,
+    )
+    const times = [...container.querySelectorAll('td.scans-time')].map((td) => td.textContent)
+    expect(times).toEqual(['14:30:05', '18:02:59'])
+  })
 })

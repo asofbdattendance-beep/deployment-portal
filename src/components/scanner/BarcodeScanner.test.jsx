@@ -226,9 +226,94 @@ describe('BarcodeScanner camera session lifecycle', () => {
     }
   })
 
-    // L-22: the watchdog error unmounts <video>, so a Retry that reads the ref
+  // Field bug (Dec 2026 readiness): a 20s "never decoded" watchdog turned an
+  // idle scanner — operator waiting for the next sewadar, or a phone still
+  // hunting focus — into a permanent "This browser cannot read badges" error.
+  // No badge in view is the NORMAL state of a scanner; it must never error.
+  it('an idle scanner with no badge in view keeps its live preview (no watchdog error)', async () => {
+    vi.useFakeTimers()
+    try {
+      const stream = makeStream()
+      mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+      const { container, queryByRole, queryByText } = render(<BarcodeScanner onScan={vi.fn()} />)
+      const video = container.querySelector('video')
+      Object.defineProperty(video, 'videoWidth', { value: 1280, configurable: true })
+      Object.defineProperty(video, 'videoHeight', { value: 720, configurable: true })
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(90000) })
+      expect(queryByText(/cannot read badges/i)).toBeNull()
+      expect(queryByRole('button', { name: /retry/i })).toBeNull()
+      expect(container.querySelector('video')).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // A portrait 1080p frame is only 1080 px across the badge; shrinking it to
+  // 720 left ~1.5 px per Code 39 bar, where soft focus kills ZXing reads.
+  it('decodes a portrait 1080p frame at full width (no 720 px downscale)', async () => {
+    const stream = makeStream()
+    mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+    const { container } = render(<BarcodeScanner onScan={vi.fn()} />)
+    const video = container.querySelector('video')
+    Object.defineProperty(video, 'videoWidth', { value: 1080, configurable: true })
+    Object.defineProperty(video, 'videoHeight', { value: 1920, configurable: true })
+    await act(async () => { await new Promise(r => setTimeout(r, 400)) })
+
+    const cropWidths = window.HTMLCanvasElement.prototype.getContext.mock.results
+      .flatMap(r => r.value.drawImage.mock.calls)
+      .filter(args => args.length === 9)
+      .map(args => args[7])
+    expect(cropWidths.length).toBeGreaterThan(0)
+    expect(cropWidths.every(w => w === Math.round(1080 * 0.92))).toBe(true)
+  })
+
+  // The camera-open timeout used to include the permission prompt: a first-time
+  // operator who took >10s to read it got "Camera took too long".
+  it('waits for a pending permission prompt instead of timing out at 10s', async () => {
+    vi.useFakeTimers()
+    try {
+      const stream = makeStream()
+      mocks.openCamera.mockReturnValue(new Promise(res => setTimeout(() => res({ stream, track: stream.track, torchSupported: false, deviceId: null, resolutionIndex: 0, adopted: false }), 25000)))
+      const { container, queryByText } = render(<BarcodeScanner onScan={vi.fn()} />)
+      await act(async () => { await vi.advanceTimersByTimeAsync(26000) })
+      expect(queryByText(/took too long/i)).toBeNull()
+      expect(container.querySelector('video').srcObject).toBe(stream)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('still reports a hung camera after 10s once permission is already granted', async () => {
+    vi.useFakeTimers()
+    Object.defineProperty(window.navigator, 'permissions', {
+      configurable: true, writable: true,
+      value: { query: vi.fn().mockResolvedValue({ state: 'granted' }) },
+    })
+    try {
+      mocks.openCamera.mockReturnValue(new Promise(() => {}))
+      const { queryByText } = render(<BarcodeScanner onScan={vi.fn()} />)
+      await act(async () => { await vi.advanceTimersByTimeAsync(11000) })
+      expect(queryByText(/took too long/i)).toBeTruthy()
+    } finally {
+      delete window.navigator.permissions
+      vi.useRealTimers()
+    }
+  })
+
+  // Chrome on Android often reports no capabilities until frames flow, so the
+  // pre-play probe said "no torch" on phones that have one.
+  it('offers the torch when the live track reveals one after playback starts', async () => {
+    const stream = makeStream()
+    stream.track.getCapabilities = () => ({ focusMode: ['continuous'], torch: true })
+    mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+    const { findByRole } = render(<BarcodeScanner onScan={vi.fn()} />)
+    expect(await findByRole('button', { name: /torch/i })).toBeTruthy()
+  })
+
+    // L-22: the error screen unmounts <video>, so a Retry that reads the ref
   // synchronously dies at "Video element missing" and the error is permanent.
-  it('recovers on Retry after the watchdog errors (no dead Video-element-missing)', async () => {    // React 18 schedules commits over MessageChannel (a REAL macrotask), which
+  it('recovers on Retry after a camera error (no dead Video-element-missing)', async () => {    // React 18 schedules commits over MessageChannel (a REAL macrotask), which
     // never runs while only the fake clock advances — so the test yields to
     // the real event loop once to let the loading state commit, exactly as a
     // real browser's event loop would interleave it.
@@ -237,14 +322,13 @@ describe('BarcodeScanner camera session lifecycle', () => {
     vi.useFakeTimers()
     try {
       const stream = makeStream()
-      mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+      const denied = Object.assign(new Error('denied'), { name: 'NotAllowedError' })
+      mocks.openCamera
+        .mockRejectedValueOnce(denied)
+        .mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
       const { container, getByRole } = render(<BarcodeScanner onScan={vi.fn()} />)
-      const video = container.querySelector('video')
-      Object.defineProperty(video, 'videoWidth', { value: 1280, configurable: true })
-      Object.defineProperty(video, 'videoHeight', { value: 720, configurable: true })
 
-      // 20s of live preview with zero decodes trips the watchdog.
-      await act(async () => { await vi.advanceTimersByTimeAsync(21000) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(100) })
       expect(getByRole('button', { name: /retry/i })).toBeTruthy()
 
       await act(async () => {

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase, fetchAllRpc } from '../lib/supabase'
-import { reportRealtimeStatus } from '../lib/realtime'
+import { useRealtimeRefresh } from './useRealtimeRefresh'
 
 /**
  * usePrevisitData — the single data owner behind BOTH previsit surfaces
@@ -77,26 +77,22 @@ export function usePrevisitData(scheduleId, enabled = true) {
   // Live refresh on peer scans AND deployment changes (the Total tab
   // reads deployments): debounced reload, teardown warns nothing
   // (reportRealtimeStatus only warns on real faults while mounted).
-  useEffect(() => {
-    if (!scheduleId || !enabled) return
-    let alive = true
-    let timer = null
-    const queue = () => {
-      if (!alive) return
-      if (timer) clearTimeout(timer)
-      timer = setTimeout(() => { if (alive) reload() }, 600)
-    }
-    const channel = supabase
-      .channel(`previsit-${scheduleId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'dp_attendance_sessions', filter: `schedule_id=eq.${scheduleId}` }, queue)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${scheduleId}` }, queue)
-      .subscribe((status) => reportRealtimeStatus('previsit', status, alive))
-    return () => {
-      alive = false
-      if (timer) clearTimeout(timer)
-      supabase.removeChannel(channel)
-    }
-  }, [scheduleId, reload, enabled])
+  useRealtimeRefresh({
+    // Trailing-only debounce starved under sustained scanning (every event
+    // re-armed the 600ms timer, so a busy visit morning never refreshed);
+    // the shared hook adds a max-wait and never stacks reloads in flight.
+    // maxWait is long because one reload fans out into several paged RPCs.
+    scheduleId: enabled ? scheduleId : null,
+    channelName: `previsit-${scheduleId}`,
+    subscriptions: [
+      { table: 'dp_attendance_sessions', filter: `schedule_id=eq.${scheduleId}` },
+      { table: 'deployments', filter: `schedule_id=eq.${scheduleId}` },
+    ],
+    onReload: reload,
+    label: 'previsit',
+    debounceMs: 600,
+    maxWaitMs: 10000,
+  })
 
   return {
     summary,

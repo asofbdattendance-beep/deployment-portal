@@ -4,7 +4,7 @@
 // RPC): the two lenses read different tables, and a stray call is either
 // wasted spend or a scope leak. The mock setup mirrors AttendancePage.test.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor, cleanup } from '@testing-library/react'
+import { render, screen, waitFor, cleanup, act } from '@testing-library/react'
 import { SEWA_MODE_VISIT, SEWA_MODE_PREVISIT } from '../lib/sewaMode'
 import { useSewaViewData } from './useSewaViewData'
 
@@ -14,8 +14,10 @@ const fetchAllRpc = vi.fn(async (name, params) => {
   if (res?.error) throw res.error
   return Array.isArray(res?.data) ? res.data : []
 })
+// pg handlers are captured so a test can drive realtime events.
+const pgHandlers = []
 const noopChannel = () => {
-  const ch = { on: () => ch, subscribe: () => ch, unsubscribe: () => ch }
+  const ch = { on: (e, f, cb) => { if (typeof cb === 'function') pgHandlers.push(cb); return ch }, subscribe: () => ch, unsubscribe: () => ch }
   return ch
 }
 vi.mock('../lib/supabase', () => ({
@@ -109,6 +111,7 @@ function rpcNames() {
 }
 
 beforeEach(() => {
+  pgHandlers.length = 0
   rpc.mockReset()
   fetchAllRpc.mockClear()
   respondWith()
@@ -168,5 +171,27 @@ describe('useSewaViewData — previsit mode', () => {
     expect(p.summary).toEqual(PREVISIT_SUMMARY)
     expect(p.rows).toEqual(PREVISIT_ROWS)
     expect(p.deployed).toEqual(PREVISIT_DEPLOYED)
+  })
+})
+
+describe('useSewaViewData — live refresh under sustained scanning', () => {
+  it('still reloads while scans keep landing faster than the debounce', async () => {
+    // A busy visit morning: a scan every 300ms. The old trailing-only 600ms
+    // debounce re-armed on every event and never fired — Reports froze for
+    // the whole rush. The max-wait must break through.
+    render(<Probe scheduleId="sched-1" mode={SEWA_MODE_VISIT} windowDates={DATES} />)
+    await waitFor(() => expect(screen.getByTestId('probe').dataset.loading).toBe('no'))
+    expect(pgHandlers.length).toBeGreaterThan(0)
+    const dailyCalls = () => rpcNames().filter((n) => n === 'attendance_centre_daily').length
+    expect(dailyCalls()).toBe(1)
+    vi.useFakeTimers()
+    try {
+      for (let i = 0; i < 40; i += 1) {
+        await act(async () => { pgHandlers[0](); await vi.advanceTimersByTimeAsync(300) })
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(dailyCalls()).toBeGreaterThan(1)
   })
 })

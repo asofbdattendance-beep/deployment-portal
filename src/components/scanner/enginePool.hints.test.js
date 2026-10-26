@@ -128,3 +128,22 @@ describe('enginePool ZXing hints are honoured (regression: decode(bitmap) wiped 
     expect(setHints).not.toHaveBeenCalled()
   })
 })
+
+describe('enginePool ZXing misses are silent (regression: a console.warn per missed frame)', () => {
+  it('a missed frame does not reach console.warn, and other warnings still do', async () => {
+    const spy = vi.fn()
+    console.warn = spy
+    const pool = createEnginePool(false, { formats: ['code_39'] })
+    await pool.init()
+
+    // A blank frame is the scanner's normal state between sewadars.
+    const blank = { gray: new Uint8ClampedArray(320 * 120).fill(255), width: 320, height: 120 }
+    const miss = await pool.detect(surface(blank))
+    expect(miss.barcodes).toEqual([])
+    expect(spy).not.toHaveBeenCalled()
+
+    // The filter is scoped to the decode call and to that one message.
+    console.warn('unrelated warning')
+    expect(spy).toHaveBeenCalledWith('unrelated warning')
+  })
+})

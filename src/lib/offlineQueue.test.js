@@ -1199,3 +1199,104 @@ describe('agent wave: error-combination hardening', () => {
     await removeQueued('stx-1')
   })
 })
+
+describe('december readiness: dead connection + C6 OUT time', () => {
+  const row = (id, extra = {}) => ({
+    id, badge: 'VS0101', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:00:00.000Z',
+    createdAt: 1, attempts: 0, synced: false, owner: 'user-A', ...extra,
+  })
+  const c6Client = (calls, openRow) => ({
+    auth: { getSession: async () => ({ data: { session: { user: { id: 'user-A' } } } }) },
+    rpc: async (name, params) => {
+      calls.push([name, params])
+      if (name === 'scan_in') return { data: null, error: new Error('Already IN — OUT first') }
+      if (name === 'get_open_session') return { data: openRow, error: null }
+      return { data: { ok: true }, error: null }
+    },
+  })
+
+  // Offline past the JWT expiry: getSession() answers { session: null, error }
+  // (refresh could not run) although the user never signed out. Enqueue used
+  // to tag owner:null — never auto-drained, hidden from the logged-in operator.
+  it('tags offline-expired enqueues with the stored session user; the drain stays strict', async () => {
+    const { supabase } = await import('./supabase')
+    const realGetSession = supabase.auth.getSession
+    supabase.auth.storageKey = 'sb-test-auth-token'
+    supabase.auth.storage = { getItem: (k) => (k === 'sb-test-auth-token' ? JSON.stringify({ user: { id: 'user-A' } }) : null) }
+    supabase.auth.getSession = async () => ({ data: { session: null }, error: new Error('Failed to fetch') })
+    try {
+      const res = await enqueueScan({ id: 'exp-1', badge: 'VS0102', schedule_id: 's', action: 'IN' })
+      expect(res).toMatchObject({ ok: true, owner: 'user-A' })
+      expect((await getQueuedScans()).map((r) => r.id)).toEqual(['exp-1'])
+      const calls = []
+      const drained = await drainQueue({ auth: supabase.auth, rpc: async (n) => { calls.push(n); return { data: {}, error: null } } })
+      expect(drained).toBe(0)
+      expect(calls).toEqual([])
+    } finally {
+      supabase.auth.getSession = realGetSession
+      delete supabase.auth.storage
+      delete supabase.auth.storageKey
+    }
+    expect((await allRows()).find((r) => r.id === 'exp-1').owner).toBe('user-A')
+  })
+
+  it('falls back to getSession when nothing is stored (signed out stays null-owner)', async () => {
+    const { supabase } = await import('./supabase')
+    currentUserId = null
+    supabase.auth.storageKey = 'sb-test-auth-token'
+    supabase.auth.storage = { getItem: () => null }
+    try {
+      expect(await enqueueScan({ id: 'anon-1', badge: 'VS0103', schedule_id: 's', action: 'IN' })).toMatchObject({ ok: true, owner: null })
+    } finally {
+      delete supabase.auth.storage
+      delete supabase.auth.storageKey
+      currentUserId = 'user-A'
+    }
+  })
+
+  // A cached connection whose transaction() throws (WebKit "connection is
+  // closing" without a `close` event) used to be handed to every later call:
+  // every enqueue failed and the drain never read the queue until a reload.
+  it('forgets a connection whose transaction() throws so the next enqueue reopens', async () => {
+    const orig = IDBDatabase.prototype.transaction
+    let dead = null
+    const spy = vi.spyOn(IDBDatabase.prototype, 'transaction').mockImplementation(function (...args) {
+      if (dead === null) dead = this
+      if (this === dead) throw new DOMException('The database connection is closing.', 'InvalidStateError')
+      return orig.apply(this, args)
+    })
+    try {
+      const first = await enqueueScan({ id: 'dead-1', badge: 'VS0101', schedule_id: 's', action: 'IN' })
+      expect(first).toMatchObject({ ok: false, reason: 'write-failed' })
+      const second = await enqueueScan({ id: 'dead-2', badge: 'VS0101', schedule_id: 's', action: 'IN' })
+      expect(second.ok).toBe(true)
+    } finally {
+      spy.mockRestore()
+    }
+    expect((await allRows()).map((r) => r.id)).toEqual(['dead-2'])
+  })
+
+  // C6 escalation: the OUT is the operator's scan (q.ts), not the drain
+  // moment — an outage of hours must not inflate the session by hours.
+  it('C6 closes at the queued scan time when it is after the session IN', async () => {
+    __resetDrainState()
+    const calls = []
+    // IN 14:00 IST = 08:30Z; queued scan 09:00Z (14:30 IST).
+    await putRaw(row('c6at', { uncertain: true }))
+    const drained = await drainQueue(c6Client(calls, { id: 'open-1', in_date: '2026-09-24', in_time: '14:00:00.123456' }))
+    expect(drained).toBe(1)
+    const out = calls.find((c) => c[0] === 'scan_out')
+    expect(out[1]).toMatchObject({ p_open_id: 'open-1', p_ts: '2026-09-24T09:00:00.000Z' })
+  })
+
+  it('C6 falls back to now when the queued scan predates the session IN', async () => {
+    __resetDrainState()
+    const calls = []
+    // Foreign session opened 15:00 IST (09:30Z) — after the 09:00Z scan.
+    await putRaw(row('c6pre', { uncertain: true }))
+    const before = Date.now()
+    expect(await drainQueue(c6Client(calls, { id: 'open-2', in_date: '2026-09-24', in_time: '15:00:00' }))).toBe(1)
+    const out = calls.find((c) => c[0] === 'scan_out')
+    expect(new Date(out[1].p_ts).getTime()).toBeGreaterThanOrEqual(before)
+  })
+})

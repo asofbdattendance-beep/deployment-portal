@@ -538,6 +538,12 @@ describe('VSS registration age + validation', () => {
   it('enforces the photo size limit', () => {
     expect(vssRegistrationErrors(validForm, { hasPhoto: true, photoSize: 4 * 1024 * 1024 }).photo).toBe('Photo must be under 3 MB')
   })
+  it('rejects a future dob instead of letting its negative age slip past the age rule', () => {
+    // 2062-for-1962 typo: negative age, so isVssAgeBlocked never fires
+    const future = `${new Date().getFullYear() + 36}-01-15`
+    const e = vssRegistrationErrors({ ...validForm, dob: future }, { hasPhoto: true })
+    expect(e.dob).toBe('Enter a valid date of birth')
+  })
 })
 
 describe('isEligible / eligibilityReasons', () => {

@@ -637,7 +637,9 @@ export default function UsersPage() {
         if (error) { failed++; toast.error(`${u.name || u.email}: ${error}`); continue }
         await audit('DELETE_USER', 'portal_users', u.id, { email: u.email })
       }
-      toast.success(failed > 0 ? `Deleted ${targets.length - failed} of ${targets.length} — ${failed} failed` : `Deleted ${targets.length} login${targets.length === 1 ? '' : 's'}`)
+      if (failed === targets.length) toast.error(`No logins deleted — ${failed} failed`)
+      else if (failed > 0) toast.warning(`Deleted ${targets.length - failed} of ${targets.length} — ${failed} failed`)
+      else toast.success(`Deleted ${targets.length} login${targets.length === 1 ? '' : 's'}`)
     } else {
       const patch = kind === 'archive'
         ? { archived_at: new Date().toISOString(), archived_by: profile?.name || null, is_active: false }
@@ -645,13 +647,17 @@ export default function UsersPage() {
           ? { archived_at: null, archived_by: null, is_active: true }
           : { is_active: false }
       const action = kind === 'archive' ? 'ARCHIVE_USER' : kind === 'restore' ? 'RESTORE_USER' : 'SUSPEND_USER'
+      let failed = 0
       for (const u of targets) {
         const { error } = await supabase.from('portal_users').update(patch).eq('id', u.id)
-        if (error) { toast.error(error.message); continue }
+        if (error) { failed++; toast.error(`${u.name || u.email}: ${error.message}`); continue }
         await audit(action, 'portal_users', u.id, { email: u.email })
       }
       const done = kind === 'archive' ? 'archived' : kind === 'restore' ? 'restored' : 'suspended'
-      toast.success(`${targets.length} login${targets.length === 1 ? '' : 's'} ${done}`)
+      // never report failed rows as done (mirrors the delete branch)
+      if (failed === targets.length) toast.error(`No logins ${done} — ${failed} failed`)
+      else if (failed > 0) toast.warning(`${targets.length - failed} of ${targets.length} logins ${done} — ${failed} failed`)
+      else toast.success(`${targets.length} login${targets.length === 1 ? '' : 's'} ${done}`)
     }
     setSelected(new Set())
     load().catch(() => {})

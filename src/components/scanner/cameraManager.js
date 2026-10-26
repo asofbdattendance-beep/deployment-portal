@@ -42,11 +42,14 @@ export const platform = {
 
 // ─── Resolution Chain ─────────────────────────────────────────────────────────
 // Progressive fallback: start high, drop down if the camera can't handle it.
-// Capped at 1280×720 on purpose — a 1080p stream triples the decode cost for no
-// detection gain once the ROI is already downscaled, which is what makes
-// low-end phones keep up.
+// Starts at 1080p: phones deliver portrait frames, so a 720p stream is only 720
+// px across the badge — ~1.5 px per Code 39 bar at a normal holding distance,
+// where a slightly soft focus already drops ZXing to 5–40% reads (it needs
+// ~2 px/bar). 1080 px across gives that margin back. Decode cost is bounded by
+// the per-profile detect width in BarcodeScanner, not by the stream size.
 
 const RESOLUTION_CHAIN = [
+  { width: { ideal: 1920 }, height: { ideal: 1080 } },
   { width: { ideal: 1280 }, height: { ideal: 720 } },
   { width: { ideal: 720 }, height: { ideal: 540 } },
   { width: { ideal: 640 }, height: { ideal: 480 } },

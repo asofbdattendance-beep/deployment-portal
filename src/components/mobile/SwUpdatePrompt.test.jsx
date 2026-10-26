@@ -36,3 +36,37 @@ describe('SwUpdatePrompt', () => {
     })
   })
 })
+
+describe('SwUpdatePrompt reload timing', () => {
+  it('reloads on controllerchange, not on a fixed beat before the new worker controls the page', async () => {
+    vi.useFakeTimers()
+    try {
+      const listeners = {}
+      const postMessage = vi.fn()
+      const getRegistration = vi.fn().mockResolvedValue({ waiting: { postMessage } })
+      Object.defineProperty(window.navigator, 'serviceWorker', {
+        configurable: true,
+        writable: true,
+        value: { getRegistration, addEventListener: (t, fn) => { listeners[t] = fn } },
+      })
+      const reloadPage = vi.fn()
+      render(<SwUpdatePrompt reloadPage={reloadPage} />)
+      act(() => {
+        window.dispatchEvent(new CustomEvent('portal-sw-update', { detail: { registration: {} } }))
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'Reload' }))
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+      expect(postMessage).toHaveBeenCalledWith({ type: 'SKIP_WAITING' })
+      // the new worker is slow to activate: still no reload after the old 400ms beat
+      await act(async () => { vi.advanceTimersByTime(1000) })
+      expect(reloadPage).not.toHaveBeenCalled()
+      // the new worker takes control → exactly one reload
+      act(() => { listeners.controllerchange() })
+      await act(async () => { vi.advanceTimersByTime(5000) })
+      expect(reloadPage).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+      delete window.navigator.serviceWorker
+    }
+  })
+})

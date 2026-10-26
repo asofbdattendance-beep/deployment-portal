@@ -267,7 +267,7 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
         photo_url = await uploadPhoto(editPhoto)
         uploadedEditPath = photo_url
       }
-      const { error } = await supabase.from('vss_registrations').update({
+      const { data: updated, error } = await supabase.from('vss_registrations').update({
         centre: editForm.centre,
         sewadar_name: editForm.sewadar_name.trim(),
         father_husband_name: editForm.father_husband_name.trim(),
@@ -279,8 +279,10 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
         is_initiated: editForm.is_initiated,
         aadhar_number: editForm.aadhar_number.trim(),
         photo_url,
-      }).eq('id', editReg.id)
+      }).eq('id', editReg.id).select('id')
       if (error) throw error
+      // RLS matches zero rows (no error) once the registration is assigned
+      if (!updated || updated.length === 0) throw new Error('Not saved — this registration is locked (VSS number assigned) or no longer exists')
       toast.success('Registration updated')
       setEditReg(null)
       loadRegistrations()
@@ -303,12 +305,17 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
     }
     setDeleting(true)
     try {
+      // Delete the row FIRST: RLS silently matches zero rows once a
+      // registration is assigned (v37), and a trigger may reject it — the
+      // photo must only go once the row is really gone, or an assigned
+      // record loses its photo behind a false "deleted" toast.
+      const { data: gone, error } = await supabase.from('vss_registrations').delete().eq('id', deleteReg.id).select('id')
+      if (error) throw error
+      if (!gone || gone.length === 0) throw new Error('Not deleted — this registration is locked (VSS number assigned) or no longer exists')
       if (deleteReg.photo_url) {
         const path = deleteReg.photo_url.split('/vss-photos/')[1] || deleteReg.photo_url
         if (path && path.startsWith('reg/')) await supabase.storage.from('vss-photos').remove([path]).catch(() => {})
       }
-      const { error } = await supabase.from('vss_registrations').delete().eq('id', deleteReg.id)
-      if (error) throw error
       toast.success('Registration deleted')
       setDeleteReg(null)
       loadRegistrations()

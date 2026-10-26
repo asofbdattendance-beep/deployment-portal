@@ -18,7 +18,7 @@ import {
 } from 'lucide-react'
 import PageHeader, { ViewOnlyPill } from '../components/PageHeader'
 import KpiTile from '../components/KpiTile'
-import { reportRealtimeStatus } from '../lib/realtime'
+import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
 
 /**
  * Unwrap a supabase-js PostgREST result into rows, THROWING on a returned
@@ -107,6 +107,10 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
   // Bhati Visit shows visit-days data only: pin the picker inside the
   // window (windowless schedules pass through untouched).
   const visitWin = useMemo(() => scheduleWindow(schedule), [schedule])
+  // The focus/interval re-sync below closes over the window once, so it reads
+  // the CURRENT window through this ref (same pattern as AttendancePage).
+  const winRef = useRef(visitWin)
+  winRef.current = visitWin
   useEffect(() => { setDate((d) => clampDateToWindow(d, visitWin)) }, [visitWin])
   const [dailyRaw, setDailyRaw] = useState([])
   const [visitRaw, setVisitRaw] = useState([])
@@ -141,7 +145,10 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
   useEffect(() => {
     const sync = () => {
       if (dateTouchedRef.current) return
-      const t = todayStrIST()
+      // Clamp like the initial state: an unclamped today (the cutoff day
+      // before the visit, or any day after it) re-pointed the Bhati Visit
+      // dashboard at a non-visit date on mount and every 30s.
+      const t = clampDateToWindow(todayStrIST(), winRef.current)
       setDate((d) => (d === t ? d : t))
     }
     sync()
@@ -235,25 +242,25 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
   // aggregate RPCs — once per event; during a busy bhati that is a continuous
   // stampede of identical queries and the page feels like it is permanently
   // 1-2 s behind. Coalescing keeps the numbers live at a fraction of the cost.
-  useEffect(() => {
-    if (!scheduleId) return
-    let alive = true
-    let timer = null
-    const reload = () => {
-      if (!alive) return
-      if (timer) clearTimeout(timer)
-      timer = setTimeout(() => { if (alive) load().catch(() => {}) }, 400)
-    }
-    const ch = supabase
-      .channel(`incharge-dash-${scheduleId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'dp_attendance_sessions', filter: `schedule_id=eq.${scheduleId}` }, reload)
+  // Shared hook (was an inline channel): the inline effect depended on
+  // `load`, so every date change (picker, the 30s midnight sync) tore the
+  // channel down and re-created the SAME topic while the old one was still
+  // leaving — realtime-js handed back the dying channel and live updates
+  // went silently dead. Its trailing-only debounce also starved under
+  // sustained scanning. The hook subscribes once per schedule, reads `load`
+  // through a ref, adds a max-wait and never stacks reloads in flight.
+  useRealtimeRefresh({
+    scheduleId,
+    channelName: `incharge-dash-${scheduleId}`,
+    subscriptions: [
+      { table: 'dp_attendance_sessions', filter: `schedule_id=eq.${scheduleId}` },
       // a row becoming deployed moves the denominator behind every tile
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${scheduleId}` }, reload)
-      .subscribe((status) => {
-        reportRealtimeStatus('incharge-dashboard', status, alive)
-      })
-    return () => { alive = false; if (timer) clearTimeout(timer); try { supabase.removeChannel(ch) } catch { /* already torn down */ } }
-  }, [scheduleId, load])
+      { table: 'deployments', filter: `schedule_id=eq.${scheduleId}` },
+    ],
+    onReload: () => load().catch(() => {}),
+    label: 'incharge-dashboard',
+    maxWaitMs: 10000,
+  })
 
   const rowsAreCurrent = rowsScheduleId === scheduleId && rowsDate === date
   // Until the load for THIS schedule and scan day lands there are no rows —

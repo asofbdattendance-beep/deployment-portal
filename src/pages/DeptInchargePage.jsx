@@ -69,6 +69,14 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
   // and overwrite its rows — every sibling page sequences its loads.
   const mountedRef = useRef(true)
   const seqRef = useRef(0)
+  // The session poll / post-scan refresh sequences on its OWN counter. It
+  // used to bump `seqRef`, so a scan (or the 15s poll) landing while the
+  // initial load was still in flight — the norm on a weak network, where
+  // the incharge starts scanning the moment the page opens — made the load
+  // discard its results AND skip setLoading(false): the lists stayed empty
+  // until a remount. A load still invalidates in-flight polls (bumps this
+  // too) so a pre-switch poll can never land on the new schedule.
+  const pollSeqRef = useRef(0)
   // T4: set on the first successful load OR poll — the stale-data pin means
   // "showing last data", so a poll that fails before anything ever loaded
   // must not raise it (there is no last data yet).
@@ -83,6 +91,7 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
   const load = useCallback(async () => {
     if (!selectedScheduleId) { setLoading(false); return }
     const seq = ++seqRef.current
+    pollSeqRef.current += 1
     // T3: every setter below is gated on this — a slow schedule-A load that
     // resolves after the schedule-B load must not touch rows, toasts or pins.
     const alive = () => mountedRef.current && seq === seqRef.current
@@ -202,8 +211,8 @@ export default function DeptInchargePage({ schedules = [], scheduleId }) {
   // production-wide. The initial load() above keeps the count (and its
   // mismatch guard) so a truncated first paint still fails loudly.
   const refreshSessions = useCallback(async () => {
-    const seq = ++seqRef.current
-    const alive = () => mountedRef.current && seq === seqRef.current
+    const seq = ++pollSeqRef.current
+    const alive = () => mountedRef.current && seq === pollSeqRef.current
     try {
       const today = todayStrIST()
       const sess = await fetchAllRows('dp_attendance_sessions', 'id,badge_number,sewadar_name,sewadar_centre,sewadar_dept,in_date,out_date,in_time,out_time,is_vss,undeployed_scan,created_at', (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id', { count: 'none' })

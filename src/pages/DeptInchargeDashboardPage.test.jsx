@@ -21,6 +21,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { StrictMode } from 'react'
 import { render, screen, waitFor, cleanup, within, fireEvent } from '@testing-library/react'
 import DeptInchargeDashboardPage from './DeptInchargeDashboardPage'
+import { todayStrIST } from '../lib/scannerUtils'
+import { clampDateToWindow } from '../lib/sewaMode'
 
 const rpc = vi.fn()
 // Delegates to `rpc` fixtures, upholding the real fetchAllRpc contract:
@@ -41,10 +43,11 @@ const noopChannel = () => {
   return ch
 }
 
+const channelNames = []
 vi.mock('../lib/supabase', () => ({
   supabase: {
     rpc: (...args) => rpc(...args),
-    channel: () => noopChannel(),
+    channel: (name) => { channelNames.push(name); return noopChannel() },
     removeChannel: () => {},
   },
   fetchAllRpc: (...args) => fetchAllRpc(...args),
@@ -520,5 +523,38 @@ describe('DeptInchargeDashboardPage — matrix search and centre filter', () => 
     expect(screen.getByText('B2')).toBeTruthy()
     expect(screen.getByText('4 of 4 sewadars')).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Clear' })).toBeNull()
+  })
+})
+
+describe('DeptInchargeDashboardPage — scan day stays inside the visit window', () => {
+  it('the mount/focus re-sync clamps today into the window (never a non-visit day)', async () => {
+    // Today (IST) is outside the fixture window (Oct 7-11). The re-sync used
+    // to set the unclamped today right after mount, so the Bhati Visit
+    // dashboard queried a non-visit date while the picker's min/max said
+    // otherwise.
+    respondWith()
+    await renderPage()
+    const expected = clampDateToWindow(todayStrIST(), { start: '2026-10-07', end: '2026-10-11' })
+    await waitFor(() => expect(screen.getByLabelText('Scan day').value).toBe(expected))
+    const dailyDates = rpc.mock.calls.filter((c) => c[0] === 'attendance_daily_summary').map(([, p]) => p.p_date)
+    expect(dailyDates[dailyDates.length - 1]).toBe(expected)
+    for (const d of dailyDates) {
+      expect(d >= '2026-10-07' && d <= '2026-10-11').toBe(true)
+    }
+  })
+
+  it('changing the scan day reloads WITHOUT re-creating the realtime channel', async () => {
+    // The old inline effect depended on `load`, so a date change tore the
+    // channel down and re-opened the same topic while it was still leaving —
+    // realtime-js returns that dying channel and live updates went dead.
+    respondWith()
+    channelNames.length = 0
+    await renderPage()
+    const before = channelNames.length
+    expect(before).toBeGreaterThan(0)
+    const callsBefore = rpc.mock.calls.filter((c) => c[0] === 'attendance_daily_summary').length
+    fireEvent.change(screen.getByLabelText('Scan day'), { target: { value: '2026-10-08' } })
+    await waitFor(() => expect(rpc.mock.calls.filter((c) => c[0] === 'attendance_daily_summary').length).toBeGreaterThan(callsBefore))
+    expect(channelNames.length).toBe(before)
   })
 })

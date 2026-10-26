@@ -30,6 +30,15 @@ import { perfStart, perfMark } from '../lib/perfTimings'
  * @param {number} [cfg.debounceMs=400]
  * @param {number} [cfg.maxWaitMs=2000]
  */
+// Per-subscribe topic suffix. realtime-js `channel(topic)` RETURNS the
+// existing channel when one with that topic is still in the socket's list —
+// and a channel we just removed stays there (state `leaving`) until the
+// server acks the leave. Re-subscribing the same name inside that window
+// (schedule A→B→A, page away-and-back, StrictMode remount) got the dying
+// channel back: `.subscribe()` is a no-op on a non-closed channel, the leave
+// ack then closes it, and live updates were silently OFF until a reload.
+let topicSeq = 0
+
 export function useRealtimeRefresh({
   scheduleId,
   channelName,
@@ -49,6 +58,26 @@ export function useRealtimeRefresh({
     if (!scheduleId) return undefined
     let alive = true
     let timer = null
+    // In-flight guard: on a weak network one reload can outlast maxWaitMs,
+    // and every further event used to start ANOTHER full reload on top of
+    // it — requests stacked faster than they completed (refetch storm).
+    // While one is running, later events only mark it dirty; ONE follow-up
+    // runs after it settles, so the newest change is still picked up.
+    let inFlight = false
+    let dirty = false
+    const fire = () => {
+      if (!alive) return
+      if (inFlight) { dirty = true; return }
+      inFlight = true
+      lastReloadAt.current = Date.now()
+      Promise.resolve()
+        .then(() => reloadRef.current?.())
+        .catch(() => {})
+        .finally(() => {
+          inFlight = false
+          if (alive && dirty) { dirty = false; reload() }
+        })
+    }
     const reload = () => {
       if (!alive) return
       // Phase-0 tripwire: every postgres_changes event starts a viewer run;
@@ -61,20 +90,21 @@ export function useRealtimeRefresh({
       // when the last actual load is more than maxWaitMs old.
       if (Date.now() - lastReloadAt.current > maxWaitMs) {
         if (timer) clearTimeout(timer)
-        lastReloadAt.current = Date.now()
+        timer = null
         perfMark('viewer', viewerRun, 'reload-fired:max-wait')
-        if (alive) Promise.resolve().then(() => reloadRef.current?.()).catch(() => {})
+        fire()
         return
       }
       if (timer) clearTimeout(timer)
       timer = setTimeout(() => {
+        timer = null
         if (!alive) return
-        lastReloadAt.current = Date.now()
         perfMark('viewer', viewerRun, 'reload-fired:debounced')
-        Promise.resolve().then(() => reloadRef.current?.()).catch(() => {})
+        fire()
       }, debounceMs)
     }
-    let channel = supabase.channel(channelName)
+    topicSeq += 1
+    let channel = supabase.channel(`${channelName}-${topicSeq}`)
     for (const sub of subsRef.current || []) {
       channel = channel.on(
         'postgres_changes',

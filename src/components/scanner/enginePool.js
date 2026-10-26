@@ -259,7 +259,21 @@ export function createEnginePool(debug, opts = {}) {
           // produces a frame the binarizer can never read.
           const gray = imageData?.gray || rgbaToGray(imageData)
           const lum = new zx.RGBLuminanceSource(gray, imageData.width, imageData.height)
-          return reader.decode(new zx.BinaryBitmap(new zx.HybridBinarizer(lum)), hints)
+          // MultiFormatReader console.warns 'non-ReaderException' on EVERY
+          // missed frame (its instanceof check fails on the library's own
+          // NotFoundException), i.e. several times a second for a whole
+          // event day — CPU and console-buffer memory a low-end phone can't
+          // spare. Drop just that message for the synchronous decode.
+          const warn = console.warn
+          console.warn = (...args) => {
+            if (typeof args[0] === 'string' && args[0].startsWith('MultiFormatReader: non-ReaderException')) return
+            warn.apply(console, args)
+          }
+          try {
+            return reader.decode(new zx.BinaryBitmap(new zx.HybridBinarizer(lum)), hints)
+          } finally {
+            console.warn = warn
+          }
         },
       }
       engines[1].ready = true

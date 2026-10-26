@@ -279,7 +279,9 @@ describe('realtime — a mid-visit anomaly shows up without a manual refresh', (
   it('subscribes to a schedule-scoped channel', async () => {
     await renderPage()
     expect(subscribed).toBe(true)
-    expect(channelName).toBe('anomalies-sched-1')
+    // useRealtimeRefresh suffixes a per-subscribe counter so a re-subscribe
+    // never gets a still-leaving channel of the same topic back.
+    expect(channelName).toMatch(/^anomalies-sched-1-\d+$/)
   })
 })
 

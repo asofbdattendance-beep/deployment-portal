@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { fetchAllRows } from '../lib/supabase'
 import { buildDirectoryMap, readDirectory, writeDirectory } from '../lib/sewadarDirectory'
 
@@ -20,6 +20,12 @@ import { buildDirectoryMap, readDirectory, writeDirectory } from '../lib/sewadar
  */
 export function useSewadarDirectory({ scheduleId, enabled }) {
   const [map, setMap] = useState(() => new Map())
+  // The schedule the hook currently serves. A refresh resolves seconds later
+  // (paged fetch on a weak link); after a schedule switch the OLD schedule's
+  // result must not replace the new schedule's map, or popups label badges
+  // with the previous schedule's departments until the next refresh.
+  const currentRef = useRef(enabled ? scheduleId : null)
+  useEffect(() => { currentRef.current = enabled ? scheduleId : null }, [enabled, scheduleId])
 
   const refresh = useCallback(async () => {
     if (!enabled || !scheduleId) return
@@ -53,11 +59,11 @@ export function useSewadarDirectory({ scheduleId, enabled }) {
         const cached = await readDirectory(scheduleId).catch(() => null)
         if (cached && cached.count > 0) {
           console.warn('[Directory] fetch returned 0 rows with a cached snapshot — keeping cache')
-          setMap(cached.map)
+          if (currentRef.current === scheduleId) setMap(cached.map)
           return
         }
       }
-      setMap(buildDirectoryMap(list, vss))
+      if (currentRef.current === scheduleId) setMap(buildDirectoryMap(list, vss))
       // Persist best-effort: quota failure resolves false, session Map stands.
       writeDirectory(scheduleId, list, vss).catch(() => {})
     } catch (e) {

@@ -523,7 +523,9 @@ export function vssRegistrationErrors(form, { hasPhoto = false, photoSize = 0 } 
   if (!form?.father_husband_name || !String(form.father_husband_name).trim()) e.father_husband_name = 'Father / Husband name is required'
   if (!form?.gender) e.gender = 'Gender is required'
   if (!form?.dob) e.dob = 'Date of birth is required'
-  else if (computeAge(form.dob) === null) e.dob = 'Enter a valid date of birth'
+  // A future DOB (e.g. a 2062-for-1962 typo) yields a negative age, which
+  // would silently slip past the Age >= 29 rule below — reject it.
+  else if (computeAge(form.dob) === null || computeAge(form.dob) < 0) e.dob = 'Enter a valid date of birth'
   if (!form?.address || !String(form.address).trim()) e.address = 'Address is required'
   if (!form?.contact_no || !String(form.contact_no).trim()) e.contact_no = 'Contact number is required'
   else if (!/^\d{10,12}$/.test(String(form.contact_no).replace(/\D/g, ''))) e.contact_no = 'Enter a valid contact number (10–12 digits)'

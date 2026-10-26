@@ -66,8 +66,9 @@ test.describe('queue matrix', () => {
     // calls the identical handleScan path. Each tap only OFFERS the choice
     // (nothing is written until tapped): tap 1 offers Mark IN (no pending
     // IN) and the tap queues IN; tap 2 sees the pending IN and offers Mark
-    // OUT (C4) and the tap queues OUT; tap 3 lands inside the OUT dupe
-    // window and is refused.
+    // OUT (C4) and the tap queues OUT; tap 3 sees the NEWEST local row is the
+    // OUT, so it offers Mark IN (offline re-entry) — never a second OUT —
+    // and the offer alone writes nothing.
     const tap = (badge) =>
       page
         .getByPlaceholder('Manual FB/VS badge')
@@ -81,13 +82,14 @@ test.describe('queue matrix', () => {
     await tap('FB5971GA1003')
     await choose('Mark OUT')
     // Tap 3 must land AFTER tap 2 completes (else the busy flag swallows it
-    // silently) but INSIDE the 2s OUT dupe window from tap 2's enqueue.
+    // silently).
     await expect
       .poll(async () => (await queueRows(page)).filter((r) => r.badge === 'FB5971GA1003').length)
       .toBe(2)
     await tap('FB5971GA1003')
-    await choose('Mark OUT')
-    await expect(page.getByText(/Already queued/)).toBeVisible()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByRole('button', { name: 'Mark IN', exact: true })).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Mark OUT', exact: true })).toHaveCount(0)
     const rows = (await queueRows(page)).filter((r) => r.badge === 'FB5971GA1003')
     expect(rows).toHaveLength(2)
     expect(rows.map((r) => r.action).sort()).toEqual(['IN', 'OUT'])

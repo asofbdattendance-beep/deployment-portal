@@ -365,6 +365,46 @@ describe('useScannerSession V15 hardening', () => {
     }
   })
 
+  it('a double-tap on Mark IN writes once and never swaps in a busy error', async () => {
+    let release
+    rpc.mockImplementation(() => new Promise((res) => { release = res }))
+    const { result, toast, unmount } = setup()
+    act(() => { result.current.showPopup({ status: 'choose', action: 'IN', badge: 'FB5971GA0001' }) })
+    let first
+    act(() => { first = result.current.commitScan() })
+    act(() => { result.current.commitScan() })
+    expect(rpc).toHaveBeenCalledTimes(1)
+    expect(result.current.popup).toMatchObject({ status: 'choose', badge: 'FB5971GA0001' })
+    expect(toast.warning).not.toHaveBeenCalledWith('Scanner busy — retry this badge')
+    await act(async () => { release({ data: { ok: true }, error: null }); await first })
+    expect(result.current.popup).toMatchObject({ status: 'in', badge: 'FB5971GA0001' })
+    unmount()
+  })
+
+  it('a double-tap on the forgot confirm closes once and arms one follow-up', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(NOW)
+    try {
+      let release
+      rpc.mockImplementation((fn) => fn === 'scan_out'
+        ? new Promise((res) => { release = res })
+        : Promise.resolve({ data: { ok: true }, error: null }))
+      const { popup, outTime } = forgotState()
+      const { result, unmount } = setup()
+      act(() => { result.current.showPopup(popup) })
+      act(() => { result.current.setOutTime(outTime) })
+      let first
+      act(() => { first = result.current.confirmForgot() })
+      act(() => { result.current.confirmForgot() })
+      await act(async () => { release({ data: { ok: true }, error: null }); await first })
+      await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+      expect(rpc.mock.calls.filter((c) => c[0] === 'scan_out')).toHaveLength(1)
+      expect(rpc.mock.calls.filter((c) => c[0] === 'scan_in')).toHaveLength(1)
+      unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('commit carries the manual flag so a hand-typed correction keeps its audit mark', async () => {
     rpc.mockResolvedValue({ data: { ok: true }, error: null })
     const { result, unmount } = setup()

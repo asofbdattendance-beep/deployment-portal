@@ -178,3 +178,27 @@ describe('InchargeScannerPage scanner success path', () => {
     expect(screen.getByText('LANGAR')).toBeTruthy()
   })
 })
+
+// A post-scan refresh landing while the initial load is in flight must not
+// make the load discard its department names (they shared one sequence
+// counter — on a first-ever open with no cached names, every Dept pill and
+// column stayed blank until a remount).
+describe('InchargeScannerPage — scan during a slow initial load', () => {
+  it('keeps the initial load results when a post-scan refresh overlaps it', async () => {
+    let releaseDepts
+    const gate = new Promise((r) => { releaseDepts = r })
+    mocks.sessionRows = [rowFor(todayStrIST())]
+    mocks.fetchAllRows.mockImplementation(async (table) => {
+      if (table === 'deployment_departments') { await gate; return DEPTS }
+      if (table === 'dp_attendance_sessions') return mocks.sessionRows
+      return []
+    })
+    render(<InchargeScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+    await settle()
+    // the operator scans before the load has finished
+    await act(async () => { await mocks.scannerCfg.onAfterScan() })
+    await act(async () => { releaseDepts() })
+    await settle()
+    expect(screen.getAllByText('LANGAR').length).toBeGreaterThan(0)
+  })
+})

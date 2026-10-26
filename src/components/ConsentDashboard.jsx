@@ -50,7 +50,11 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
       supabase.rpc('get_parent_consent_matrix', { p_schedule: scheduleId }),
       fetchAllRows('centre_allocations', 'department_id, centre, max_count', (q) => q.eq('schedule_id', scheduleId), ['department_id', 'centre']),
     ])
-    setConsentMatrix(consentRes.data || [])
+    // supabase.rpc resolves { error } instead of throwing — a failed matrix
+    // RPC used to blank every CENTRE to 0 consents with no message. Keep the
+    // last good matrix and say why.
+    if (consentRes.error) toast.error(`Could not load the consent matrix: ${consentRes.error.message || 'unknown error'}`)
+    else setConsentMatrix(consentRes.data || [])
     setAllocations(allocAll || [])
     // centre deployment locks (v13) — non-fatal: strip just stays empty if the
     // migration hasn't been run yet (paginated, though locks are < 50 rows)
@@ -66,7 +70,7 @@ export default function ConsentDashboard({ schedules, scheduleId }) {
         .order('created_at', { ascending: false }).limit(25)
       setActivity(actData || [])
     } catch { setActivity([]) }
-  }, [])
+  }, [toast])
 
   useEffect(() => {
     if (!selectedScheduleId) return

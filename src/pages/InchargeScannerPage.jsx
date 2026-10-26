@@ -53,6 +53,14 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
   // and overwrite its rows — every sibling page sequences its loads.
   const mountedRef = useRef(true)
   const seqRef = useRef(0)
+  // The session poll / post-scan refresh sequences on its OWN counter. It
+  // used to bump `seqRef`, so a scan (or the 15s poll) landing while the
+  // initial load was still in flight — the norm on a weak network, where
+  // the incharge starts scanning the moment the page opens — made the load
+  // discard its results AND skip setLoading(false): the lists stayed empty
+  // until a remount. A load still invalidates in-flight polls (bumps this
+  // too) so a pre-switch poll can never land on the new schedule.
+  const pollSeqRef = useRef(0)
   // T3: the schedule whose rows are currently rendered. On a schedule switch
   // the rows are cleared immediately (see the effect below) so stale rows
   // never survive until the new load lands.
@@ -61,6 +69,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
   const load = useCallback(async () => {
     if (!selectedScheduleId) return
     const seq = ++seqRef.current
+    pollSeqRef.current += 1
     // T3: every setter below is gated on this — a slow schedule-A load that
     // resolves after the schedule-B load must not touch rows.
     const alive = () => mountedRef.current && seq === seqRef.current
@@ -96,8 +105,8 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
   // already-rendered rows and keeps last data on error.
   const refreshSessions = useCallback(async () => {
     if (!selectedScheduleId) return
-    const seq = ++seqRef.current
-    const alive = () => mountedRef.current && seq === seqRef.current
+    const seq = ++pollSeqRef.current
+    const alive = () => mountedRef.current && seq === pollSeqRef.current
     try {
       const today = todayStrIST()
       const sess = await fetchAllRows('dp_attendance_sessions', SESSION_COLS, (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id', { count: 'none' })

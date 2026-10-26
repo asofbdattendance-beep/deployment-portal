@@ -19,9 +19,39 @@ function isFailedRow(r) {
   return !!r && (r.status === 'failed' || r.failed === true)
 }
 
-async function resolveOwnerId(client) {
+// The signed-in user's id from the PERSISTED auth session — no network.
+// Undefined when the client exposes no readable session (test doubles,
+// nothing stored), so the caller falls back to getSession().
+async function storedSessionUserId(c) {
+  try {
+    const auth = c?.auth
+    if (!auth?.storageKey || typeof auth.storage?.getItem !== 'function') return undefined
+    const raw = await auth.storage.getItem(auth.storageKey)
+    const s = typeof raw === 'string' ? JSON.parse(raw) : raw
+    const id = s?.user?.id
+    return typeof id === 'string' && id ? id : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// `strict` (the drain) requires a session getSession() can hand out — RPCs
+// need a live token. Everything else (tagging, visibility, clears) only
+// needs WHO is signed in: once the access token expires while offline
+// (> JWT expiry, ~1h, at a jammed venue) getSession() spends ~25s retrying
+// the refresh and then answers { session: null, error } although the user
+// never signed out. Every scan enqueued from then on was tagged owner:null —
+// never auto-drained and invisible to the logged-in operator — and each
+// enqueue blocked the scan for the whole retry window. The stored session
+// is cleared by signOut / a rejected refresh, so its user is still exactly
+// the signed-in user (D1a holds).
+async function resolveOwnerId(client, { strict = false } = {}) {
   try {
     const c = client || defaultSupabase
+    if (!strict) {
+      const stored = await storedSessionUserId(c)
+      if (stored) return stored
+    }
     const { data } = await c.auth.getSession()
     return data?.session?.user?.id ?? null
   } catch {
@@ -34,7 +64,7 @@ function quarantineRow(id, reason) {
   return getDB().then(db => {
     if (!db) return
     return new Promise((resolve) => {
-      const tx = db.transaction(STORE, 'readwrite')
+      const tx = openTx(db, STORE, 'readwrite')
       const store = tx.objectStore(STORE)
       const req = store.get(id)
       req.onsuccess = () => {
@@ -164,6 +194,22 @@ export function notifyQueueChanged() {
 let _dbPromise = null
 let _dbInstance = null
 
+// A connection that throws on transaction() (InvalidStateError: "The
+// database connection is closing" — WebKit after a lost IDB server
+// connection or a backgrounded PWA) is dead, but it does not always fire
+// `close`, so the cache above would hand the same corpse to every later
+// call: every enqueue fails and the drain never reads the queue until a
+// page reload. Forget it so the next call reopens; the throw still
+// surfaces to the caller (enqueue reports write-failed, the operator retries).
+function openTx(db, store, mode) {
+  try {
+    return db.transaction(store, mode)
+  } catch (e) {
+    if (_dbInstance === db) { _dbInstance = null; _dbPromise = null }
+    throw e
+  }
+}
+
 function getDB() {
   if (_dbInstance && _dbInstance.objectStoreNames && _dbInstance.objectStoreNames.length > 0) return Promise.resolve(_dbInstance)
   if (_dbPromise) return _dbPromise
@@ -206,7 +252,7 @@ export async function enqueueScan(scan) {
   let existing
   try {
     existing = await new Promise((resolve, reject) => {
-      const req = db.transaction(STORE, 'readonly').objectStore(STORE).getAll()
+      const req = openTx(db, STORE, 'readonly').objectStore(STORE).getAll()
       req.onsuccess = () => resolve(req.result || [])
       req.onerror = () => reject(req.error)
     })
@@ -256,7 +302,7 @@ export async function enqueueScan(scan) {
     // an unhandled error and leave this promise PENDING. Never let that escape.
     const txError = () => { try { return tx2 ? tx2.error : null } catch { return null } }
     try {
-      tx2 = db.transaction(STORE, 'readwrite')
+      tx2 = openTx(db, STORE, 'readwrite')
       tx2.objectStore(STORE).put({ ...scan, id, createdAt, attempts: 0, synced: false, owner: owner ?? null })
     } catch (e) {
       // A closing connection or a non-cloneable value throws synchronously.
@@ -278,7 +324,7 @@ export async function getQueuedScans() {
   // here (missing owner reads as null-owner, visible only while logged out).
   const uid = await resolveOwnerId(null)
   return new Promise((res, rej) => {
-    const req = db.transaction(STORE, 'readonly').objectStore(STORE).getAll()
+    const req = openTx(db, STORE, 'readonly').objectStore(STORE).getAll()
     req.onsuccess = () => res((req.result || []).filter(r => (r.owner ?? null) === uid))
     req.onerror = () => rej(req.error)
   })
@@ -288,7 +334,7 @@ export async function removeQueued(id) {
   const db = await getDB()
   if (!db) return
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, 'readwrite')
+    const tx = openTx(db, STORE, 'readwrite')
     tx.objectStore(STORE).delete(id)
     tx.oncomplete = () => { notifyQueueChanged(); resolve() }
     tx.onerror = () => reject(tx.error)
@@ -310,7 +356,7 @@ export async function markFailed(id) {
   // foreground events, and genuinely new queue writes. Counts still refresh
   // via the drain's onProgress callback.
   return new Promise((resolve) => {
-    const tx = db.transaction(STORE, 'readwrite')
+    const tx = openTx(db, STORE, 'readwrite')
     const store = tx.objectStore(STORE)
     const req = store.get(id)
     req.onsuccess = () => {
@@ -340,14 +386,14 @@ export async function clearFailedQueue() {
   if (!db) return 0
   const uid = await resolveOwnerId(null)
   const rows = await new Promise((res) => {
-    const req = db.transaction(STORE, 'readonly').objectStore(STORE).getAll()
+    const req = openTx(db, STORE, 'readonly').objectStore(STORE).getAll()
     req.onsuccess = () => res(req.result || [])
     req.onerror = () => res([])
   })
   const doomed = rows.filter(r => isFailedRow(r) && (r.owner ?? null) === uid)
   if (doomed.length === 0) return 0
   return new Promise((resolve) => {
-    const tx = db.transaction(STORE, 'readwrite')
+    const tx = openTx(db, STORE, 'readwrite')
     const store = tx.objectStore(STORE)
     for (const r of doomed) store.delete(r.id)
     tx.oncomplete = () => { notifyQueueChanged(); resolve(doomed.length) }
@@ -368,14 +414,14 @@ export async function clearOrphanedQueue() {
   const uid = await resolveOwnerId(null)
   if (uid !== null) return 0
   const rows = await new Promise((res) => {
-    const req = db.transaction(STORE, 'readonly').objectStore(STORE).getAll()
+    const req = openTx(db, STORE, 'readonly').objectStore(STORE).getAll()
     req.onsuccess = () => res(req.result || [])
     req.onerror = () => res([])
   })
   const doomed = rows.filter(r => !isFailedRow(r) && (r.owner ?? null) === null)
   if (doomed.length === 0) return 0
   return new Promise((resolve) => {
-    const tx = db.transaction(STORE, 'readwrite')
+    const tx = openTx(db, STORE, 'readwrite')
     const store = tx.objectStore(STORE)
     for (const r of doomed) store.delete(r.id)
     tx.oncomplete = () => { notifyQueueChanged(); resolve(doomed.length) }
@@ -421,7 +467,7 @@ export async function listStrandedQueue() {
   const uid = await resolveOwnerId(null)
   if (uid !== null) return []
   return new Promise((res) => {
-    const req = db.transaction(STORE, 'readonly').objectStore(STORE).getAll()
+    const req = openTx(db, STORE, 'readonly').objectStore(STORE).getAll()
     req.onsuccess = () => res((req.result || []).filter(isStrandedRow))
     req.onerror = () => res([])
   })
@@ -436,14 +482,14 @@ export async function clearLiveQueue() {
   if (!db) return 0
   const uid = await resolveOwnerId(null)
   const rows = await new Promise((res) => {
-    const req = db.transaction(STORE, 'readonly').objectStore(STORE).getAll()
+    const req = openTx(db, STORE, 'readonly').objectStore(STORE).getAll()
     req.onsuccess = () => res(req.result || [])
     req.onerror = () => res([])
   })
   const doomed = rows.filter(r => !isFailedRow(r) && (r.owner ?? null) === uid)
   if (doomed.length === 0) return 0
   return new Promise((resolve) => {
-    const tx = db.transaction(STORE, 'readwrite')
+    const tx = openTx(db, STORE, 'readwrite')
     const store = tx.objectStore(STORE)
     for (const r of doomed) store.delete(r.id)
     tx.oncomplete = () => { notifyQueueChanged(); resolve(doomed.length) }
@@ -456,7 +502,7 @@ export async function cacheSet(key, value) {
   const db = await getDB()
   if (!db) return
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(CACHE, 'readwrite')
+    const tx = openTx(db, CACHE, 'readwrite')
     tx.objectStore(CACHE).put({ key, value, at: Date.now() })
     tx.oncomplete = () => resolve()
     tx.onerror = () => reject(tx.error)
@@ -470,7 +516,7 @@ export async function cacheDelete(key) {
   const db = await getDB()
   if (!db) return
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(CACHE, 'readwrite')
+    const tx = openTx(db, CACHE, 'readwrite')
     tx.objectStore(CACHE).delete(key)
     tx.oncomplete = () => resolve()
     tx.onerror = () => reject(tx.error)
@@ -483,7 +529,7 @@ export async function cacheGet(key) {
   const db = await getDB()
   if (!db) return null
   return new Promise((res) => {
-    const req = db.transaction(CACHE, 'readonly').objectStore(CACHE).get(key)
+    const req = openTx(db, CACHE, 'readonly').objectStore(CACHE).get(key)
     req.onsuccess = () => res(req.result?.value ?? null)
     req.onerror = () => res(null)
   })
@@ -499,11 +545,11 @@ export async function getCachedDeployed(scheduleId) {
   const db = await getDB()
   if (!db) return []
   return new Promise((res) => {
-    const req = db.transaction(CACHE, 'readonly').objectStore(CACHE).get(`deployed_at:${scheduleId}`)
+    const req = openTx(db, CACHE, 'readonly').objectStore(CACHE).get(`deployed_at:${scheduleId}`)
     req.onsuccess = () => {
       const at = req.result?.value
       if (at && Date.now() - at > CACHE_TTL) { res([]); return }
-      const req2 = db.transaction(CACHE, 'readonly').objectStore(CACHE).get(`deployed:${scheduleId}`)
+      const req2 = openTx(db, CACHE, 'readonly').objectStore(CACHE).get(`deployed:${scheduleId}`)
       req2.onsuccess = () => res(req2.result?.value ?? [])
       req2.onerror = () => res([])
     }
@@ -529,12 +575,12 @@ export async function drainQueue(supabase, onProgress) {
       // Bounded: getSession() can perform an untimed refresh_token fetch, and
       // this runs inside the cross-tab Web Lock — an unbounded wait would
       // wedge every tab's drain. Timeout reads as logged-out (clean no-op).
-      const uid = await withTimeout(resolveOwnerId(supabase), 8000, 'Drain session').catch(() => null)
+      const uid = await withTimeout(resolveOwnerId(supabase, { strict: true }), 8000, 'Drain session').catch(() => null)
       if (!uid) return 0
       const db = await getDB()
       if (!db) return 0
       const queued = await new Promise((res) => {
-        const tx = db.transaction(STORE, 'readonly')
+        const tx = openTx(db, STORE, 'readonly')
         const req = tx.objectStore(STORE).getAll()
         req.onsuccess = () => res(req.result || [])
         req.onerror = () => res([])
@@ -650,11 +696,19 @@ export async function drainQueue(supabase, onProgress) {
                 if (openError) throw openError
                 const openRow = Array.isArray(openData) ? openData[0] : openData
                 if (!openRow?.id) throw new Error('No open session to close', { cause: e })
-                // The escalation closes a session discovered NOW — stamp now,
-                // not the queued IN's ts, which can predate the foreign
-                // session's in_time and fail 'OUT time must be after IN time'.
+                // The OUT happened when the operator scanned (q.ts), not when
+                // this drain ran — a device offline for hours stamping `now`
+                // inflated the session by the whole outage. q.ts is used only
+                // when it is safely after the session's IN (it can predate a
+                // foreign session's in_time and fail 'OUT time must be after
+                // IN time'); otherwise, or when the IN instant is unknown,
+                // fall back to now.
+                const inMs = openRow.in_date && openRow.in_time
+                  ? new Date(`${openRow.in_date}T${openRow.in_time}+05:30`).getTime()
+                  : NaN
+                const outMs = Number.isFinite(inMs) && Date.parse(ts) > inMs + 1000 ? Date.parse(ts) : Date.now()
                 const { error: outError } = await withTimeout(
-                  supabase.rpc('scan_out', { p_badge: q.badge, p_schedule: q.schedule_id, p_ts: new Date().toISOString(), p_open_id: openRow.id, p_is_manual: q.is_manual || false }),
+                  supabase.rpc('scan_out', { p_badge: q.badge, p_schedule: q.schedule_id, p_ts: new Date(outMs).toISOString(), p_open_id: openRow.id, p_is_manual: q.is_manual || false }),
                   10000,
                   'Drain OUT'
                 )

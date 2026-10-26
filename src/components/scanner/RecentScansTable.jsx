@@ -18,6 +18,11 @@ const COLUMNS = ['Badge', 'Name', 'Dept', 'In', 'Out']
 
 const EM_DASH = '—'
 
+// in_time/out_time are Postgres `time` columns fed by `(p_ts AT TIME ZONE
+// 'Asia/Kolkata')::time`, so they carry the ISO ts's milliseconds
+// ("14:30:05.123"). Show HH:MM:SS only.
+const hms = (t) => (t ? String(t).slice(0, 8) : t)
+
 export default function RecentScansTable({ rows = [], deptNameById, limit, emptyMessage }) {
   const list = typeof limit === 'number' ? rows.slice(0, limit) : rows
 
@@ -64,8 +69,8 @@ export default function RecentScansTable({ rows = [], deptNameById, limit, empty
                   <td className="scans-dept">
                     {deptName ? <span className="pill pill-blue">{deptName}</span> : EM_DASH}
                   </td>
-                  <td className="scans-time">{row.in_time}</td>
-                  <td className="scans-time">{row.out_time || EM_DASH}</td>
+                  <td className="scans-time">{hms(row.in_time)}</td>
+                  <td className="scans-time">{hms(row.out_time) || EM_DASH}</td>
                 </tr>
               )
             })

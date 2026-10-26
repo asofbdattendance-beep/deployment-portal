@@ -169,6 +169,22 @@ test.describe('scanner camera decode (fake camera)', () => {
     guard.assertEmpty()
   })
 
+  // iPhone Safari has no BarcodeDetector, so every iOS scan runs the lazily
+  // loaded ZXing leg — the path the native-only cases above never reach.
+  test('upright barcode decodes on the ZXing leg (no BarcodeDetector, iOS path)', async ({ page, context }) => {
+    test.setTimeout(120000)
+    const guard = collectPageErrors(page)
+    await installFakeCamera(context, { badge: BADGE, tiltDeg: 0 })
+    await context.addInitScript(() => { try { delete window.BarcodeDetector } catch { /* absent */ } })
+    await loginAsScanner(page)
+
+    await assertCameraLive(page)
+    await expect(page.locator('span.pill', { hasText: 'Universal' })).toBeVisible({ timeout: 30000 })
+    await assertBadgeDecoded(page)
+
+    guard.assertEmpty()
+  })
+
   // Phone viewport — mirrors the mobile-chrome project's Pixel 5 device.
   // (defaultBrowserType is dropped: test.use forbids it inside a describe;
   // viewport/UA/touch are the properties that matter here.)

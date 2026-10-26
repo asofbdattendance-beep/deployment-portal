@@ -329,6 +329,37 @@ describe('error classification', () => {
     await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
     expect(enqueueScan).toHaveBeenCalledWith(expect.objectContaining({ badge: BADGE, action: 'IN' }))
   })
+
+  it('offers Mark IN again after an offline IN→OUT pair (newest local row decides)', async () => {
+    // The sewadar went IN and OUT while this device was offline (both rows
+    // still queued) and now re-enters. "Any pending IN" offered Mark OUT
+    // here forever, so the re-entry could not be recorded offline.
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    rpc.mockRejectedValue(new Error('Failed to fetch'))
+    getQueuedScans.mockResolvedValue([
+      { id: 'q-out', badge: BADGE, schedule_id: 'sched-1', action: 'OUT', synced: false, createdAt: 2 },
+      { id: 'q-in', badge: BADGE, schedule_id: 'sched-1', action: 'IN', synced: false, createdAt: 1 },
+    ])
+    const { result, showPopup } = setup()
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'IN' })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'IN' }))
+  })
+
+  it('still offers Mark OUT when the newest local row is the IN (IN→OUT→IN queued)', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    rpc.mockRejectedValue(new Error('Failed to fetch'))
+    getQueuedScans.mockResolvedValue([
+      { id: 'q-in1', badge: BADGE, schedule_id: 'sched-1', action: 'IN', synced: false, createdAt: 1 },
+      { id: 'q-out', badge: BADGE, schedule_id: 'sched-1', action: 'OUT', synced: false, createdAt: 2 },
+      { id: 'q-in2', badge: BADGE, schedule_id: 'sched-1', action: 'IN', synced: false, createdAt: 3 },
+    ])
+    const { result } = setup()
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'OUT' })
+  })
 })
 
 describe('busy flag', () => {
