@@ -363,6 +363,64 @@ export function computeRoi(vw, vh, opts = {}) {
   return { sx, sy, sw, sh, dw, dh, scale }
 }
 
+/**
+ * Crop gray buffer by a rect in SOURCE (video) pixels.
+ * Returns a new Uint8ClampedArray + size. Used by the source-resolution crop
+ * path and its tests; production draws the same rect with drawImage.
+ * Default pad matches BarcodeScanner's CROP_PAD (8 band px) — the measured
+ * quiet-zone minimum; more padding measurably hurts ZXing's block grid.
+ */
+export function cropGrayByBox(gray, width, height, rect, pad = 8) {
+  if (!gray || !width || !height || !rect) return null
+  const rw = rect.w ?? rect.width ?? 0
+  const rh = rect.h ?? rect.height ?? 0
+  const x0 = Math.max(0, Math.round((rect.x || 0) - pad))
+  const y0 = Math.max(0, Math.round((rect.y || 0) - pad))
+  const x1 = Math.min(width, Math.round((rect.x || 0) + rw + pad))
+  const y1 = Math.min(height, Math.round((rect.y || 0) + rh + pad))
+  const w = Math.max(1, x1 - x0)
+  const h = Math.max(1, y1 - y0)
+  const out = new Uint8ClampedArray(w * h)
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      out[y * w + x] = gray[(y0 + y) * width + (x0 + x)]
+    }
+  }
+  return { gray: out, width: w, height: h, x: x0, y: y0 }
+}
+
+/**
+ * Map a locator box measured on the DETECT SURFACE back to video pixels.
+ *
+ * `computeRoi` scales the band by `scale = dw / sw` before it reaches the
+ * decoder, so every coordinate the locator reports is in the downscaled space.
+ * Drawing a 1:1 crop needs the inverse hop — this function. Without it a crop
+ * silently takes the wrong region of the frame (the exact class of bug that
+ * makes a "fix" look wired-up and do nothing).
+ *
+ * @param {{x:number,y:number,width:number,height:number}} box surface px
+ * @param {{sx:number,sy:number,sw:number,sh:number,dw:number,dh:number}} roi
+ * @param {number} videoW @param {number} videoH
+ * @param {number} pad extra margin in SURFACE px (scaled up with the box)
+ * @returns {{x:number,y:number,w:number,h:number}|null} integer rect, clamped
+ */
+export function bandBoxToVideoPx(box, roi, videoW, videoH, pad = 0) {
+  if (!box || !roi || !videoW || !videoH) return null
+  if (!roi.sw || !roi.sh || !roi.dw || !roi.dh) return null
+  const scale = roi.dw / roi.sw
+  if (!Number.isFinite(scale) || scale <= 0) return null
+  const p = Math.max(0, Number(pad) || 0)
+  const x0 = Math.floor(roi.sx + ((box.x || 0) - p) / scale)
+  const y0 = Math.floor(roi.sy + ((box.y || 0) - p) / scale)
+  const x1 = Math.ceil(roi.sx + ((box.x || 0) + (box.width || 0) + p) / scale)
+  const y1 = Math.ceil(roi.sy + ((box.y || 0) + (box.height || 0) + p) / scale)
+  const x = Math.max(0, Math.min(videoW - 1, x0))
+  const y = Math.max(0, Math.min(videoH - 1, y0))
+  const w = Math.max(1, Math.min(videoW, x1) - x)
+  const h = Math.max(1, Math.min(videoH, y1) - y)
+  return { x, y, w, h }
+}
+
 // ─── isEdgeDetection ─────────────────────────────────────────────────────────
 /**
  * True when a detection's centroid hugs the frame edge (< 2% margin).

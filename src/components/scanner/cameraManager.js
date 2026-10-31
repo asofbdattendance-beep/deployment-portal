@@ -188,6 +188,67 @@ export async function toggleTorch(track, on) {
 /* ─── Focus ─────────────────────────────────────────────────────────────────── */
 
 /**
+ * Some firmwares (OnePlus/OxygenOS, ColorOS, a few Samsungs) honour `ideal`
+ * resolution constraints very loosely: you ask for 1920x1080 and get 640x480
+ * with no error at all, so the resolution ladder in `openCameraInner` never
+ * escalates — it only advances on a THROWN error. Code 39 needs about 2 px per
+ * narrow module to survive soft focus, and a 640-wide stream cannot reach that
+ * at arm's length, which is exactly the "works on most phones, not this one"
+ * signature.
+ *
+ * So after the stream opens, check what we ACTUALLY got and re-ask using the
+ * track's own capability maximum. `ideal` is used rather than `min` because a
+ * hard `min` throws OverconstrainedError on firmwares that misreport caps, and
+ * a failed re-ask must never cost us the working stream we already have.
+ *
+ * Never throws. Returns what happened so the HUD can show it.
+ *
+ * @param {MediaStreamTrack} track
+ * @param {{minWidth?: number, requested?: number, debug?: boolean}} [opts]
+ * @returns {Promise<{applied:boolean, from:number|null, to:number|null, capped?:number}>}
+ */
+export async function ensureUsableResolution(track, opts = {}) {
+  const { minWidth = 1280, requested = 1920, debug = false } = opts
+  const noop = (from) => ({ applied: false, from, to: from })
+  if (!track || typeof track.getSettings !== 'function' || typeof track.applyConstraints !== 'function') {
+    return noop(null)
+  }
+  const read = () => { try { return track.getSettings() || {} } catch { return {} } }
+  const before = read()
+  const fromW = Number(before.width) || 0
+  if (fromW >= minWidth) return noop(fromW)
+
+  let caps = {}
+  try { caps = track.getCapabilities?.() || {} } catch { caps = {} }
+  const capMax = Number(caps.width?.max) || 0
+  // The sensor genuinely cannot do better — nothing to ask for.
+  if (capMax && capMax < minWidth) return { ...noop(fromW), capped: capMax }
+
+  const targetW = Math.min(capMax || requested, requested)
+  if (targetW <= fromW) return noop(fromW)
+
+  // Keep the delivered aspect ratio: re-asking 1920x1080 on a 4:3 stream
+  // letters out or gets rejected on some firmwares.
+  const ar = fromW && Number(before.height) ? Number(before.height) / fromW : 3 / 4
+  const capH = Number(caps.height?.max) || 0
+  let targetH = Math.max(1, Math.round(targetW * ar))
+  if (capH) targetH = Math.min(targetH, capH)
+
+  try {
+    await track.applyConstraints({ width: { ideal: targetW }, height: { ideal: targetH } })
+  } catch {
+    return noop(fromW)
+  }
+
+  const afterW = Number(read().width) || 0
+  const applied = afterW > fromW
+  if (debug) {
+    console.log(`[CameraMgr] resolution ${fromW}px -> ${afterW}px (asked ${targetW}x${targetH})`)
+  }
+  return { applied, from: fromW, to: afterW || fromW }
+}
+
+/**
  * Best-effort continuous autofocus, digital zoom and (when the caller supplies
  * a tap point) a focus region of interest.
  *
@@ -228,6 +289,12 @@ export async function applyFocusConstraints(track, opts = {}) {
     // leaving the lens at its (possibly macro-locked) default.
     if (focusModes.includes('continuous') || (platform.isAndroid && focusModes.length === 0)) {
       focusSet.focusMode = 'continuous'
+    } else if (focusModes.includes('single-shot')) {
+      // Some firmwares expose only single-shot/manual. Asking for nothing
+      // leaves the lens wherever it booted (often macro-locked or at
+      // infinity), which reads as "sharp everywhere except on the badge".
+      // One single-shot cycle at start at least gets a real AF run.
+      focusSet.focusMode = 'single-shot'
     }
     if (Array.isArray(caps.exposureMode) && caps.exposureMode.includes('continuous')) {
       focusSet.exposureMode = 'continuous'
@@ -243,12 +310,16 @@ export async function applyFocusConstraints(track, opts = {}) {
       } catch { /* unsupported set — zoom below still gets its own chance */ }
     }
 
-    // Digital zoom makes the barcode physically larger in the frame, which is
-    // the single most effective cure for a blurry/low-res capture. Enabled for
-    // any device exposing `zoom` (not only Android — Samsung and desktop
-    // Chrome expose it too). Kept modest (1.25): a heavy digital crop on a
-    // foldable's sensor magnifies focus hunting more than it helps decoding.
-    if (applyZoom && caps.zoom) {
+    // Digital zoom makes the barcode larger in the frame, but it CANNOT add
+    // detail — it crops the sensor. On a stream that is already narrow
+    // (OxygenOS/ColorOS hand back 640x480 no matter what you ask) zooming just
+    // shrinks the field of view for the same pixel budget, pushing the badge
+    // closer to the px/module cliff. Only zoom when the stream is wide enough
+    // that a crop still leaves detail behind. Unknown width (fake tracks in
+    // tests, odd firmware) keeps the old behaviour.
+    let streamWidth = 0
+    try { streamWidth = Number(track.getSettings?.().width) || 0 } catch { streamWidth = 0 }
+    if (applyZoom && caps.zoom && (streamWidth === 0 || streamWidth >= 1440)) {
       const maxZoom = Number(caps.zoom.max) || 1
       const idealZoom = Math.min(1.25, maxZoom)
       if (idealZoom > 1) {
@@ -381,6 +452,16 @@ export async function focusHunt(track, attempt = 1, opts = {}) {
         await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] })
         if (debug) console.log('[CameraMgr] focus hunt: re-asserted continuous AF')
         return { mode: 'continuous', ok: true, nextMs: nextMs() }
+      }
+      // Firmware that hides continuous AF but does expose single-shot: one
+      // real AF cycle beats leaving the lens wherever it booted (macro-locked
+      // or at infinity is exactly the "everything is sharp except the badge"
+      // signature). The caller's backoff turns this into a periodic re-focus.
+      const singleShot = Array.isArray(caps.focusMode) && caps.focusMode.includes('single-shot')
+      if (singleShot) {
+        await track.applyConstraints({ advanced: [{ focusMode: 'single-shot' }] })
+        if (debug) console.log('[CameraMgr] focus hunt: single-shot cycle')
+        return { mode: 'single-shot', ok: true, nextMs: nextMs() }
       }
       return none()
     }
@@ -618,6 +699,9 @@ async function openCameraInner({ startIndex = 0, debug = false } = {}) {
         throw new Error('Camera returned no video track')
       }
       const torchSupported = await probeTorch(track)
+      // Ask once more for a usable resolution: some firmwares ignore `ideal`
+      // and hand back 640x480 without throwing (see ensureUsableResolution).
+      await ensureUsableResolution(track, { debug })
       return { stream, track, torchSupported, deviceId, resolutionIndex: i, adopted: false }
     } catch (e) {
       lastError = e

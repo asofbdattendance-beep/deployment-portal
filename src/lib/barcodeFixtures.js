@@ -160,3 +160,71 @@ export function invertGray(gray) {
   for (let i = 0; i < gray.length; i += 1) out[i] = 255 - gray[i]
   return out
 }
+
+/**
+ * Render with arbitrary px/module using sub-pixel area coverage. Test helper.
+ * @returns {{gray: Uint8ClampedArray, width: number, height: number}}
+ */
+export function renderAt(elements, pxPerModule = MODULE_PX, opts = {}) {
+  const { heightPx = 180, offsetPx = 0 } = opts
+  const totalUnits = QUIET_UNITS * 2 + elements.reduce((a, e) => a + e.u, 0)
+  const width = Math.ceil(totalUnits * pxPerModule) + 4
+  const height = Math.max(1, Math.round(heightPx))
+  const gray = new Uint8ClampedArray(width * height).fill(240)
+  let u = QUIET_UNITS
+  for (const e of elements) {
+    const x0 = u * pxPerModule + offsetPx
+    const x1 = (u + e.u) * pxPerModule + offsetPx
+    const v = e.bar ? 0 : 240
+    for (let x = Math.floor(x0); x < Math.ceil(x1); x += 1) {
+      if (x < 0 || x >= width) { u += e.u; continue }
+      const cov = Math.max(0, Math.min(x + 1, x1) - Math.max(x, x0))
+      if (cov <= 0) continue
+      for (let y = 0; y < height; y += 1) {
+        const i = y * width + x
+        gray[i] = Math.round(gray[i] * (1 - cov) + v * cov)
+      }
+    }
+    u += e.u
+  }
+  return { gray, width, height }
+}
+
+export function boxBlurGray(src, w, h, r) {
+  if (!r || r <= 0) return new Uint8ClampedArray(src)
+  const rad = Math.max(1, Math.round(r))
+  const tmp = new Float32Array(w * h)
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      let s = 0, n = 0
+      for (let k = -rad; k <= rad; k += 1) {
+        const xx = x + k
+        if (xx >= 0 && xx < w) { s += src[y * w + xx]; n += 1 }
+      }
+      tmp[y * w + x] = n ? s / n : src[y * w + x]
+    }
+  }
+  const out = new Uint8ClampedArray(w * h)
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      let s = 0, n = 0
+      for (let k = -rad; k <= rad; k += 1) {
+        const yy = y + k
+        if (yy >= 0 && yy < h) { s += tmp[yy * w + x]; n += 1 }
+      }
+      out[y * w + x] = Math.round(n ? s / n : tmp[y * w + x])
+    }
+  }
+  return out
+}
+
+export function addSensorNoise(src, amp = 4, seed = 12345) {
+  const out = new Uint8ClampedArray(src.length)
+  let s = seed >>> 0
+  for (let i = 0; i < src.length; i += 1) {
+    s = (Math.imul(s, 1103515245) + 12345) >>> 0
+    const n = ((s >> 16) % (2 * amp + 1)) - amp
+    out[i] = Math.max(0, Math.min(255, src[i] + n))
+  }
+  return out
+}

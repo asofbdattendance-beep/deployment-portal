@@ -26,17 +26,26 @@
  */
 import { test, expect, devices } from '@playwright/test'
 import { resetMock, collectPageErrors, loginAsScanner } from './helpers.mjs'
-import { encodeCode39, render1D, BADGE } from '../../src/lib/barcodeFixtures'
+import { encodeCode39, render1D, renderAt, BADGE } from '../../src/lib/barcodeFixtures'
 
 /**
  * Install the fake camera BEFORE the app boots. The barcode frame is rendered
  * in Node by the shared fixture encoder; only the raw grayscale pixels cross
  * into the page, where the init script paints them onto the video canvas.
  */
-async function installFakeCamera(context, { badge, tiltDeg = 0 }) {
-  const { gray, width, height } = render1D(encodeCode39(badge))
+async function installFakeCamera(
+  context,
+  { badge, tiltDeg = 0, videoW = 800, videoH = 480, pxPerModule = null },
+) {
+  // pxPerModule=null keeps the original 3 px/module render, so every older
+  // test sees byte-identical frames. A value here renders at that exact
+  // px/module — the knob that lets a test put the badge BELOW the resolution
+  // where the downscaled ROI band can decode.
+  const { gray, width, height } = pxPerModule
+    ? renderAt(encodeCode39(badge), pxPerModule, { heightPx: 120 })
+    : render1D(encodeCode39(badge))
   await context.addInitScript(
-    ({ gray, width, height, tiltDeg }) => {
+    ({ gray, width, height, tiltDeg, videoW, videoH }) => {
       function makeStream() {
         // Grayscale → RGBA on an offscreen canvas. putImageData ignores the
         // current transform, so the tilt is applied on the video canvas below
@@ -54,8 +63,8 @@ async function installFakeCamera(context, { badge, tiltDeg = 0 }) {
         }
         offCtx.putImageData(img, 0, 0)
 
-        const CW = 800
-        const CH = 480
+        const CW = videoW
+        const CH = videoH
         const canvas = document.createElement('canvas')
         canvas.width = CW
         canvas.height = CH
@@ -101,7 +110,7 @@ async function installFakeCamera(context, { badge, tiltDeg = 0 }) {
       try { delete HTMLVideoElement.prototype.requestVideoFrameCallback } catch { /* already absent */ }
       try { delete HTMLVideoElement.prototype.cancelVideoFrameCallback } catch { /* already absent */ }
     },
-    { gray: Array.from(gray), width, height, tiltDeg },
+    { gray: Array.from(gray), width, height, tiltDeg, videoW, videoH },
   )
 }
 
@@ -161,6 +170,39 @@ test.describe('scanner camera decode (fake camera)', () => {
     test.setTimeout(120000)
     const guard = collectPageErrors(page)
     await installFakeCamera(context, { badge: BADGE, tiltDeg: 12 })
+    await loginAsScanner(page)
+
+    await assertCameraLive(page)
+    await assertBadgeDecoded(page)
+
+    guard.assertEmpty()
+  })
+
+  // Browser proof of the source-resolution crop GLUE on the ZXing leg
+  // (iOS/Safari), in the one regime where it is a pixel win: the stream is
+  // wider than the profile's cap, so computeRoi actually downscales the band.
+  // 2400 px stream -> band 2208 px -> capped to 1280 (scale 0.58), which puts
+  // the badge at ~0.87 px/module on the band: unreadable, but still locatable.
+  // Offline probe of this exact geometry (real locator + ZXing chain, 10 runs):
+  // band 0/10, locator 10/10, 1:1 crop 10/10.
+  // What this pins: the frame reaches planSourceCrop, the roi.scale gate opens,
+  // the locator's box is mapped back to video pixels, grabCrop's 1:1 drawImage
+  // runs on the real canvas, and the decoded badge reaches the UI.
+  //
+  // BarcodeDetector is deleted on purpose: Chrome's native detector reads a
+  // sub-1 px/module band fine, so only the ZXing leg exercises the path this
+  // change touches.
+  test('source-resolution crop decodes a badge the downscaled band cannot', async ({ page, context }) => {
+    test.setTimeout(120000)
+    const guard = collectPageErrors(page)
+    await installFakeCamera(context, {
+      badge: BADGE,
+      videoW: 2400,
+      videoH: 1350,
+      pxPerModule: 1.5,
+    })
+    // iOS/Safari: no BarcodeDetector, every scan runs the ZXing leg.
+    await context.addInitScript(() => { try { delete window.BarcodeDetector } catch { /* absent */ } })
     await loginAsScanner(page)
 
     await assertCameraLive(page)

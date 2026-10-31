@@ -40,6 +40,7 @@ import {
   toggleTorch,
   describeCamera,
   platform,
+  beginFocusHunt,
 } from './cameraManager'
 import { BADGE_REGEX, sanitizeScannedBadge } from '../../lib/logic'
 
@@ -79,14 +80,43 @@ const AIM_THROTTLE_MS = 150
 // 8/6 (was 3/3): the localizer costs a full extra getImageData + gray pass +
 // locateBarcode on the decode thread for overlay only — engaging during normal
 // initial aiming taxed every badge wave.
+// Consecutive misses before a focus hunt starts: below the aim-hint gate (8),
+// because a parked lens is likelier than a misaligned badge and a hunt is cheap.
+const FOCUS_HUNT_AFTER = 6
 const AIM_HINT_AFTER = 8
 const AIM_HINT_EVERY = 6
+// Code 39 is 211 narrow modules wide including quiet zones (4+4) for the badge
+// format this portal issues. Used to turn the locator's measured width into
+// px/module, which is the number that actually decides decode success: below
+// ~2 px/module a blurred capture is unreadable by any engine (measured: 10/10
+// at 2.0 px/module with 1px blur, 0/10 at 1.75 and below).
+const CODE39_MODULES = 211
+const MIN_DECODABLE_PPM = 2.2
 // Consecutive misses before the hard-pass second look runs, and its stride.
 // hardPass tries every ready engine x normal+inverted (+ widened 2D for ZXing)
 // so it buys capability the base pass lacks — but at ~2-4x frame cost, hence
 // gated well behind the cheap passes.
 const HARD_PASS_AFTER = 10
 const HARD_PASS_EVERY = 10
+// Source-resolution crop: after this many consecutive misses, locate the badge
+// on the band and re-decode a 1:1 crop of it. The reason is pixels, not effort:
+// computeRoi downscales the band only when its cap is below the band width, so
+// with DEVICE_PROFILES caps of fast 1280 / medium 1080 / slow 720 above, a 1080p
+// portrait stream (994 px band) is already 1:1 on fast and medium and the crop
+// can add nothing by construction. planSourceCrop gates on roi.scale for exactly
+// that reason (scale 1 => null), so this fires only where pixels were really
+// lost: the slow profile, or a stream wider than the profile's cap.
+// A 2nd miss is the earliest honest signal that the band is not enough, and the
+// stride keeps the locator's full-frame pass (~4.6 ms measured on 994x615) off
+// half the failing frames.
+// CROP_PAD is in SURFACE px, scaled back up with the box: the locator box is
+// tight around the bars, so 8 surface px restores 2-6 modules of quiet zone.
+// Measured: pad 0-8 decodes 10/10 on the test frame, pad 12+ drops to 8/10 and
+// pad 32 to 0/10 (ZXing's 8x8 block grid shifts against the bar edges) — so
+// this is a quiet-zone minimum, not a knob to grow.
+const CROP_AFTER = 2
+const CROP_EVERY = 2
+const CROP_PAD = 8
 // Ms a busy/decision-declined badge stays damped. The 2s duplicate suppressor
 // records only on ACCEPTANCE (a declined scan never ran, so its retry must not
 // be swallowed) — but without any damp the same badge re-fires vibrate +
@@ -129,11 +159,15 @@ function createQualityChecker() {
   }
 }
 
-function guidanceFor(reason, elapsed, hasEverDetected, consecutiveFails) {
+export function guidanceFor(reason, elapsed, hasEverDetected, consecutiveFails, tooFar = false) {
   if (reason === 'dark') return 'Better lighting needed'
   if (reason === 'bright') return 'Reduce glare'
   if (reason === 'blurry') return 'Hold steady'
   if (reason === 'low-contrast') return 'Move badge into the light'
+  // A located badge that is physically too small in the frame cannot be
+  // decoded by any engine — telling the operator to align it is a lie that
+  // produces the "it just refuses" experience.
+  if (tooFar) return 'Move closer to the badge'
   if (elapsed > 6000 && consecutiveFails > GUIDANCE_AFTER) {
     return hasEverDetected ? 'Align badge within the frame' : 'Tap the video to focus'
   }
@@ -143,6 +177,7 @@ function guidanceFor(reason, elapsed, hasEverDetected, consecutiveFails) {
 
 import { createEnginePool } from './enginePool'
 import { locateBarcode } from './barcodeLocator'
+import { planSourceCrop } from './cropPlan'
 
 
 // ─── Detection surface ────────────────────────────────────────────────────────
@@ -151,8 +186,21 @@ function createDetectSurface() {
   let canvas = null
   let ctx = null
 
+  const ensure = (w, h) => {
+    if (!ctx) {
+      canvas = document.createElement('canvas')
+      ctx = canvas.getContext('2d', { willReadFrequently: true })
+      if (!ctx) { canvas = null; return null }
+    }
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w
+      canvas.height = h
+    }
+    return ctx
+  }
+
   return {
-    /** The cropped, downscaled canvas handed to the detectors. */
+    /** The current crop handed to the detectors. */
     get canvas() { return canvas },
     /** Raw pixels of the current crop — the ZXing path decodes from this. */
     read() {
@@ -161,20 +209,27 @@ function createDetectSurface() {
     },
     /** Crop + downscale one video frame into a canvas the decoder can chew. */
     grab(video, roi) {
-      if (!video?.videoWidth) return null
-      if (!ctx) {
-        canvas = document.createElement('canvas')
-        canvas.width = roi.dw
-        canvas.height = roi.dh
-        ctx = canvas.getContext('2d', { willReadFrequently: true })
-        if (!ctx) return null
-      }
-      if (canvas.width !== roi.dw || canvas.height !== roi.dh) {
-        canvas.width = roi.dw
-        canvas.height = roi.dh
-      }
+      if (!video?.videoWidth || !roi?.dw || !roi?.dh) return null
+      if (!ensure(roi.dw, roi.dh)) return null
       try {
         ctx.drawImage(video, roi.sx, roi.sy, roi.sw, roi.sh, 0, 0, roi.dw, roi.dh)
+        return canvas
+      } catch {
+        return null
+      }
+    },
+    /**
+     * Draw ONE region of the frame 1:1 — no downscale, so the decoder gets the
+     * sensor's real pixels per module. Same surface object, so enginePool.detect
+     * needs no second code path; the next grab() resizes it back to the band.
+     */
+    grabCrop(video, rect) {
+      if (!video?.videoWidth || !rect) return null
+      const w = Math.max(1, Math.round(rect.w))
+      const h = Math.max(1, Math.round(rect.h))
+      if (!ensure(w, h)) return null
+      try {
+        ctx.drawImage(video, rect.x, rect.y, w, h, 0, 0, w, h)
         return canvas
       } catch {
         return null
@@ -190,6 +245,8 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const sessionRef = useRef(0)          // monotonic — the cancellation authority
   const mountedRef = useRef(true)
   const streamRef = useRef(null)
+  // Miss-driven autofocus: the hunt chain spans frames, so it lives in a ref.
+  const focusHuntStopRef = useRef(null)
   const trackRef = useRef(null)
   const frameHandleRef = useRef(null)    // rAF or video-frame callback id
   const frameApiRef = useRef('raf')
@@ -206,6 +263,9 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const slidingWindowRef = useRef([])
   const configRef = useRef(DEVICE_PROFILES.medium)
   const surfaceRef = useRef(null)
+  // Set by the locator pass: true when the badge is physically too small in
+  // the frame for ANY engine to decode it. Drives "Move closer" guidance.
+  const tooFarRef = useRef(false)
   const qualityRef = useRef(null)
   const hasEverDetectedRef = useRef(false)
   const consecutiveFailsRef = useRef(0)
@@ -335,6 +395,12 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       if (!img || !video?.videoWidth) return
       const box = locateBarcode(rgbaToGray(img), img.width, img.height, { minConfidence: 0.55 })
       if (!box) return
+      // px/module in SOURCE pixels: the box is measured on the detect surface,
+      // which computeRoi may have downscaled by roi.scale. On the crop path the
+      // pseudo-roi has scale 1, so this is identity there too.
+      const scale = Number(roi?.scale) || 1
+      const ppm = box.width / scale / CODE39_MODULES
+      if (ppm > 0) tooFarRef.current = ppm < MIN_DECODABLE_PPM
       // detectionBox speaks in corner points; a rect's four corners are enough
       // to recover it, and they arrive in the same detect-canvas space the ROI
       // describes.
@@ -430,6 +496,8 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       const declinedDamped = lastDeclinedRef.current.badge === cleaned && now - lastDeclinedRef.current.time < DECLINED_DAMP_MS
       if (!declinedDamped) { try { navigator.vibrate?.(80) } catch {} }
       pushDebug(`SCAN OK [${engine}]: ${cleaned}`)
+      tooFarRef.current = false
+      if (focusHuntStopRef.current) { focusHuntStopRef.current(); focusHuntStopRef.current = null }
       // Camera-suppressor contract (see the busy guard in useScanHandler.js):
       // the suppressor records only on ACCEPTANCE. A declined scan (the
       // handler returned exactly `false` — busy or decision-pending) never
@@ -491,7 +559,13 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     // scanning look broken on Android.
     const elapsed = Date.now() - startTimeRef.current
     const hint = qualityRef.current?.(video) || null
-    setGuidance(guidanceFor(hint, elapsed, hasEverDetectedRef.current, consecutiveFailsRef.current))
+    setGuidance(guidanceFor(hint, elapsed, hasEverDetectedRef.current, consecutiveFailsRef.current, tooFarRef.current))
+    // A streak of misses usually means the lens is parked, so start the
+    // already-built focus-hunt chain (this is its only caller). The success
+    // path and the camera teardown both stop it.
+    if (consecutiveFailsRef.current >= FOCUS_HUNT_AFTER && !focusHuntStopRef.current && trackRef.current) {
+      focusHuntStopRef.current = beginFocusHunt(trackRef.current, { interval: 600, debug: debugOn })
+    }
 
     const roi = computeRoi(video.videoWidth, video.videoHeight, {
       mode: roiModeRef.current,
@@ -499,6 +573,35 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     })
     const surface = surfaceRef.current?.grab(video, roi)
     if (!surface) { scheduleNext(); return }
+
+    // Cropping is a HINT: if the locator finds nothing (or the crop fails) the
+    // band decode below runs exactly as it always did. It only buys pixels when
+    // computeRoi actually downscaled the band (band wider than cfg.maxWidth) —
+    // on an already-1:1 band this is a no-op that costs one locator pass every
+    // other failing frame, so it stays behind the miss gate.
+    let detectRoi = roi
+    if (consecutiveFailsRef.current >= CROP_AFTER && frameCountRef.current % CROP_EVERY === 0) {
+      try {
+        const img = surfaceRef.current.read()
+        const rect = img
+          ? planSourceCrop(rgbaToGray(img), img.width, img.height, roi, video.videoWidth, video.videoHeight, CROP_PAD)
+          : null
+        if (rect) {
+          if (surfaceRef.current.grabCrop(video, rect)) {
+            // Report detections in this crop's coordinate space, so the edge
+            // reject and the aim box keep landing on the right pixels.
+            detectRoi = { sx: rect.x, sy: rect.y, sw: rect.w, sh: rect.h, dw: rect.w, dh: rect.h, scale: 1 }
+            // Field-verifiable: ?scannerdebug=1 shows this line on the phone,
+            // which is how you confirm the crop actually ran on the device.
+            if (debugOn) pushDebug(`crop ${rect.w}x${rect.h} @${rect.x},${rect.y}`)
+          } else {
+            // grabCrop may have resized (and so cleared) the canvas before the
+            // draw threw — put the band back so this pass decodes real pixels.
+            surfaceRef.current.grab(video, roi)
+          }
+        }
+      } catch { /* hint only — never let the locator break the loop */ }
+    }
 
     const t0 = performance.now()
     const { barcodes, engine } = await engineRef.current.detect(surfaceRef.current)
@@ -526,14 +629,14 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       // Re-narrow the crop once a badge reads, so a full-frame pass doesn't
       // permanently halve the frame rate on a low-end phone.
       if (roiModeRef.current === 'full') roiModeRef.current = 'band'
-      handleBarcodes(barcodes, roi, engine)
+      handleBarcodes(barcodes, detectRoi, engine)
     } else {
       consecutiveFailsRef.current++
       // Point at the barcode while the DECODER is the thing failing. Throttled
       // both by miss count and frame number so a hopeless loop never pays the
       // localizer on every pass. Pure overlay — see publishLocalizerAim.
       if (consecutiveFailsRef.current >= AIM_HINT_AFTER && frameCountRef.current % AIM_HINT_EVERY === 0) {
-        publishLocalizerAim(roi, video)
+        publishLocalizerAim(detectRoi, video)
       }
       // No "never decoded" watchdog: an empty frame is the normal state of a
       // scanner between sewadars, and the old 20s error killed idle and
@@ -546,6 +649,9 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       // normal reads.
       if (consecutiveFailsRef.current >= HARD_PASS_AFTER && frameCountRef.current % HARD_PASS_EVERY === 0) {
         try {
+          // hardPass is the widest net — give it the whole band, never a crop
+          // from this pass (its own corner points are mapped with `roi`).
+          if (detectRoi !== roi) surfaceRef.current.grab(video, roi)
           const hard = await engineRef.current?.hardPass?.(surfaceRef.current)
           if (!isCurrent(session) || !mountedRef.current) return
           if (gen !== loopGenRef.current) return
@@ -735,6 +841,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       if (stream) stopStream(stream)
       streamRef.current = null
       trackRef.current = null
+      if (focusHuntStopRef.current) { focusHuntStopRef.current(); focusHuntStopRef.current = null }
       if (videoRef.current) {
         try { videoRef.current.pause?.() } catch {}
         videoRef.current.srcObject = null
