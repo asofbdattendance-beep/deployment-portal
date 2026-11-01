@@ -100,17 +100,16 @@ test.beforeEach(async ({ request }) => {
   await resetMock(request)
 })
 
-test('register chrome: visit vocab, four tabs, never an Absent tab', async ({ page, request }) => {
+test('register chrome: visit vocab, five tabs incl. Absent', async ({ page, request }) => {
   const errors = collectPageErrors(page)
   await seedVisitRegister(request)
   await loginAs(page, 'aso@example.com')
   await openVisitReports(page)
 
   await expect(page.getByRole('tablist', { name: 'Visit list' })).toBeVisible()
-  for (const name of ['Total', 'Present', 'Attention', 'Logs']) {
+  for (const name of ['Total', 'Present', 'Absent', 'Attention', 'Logs']) {
     await expect(page.getByRole('tab', { name: new RegExp(`^${name} \\(`) })).toBeVisible()
   }
-  await expect(page.getByRole('tab', { name: /Absent/ })).toHaveCount(0)
   await expect(page.getByLabel('Search visit rows')).toBeVisible()
   errors.assertEmpty()
 })

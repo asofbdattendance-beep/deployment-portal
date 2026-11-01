@@ -75,7 +75,7 @@ test('post-cutoff: everyone is pinned to Bhati Visit, no toggle', async ({ page,
 
   await gotoTab(page, 'Reports')
   await expect(page.getByRole('heading', { name: /Bhati Visit Register/ })).toBeVisible()
-  await expect(page.getByRole('tab', { name: /Absent/ })).toHaveCount(0)
+  await expect(page.getByRole('tab', { name: /^Absent \(/ })).toBeVisible()
 
   // No previsit RPC was ever asked in the visit lens.
   const calls = await mockCalls(request)
