@@ -2,7 +2,22 @@ import { useState } from 'react'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { supabase } from '../lib/supabase'
 import { perfStart, perfMark } from '../lib/perfTimings'
+import { jitter } from '../lib/jitter'
 import { LogIn, AlertCircle, Users, KeyRound, ArrowLeft, MailCheck } from 'lucide-react'
+
+// Supabase Auth's token endpoint is limited per IP (default 150 / 5 min, burst
+// 30), and a venue's phones share one public IP. On its 429 we wait and retry
+// on our own instead of making everyone tap Sign In again; the ±30% jitter
+// spreads the retries so the phones don't all come back at the same instant.
+const AUTH_RETRY_DELAYS_MS = [5000, 10000, 20000, 30000]
+
+function isAuthRateLimited(err) {
+  const status = err && (err.status || err.code)
+  const msg = (err && (err.message || '')) || ''
+  return status === 429 || status === '429' || /429|too many|rate limit/i.test(msg)
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 export default function LoginPage() {
   const { signIn, recoveryLinkError } = usePortalAuth()
@@ -10,6 +25,7 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [retryNote, setRetryNote] = useState('')
 
   // forgot-password mode
   const [resetMode, setResetMode] = useState(false)
@@ -21,6 +37,7 @@ export default function LoginPage() {
   const handleSubmit = async (e) => {
     e.preventDefault()
     setError('')
+    setRetryNote('')
     setLoading(true)
     // Phase-0 latency tripwire: tap → resolve → auth → (profile continues in
     // PortalAuthContext under the same run id). Paste via __portalPerfDump.
@@ -51,23 +68,28 @@ export default function LoginPage() {
         loginEmail = resolved
       }
       perfMark('login', runId, 'auth-start')
-      try {
-        await signIn(loginEmail, password)
-      } catch (authErr) {
-        // Supabase Auth has its own per-IP limit on the token endpoint; surface
-        // it as a readable message instead of GoTrue's raw error text.
-        const aStatus = authErr && (authErr.status || authErr.code)
-        const aMsg = (authErr && (authErr.message || '')) || ''
-        if (aStatus === 429 || aStatus === '429' || /429|too many|rate limit/i.test(aMsg)) {
-          throw new Error('Too many sign-in attempts right now — wait a few minutes and try again', { cause: authErr })
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await signIn(loginEmail, password)
+          break
+        } catch (authErr) {
+          if (!isAuthRateLimited(authErr)) throw authErr
+          if (attempt >= AUTH_RETRY_DELAYS_MS.length) {
+            // Out of retries: surface a readable message instead of GoTrue's
+            // raw error text.
+            throw new Error('Too many sign-in attempts right now — wait a few minutes and try again', { cause: authErr })
+          }
+          perfMark('login', runId, `auth-429-retry-${attempt + 1}`)
+          setRetryNote(`Server busy — retrying sign-in automatically (${attempt + 1} of ${AUTH_RETRY_DELAYS_MS.length})…`)
+          await sleep(jitter(AUTH_RETRY_DELAYS_MS[attempt], 0.3))
         }
-        throw authErr
       }
       perfMark('login', runId, 'auth-end')
     } catch (err) {
       perfMark('login', runId, 'failed')
       setError(err.message || 'Login failed')
     } finally {
+      setRetryNote('')
       setLoading(false)
     }
   }
@@ -192,6 +214,12 @@ export default function LoginPage() {
                   <AlertCircle size={16} />
                   <span>{error}</span>
                 </div>
+              )}
+
+              {retryNote && (
+                <p role="status" style={{ fontSize: '0.85rem', color: '#64748b', margin: '0 0 0.75rem' }}>
+                  {retryNote}
+                </p>
               )}
 
               <button type="submit" className="login-submit" disabled={loading}>

@@ -1,0 +1,46 @@
+# Keeps the free-tier Supabase project from pausing.
+#
+# Supabase pauses a Free plan project that sees no database activity for a
+# week. This makes one cheap real query twice a week: portal_app_version(),
+# which anon may already call (v78) and which the version banner reads on
+# every page load anyway. No writes, no service key.
+#
+# Needs two repository secrets (Settings → Secrets and variables → Actions):
+#   SUPABASE_URL       https://<project-ref>.supabase.co
+#   SUPABASE_ANON_KEY  the project's anon / publishable key (same as VITE_SUPABASE_ANON_KEY)
+#
+# Fails loudly when the secrets are missing or the project doesn't answer, so
+# GitHub's failed-run email is the early warning.
+name: Supabase keep-alive
+
+on:
+  schedule:
+    # Mondays and Thursdays, 03:17 UTC (08:47 IST). Off the hour on purpose:
+    # GitHub delays or drops scheduled runs at busy :00 slots.
+    - cron: '17 3 * * 1,4'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Query portal_app_version()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "::error::Set the SUPABASE_URL and SUPABASE_ANON_KEY repository secrets."
+            exit 1
+          fi
+          body=$(curl -sS --fail-with-body --retry 3 --retry-delay 10 --max-time 30 \
+            -X POST "$SUPABASE_URL/rest/v1/rpc/portal_app_version" \
+            -H "apikey: $SUPABASE_ANON_KEY" \
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{}')
+          echo "portal_app_version: $body"
