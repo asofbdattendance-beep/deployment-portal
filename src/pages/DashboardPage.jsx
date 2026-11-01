@@ -24,7 +24,9 @@ import EmptyState from '../components/EmptyState'
 import CentreDayHeatmap from '../components/CentreDayHeatmap'
 import CentreDeptMatrixCard from '../components/CentreDeptMatrixCard'
 import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
+import { cached, invalidate } from '../lib/queryCache'
 import { useIsMobile } from '../hooks/useMediaQuery'
+import StaleBanner from '../components/StaleBanner'
 import FilterSheet, { MobileFilterBar } from '../components/mobile/FilterSheet'
 import {
   LayoutDashboard, Users, Clock, AlertTriangle, ArrowUpRight,
@@ -154,6 +156,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
   // A monotonically increasing request sequence — a slow load must not
   // overwrite a fast newer one.
   const seqRef = useRef(0)
+  const firstLoadRef = useRef(false)
 
   // ─── Centre + department filters (client-side only) ───
   // Mirrors AttendancePage's filterCentre/filterDept pattern. Daily rows carry
@@ -203,16 +206,17 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
     try {
       // Every source is wrapped in withTimeout: a hung function must surface a
       // friendly section error, never latch the page on its spinner forever.
+      const wantCount = !firstLoadRef.current
       const results = await Promise.allSettled([
-        withTimeout(rpcRows('attendance_daily_summary', { p_schedule: scheduleId, p_date: date }), 15000, 'attendance_daily_summary'),
-        withTimeout(rpcRows('attendance_scanner_ops', { p_schedule: scheduleId, p_date: date }), 15000, 'attendance_scanner_ops'),
+        withTimeout(cached(`dash:${scheduleId}:${date}:daily`, 5000, () => rpcRows('attendance_daily_summary', { p_schedule: scheduleId, p_date: date })), 15000, 'attendance_daily_summary'),
+        withTimeout(cached(`dash:${scheduleId}:${date}:ops`, 5000, () => rpcRows('attendance_scanner_ops', { p_schedule: scheduleId, p_date: date })), 15000, 'attendance_scanner_ops'),
         // p_date: null → the visit-wide anomaly sweep, not one day.
-        withTimeout(rpcRows('attendance_anomalies', { p_schedule: scheduleId, p_date: null }), 15000, 'attendance_anomalies'),
+        withTimeout(cached(`dash:${scheduleId}:${date}:anom`, 5000, () => rpcRows('attendance_anomalies', { p_schedule: scheduleId, p_date: null })), 15000, 'attendance_anomalies'),
         // v74: one row per centre × visit date — the day strip + heatmap.
-        withTimeout(rpcRows('attendance_centre_daily', { p_schedule: scheduleId }), 15000, 'attendance_centre_daily'),
+        withTimeout(cached(`dash:${scheduleId}:${date}:visit`, 5000, () => rpcRows('attendance_centre_daily', { p_schedule: scheduleId })), 15000, 'attendance_centre_daily'),
         // Unscoped reference data for the matrix parent-centre rollup; a
         // failure here degrades to a flat grid, never blanks the matrix.
-        withTimeout(fetchCentres(), 15000, 'dp_centres'),
+        withTimeout(cached('centres', 60000, () => fetchCentres(wantCount ? null : { count: 'none' }), { staleMs: 300000 }), 15000, 'dp_centres'),
       ])
       if (!mountedRef.current || seq !== seqRef.current) return
       const next = {}
@@ -228,6 +232,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
       })
       setSec(next)
       setRowsScheduleId(scheduleId)
+      firstLoadRef.current = true
       // No silent freshness: the LIVE pill only advances when at least one
       // source actually answered — five rejections leave the old timestamp.
       if (results.some((r) => r.status === 'fulfilled')) setLastRefreshAt(Date.now())
@@ -259,8 +264,9 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
       { table: 'dp_attendance_sessions', filter: `schedule_id=eq.${scheduleId}` },
       { table: 'deployments', filter: `schedule_id=eq.${scheduleId}` },
     ],
-    onReload: () => load().catch(() => {}),
+    onReload: () => { invalidate('dash:'); invalidate('centres'); return load().catch(() => {}) },
     label: 'dashboard',
+    maxWaitMs: 5000,
   })
 
   // ─── Derived rows ───
@@ -493,7 +499,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
           </>
         )}
         actions={(
-          <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
+          <button onClick={() => { invalidate('dash:'); invalidate('centres'); load() }} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
             {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
           </button>
         )}
@@ -514,6 +520,13 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
             </div>
           </>
         )}
+      />
+
+      <StaleBanner
+        stale={!!lastRefreshAt && Date.now() - lastRefreshAt > 30000}
+        error={failedSources > 0 ? `${failedSources} of ${sourceTotal} sources failed` : null}
+        onRetry={load}
+        lastRefreshAt={lastRefreshAt}
       />
 
       {/* ── Centre + department filters ── */}

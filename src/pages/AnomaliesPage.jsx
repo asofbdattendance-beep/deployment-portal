@@ -7,6 +7,8 @@ import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
 import { fileSlug } from '../lib/excel'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
+import StaleBanner from '../components/StaleBanner'
+import { cached, invalidate } from '../lib/queryCache'
 import PageHeader, { ViewOnlyPill } from '../components/PageHeader'
 import KpiTile from '../components/KpiTile'
 import DataTable from '../components/DataTable'
@@ -193,16 +195,16 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
       // reject — so without an explicit throw a missing function (PGRST202),
       // an RLS denial or a dropped connection all render as a clean, wrong
       // "no anomalies" visit.
-      const { data, error } = await supabase.rpc('attendance_anomalies', {
-        p_schedule: scheduleId,
-        p_date: date || null,
+      const data = await cached(`anom:${scheduleId}:${date || ''}`, 0, async () => {
+        const { data: d, error: e } = await supabase.rpc('attendance_anomalies', {
+          p_schedule: scheduleId,
+          p_date: date || null,
+        })
+        if (e) throw new Error(`attendance_anomalies: ${e.message || e.code || 'Unknown error'}`)
+        return Array.isArray(d) ? d : []
       })
       if (!mountedRef.current || seq !== seqRef.current) return
-      if (error) {
-        const msg = error.message || error.code || 'Unknown error'
-        throw new Error(`attendance_anomalies: ${msg}`)
-      }
-      setRaw(Array.isArray(data) ? data : [])
+      setRaw(data)
       setRowsScheduleId(scheduleId)
       setLoadError(null)
     } catch (e) {
@@ -238,9 +240,10 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
       { table: 'dp_attendance_sessions', filter: `schedule_id=eq.${scheduleId}` },
       { table: 'deployments', filter: `schedule_id=eq.${scheduleId}` },
     ],
-    onReload: load,
+    onReload: () => { invalidate('anom:'); return load().catch(() => {}) },
     label: 'anomalies',
     debounceMs: 400,
+    maxWaitMs: 5000,
   })
 
   // ─── Derived rows ───
@@ -480,6 +483,12 @@ export default function AnomaliesPage({ schedules = [], scheduleId, onNavigate }
             </button>
           </>
         }
+      />
+
+      <StaleBanner
+        stale={false}
+        error={loadError}
+        onRetry={load}
       />
 
       <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>

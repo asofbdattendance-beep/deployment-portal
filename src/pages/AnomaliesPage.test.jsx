@@ -19,6 +19,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, within, waitFor, fireEvent, cleanup } from '@testing-library/react'
 import AnomaliesPage from './AnomaliesPage'
+import { __reset as resetQueryCache } from '../lib/queryCache'
 
 const rpc = vi.fn()
 const fromMock = vi.fn()
@@ -158,6 +159,7 @@ async function renderPage(props = {}) {
 }
 
 beforeEach(() => {
+  resetQueryCache()
   rpc.mockReset()
   fromMock.mockReset()
   // Direct table reads (the anomaly popup's trail + the dept-name refresh)

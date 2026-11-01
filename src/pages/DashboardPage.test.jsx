@@ -28,6 +28,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, cleanup, within, act } from '@testing-library/react'
 import DashboardPage from './DashboardPage'
+import { __reset as resetQueryCache } from '../lib/queryCache'
 
 const rpc = vi.fn()
 // Delegates to `rpc` fixtures, upholding the real fetchAllRpc contract:
@@ -116,6 +117,7 @@ async function renderPage(props = {}) {
 }
 
 beforeEach(() => {
+  resetQueryCache()
   rpc.mockReset()
   fetchCentres.mockReset()
   fetchCentres.mockResolvedValue([])

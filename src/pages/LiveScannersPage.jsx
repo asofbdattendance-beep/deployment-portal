@@ -11,6 +11,7 @@ import PageHeader, { ViewOnlyPill } from '../components/PageHeader'
 import KpiTile from '../components/KpiTile'
 import EmptyState from '../components/EmptyState'
 import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
+import { cached, invalidate } from '../lib/queryCache'
 import { perfCurrentRun, perfMark } from '../lib/perfTimings'
 import FilterSheet, { MobileFilterBar } from '../components/mobile/FilterSheet'
 import Skeleton from '../components/mobile/Skeleton'
@@ -179,7 +180,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
         setLoadedAt(null)
         return
       }
-      const rows = await rpcRows('attendance_scanner_ops', { p_schedule: scheduleId, p_date: date })
+      const rows = await cached(`live:${scheduleId}:${date}`, 5000, () => rpcRows('attendance_scanner_ops', { p_schedule: scheduleId, p_date: date }))
       if (!mountedRef.current || seq !== seqRef.current) return
       setRaw(rows)
       // Phase-0 tripwire: completes the viewer run started by the realtime
@@ -253,8 +254,9 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
       { table: 'dp_attendance_sessions', filter: `schedule_id=eq.${scheduleId}` },
       { table: 'deployments', filter: `schedule_id=eq.${scheduleId}` },
     ],
-    onReload: () => load().catch(() => {}),
+    onReload: () => { invalidate('live:'); return load().catch(() => {}) },
     label: 'live-scanners',
+    maxWaitMs: 5000,
   })
 
   // LAZY: the second RPC is not called for a row until that row is actually
@@ -380,7 +382,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
             this is not a report that scanning is idle.
           </p>
           <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem' }}>
-            <button onClick={load} disabled={loading} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
+            <button onClick={() => { invalidate('live:'); load() }} disabled={loading} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>
               {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Retry
             </button>
           </div>
@@ -409,7 +411,7 @@ export default function LiveScannersPage({ schedules, scheduleId, onNavigate }) 
         }
         actions={
           <>
-            <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
+            <button onClick={() => { invalidate('live:'); load() }} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
               {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
             </button>
             <ExportButton

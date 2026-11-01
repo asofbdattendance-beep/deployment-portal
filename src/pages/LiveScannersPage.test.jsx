@@ -16,6 +16,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react'
 import LiveScannersPage from './LiveScannersPage'
+import { __reset as resetQueryCache } from '../lib/queryCache'
 
 const rpc = vi.fn()
 const toastError = vi.fn()
@@ -132,6 +133,7 @@ async function renderPage(props = {}) {
 const rows = () => document.querySelectorAll('table tbody tr')
 
 beforeEach(() => {
+  resetQueryCache()
   rpc.mockReset()
   toastError.mockReset()
   toastSuccess.mockReset()

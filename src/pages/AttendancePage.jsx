@@ -28,6 +28,8 @@ import { scheduleWindow, clampDateToWindow } from '../lib/sewaMode'
 import { fileSlug } from '../lib/excel'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
+import StaleBanner from '../components/StaleBanner'
+import { cached, invalidate } from '../lib/queryCache'
 import PageHeader, { ViewOnlyPill } from '../components/PageHeader'
 import DataTable from '../components/DataTable'
 import EmptyState from '../components/EmptyState'
@@ -129,6 +131,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   // A3: a monotonically increasing request sequence — a slow load for date A
   // must not overwrite a fast load for date B.
   const seqRef = useRef(0)
+  const firstLoadRef = useRef(false)
   // A12: once the operator picks a scan day by hand, window-focus must stop
   // moving it.
   const dateTouchedRef = useRef(false)
@@ -167,21 +170,22 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
       // inline message is rendered instead.
       // Every RPC is wrapped in withTimeout: a hung function must surface a
       // friendly error, never latch the page on its spinner forever.
+      const wantCount = !firstLoadRef.current
       const dayCalls = date
         ? [
-            withTimeout(rpcRows('attendance_daily_summary', { p_schedule: scheduleId, p_date: date }), 15000, 'attendance_daily_summary'),
-            withTimeout(rpcRows('attendance_scanner_ops', { p_schedule: scheduleId, p_date: date }), 15000, 'attendance_scanner_ops'),
+            withTimeout(cached(`att:${scheduleId}:${date}:daily`, 5000, () => rpcRows('attendance_daily_summary', { p_schedule: scheduleId, p_date: date })), 15000, 'attendance_daily_summary'),
+            withTimeout(cached(`att:${scheduleId}:${date}:ops`, 5000, () => rpcRows('attendance_scanner_ops', { p_schedule: scheduleId, p_date: date })), 15000, 'attendance_scanner_ops'),
           ]
         : [Promise.resolve([]), Promise.resolve([])]
       const [sewR, dayR, opsR, logR] = await Promise.allSettled([
         // one row PER BADGE across ~3597 sewadars — must paginate, or the
         // KPI tiles and the Excel export silently read only the first 1000.
-        withTimeout(fetchAllRpc('attendance_sewadar_summary', { p_schedule: scheduleId }), 15000, 'attendance_sewadar_summary'),
+        withTimeout(cached(`att:${scheduleId}:sew`, 5000, () => fetchAllRpc('attendance_sewadar_summary', { p_schedule: scheduleId }, undefined, wantCount ? null : { count: 'none' })), 15000, 'attendance_sewadar_summary'),
         dayCalls[0],
         dayCalls[1],
         // the scan log: every session for the schedule, complete-or-throw
         // paging (RLS scopes each role to its own rows).
-        withTimeout(fetchAllRows('dp_attendance_sessions', LOG_SESSION_COLS, (q) => q.eq('schedule_id', scheduleId), 'id'), 20000, 'attendance_scan_log'),
+        withTimeout(cached(`att:${scheduleId}:log`, 5000, () => fetchAllRows('dp_attendance_sessions', LOG_SESSION_COLS, (q) => q.eq('schedule_id', scheduleId), 'id', wantCount ? null : { count: 'none' })), 20000, 'attendance_scan_log'),
       ])
       // A3: drop a stale response that landed after a newer one.
       if (!mountedRef.current || seq !== seqRef.current) return
@@ -222,6 +226,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
         setLogErr(logR.reason?.message || 'Unknown error')
       }
       setRowsScheduleId(scheduleId)
+      firstLoadRef.current = true
     } finally {
       if (mountedRef.current && seq === seqRef.current) setLoading(false)
     }
@@ -264,8 +269,9 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
       { table: 'dp_attendance_sessions', filter: `schedule_id=eq.${scheduleId}` },
       { table: 'deployments', filter: `schedule_id=eq.${scheduleId}` },
     ],
-    onReload: load,
+    onReload: () => { invalidate('att:'); return load().catch(() => {}) },
     label: 'attendance',
+    maxWaitMs: 5000,
   })
 
   // ─── Derived rows ───
@@ -757,7 +763,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
           )}
         </>}
         actions={<>
-          <button onClick={load} disabled={loading} className="btn btn-ghost">
+          <button onClick={() => { invalidate('att:'); load() }} disabled={loading} className="btn btn-ghost">
             {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
           </button>
           <ExportButton
@@ -790,6 +796,12 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
             )}
           </div>
         )}
+      />
+
+      <StaleBanner
+        stale={false}
+        error={sewErr || dayErr || opsErr || logErr || null}
+        onRetry={load}
       />
 
       {/* ── Today: the day-scoped headline. Same attendance_daily_summary law

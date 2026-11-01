@@ -18,6 +18,7 @@ import { render, screen, waitFor, fireEvent, cleanup, act } from '@testing-libra
 import { todayStrIST } from '../lib/scannerUtils'
 import { UNASSIGNED_CENTRE } from '../lib/attendance'
 import AttendancePage from './AttendancePage'
+import { __reset as resetQueryCache } from '../lib/queryCache'
 
 const rpc = vi.fn()
 // fetchAllRpc delegates to the SAME fixture engine as `rpc`, then upholds the
@@ -160,6 +161,7 @@ async function renderPage(props = {}) {
 }
 
 beforeEach(() => {
+  resetQueryCache()
   rpc.mockReset()
   fetchAllRows.mockReset()
   pgHandlers.length = 0
@@ -305,6 +307,7 @@ describe('A5 — an empty scan day is never sent to Postgres', () => {
   it('sends no date-keyed RPC at all while the day is empty', async () => {
     await renderPage()
     rpc.mockClear()
+    resetQueryCache()
     fireEvent.change(screen.getByLabelText('Scan day'), { target: { value: '' } })
     await settle()
     const names = rpc.mock.calls.map((c) => c[0])
