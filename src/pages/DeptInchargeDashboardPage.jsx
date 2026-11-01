@@ -541,13 +541,14 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
           <KpiTile
             label="Attendance %"
             value={(
-              <div style={{ paddingTop: '0.35rem' }}>
-                <div className="progress" style={{ height: 10 }}>
+              <>
+                {kpis.today.rate}%
+                <div className="progress" style={{ height: 8 }}>
                   <div className={`progress-bar${bandBar(kpis.today.band)}`} style={{ width: `${kpis.today.rate}%` }} />
                 </div>
-              </div>
+              </>
             )}
-            sub={`${kpis.today.rate}% present on ${shortDayLabel(date)}`}
+            sub={`present on ${shortDayLabel(date)}`}
             onPress={() => go('reports')}
             title="Open the Dept Incharge lists"
           />
@@ -581,13 +582,14 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
           <KpiTile
             label="Visit coverage"
             value={(
-              <div style={{ paddingTop: '0.35rem' }}>
-                <div className="progress" style={{ height: 10 }}>
+              <>
+                {kpis.visit.rate}%
+                <div className="progress" style={{ height: 8 }}>
                   <div className={`progress-bar${bandBar(kpis.visit.band)}`} style={{ width: `${kpis.visit.rate}%` }} />
                 </div>
-              </div>
+              </>
             )}
-            sub={`${kpis.visit.rate}% of ${kpis.visit.deployed} deployed`}
+            sub={`of ${kpis.visit.deployed} deployed`}
           />
         </div>
       )}

@@ -2,21 +2,22 @@
 name: Sewadar Deployment Portal
 description: Dense operator portal for sewadar deployment and attendance oversight.
 colors:
-  primary: "#6366f1"
-  primary-dark: "#4f46e5"
+  primary: "#4f46e5"
+  primary-dark: "#4338ca"
   primary-soft: "#eef2ff"
-  bg: "#f6f7fb"
+  bg: "#f4f5f7"
   surface: "#ffffff"
   surface-2: "#f8fafc"
   text: "#0f172a"
-  text-sec: "#64748b"
-  text-muted: "#94a3b8"
+  text-sec: "#475569"
+  text-muted: "#64748b"
   border: "#e2e8f0"
-  success: "#10b981"
+  border-strong: "#cbd5e1"
+  success: "#059669"
   success-soft: "#ecfdf5"
-  warning: "#f59e0b"
+  warning: "#d97706"
   warning-soft: "#fffbeb"
-  danger: "#ef4444"
+  danger: "#dc2626"
   danger-soft: "#fef2f2"
   violet: "#8b5cf6"
 typography:
@@ -25,13 +26,13 @@ typography:
     lineHeight: 1.5
   title:
     fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-    fontSize: "0.95rem"
+    fontSize: "1rem"
     fontWeight: 700
     letterSpacing: "-0.01em"
   mono:
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
 rounded:
-  button: "9px"
+  button: "10px"
   card: "12px"
 spacing:
   md: "16px"
@@ -41,6 +42,7 @@ components:
     textColor: "#ffffff"
     rounded: "{rounded.button}"
     padding: "0.45rem 0.9rem"
+    height: "2.25rem (44px on phones)"
   card:
     backgroundColor: "{colors.surface}"
     rounded: "{rounded.card}"
@@ -82,12 +84,16 @@ Cards radius 12, buttons radius 9, pills fully round. Status reads through pills
 
 - **Button**: inline-flex with icon gap, `.45rem/.9rem` padding; primary is white-on-indigo with a subtle lift shadow; disabled drops to 50% opacity; press is a near-instant settle, not a bounce.
 - **Card**: white, bordered, radius 12; title + small secondary sub-line; content decides internal rhythm.
-- **Tab nav**: sticky segmented pills; active segment carries the accent.
+- **Tab nav**: underline tabs on a white bar; the active tab is indigo text + a 2px indigo underline. The Deployment/Attendance phase switch above it is a grey segmented control with a white selected segment.
 - **Pill/chip**: status vocabulary (neutral, info, success, warning, danger); filter chips are outline with a removable ×.
 - **Toast**: white card, colored icon per severity, slide-fade in ~180ms, top-right stacked.
 - **Table**: header row semibold secondary text; row hover is a background shift only; dense cells, no zebra on screen (zebra reserved for print).
 
 **The Honest-Control Rule.** Every control shows all its states — disabled is visibly disabled, loading replaces content with skeleton rows (never a bare spinner in tables), and destructive actions always confirm.
+
+## Readability pass (2026-11)
+
+Labels are sentence case (stat labels, table heads, form labels, phone card labels) — no 11px grey caps. KPI tiles: 0.8rem label, 1.7rem number; rate tiles show the % as the number with the bar under it. No gradients anywhere (tabs, logo, progress). Phone scanner: badge input first, then a 60px action; disabled reads as grey "not yet", not faded indigo; the scan sheet carries a 6px status band and a solid status disc. Overrides live in the `@media screen` polish layer at the end of `index.css` so print is untouched.
 
 ## Do's and Don'ts
 

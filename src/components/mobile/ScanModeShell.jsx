@@ -8,7 +8,7 @@ import { requestWakeLock, releaseWakeLock, safeBottom } from '../../lib/mobile'
  * existing camera / action / manual / feed / popup nodes as slots, so this
  * is pure chrome — safe-area, dynamic viewport, wake lock.
  *
- * - 100dvh column: header, camera, big action, manual entry, feed.
+ * - 100dvh column: header, camera, manual entry, big action, feed.
  * - Keeps the screen awake while mounted (Wake Lock, re-acquired on
  *   visibilitychange since the lock releases when the tab hides).
  * - Feed region scrolls internally; the page behind does not double-scroll.
@@ -52,8 +52,9 @@ export default function ScanModeShell({
         {pills && <div className="scan-shell-pills">{pills}</div>}
       </div>
       {camera && <div className="scan-shell-camera">{camera}</div>}
-      {action && <div className="scan-shell-action">{action}</div>}
+      {/* Badge entry first, then the big action under the thumb. */}
       {manual && <div className="scan-shell-manual">{manual}</div>}
+      {action && <div className="scan-shell-action">{action}</div>}
       {(queueBar || feedTitle || feed) && (
         <div className="scan-shell-feed">
           {feedTitle && <div className="scan-shell-feed-title">{feedTitle}</div>}
