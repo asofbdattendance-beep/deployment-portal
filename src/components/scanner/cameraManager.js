@@ -218,7 +218,7 @@ export async function ensureUsableResolution(track, opts = {}) {
   const fromW = Number(before.width) || 0
   if (fromW >= minWidth) return noop(fromW)
 
-  let caps = {}
+  let caps
   try { caps = track.getCapabilities?.() || {} } catch { caps = {} }
   const capMax = Number(caps.width?.max) || 0
   // The sensor genuinely cannot do better — nothing to ask for.

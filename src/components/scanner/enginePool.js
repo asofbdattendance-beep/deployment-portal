@@ -332,8 +332,9 @@ export function createEnginePool(debug, opts = {}) {
       }
       return
     }
-    // No ready engine at all: hold position, reset counters, keep waiting.
-    engines.forEach(e => { e.emptyCount = 0 })
+    // (No ready engine at all is unreachable: handoffEmpty only runs from
+    // detect() after a *ready* engine's clean miss, and ready is never
+    // cleared once set. Hold position; nothing to reset.)
   }
 
   /**
