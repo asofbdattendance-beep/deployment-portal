@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { jitteredInterval } from '../lib/jitter'
 import { fetchAllRows } from '../lib/supabase'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
@@ -119,7 +120,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
       setOffline(true)
     }
   }, [selectedScheduleId])
-  useEffect(() => { const id = setInterval(() => refreshSessions(), 15000); return () => clearInterval(id) }, [refreshSessions])
+  useEffect(() => { const clear = jitteredInterval(() => refreshSessions(), 15000, 0.2); return clear }, [refreshSessions])
 
   // T3: clear stale rows the moment the schedule changes — before the new
   // load lands. Declared before the load effect so the clear runs first.

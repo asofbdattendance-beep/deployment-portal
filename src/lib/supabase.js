@@ -201,10 +201,11 @@ export const RPC_PAGE_SPECS = {
     orderBy: [['event_date', 'desc'], ['in_time', 'desc'], ['badge_number', 'asc']],
   },
 }
-export async function fetchAllRpc(name, params = {}, spec = RPC_PAGE_SPECS[name]) {
+export async function fetchAllRpc(name, params = {}, spec = RPC_PAGE_SPECS[name], opts = null) {
   if (!spec || !spec.stableKey || !Array.isArray(spec.orderBy)) {
     throw new Error(`fetchAllRpc(${name}): no page spec — refusing to paginate without a stable key`)
   }
+  const wantCount = !opts || opts.count !== 'none'
   const pageSize = 1000
   const keys = stableKeyCols(spec.stableKey)
   const keyOf = (row) => JSON.stringify(keys.map(k => row?.[k] ?? null))
@@ -215,7 +216,7 @@ export async function fetchAllRpc(name, params = {}, spec = RPC_PAGE_SPECS[name]
     let pages = 0
     while (true) {
       if (++pages > MAX_FETCH_PAGES) throw new Error(`fetchAllRpc(${name}): page guard tripped (> ${MAX_FETCH_PAGES} pages)`)
-      let q = supabase.rpc(name, params, pages === 1 ? { count: 'exact' } : undefined)
+      let q = supabase.rpc(name, params, (pages === 1 && wantCount) ? { count: 'exact' } : undefined)
       const ordered = new Set()
       for (const [col, dir] of spec.orderBy) {
         ordered.add(col)
@@ -227,7 +228,7 @@ export async function fetchAllRpc(name, params = {}, spec = RPC_PAGE_SPECS[name]
       q = q.range(from, from + pageSize - 1)
       const { data, error, count } = await q
       if (error) throw error
-      if (pages === 1 && typeof count === 'number') serverCount = count
+      if (pages === 1 && wantCount && typeof count === 'number') serverCount = count
       for (const row of data || []) {
         const k = keyOf(row)
         if (!byKey.has(k)) byKey.set(k, row) // boundary dups collapse
@@ -238,14 +239,14 @@ export async function fetchAllRpc(name, params = {}, spec = RPC_PAGE_SPECS[name]
     return { rows: [...byKey.values()], serverCount }
   }
   let { rows, serverCount } = await runOnce()
-  if (typeof serverCount === 'number' && rows.length !== serverCount) {
+  if (wantCount && typeof serverCount === 'number' && rows.length !== serverCount) {
     // Genuine drift or a mid-fetch write: one full retry on a fresh snapshot.
     // If it STILL disagrees, fail loudly — a short count must never render
     // as truth (identical contract to fetchAllRows).
     const retry = await runOnce()
     rows = retry.rows
     serverCount = retry.serverCount
-    if (typeof serverCount === 'number' && rows.length !== serverCount) {
+    if (wantCount && typeof serverCount === 'number' && rows.length !== serverCount) {
       throw new Error(
         `fetchAllRpc(${name}): count mismatch after retry — server reports ${serverCount} rows but ${rows.length} unique rows were readable. ` +
         `Refusing to render a partial dataset.`,
@@ -317,9 +318,9 @@ export async function getGroupedCounts(
   return null
 }
 
-export async function fetchCentres() {
+export async function fetchCentres(opts = null) {
   // 40 rows today — still paginated via fetchAllRows so a future import never hits the 1000 cap silently
-  return fetchAllRows('dp_centres', 'id, name, parent_centre', (q) => q.order('name'), 'id')
+  return fetchAllRows('dp_centres', 'id, name, parent_centre', (q) => q.order('name'), 'id', opts)
 }
 
 export async function fetchPortalSettings() {

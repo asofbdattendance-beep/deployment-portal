@@ -29,6 +29,8 @@ import { perfStart, perfMark } from '../lib/perfTimings'
  * @param {string} cfg.label            tag for reportRealtimeStatus console lines
  * @param {number} [cfg.debounceMs=400]
  * @param {number} [cfg.maxWaitMs=2000]
+ * @param {number} [cfg.minIntervalMs=0]  floor: never fire more often than this
+ *   (0 disables). Use to keep a burst from hammering the DB every 2s.
  */
 // Per-subscribe topic suffix. realtime-js `channel(topic)` RETURNS the
 // existing channel when one with that topic is still in the socket's list —
@@ -47,6 +49,7 @@ export function useRealtimeRefresh({
   label,
   debounceMs = 400,
   maxWaitMs = 2000,
+  minIntervalMs = 0,
 }) {
   const reloadRef = useRef(onReload)
   reloadRef.current = onReload
@@ -80,15 +83,26 @@ export function useRealtimeRefresh({
     }
     const reload = () => {
       if (!alive) return
-      // Phase-0 tripwire: every postgres_changes event starts a viewer run;
-      // pages mark 'rows-painted' when their reload lands (same run id via
-      // perfCurrentRun). Paste via __portalPerfDump.
       const viewerRun = perfStart('viewer')
       perfMark('viewer', viewerRun, 'rt-event')
+      const now = Date.now()
+      const since = now - lastReloadAt.current
+      // Floor: during a burst, never fire more often than minIntervalMs.
+      // Defer instead of dropping, so the latest change still lands.
+      if (minIntervalMs > 0 && since < minIntervalMs) {
+        if (timer) clearTimeout(timer)
+        timer = setTimeout(() => {
+          timer = null
+          if (!alive) return
+          perfMark('viewer', viewerRun, 'reload-fired:min-interval')
+          fire()
+        }, minIntervalMs - since)
+        return
+      }
       // Max-wait: the trailing debounce coalesces bursts, but a sustained
       // burst would re-arm it forever and starve the reload. Fire immediately
       // when the last actual load is more than maxWaitMs old.
-      if (Date.now() - lastReloadAt.current > maxWaitMs) {
+      if (since > maxWaitMs) {
         if (timer) clearTimeout(timer)
         timer = null
         perfMark('viewer', viewerRun, 'reload-fired:max-wait')
@@ -124,5 +138,5 @@ export function useRealtimeRefresh({
       if (timer) clearTimeout(timer)
       supabase.removeChannel(channel)
     }
-  }, [scheduleId, channelName, label, debounceMs, maxWaitMs])
+  }, [scheduleId, channelName, label, debounceMs, maxWaitMs, minIntervalMs])
 }

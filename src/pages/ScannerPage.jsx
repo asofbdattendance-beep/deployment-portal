@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
+import { jitteredInterval } from '../lib/jitter'
 import { supabase } from '../lib/supabase'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
@@ -137,7 +138,7 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
   useEffect(()=>{ refreshQueue() },[refreshQueue])
 
   useEffect(()=>{ refresh(); refreshDepts() },[refresh, refreshDepts])
-  useEffect(()=>{ const id=setInterval(()=>refresh(),15000); return()=>clearInterval(id) },[refresh])
+  useEffect(()=>{ const clear=jitteredInterval(()=>refresh(),15000,0.2); return clear },[refresh])
 
   if(!schedules.length) return <div className="page"><div className="card" style={{padding:'2rem', textAlign:'center'}}>No schedules</div></div>
 

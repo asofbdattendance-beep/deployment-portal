@@ -37,6 +37,7 @@
  */
 import { drainQueue, getQueuedScans, QUEUE_CHANGED_EVENT } from './offlineQueue'
 import { supabase } from './supabase'
+import { jitter } from './jitter'
 
 export const SYNC_MESSAGE_TYPE = 'SYNC_QUEUED'
 const SYNC_TAG = 'sewadar-sync'
@@ -258,15 +259,23 @@ export function installOfflineSync() {
     } catch {
       // Service workers unavailable — the DOM listeners still sync.
     }
-    const pollId = w.setInterval(() => {
-      try {
-        if (typeof navigator !== 'undefined' && navigator.onLine === false) return
-        if (d && d.visibilityState !== 'visible') return
-        runDrain()
-      } catch {
-        // Never let the safety net throw.
-      }
-    }, getPollMs())
+    let pollTimer = null
+    let pollStopped = false
+    const schedulePoll = () => {
+      if (pollStopped) return
+      pollTimer = w.setTimeout(() => {
+        if (pollStopped) return
+        try {
+          if (typeof navigator !== 'undefined' && navigator.onLine === false) { schedulePoll(); return }
+          if (d && d.visibilityState !== 'visible') { schedulePoll(); return }
+          runDrain()
+        } catch {
+          // Never let the safety net throw.
+        }
+        schedulePoll()
+      }, jitter(getPollMs(), 0.2))
+    }
+    schedulePoll()
     teardown = () => {
       for (const [target, type, fn] of attached.splice(0)) {
         try {
@@ -275,10 +284,9 @@ export function installOfflineSync() {
           // Detach best-effort.
         }
       }
-      try {
-        w.clearInterval(pollId)
-      } catch {
-        // Best-effort.
+      pollStopped = true
+      if (pollTimer) {
+        try { w.clearTimeout(pollTimer) } catch { /* best-effort */ }
       }
       if (kickTimer) {
         try {

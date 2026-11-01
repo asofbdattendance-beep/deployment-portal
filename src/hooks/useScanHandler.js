@@ -385,7 +385,11 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
   // (D1a), so the ack must not promise a sync that will never come. The row
   // stays visible in the queue with per-row recovery.
   const queuedAck = useCallback((queuedRes, action) => {
+    const online = typeof navigator === 'undefined' || navigator.onLine !== false
     if (queuedRes && queuedRes.owner != null) {
+      if (online) {
+        return { message: 'Server busy — scan saved, will sync', toast: `${action} queued (server busy)`, warn: false }
+      }
       return { message: 'Queued offline — will sync when online', toast: `${action} queued (offline)`, warn: false }
     }
     return {
