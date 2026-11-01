@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { supabase, fetchAllRpc } from '../lib/supabase'
+import { cached, invalidate } from '../lib/queryCache'
 import { useToast } from '../components/Toast'
 import { deptInchargeKpis, timeAgo, VISIT_DAYS, UNASSIGNED_CENTRE, visitColumns, buildAttendanceMatrixFromDayBadges, shortDayLabel } from '../lib/attendance'
 import { scheduleWindow, expandDateRange, clampDateToWindow } from '../lib/sewaMode'
@@ -182,13 +183,21 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
       if (cols.length === 0) {
         setBadgesByDate({})
       } else {
-        const settled = await Promise.allSettled(
-          cols.flatMap((col) => [
-            // per-badge rows → paginated (complete matrix + Excel snapshot)
-            fetchAllRpc('attendance_day_badges', { p_schedule: scheduleId, p_date: col, p_mode: 'present' }),
-            fetchAllRpc('attendance_day_badges', { p_schedule: scheduleId, p_date: col, p_mode: 'absent' }),
-          ])
-        )
+        // Cache per visit-day (schedule + date + mode) so realtime reloads and
+        // StrictMode double-invokes don't re-fire the 2xN fan-out inside TTL.
+        // Concurrency capped at 3: no app-level balancer exists (Supabase LBs
+        // HTTP), so we shed load on the client instead of storming PostgREST.
+        const badgeTasks = cols.flatMap((col) => [
+          () => cached(`deptdash:badges:${scheduleId}:${col}:present`, 5000, () =>
+            fetchAllRpc('attendance_day_badges', { p_schedule: scheduleId, p_date: col, p_mode: 'present' })),
+          () => cached(`deptdash:badges:${scheduleId}:${col}:absent`, 5000, () =>
+            fetchAllRpc('attendance_day_badges', { p_schedule: scheduleId, p_date: col, p_mode: 'absent' })),
+        ])
+        const settled = []
+        for (let i = 0; i < badgeTasks.length; i += 3) {
+          const chunk = badgeTasks.slice(i, i + 3).map((t) => t())
+          settled.push(...(await Promise.allSettled(chunk)))
+        }
         if (!mountedRef.current || seq !== seqRef.current) return
         const failed = settled.find((s) => s.status === 'rejected')
         if (failed) {
@@ -257,7 +266,7 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
       // a row becoming deployed moves the denominator behind every tile
       { table: 'deployments', filter: `schedule_id=eq.${scheduleId}` },
     ],
-    onReload: () => load().catch(() => {}),
+    onReload: () => { invalidate('deptdash:badges:'); return load().catch(() => {}) },
     label: 'incharge-dashboard',
     maxWaitMs: 10000,
   })
@@ -458,7 +467,7 @@ export default function DeptInchargeDashboardPage({ schedules = [], scheduleId, 
         )}
         actions={(
           <>
-            <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
+            <button onClick={() => { invalidate('deptdash:badges:'); load() }} disabled={loading} className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}>
               {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Refresh
             </button>
             <button onClick={exportSnapshot} disabled={exporting || mobileExport.building || !rowsAreCurrent || noWindow || errs.daily || errs.visit || errs.trend || errs.badges} className="btn btn-primary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}>

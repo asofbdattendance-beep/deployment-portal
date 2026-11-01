@@ -23,6 +23,7 @@ import { render, screen, waitFor, cleanup, within, fireEvent } from '@testing-li
 import DeptInchargeDashboardPage from './DeptInchargeDashboardPage'
 import { todayStrIST } from '../lib/scannerUtils'
 import { clampDateToWindow } from '../lib/sewaMode'
+import { __reset as resetQueryCache } from '../lib/queryCache'
 
 const rpc = vi.fn()
 // Delegates to `rpc` fixtures, upholding the real fetchAllRpc contract:
@@ -138,6 +139,7 @@ const kpiRow = (n = 0) => within(document.querySelectorAll('.stat-row')[n])
 
 beforeEach(() => {
   rpc.mockReset()
+  resetQueryCache()
   toastError.mockReset()
   toastSuccess.mockReset()
   toastWarning.mockReset()

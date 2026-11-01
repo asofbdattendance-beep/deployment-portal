@@ -40,14 +40,29 @@ export default function LoginPage() {
         perfMark('login', runId, 'resolve-end')
         const resolved = data && data.email
         if (fnError || !resolved) {
-          const status = fnError && (fnError.status || fnError.code)
-          if (status === 429) throw new Error('Too many attempts — try again in 15 minutes')
+          // Robust 429 detection: supabase-js may put the status on
+          // status/code/context.status, and the body message is a fallback.
+          const status = fnError && (fnError.status || fnError.code || fnError.context?.status)
+          const msg = (fnError && (fnError.message || '')) || ''
+          const rateLimited = status === 429 || status === '429' || /429|too many|rate limit/i.test(msg)
+          if (rateLimited) throw new Error('Too many attempts — try again in 15 minutes')
           throw new Error('No account found for that badge number')
         }
         loginEmail = resolved
       }
       perfMark('login', runId, 'auth-start')
-      await signIn(loginEmail, password)
+      try {
+        await signIn(loginEmail, password)
+      } catch (authErr) {
+        // Supabase Auth has its own per-IP limit on the token endpoint; surface
+        // it as a readable message instead of GoTrue's raw error text.
+        const aStatus = authErr && (authErr.status || authErr.code)
+        const aMsg = (authErr && (authErr.message || '')) || ''
+        if (aStatus === 429 || aStatus === '429' || /429|too many|rate limit/i.test(aMsg)) {
+          throw new Error('Too many sign-in attempts right now — wait a few minutes and try again', { cause: authErr })
+        }
+        throw authErr
+      }
       perfMark('login', runId, 'auth-end')
     } catch (err) {
       perfMark('login', runId, 'failed')
