@@ -227,28 +227,28 @@ describe('ScannerPage render', () => {
   })
 })
 
+function useDesktopMatchMedia() {
+  const real = window.matchMedia
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true, writable: true,
+    value: vi.fn((query) => ({
+      matches: false, // ≥769px → desktop
+      media: query,
+      addEventListener: vi.fn(), removeEventListener: vi.fn(),
+      addListener: vi.fn(), removeListener: vi.fn(),
+    })),
+  })
+  return () => {
+    if (real) Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: real })
+    else delete window.matchMedia
+  }
+}
+
 // The desktop branch is a real render path (a laptop never sees the shell),
 // and the stale-data pins below keep the failure branches live — both were
 // masked when the queue handlers lived in the page and the tests only ever
 // drove the phone layout.
 describe('ScannerPage desktop layout + stale-data paths', () => {
-  function useDesktopMatchMedia() {
-    const real = window.matchMedia
-    Object.defineProperty(window, 'matchMedia', {
-      configurable: true, writable: true,
-      value: vi.fn((query) => ({
-        matches: false, // ≥769px → desktop
-        media: query,
-        addEventListener: vi.fn(), removeEventListener: vi.fn(),
-        addListener: vi.fn(), removeListener: vi.fn(),
-      })),
-    })
-    return () => {
-      if (real) Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: real })
-      else delete window.matchMedia
-    }
-  }
-
   it('renders the desktop cards (no scan shell) and can scan from them', async () => {
     const restore = useDesktopMatchMedia()
     try {
@@ -517,5 +517,66 @@ describe('ScannerPage ASO sewadar picker', () => {
     const lookups = mocks.rpc.mock.calls.filter(([name]) => name === 'get_scan_state')
     expect(lookups.length).toBeGreaterThan(0)
     expect(lookups[0][1]).toMatchObject({ p_badge: 'FB5971GA0001', p_schedule: 'sched-1' })
+  })
+
+  it('optimistically prepends the scanned session to recent scans immediately upon scan confirmation', async () => {
+    const restore = useDesktopMatchMedia()
+    try {
+      mocks.rpc.mockImplementation((fn) => {
+        if (fn === 'get_scan_state') {
+          return Promise.resolve({
+            data: {
+              open: null,
+              last_out: null,
+              sewadar: {
+                sewadar_name: 'Optimistic Tester',
+                sewadar_centre: 'DELHI',
+                sewadar_dept: 'dept-1',
+                dept_name: 'Langar',
+              },
+            },
+          })
+        }
+        if (fn === 'scan_in') {
+          return Promise.resolve({
+            data: {
+              ok: true,
+              sewadar_name: 'Optimistic Tester',
+              sewadar_centre: 'DELHI',
+              dept_name: 'Langar',
+              late_in: false,
+            },
+          })
+        }
+        return Promise.resolve({ data: null })
+      })
+
+      render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+      await settle()
+      expect(screen.getByText('No scans by you yet today')).toBeTruthy()
+
+      const input = screen.getByPlaceholderText('Manual FB/VS badge')
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        setter.call(input, 'FB5971GA0001')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByText('Mark In/Out'))
+        await new Promise(r => setTimeout(r, 50))
+      })
+
+      const markInBtn = screen.getByRole('button', { name: /^Mark IN$/i })
+      await act(async () => {
+        fireEvent.click(markInBtn)
+        await new Promise(r => setTimeout(r, 50))
+      })
+
+      expect(screen.queryByText('No scans by you yet today')).toBeNull()
+      expect(screen.getAllByText('FB5971GA0001').length).toBeGreaterThanOrEqual(1)
+      expect(screen.getAllByText('Optimistic Tester').length).toBeGreaterThanOrEqual(1)
+    } finally {
+      restore()
+    }
   })
 })

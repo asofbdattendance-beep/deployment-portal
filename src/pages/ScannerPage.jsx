@@ -11,7 +11,7 @@ import { useScannerSession } from '../hooks/useScannerSession'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import ScanModeShell from '../components/mobile/ScanModeShell'
 import MobileScanFeed from '../components/mobile/MobileScanFeed'
-import { todayStrIST } from '../lib/scannerUtils'
+import { todayStrIST, hmsIST } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import { useSewadarDirectory } from '../hooks/useSewadarDirectory'
 import { useDeptNames, refreshDeptNames } from '../hooks/useDeptNames'
@@ -84,7 +84,13 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
       const { data: sess, error: sessError } = await q
         .order('updated_at',{ascending:false}).order('created_at',{ascending:false}).limit(10)
       if (sessError) throw new Error(`Recent scans: ${sessError.message || sessError.code || 'failed'}`)
-      setSessions(Array.isArray(sess) ? sess : [])
+      setSessions((prev) => {
+        const serverRows = Array.isArray(sess) ? sess : []
+        const pendingOpt = prev.filter(
+          (p) => typeof p.id === 'string' && p.id.startsWith('opt-') && !serverRows.some((s) => s.badge_number === p.badge_number)
+        )
+        return [...pendingOpt, ...serverRows].slice(0, 10)
+      })
       setOffline(false)
     } catch(e){ console.warn('[Scanner] session refresh failed — keeping last data:', e?.message); setOffline(true) }
   },[scheduleId,myBadge])
@@ -111,6 +117,39 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
 
   const clearManual = useCallback(() => setManualBadge(''), [])
 
+  // Optimistic local prepend so the scanner operator sees the updated row
+  // with 0ms UI delay without waiting for server roundtrips.
+  const onAfterScan = useCallback((scan) => {
+    if (scan?.badge) {
+      const today = todayStrIST()
+      const nowHms = hmsIST()
+      setSessions((prev) => {
+        const existingIdx = prev.findIndex((s) => s.badge_number === scan.badge)
+        const existing = existingIdx >= 0 ? prev[existingIdx] : null
+        const optRow = {
+          id: existing?.id || `opt-${Date.now()}`,
+          badge_number: scan.badge,
+          sewadar_name: scan.sewadar_name || existing?.sewadar_name || '',
+          sewadar_centre: scan.sewadar_centre || existing?.sewadar_centre || '',
+          sewadar_dept: scan.dept_id || existing?.sewadar_dept || null,
+          in_date: scan.action === 'IN' ? today : (existing?.in_date || today),
+          out_date: scan.action === 'OUT' ? today : (existing?.out_date || null),
+          in_time: scan.action === 'IN' ? (scan.in_time || nowHms) : (existing?.in_time || nowHms),
+          out_time: scan.action === 'OUT' ? (scan.out_time || nowHms) : (existing?.out_time || null),
+          is_vss: !!scan.is_vss || !!existing?.is_vss,
+          undeployed_scan: !!scan.undeployed || !!existing?.undeployed_scan,
+          is_late_in: scan.is_late_in !== undefined ? !!scan.is_late_in : !!existing?.is_late_in,
+          is_early_out: scan.is_early_out !== undefined ? !!scan.is_early_out : !!existing?.is_early_out,
+          updated_at: new Date().toISOString(),
+          created_at: existing?.created_at || new Date().toISOString(),
+        }
+        const rest = existingIdx >= 0 ? prev.filter((_, i) => i !== existingIdx) : prev
+        return [optRow, ...rest].slice(0, 10)
+      })
+    }
+    refresh()
+  }, [refresh])
+
   const {
     popup, outTime, setOutTime, closePopup,
     handleScan, handleCameraScan, commitScan, confirmForgot,
@@ -123,7 +162,7 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
     deptNameById,
     directoryByBadge,
     toast,
-    onAfterScan: refresh,
+    onAfterScan,
     forgotSuccessToast: 'OUT closed',
     clearManual,
   })

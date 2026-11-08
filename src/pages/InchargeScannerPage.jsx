@@ -6,7 +6,7 @@ import { useToast } from '../components/Toast'
 import BarcodeScanner from '../components/scanner/BarcodeScanner'
 import ScanResultPopup from '../components/scanner/ScanResultPopup'
 import RecentScansTable from '../components/scanner/RecentScansTable'
-import { todayStrIST } from '../lib/scannerUtils'
+import { todayStrIST, hmsIST } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import { useScannerSession } from '../hooks/useScannerSession'
 import { useSewadarDirectory } from '../hooks/useSewadarDirectory'
@@ -176,6 +176,39 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
   // unchanged while desktop offline gains popup identity.
   const directoryByBadge = useSewadarDirectory({ scheduleId: selectedScheduleId, enabled: true })
 
+  // Optimistic local prepend for 0ms operator feedback
+  const onAfterScan = useCallback((scan) => {
+    if (scan?.badge) {
+      const today = todayStrIST()
+      const nowHms = hmsIST()
+      setSessions((prev) => {
+        const existingIdx = prev.findIndex((s) => s.badge_number === scan.badge)
+        const existing = existingIdx >= 0 ? prev[existingIdx] : null
+        const optRow = {
+          id: existing?.id || `opt-${Date.now()}`,
+          badge_number: scan.badge,
+          sewadar_name: scan.sewadar_name || existing?.sewadar_name || '',
+          sewadar_centre: scan.sewadar_centre || existing?.sewadar_centre || '',
+          sewadar_dept: scan.dept_id || existing?.sewadar_dept || null,
+          in_date: scan.action === 'IN' ? today : (existing?.in_date || today),
+          out_date: scan.action === 'OUT' ? today : (existing?.out_date || null),
+          in_time: scan.action === 'IN' ? (scan.in_time || nowHms) : (existing?.in_time || nowHms),
+          out_time: scan.action === 'OUT' ? (scan.out_time || nowHms) : (existing?.out_time || null),
+          is_vss: !!scan.is_vss || !!existing?.is_vss,
+          undeployed_scan: !!scan.undeployed || !!existing?.undeployed_scan,
+          is_late_in: scan.is_late_in !== undefined ? !!scan.is_late_in : !!existing?.is_late_in,
+          is_early_out: scan.is_early_out !== undefined ? !!scan.is_early_out : !!existing?.is_early_out,
+          updated_at: new Date().toISOString(),
+          created_at: existing?.created_at || new Date().toISOString(),
+        }
+        const rest = existingIdx >= 0 ? prev.filter((_, i) => i !== existingIdx) : prev
+        return [optRow, ...rest].slice(0, 10)
+      })
+      setTotalScansCount((prev) => prev + 1)
+    }
+    refreshSessions()
+  }, [refreshSessions])
+
   const {
     popup, outTime, setOutTime, closePopup,
     handleScan, handleCameraScan, commitScan, confirmForgot,
@@ -188,7 +221,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
     deptNameById,
     directoryByBadge,
     toast,
-    onAfterScan: refreshSessions,
+    onAfterScan,
     forgotSuccessToast: 'OUT closed, now you can IN',
     clearManual,
   })
