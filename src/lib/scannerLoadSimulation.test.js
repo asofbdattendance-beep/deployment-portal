@@ -171,6 +171,7 @@ describe('150 Concurrent Scanners Load Simulation', () => {
     // Final audit: total committed sessions in database must be exactly 600 with zero duplicates
     expect(committedSessions.size).toBe(NUM_SCANNERS * SCANS_PER_SCANNER)
     expect(serverTotalIn).toBe(NUM_SCANNERS * SCANS_PER_SCANNER)
+    expect(serverTotalOut).toBe(0)
   })
 
   it('anti-thundering herd reconnect delay generates distributed offsets across 150 devices', () => {
