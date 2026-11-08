@@ -111,11 +111,12 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   const [search, setSearch] = useState('')
   const [filterCentre, setFilterCentre] = useState('all')
   const [filterDept, setFilterDept] = useState('all')
+  const [filterFlag, setFilterFlag] = useState('all')
   // Mobile filter sheet state. The sheet hosts the SAME filter controls as
   // the desktop toolbar (same state, same handlers) — never a fork.
   const isMobile = useIsMobile()
   const [filtersOpen, setFiltersOpen] = useState(false)
-  const clearFilters = () => { setFilterCentre('all'); setFilterDept('all'); setSearch('') }
+  const clearFilters = () => { setFilterCentre('all'); setFilterDept('all'); setFilterFlag('all'); setSearch('') }
   // Per-RPC errors, not one all-or-nothing flag. Only the sewadar summary
   // failing blanks the page (every tab and tile is built on it); a daily or
   // scanner-ops failure degrades that tab in place while the healthy datasets
@@ -245,6 +246,7 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
   useEffect(() => {
     setFilterCentre('all')
     setFilterDept('all')
+    setFilterFlag('all')
   }, [scheduleId])
 
   // A13: mark the in-flight rows as belonging to nothing the moment the schedule
@@ -327,13 +329,18 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     if (filterDept !== 'all' && !depts.includes(filterDept)) setFilterDept('all')
   }, [depts, filterDept])
 
-  // Filter on centre → dept → search, in that order, so the option lists stay
+  // Filter on centre → dept → flag → search, in that order, so the option lists stay
   // scoped to what the caller can actually see.
   const visible = useMemo(() => {
     let rows = centreFiltered
     rows = filterByDept(rows, filterDept)
+    if (filterFlag === 'open') {
+      rows = rows.filter((r) => r.open_sessions > 0)
+    } else if (filterFlag === 'undeployed') {
+      rows = rows.filter((r) => r.undeployed_scan)
+    }
     return searchRows(rows, search)
-  }, [centreFiltered, filterDept, search])
+  }, [centreFiltered, filterDept, filterFlag, search])
 
   // L-45: the header tiles describe the same filter set as the tables and
   // the export (ReportsPage already totals its visible rows) — never the
@@ -359,38 +366,63 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     return value === filterCentre
   }
 
-  const filtering = filterCentre !== 'all' || filterDept !== 'all' || search.trim() !== ''
+  const filtering = filterCentre !== 'all' || filterDept !== 'all' || filterFlag !== 'all' || search.trim() !== ''
 
   const visibleDaily = useMemo(() => {
     if (!filtering) return dailyRows
-    return dailyRows.filter(
-      (r) => centreMatches(r.centre) && (filterDept === 'all' || r.dept_name === filterDept) && matchText(search, r.centre, r.dept_name)
-    )
+    return dailyRows.filter((r) => {
+      if (!centreMatches(r.centre)) return false
+      if (filterDept !== 'all' && r.dept_name !== filterDept) return false
+      if (filterFlag === 'open' && (!r.open_now || r.open_now <= 0)) return false
+      return matchText(search, r.centre, r.dept_name)
+    })
     // `centreMatches` / `matchText` are pure helpers redefined each render; the
     // listed deps fully determine the result.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dailyRows, filterCentre, filterDept, search, filtering])
+  }, [dailyRows, filterCentre, filterDept, filterFlag, search, filtering])
   const visibleTotals = useMemo(() => dailyTotals(visibleDaily), [visibleDaily])
 
   const visibleScanner = useMemo(() => {
     if (!filtering) return scannerRows
     // Scanners carry no department, so the dept filter does not apply here —
     // but it still narrows the export, so it is surfaced in the sheet title.
-    return scannerRows.filter((r) => centreMatches(r.scanner_centre) && matchText(search, r.scanner_name, r.scanner_badge, r.scanner_centre))
+    return scannerRows.filter((r) => {
+      if (!centreMatches(r.scanner_centre)) return false
+      if (filterFlag === 'open' && (!r.open_now || r.open_now <= 0)) return false
+      return matchText(search, r.scanner_name, r.scanner_badge, r.scanner_centre)
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scannerRows, filterCentre, search, filtering])
+  }, [scannerRows, filterCentre, filterFlag, search, filtering])
 
   // The Logs tab answers "who scanned what, when, by whom" for the whole
-  // schedule: same centre/dept/search controls, plus the scanner identities.
+  // schedule: same centre/dept/search controls, plus the scanner identities and timing tags.
   const visibleLog = useMemo(() => {
     if (!filtering) return logRows
-    return logRows.filter(
-      (r) => centreMatches(r.sewadar_centre)
-        && (filterDept === 'all' || r.dept_name === filterDept)
-        && matchText(search, r.badge_number, r.sewadar_name, r.sewadar_centre, r.dept_name, r.in_by, r.out_by)
-    )
+    return logRows.filter((r) => {
+      if (!centreMatches(r.sewadar_centre)) return false
+      if (filterDept !== 'all' && r.dept_name !== filterDept) return false
+      if (filterFlag === 'late_in' && !r.is_late_in) return false
+      if (filterFlag === 'early_out' && !r.is_early_out) return false
+      if (filterFlag === 'auto_out' && !r.is_auto_out) return false
+      if (filterFlag === 'open' && r.status !== 'OPEN') return false
+      if (filterFlag === 'undeployed' && !r.undeployed_scan) return false
+      return matchText(
+        search,
+        r.badge_number,
+        r.sewadar_name,
+        r.sewadar_centre,
+        r.dept_name,
+        r.in_by,
+        r.out_by,
+        r.is_late_in ? 'late in late' : '',
+        r.is_early_out ? 'early out early' : '',
+        r.is_auto_out ? 'auto out' : '',
+        r.status === 'OPEN' ? 'open' : '',
+        r.undeployed_scan ? 'undeployed' : ''
+      )
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [logRows, filterCentre, filterDept, search, filtering])
+  }, [logRows, filterCentre, filterDept, filterFlag, search, filtering])
 
   // A4: every sheet title states the active filter, so a filtered export can
   // never be mistaken for a full one.
@@ -398,9 +430,19 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     const parts = []
     if (filterCentre !== 'all') parts.push(filterCentre)
     if (filterDept !== 'all') parts.push(filterDept)
+    if (filterFlag !== 'all') {
+      const flagMap = {
+        late_in: 'Late In',
+        early_out: 'Early Out',
+        auto_out: 'Auto Out',
+        open: 'Open',
+        undeployed: 'Undeployed',
+      }
+      parts.push(flagMap[filterFlag] || filterFlag)
+    }
     if (search.trim()) parts.push(`"${search.trim()}"`)
     return parts.length ? ` · ${parts.join(' · ')}` : ''
-  }, [filterCentre, filterDept, search])
+  }, [filterCentre, filterDept, filterFlag, search])
 
   // Mobile filter bar + sheet share these nodes (same state as desktop).
   const filtersNode = (<>
@@ -412,6 +454,14 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
       <option value="all">All departments</option>
       {depts.map((d) => <option key={d} value={d}>{d}</option>)}
     </select>
+    <select value={filterFlag} onChange={(e) => setFilterFlag(e.target.value)} className="select" aria-label="Filter by flag">
+      <option value="all">All flags / tags</option>
+      <option value="late_in">Late In</option>
+      <option value="early_out">Early Out</option>
+      <option value="auto_out">Auto out</option>
+      <option value="open">Open sessions</option>
+      <option value="undeployed">Undeployed</option>
+    </select>
     <div style={{ position: 'relative', minWidth: 200 }}>
       <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }} />
       <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name / badge / centre..." className="input" style={{ width: '100%', paddingLeft: 30 }} aria-label="Search attendance" />
@@ -421,12 +471,23 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     const chips = []
     if (filterCentre !== 'all') chips.push({ key: 'centre', label: `Centre: ${filterCentre}` })
     if (filterDept !== 'all') chips.push({ key: 'dept', label: `Dept: ${filterDept}` })
+    if (filterFlag !== 'all') {
+      const flagMap = {
+        late_in: 'Late In',
+        early_out: 'Early Out',
+        auto_out: 'Auto Out',
+        open: 'Open Sessions',
+        undeployed: 'Undeployed',
+      }
+      chips.push({ key: 'flag', label: `Tag: ${flagMap[filterFlag] || filterFlag}` })
+    }
     if (search.trim()) chips.push({ key: 'search', label: `"${search.trim()}"` })
     return chips
-  }, [filterCentre, filterDept, search])
+  }, [filterCentre, filterDept, filterFlag, search])
   const clearFilterChip = (key) => {
     if (key === 'centre') setFilterCentre('all')
     else if (key === 'dept') setFilterDept('all')
+    else if (key === 'flag') setFilterFlag('all')
     else if (key === 'search') setSearch('')
   }
   const filterResultText = tab === 'sewadars'
@@ -1048,13 +1109,30 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
             ) : (
               // Whole-schedule log, newest first — one compact line per
               // session, so IN/IN-by and OUT/OUT-by read as a single story.
-              <DataTable
-                columns={logColumns}
-                rows={visibleLog}
-                rowKey={(r) => r.id}
-                sticky={false}
-                label="Scan log"
-              />
+              <>
+                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '0.75rem', alignItems: 'center' }}>
+                  <span className="pill pill-gray" style={{ fontSize: '0.75rem' }}>Total: {visibleLog.length}</span>
+                  {visibleLog.some((r) => r.is_late_in) && (
+                    <span className="pill pill-amber" style={{ fontSize: '0.75rem' }}>Late In: {visibleLog.filter((r) => r.is_late_in).length}</span>
+                  )}
+                  {visibleLog.some((r) => r.is_early_out) && (
+                    <span className="pill pill-amber" style={{ fontSize: '0.75rem' }}>Early Out: {visibleLog.filter((r) => r.is_early_out).length}</span>
+                  )}
+                  {visibleLog.some((r) => r.is_auto_out) && (
+                    <span className="pill pill-blue" style={{ fontSize: '0.75rem' }}>Auto out: {visibleLog.filter((r) => r.is_auto_out).length}</span>
+                  )}
+                  {visibleLog.some((r) => r.status === 'OPEN') && (
+                    <span className="pill pill-amber" style={{ fontSize: '0.75rem' }}>Open now: {visibleLog.filter((r) => r.status === 'OPEN').length}</span>
+                  )}
+                </div>
+                <DataTable
+                  columns={logColumns}
+                  rows={visibleLog}
+                  rowKey={(r) => r.id}
+                  sticky={false}
+                  label="Scan log"
+                />
+              </>
             )}
           </>
         )}
