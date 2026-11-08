@@ -94,8 +94,10 @@ BEGIN
 
   -- Idempotency check
   IF p_nonce IS NOT NULL THEN
-    PERFORM 1 FROM public.dp_attendance_sessions
-     WHERE schedule_id = p_schedule AND nonce = p_nonce;
+    SELECT is_late_in INTO v_is_late_in
+      FROM public.dp_attendance_sessions
+     WHERE schedule_id = p_schedule AND nonce = p_nonce
+     LIMIT 1;
     IF FOUND THEN
       v_s := public.get_sewadar_by_badge(p_badge);
       SELECT COALESCE(deployed_department_id, department_id) INTO v_dept
@@ -106,7 +108,7 @@ BEGIN
         'ok', true,
         'dedup', true,
         'undeployed', (v_dept IS NULL),
-        'late_in', false,
+        'late_in', COALESCE(v_is_late_in, false),
         'sewadar_name', COALESCE(v_s->>'sewadar_name',''),
         'sewadar_centre', v_s->>'centre',
         'dept_name', public.dept_name_by_id(v_dept));
@@ -262,14 +264,14 @@ BEGIN
     RAISE EXCEPTION 'OUT time must be after IN time';
   END IF;
 
-  -- Evaluate shift cutoff for Early Out
+  -- Evaluate shift cutoff for Early Out (only on same calendar day as IN)
   IF v_open.sewadar_dept IS NOT NULL THEN
     SELECT COALESCE(sdt.expected_out_time, d.expected_out_time) INTO v_expected_out
       FROM public.deployment_departments d
       LEFT JOIN public.schedule_department_timings sdt
         ON sdt.department_id = d.id AND sdt.schedule_id = p_schedule
      WHERE d.id = v_open.sewadar_dept;
-    IF v_expected_out IS NOT NULL AND v_out_time < v_expected_out THEN
+    IF v_expected_out IS NOT NULL AND v_out_date <= v_open.in_date AND v_out_time < v_expected_out THEN
       v_is_early_out := true;
     END IF;
   END IF;

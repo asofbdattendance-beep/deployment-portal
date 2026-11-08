@@ -469,9 +469,29 @@ function DepartmentsPanel({ schedule, isSuper, toast }) {
   const loadDepts = useCallback(async () => {
     try {
       const data = await fetchAllRows('deployment_departments', '*', (q) => q.order('name'), 'id')
-      setDepts(data || [])
+      let list = data || []
+      if (schedule?.id) {
+        try {
+          const sdtList = await fetchAllRows('schedule_department_timings', '*', (q) => q.eq('schedule_id', schedule.id), ['schedule_id', 'department_id'])
+          if (Array.isArray(sdtList) && sdtList.length > 0) {
+            const timingMap = new Map(sdtList.map(t => [t.department_id, t]))
+            list = list.map(d => {
+              const timing = timingMap.get(d.id)
+              if (!timing) return d
+              return {
+                ...d,
+                expected_in_time: timing.expected_in_time || d.expected_in_time,
+                expected_out_time: timing.expected_out_time || d.expected_out_time,
+              }
+            })
+          }
+        } catch (err) {
+          console.warn('schedule_department_timings list failed:', err.message)
+        }
+      }
+      setDepts(list)
     } catch (err) { toast.error(`Could not load departments: ${err.message}`) }
-  }, [toast])
+  }, [schedule?.id, toast])
 
   useEffect(() => { loadDepts() }, [loadDepts])
 
@@ -531,13 +551,13 @@ function DepartmentsPanel({ schedule, isSuper, toast }) {
       .eq('id', deptId)
     if (error) { toast.error(error.message); return }
     if (schedule?.id) {
-      try {
-        await supabase.from('schedule_department_timings')
-          .delete()
-          .eq('schedule_id', schedule.id)
-          .eq('department_id', deptId)
-      } catch (err) {
-        console.warn('schedule_department_timings delete failed:', err.message)
+      const { error: delErr } = await supabase.from('schedule_department_timings')
+        .delete()
+        .eq('schedule_id', schedule.id)
+        .eq('department_id', deptId)
+      if (delErr) {
+        toast.error(`Could not reset schedule timings: ${delErr.message}`)
+        return
       }
     }
     setRulesDeptId(null)
@@ -545,26 +565,9 @@ function DepartmentsPanel({ schedule, isSuper, toast }) {
     toast.success('Rules reset to defaults')
   }
 
-  const openRules = async (dept) => {
-    setRulesDeptId(dept.id)
+  const openRules = (dept) => {
     let inTime = dept.expected_in_time ? String(dept.expected_in_time).slice(0, 5) : '08:00'
     let outTime = dept.expected_out_time ? String(dept.expected_out_time).slice(0, 5) : '17:00'
-    if (schedule?.id) {
-      try {
-        const { data } = await supabase
-          .from('schedule_department_timings')
-          .select('expected_in_time, expected_out_time')
-          .eq('schedule_id', schedule.id)
-          .eq('department_id', dept.id)
-          .maybeSingle()
-        if (data) {
-          if (data.expected_in_time) inTime = String(data.expected_in_time).slice(0, 5)
-          if (data.expected_out_time) outTime = String(data.expected_out_time).slice(0, 5)
-        }
-      } catch (err) {
-        console.warn('schedule_department_timings read failed:', err.message)
-      }
-    }
     setRules({
       min_days: dept.min_days ?? 1, requires_stay_at_bhati: !!dept.requires_stay_at_bhati, requires_initiated: !!dept.requires_initiated,
       include_vss: !!dept.include_vss, vss_min_days: dept.vss_min_days ?? 1,
@@ -573,6 +576,28 @@ function DepartmentsPanel({ schedule, isSuper, toast }) {
       expected_in_time: inTime,
       expected_out_time: outTime,
     })
+    setRulesDeptId(dept.id)
+
+    if (schedule?.id) {
+      supabase
+        .from('schedule_department_timings')
+        .select('expected_in_time, expected_out_time')
+        .eq('schedule_id', schedule.id)
+        .eq('department_id', dept.id)
+        .maybeSingle()
+        .then(({ data }) => {
+          if (data) {
+            setRules(prev => ({
+              ...prev,
+              expected_in_time: data.expected_in_time ? String(data.expected_in_time).slice(0, 5) : prev.expected_in_time,
+              expected_out_time: data.expected_out_time ? String(data.expected_out_time).slice(0, 5) : prev.expected_out_time,
+            }))
+          }
+        })
+        .catch(err => {
+          console.warn('schedule_department_timings read failed:', err.message)
+        })
+    }
   }
 
   const saveRules = async (deptId) => {
@@ -598,16 +623,16 @@ function DepartmentsPanel({ schedule, isSuper, toast }) {
     if (error) { toast.error(error.message); return }
 
     if (schedule?.id) {
-      try {
-        await supabase.from('schedule_department_timings').upsert({
-          schedule_id: schedule.id,
-          department_id: deptId,
-          expected_in_time: rules.expected_in_time || null,
-          expected_out_time: rules.expected_out_time || null,
-          updated_at: new Date().toISOString(),
-        })
-      } catch (err) {
-        console.warn('schedule_department_timings upsert failed:', err.message)
+      const { error: timingErr } = await supabase.from('schedule_department_timings').upsert({
+        schedule_id: schedule.id,
+        department_id: deptId,
+        expected_in_time: rules.expected_in_time || null,
+        expected_out_time: rules.expected_out_time || null,
+        updated_at: new Date().toISOString(),
+      })
+      if (timingErr) {
+        toast.error(`Could not save schedule timings: ${timingErr.message}`)
+        return
       }
     }
 

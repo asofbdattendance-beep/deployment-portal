@@ -22,7 +22,7 @@ import { ScanLine, Clock, Wifi, WifiOff, RefreshCw, Loader2 } from 'lucide-react
 // Narrow session columns — this is all RecentScansTable reads. Same list as
 // DeptInchargePage (V9: `created_at` is load-bearing — recent scans are ordered
 // by it, not id; T5: `sewadar_centre` is load-bearing).
-const SESSION_COLS = 'id,badge_number,sewadar_name,sewadar_centre,sewadar_dept,in_date,out_date,in_time,out_time,is_vss,undeployed_scan,created_at'
+const SESSION_COLS = 'id,badge_number,sewadar_name,sewadar_centre,sewadar_dept,in_date,out_date,in_time,out_time,is_vss,undeployed_scan,is_late_in,is_early_out,created_at'
 
 // InchargeScannerPage — the scanner-only page for the dept_incharge
 // Attendance tab. Scan wiring mirrors DeptInchargePage's scan tab
@@ -229,6 +229,8 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
       onOutTimeChange={setOutTime}
       onClose={closePopup}
       onConfirm={popup?.status === 'forgot' ? confirmForgot : popup?.status === 'choose' ? commitScan : closePopup}
+      is_late_in={popup?.is_late_in}
+      is_early_out={popup?.is_early_out}
     />
   )
 

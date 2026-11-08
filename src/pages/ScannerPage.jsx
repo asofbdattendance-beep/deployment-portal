@@ -75,7 +75,7 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
       // Narrow column list — this is all RecentScansTable + the header read.
       // `select('*')` would also drag in any future fat column on every poll.
       let q = supabase.from('dp_attendance_sessions')
-        .select('id,badge_number,sewadar_name,sewadar_dept,in_date,out_date,in_time,out_time,is_vss,undeployed_scan,updated_at')
+        .select('id,badge_number,sewadar_name,sewadar_dept,in_date,out_date,in_time,out_time,is_vss,undeployed_scan,is_late_in,is_early_out,updated_at')
         .eq('schedule_id',scheduleId).or(badgeOr)
       // supabase-js RESOLVES with { data, error } — it never rejects — so a
       // `.then(r => r.data || [])` here turned a denied/failed read into a
@@ -179,6 +179,8 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
       onOutTimeChange={setOutTime}
       onClose={closePopup}
       onConfirm={popup?.status==='forgot' ? confirmForgot : popup?.status==='choose' ? commitScan : closePopup}
+      is_late_in={popup?.is_late_in}
+      is_early_out={popup?.is_early_out}
     />
   )
   const manualSubmit = () => { handleScan(manualBadge, { manual: true }) }
