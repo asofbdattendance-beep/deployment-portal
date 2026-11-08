@@ -21,7 +21,7 @@ vi.mock('./supabase', () => ({
   },
 }))
 
-const { enqueueScan, getQueuedScans, removeQueued, markFailed, clearFailedQueue, clearLiveQueue, clearOrphanedQueue, drainQueue, classifyScanError, isNetworkNotReached, isStrandedRow, listStrandedQueue, getDrainTiming, __resetDrainState, __getConsecutiveFailures, cacheSet, getCachedDeployed, preloadDeployed, installDrainListeners, QUEUE_CHANGED_EVENT } = await import('./offlineQueue')
+const { enqueueScan, getQueuedScans, removeQueued, markFailed, clearFailedQueue, clearLiveQueue, clearOrphanedQueue, drainQueue, classifyScanError, autoOutSessionId, isNetworkNotReached, isStrandedRow, listStrandedQueue, getDrainTiming, __resetDrainState, __getConsecutiveFailures, cacheSet, getCachedDeployed, preloadDeployed, installDrainListeners, QUEUE_CHANGED_EVENT } = await import('./offlineQueue')
 
 /** Read EVERY row in the store, bypassing the owner filter — test-only helper. */
 function allRows() {
@@ -359,6 +359,7 @@ describe('classifyScanError (Task 1: L-04 + L-08)', () => {
     ['Failed to fetch', 'retry'],
     ['Drain IN timed out after 10000ms', 'retry'],
     ['PGRST202 whatever', 'retry'],
+    ['Auto-closed at 21:00 — scan OUT instead (session 3f2a9c1e-5b7d-4e8a-9c0b-1d2e3f4a5b6c)', 'auto_out'],
     ['', 'retry'],
   ])('classifies %p as %p', (msg, expected) => {
     expect(classifyScanError(msg)).toBe(expected)
@@ -806,6 +807,51 @@ describe('worst-case data-loss fixes (C1/C3/C4/C5/C6 + cap policy)', () => {
   const live = (id, extra = {}) => ({
     id, badge: 'VS0001', schedule_id: 's', action: 'IN', ts: '2026-09-24T09:00:00Z',
     createdAt: 1, attempts: 0, synced: false, owner: 'user-A', ...extra,
+  })
+
+  // v83: scan_in refuses a same-date IN after a 21:00 auto-out. The queued IN
+  // was really that session's OUT — replay it as one, never a second session.
+  const AUTO_ID = '3f2a9c1e-5b7d-4e8a-9c0b-1d2e3f4a5b6c'
+  const autoOutErr = () => new Error(`Auto-closed at 21:00 — scan OUT instead (session ${AUTO_ID})`)
+
+  it('v83: a queued IN hitting the auto-out guard is replayed as scan_out on that session, then removed', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw(live('ao1', { badge: 'VS0031', ts: '2026-09-24T16:00:00Z', is_manual: true }))
+    const drained = await drainQueue(fakeSupabase(calls, (name) => (
+      name === 'scan_in' ? { data: null, error: autoOutErr() } : { data: { ok: true }, error: null }
+    )))
+    expect(drained).toBe(1)
+    expect(calls.map((c) => c[0])).toEqual(['scan_in', 'scan_out'])
+    // Pinned to the auto-closed session, at the operator's scan time.
+    expect(calls[1][1]).toMatchObject({ p_badge: 'VS0031', p_schedule: 's', p_open_id: AUTO_ID, p_ts: '2026-09-24T16:00:00.000Z', p_is_manual: true })
+    expect(await allRows()).toHaveLength(0)
+  })
+
+  it('v83: a failed replay quarantines the IN (visible), never deletes it, and keeps draining', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw(live('ao2', { badge: 'VS0032', createdAt: 1 }))
+    await putRaw(live('ao3', { badge: 'VS0033', createdAt: 2 }))
+    const drained = await drainQueue(fakeSupabase(calls, (name, params) => {
+      if (name === 'scan_in' && params.p_badge === 'VS0032') return { data: null, error: autoOutErr() }
+      if (name === 'scan_out') return { data: null, error: new Error('OUT time must be after IN time') }
+      return { data: { ok: true }, error: null }
+    }))
+    expect(drained).toBe(1) // ao3 still drained — no head-of-line block
+    const row = (await allRows()).find((r) => r.id === 'ao2')
+    expect(row.failed).toBe(true)
+    expect(row.status).toBe('failed')
+  })
+
+  it('v83: a guard message without a session id is quarantined, not retried', async () => {
+    __resetDrainState()
+    const calls = []
+    await putRaw(live('ao4', { badge: 'VS0034' }))
+    const drained = await drainQueue(fakeSupabase(calls, () => ({ data: null, error: new Error('Auto-closed at 21:00 — scan OUT instead') })))
+    expect(drained).toBe(0)
+    expect(calls.map((c) => c[0])).toEqual(['scan_in'])
+    expect((await allRows()).find((r) => r.id === 'ao4').failed).toBe(true)
   })
 
   it('C1: a drain-IN timeout burns ONE attempt but still breaks (server-possibly-reached)', async () => {
@@ -1298,5 +1344,16 @@ describe('december readiness: dead connection + C6 OUT time', () => {
     expect(await drainQueue(c6Client(calls, { id: 'open-2', in_date: '2026-09-24', in_time: '15:00:00' }))).toBe(1)
     const out = calls.find((c) => c[0] === 'scan_out')
     expect(new Date(out[1].p_ts).getTime()).toBeGreaterThanOrEqual(before)
+  })
+})
+
+describe('autoOutSessionId (v83)', () => {
+  it('extracts the session uuid from the guard message', () => {
+    expect(autoOutSessionId('Auto-closed at 21:00 — scan OUT instead (session 3f2a9c1e-5b7d-4e8a-9c0b-1d2e3f4a5b6c)')).toBe('3f2a9c1e-5b7d-4e8a-9c0b-1d2e3f4a5b6c')
+  })
+  it('returns null for other errors and for a guard message without an id', () => {
+    expect(autoOutSessionId('Already IN — OUT first 3f2a9c1e-5b7d-4e8a-9c0b-1d2e3f4a5b6c')).toBeNull()
+    expect(autoOutSessionId('Auto-closed at 21:00 — scan OUT instead')).toBeNull()
+    expect(autoOutSessionId(undefined)).toBeNull()
   })
 })

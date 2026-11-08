@@ -1717,3 +1717,71 @@ describe('shift cutoff tagging (Late In / Early Out)', () => {
     }))
   })
 })
+
+// ─── Same-date rules: no second session for a date after a forgot-OUT ───────
+// LATE_NOW = 2026-11-08 22:00 IST — past the 21:00 auto-out sweep.
+describe('same-date scan after a forgotten OUT', () => {
+  const LATE_NOW = new Date('2026-11-08T16:30:00Z')
+
+  it('A: a same-date session open 13h is a plain Mark OUT, not forgot / Close OUT then IN', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(LATE_NOW)
+    rpc.mockResolvedValueOnce({ data: { open: { id: 'open-1', status: 'OPEN', in_date: '2026-11-08', in_time: '09:00:00' }, last_out: null } })
+    const { result, showPopup } = setup()
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(showPopup).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'forgot' }))
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'OUT', openId: 'open-1' }))
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'OUT' })
+  })
+
+  it('B: a session auto-closed at 21:00 today offers Mark OUT on that session, never Mark IN', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(LATE_NOW)
+    const autoClosed = { id: 'auto-1', status: 'CLOSED', is_auto_out: true, in_date: '2026-11-08', in_time: '09:00:00', out_date: '2026-11-08', out_time: '21:00:00' }
+    rpc.mockResolvedValueOnce({ data: { open: null, last_out: autoClosed } })
+    const { result, showPopup } = setup()
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE) })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'OUT', openId: 'auto-1' }))
+    expect(showPopup).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'IN' }))
+    expect(rpc).not.toHaveBeenCalledWith('scan_in', expect.anything())
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'OUT' })
+  })
+
+  it('B: confirming that OUT writes scan_out pinned to the auto-closed session', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(LATE_NOW)
+    rpc.mockResolvedValueOnce({ data: { ok: true, early_out: false } })
+    const { result } = setup()
+    await act(async () => { await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: 'auto-1' }) })
+    expect(rpc).toHaveBeenCalledWith('scan_out', expect.objectContaining({ p_badge: BADGE, p_open_id: 'auto-1' }))
+    expect(rpc).not.toHaveBeenCalledWith('scan_in', expect.anything())
+  })
+
+  it('v83 backstop: scan_in refusing a same-date IN turns into Mark OUT on that session', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(LATE_NOW)
+    const id = '3f2a9c1e-5b7d-4e8a-9c0b-1d2e3f4a5b6c'
+    rpc.mockRejectedValueOnce(new Error(`Auto-closed at 21:00 — scan OUT instead (session ${id})`))
+    const { result, showPopup } = setup()
+    let out
+    await act(async () => { out = await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' }) })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'OUT', openId: id }))
+    expect(out).toEqual({ ok: false, reason: 'confirm_required', action: 'OUT' })
+  })
+
+  it('re-entry after a REAL OUT the same date still offers a new IN', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(LATE_NOW)
+    const realOut = { id: 'real-1', status: 'CLOSED', is_auto_out: false, in_date: '2026-11-08', in_time: '09:00:00', out_date: '2026-11-08', out_time: '13:00:00' }
+    rpc.mockResolvedValueOnce({ data: { open: null, last_out: realOut } })
+    const { result, showPopup } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'IN' }))
+  })
+
+  it('an auto-closed session from an EARLIER date does not block today\'s IN', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(LATE_NOW)
+    const yesterday = { id: 'auto-0', status: 'CLOSED', is_auto_out: true, in_date: '2026-11-07', in_time: '09:00:00', out_date: '2026-11-07', out_time: '21:00:00' }
+    rpc.mockResolvedValueOnce({ data: { open: null, last_out: yesterday } })
+    const { result, showPopup } = setup()
+    await act(async () => { await result.current.handleScan(BADGE) })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({ status: 'choose', action: 'IN' }))
+  })
+})

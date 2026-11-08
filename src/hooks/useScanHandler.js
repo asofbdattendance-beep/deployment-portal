@@ -19,6 +19,9 @@ import {
   isTimestampStale,
   todayStrIST,
   hmsIST,
+  isForgotOutSession,
+  sameDayAutoOutSession,
+  autoOutSessionId,
 } from '../lib/scannerUtils'
 
 /**
@@ -734,9 +737,10 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
       }
       if (open) {
         // ── OUT flow ──────────────────────────────────────────────
-        const inTs = new Date(`${open.in_date}T${open.in_time}+05:30`).getTime()
-        const hrs = (Date.now() - inTs) / 3600000
-        if (hrs > 12) {
+        // Same-date sessions are never "forgotten": the scan is their OUT (the
+        // 21:00 sweep owns today's forgot-OUTs). Only an earlier-date session
+        // open past the threshold gets the forgot prompt + "Close OUT then IN".
+        if (isForgotOutSession(open)) {
           // v65: forgot prompt uses the SAME live identity as choose —
           // sewadar row first, directory second, session snapshot only as
           // fallback. A pre-v43 session row has no sewadar_centre/dept
@@ -762,8 +766,8 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
         // ── Explicit choice ────────────────────────────────────────
         // No auto-OUT: show the sewadar's details with the single valid
         // action. Tapping Mark OUT commits via the pinned-session fast-path
-        // above; Cancel writes nothing. (>12h already became the forgot-OUT
-        // prompt above.)
+        // above; Cancel writes nothing. (an earlier-date session past the threshold
+        // already became the forgot-OUT prompt above.)
         if (!isConfirmed('OUT')) {
           // v65: identity prefers the LIVE sewadar row over the session's
           // snapshot — same source the IN-side prompt uses, so both directions
@@ -787,6 +791,26 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
         showPopup({ status: 'error', badge: b, message: 'Session lookup timed out — nothing was changed. Please retry the scan.', time: new Date().toLocaleTimeString() })
         return { ok: false, reason: 'session_lookup_timeout' }
       } else {
+        // ── Same-date auto-out: this scan is the real OUT ─────────
+        // The 21:00 sweep closed today's session because the OUT was
+        // forgotten. A scan later the same date corrects that session's OUT
+        // (scan_out pinned by id replaces an is_auto_out close) — it must
+        // never open a second session for the date. Confirmed OUT commits
+        // via the pinned fast-path at the top of this function.
+        const autoOut = sameDayAutoOutSession(lastOut)
+        if (autoOut) {
+          const dispAuto = displayOf(sewadar || dirFor(b) || autoOut)
+          showPopup({
+            status: 'choose', action: 'OUT', badge: b,
+            name: dispAuto.name, centre: dispAuto.centre, deptName: dispAuto.deptName,
+            openId: autoOut.id, openSince: `${autoOut.in_date} ${autoOut.in_time}`, manual,
+            message: 'Auto-closed at 21:00 — tap Mark OUT to record the real OUT time.',
+            time: new Date().toLocaleTimeString(),
+            ...eventStamp(),
+          })
+          return { ok: false, reason: 'confirm_required', action: 'OUT' }
+        }
+
         // ── Explicit choice ────────────────────────────────────────
         // No auto-IN: show the sewadar's details (from their last OUT when
         // known — null-safe for a first-ever scan) with the single valid
@@ -852,6 +876,22 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
           }
         } catch (e) {
           const msg = String(e.message || '')
+          const autoOutId = autoOutSessionId(msg)
+          if (autoOutId) {
+            // v83 backstop: the server saw today's 21:00 auto-out the lookup
+            // missed (another device, a stale read). Same answer as the
+            // pre-check: this scan is that session's OUT, not a new IN.
+            const dispAuto = displayOf(display || dirFor(b) || {})
+            showPopup({
+              status: 'choose', action: 'OUT', badge: b,
+              name: dispAuto.name, centre: dispAuto.centre, deptName: dispAuto.deptName,
+              openId: autoOutId, manual,
+              message: 'Auto-closed at 21:00 — tap Mark OUT to record the real OUT time.',
+              time: new Date().toLocaleTimeString(),
+              ...eventStamp(),
+            })
+            return { ok: false, reason: 'confirm_required', action: 'OUT' }
+          }
           if (msg.includes('Already IN')) {
             // Re-fetch to get the open session for the forgot-out flow. The
             // error field is captured, not dropped: a PGRST202 / permission
@@ -861,10 +901,9 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
             if (fresh.kind === 'ok' && fresh.open) {
               // L-39: the forgot prompt (with its ">12h open" pill and the
               // destructive "Close OUT then IN") is only honest past 12h — the
-              // primary path gates it at hrs > 12, and this refetch must too.
+              // primary path gates it with isForgotOutSession, and this refetch must too.
               // A young session gets the plain Already-IN error instead.
-              const freshInTs = new Date(`${fresh.open.in_date}T${fresh.open.in_time}+05:30`).getTime()
-              if ((Date.now() - freshInTs) / 3600000 > 12) {
+              if (isForgotOutSession(fresh.open)) {
                 // Same live-identity preference as the primary forgot path above.
                 const dispFresh = displayOf(fresh.sewadar || dirFor(b) || fresh.open)
                 const forgot = resolveForgotOutTime({ inDate: fresh.open.in_date, inTime: fresh.open.in_time })
