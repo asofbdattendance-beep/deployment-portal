@@ -139,6 +139,9 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
       const today = todayStrIST()
       const nowHms = hmsIST()
       const isOut = scan.action === 'OUT'
+      const deptUuid = scan.dept_id || (scan.dept_name
+        ? Object.entries(deptNameById).find(([, name]) => name === scan.dept_name)?.[0] || null
+        : null)
       setSessions((prev) => {
         const existingIdx = prev.findIndex((s) => s.badge_number === scan.badge)
         const existing = existingIdx >= 0 ? prev[existingIdx] : null
@@ -148,24 +151,28 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
           badge_number: scan.badge,
           sewadar_name: scan.sewadar_name || existing?.sewadar_name || '',
           sewadar_centre: scan.sewadar_centre || existing?.sewadar_centre || '',
-          sewadar_dept: scan.dept_id || existing?.sewadar_dept || null,
+          sewadar_dept: deptUuid || existing?.sewadar_dept || null,
           in_date: isOut ? (existing?.in_date || today) : today,
-          out_date: isOut ? today : (existing?.out_date || null),
+          out_date: isOut ? today : null,
           in_time: isOut ? (existing?.in_time || null) : (scan.in_time || nowHms),
-          out_time: isOut ? (scan.out_time || nowHms) : (existing?.out_time || null),
+          out_time: isOut ? (scan.out_time || nowHms) : null,
           is_vss: !!scan.is_vss || !!existing?.is_vss,
           undeployed_scan: !!scan.undeployed || !!existing?.undeployed_scan,
-          is_late_in: scan.is_late_in !== undefined ? !!scan.is_late_in : !!existing?.is_late_in,
-          is_early_out: scan.is_early_out !== undefined ? !!scan.is_early_out : !!existing?.is_early_out,
+          is_late_in: !isOut
+            ? (scan.is_late_in !== undefined ? !!scan.is_late_in : (scan.late_in !== undefined ? !!scan.late_in : false))
+            : (existing?.is_late_in !== undefined ? !!existing.is_late_in : false),
+          is_early_out: isOut
+            ? (scan.is_early_out !== undefined ? !!scan.is_early_out : (scan.early_out !== undefined ? !!scan.early_out : false))
+            : false,
           updated_at: new Date().toISOString(),
-          created_at: existing?.created_at || new Date().toISOString(),
+          created_at: (isOut && existing?.created_at) ? existing.created_at : new Date().toISOString(),
         }
         const rest = existingIdx >= 0 ? prev.filter((_, i) => i !== existingIdx) : prev
         return [optRow, ...rest].slice(0, 10)
       })
     }
     scheduleRefresh()
-  }, [scheduleRefresh])
+  }, [scheduleRefresh, deptNameById])
 
   const {
     popup, outTime, setOutTime, closePopup,

@@ -56,7 +56,7 @@ describe('DeploymentMatrixReport', () => {
     cleanup()
   })
 
-  it('subscribes to realtime tables: deployments, centre_allocations, sewadar_consents, centre_locks, and deployment_departments', async () => {
+  it('subscribes to realtime tables: deployments, centre_allocations, sewadar_consents, and centre_locks', async () => {
     render(<DeploymentMatrixReport scheduleId="s1" scheduleName="Visit 2026" />)
     await waitFor(() => {
       expect(mockData.realtimeSubs.length).toBeGreaterThan(0)
@@ -68,7 +68,7 @@ describe('DeploymentMatrixReport', () => {
     expect(tables).toContain('centre_allocations')
     expect(tables).toContain('sewadar_consents')
     expect(tables).toContain('centre_locks')
-    expect(tables).toContain('deployment_departments')
+    expect(tables).not.toContain('deployment_departments')
   })
 
   it('reconciles deployments with zero gaps using badge gender fallback and finalized department priority', async () => {

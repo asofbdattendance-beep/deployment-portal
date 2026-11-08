@@ -126,14 +126,20 @@ describe('ScheduleMakerPage - Department Shift Cutoffs', () => {
     const saveBtn = screen.getByRole('button', { name: /save rules/i })
     fireEvent.click(saveBtn)
 
-    // Verify update was dispatched with new cutoffs
+    // Verify update was dispatched with new cutoffs to schedule_department_timings (not leaking to global deployment_departments)
     await waitFor(() => {
-      const deptUpdate = updateCalls.find(c => c.table === 'deployment_departments')
-      expect(deptUpdate).toBeDefined()
-      expect(deptUpdate.payload).toMatchObject({
+      const timingUpsert = updateCalls.find(c => c.table === 'schedule_department_timings')
+      expect(timingUpsert).toBeDefined()
+      expect(timingUpsert.payload).toMatchObject({
+        schedule_id: 'sched-1',
+        department_id: 'dept-1',
         expected_in_time: '07:30',
         expected_out_time: '18:00',
       })
+      const deptUpdate = updateCalls.find(c => c.table === 'deployment_departments')
+      expect(deptUpdate).toBeDefined()
+      expect(deptUpdate.payload.expected_in_time).toBeUndefined()
+      expect(deptUpdate.payload.expected_out_time).toBeUndefined()
     })
   })
 })

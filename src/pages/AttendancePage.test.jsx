@@ -852,4 +852,32 @@ describe('Logs — the whole-schedule scan record, one compact line per session'
     expect(table.textContent).toContain('FB5971GA0001')
     expect(table.textContent).not.toContain('FB5971GA0002')
   })
+
+  it('filters Sewadars and Daily tabs consistently when Late In flag is selected', async () => {
+    respondWith({
+      sew: [
+        { ...SEWADAR, badge_number: 'FB5971GA0001', sewadar_name: 'RAM' },
+        { ...SEWADAR, badge_number: 'FB5971GA0002', sewadar_name: 'SHAM' },
+      ],
+      log: [
+        {
+          ...LOG[0], id: 'log-late', badge_number: 'FB5971GA0001', sewadar_name: 'RAM',
+          is_late_in: true, is_early_out: false,
+        },
+      ],
+    })
+    await renderPage()
+
+    // Sewadars tab initially has RAM and SHAM
+    expect(screen.getByText('RAM')).toBeTruthy()
+    expect(screen.getByText('SHAM')).toBeTruthy()
+
+    // Filter by Late In
+    fireEvent.change(screen.getByLabelText('Filter by flag'), { target: { value: 'late_in' } })
+    await settle()
+
+    // Only RAM remains
+    expect(screen.getByText('RAM')).toBeTruthy()
+    expect(screen.queryByText('SHAM')).toBeNull()
+  })
 })

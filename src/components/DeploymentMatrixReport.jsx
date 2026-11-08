@@ -110,7 +110,6 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
       { table: 'centre_allocations', filter: `schedule_id=eq.${scheduleId}` },
       { table: 'sewadar_consents', filter: `schedule_id=eq.${scheduleId}` },
       { table: 'centre_locks', filter: `schedule_id=eq.${scheduleId}` },
-      { table: 'deployment_departments' },
     ],
     onReload: () => load(scheduleId).catch((e) => { console.error('[Overview] reload failed:', e?.message) }),
     label: 'deploy-overview',

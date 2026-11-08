@@ -27,10 +27,10 @@ ALTER TABLE public.dp_attendance_sessions
 -- 2. Add default shift cutoffs to deployment_departments
 -- ------------------------------------------------------------
 ALTER TABLE public.deployment_departments
-  ADD COLUMN IF NOT EXISTS expected_in_time time DEFAULT '08:00';
+  ADD COLUMN IF NOT EXISTS expected_in_time time DEFAULT NULL;
 
 ALTER TABLE public.deployment_departments
-  ADD COLUMN IF NOT EXISTS expected_out_time time DEFAULT '17:00';
+  ADD COLUMN IF NOT EXISTS expected_out_time time DEFAULT NULL;
 
 -- ------------------------------------------------------------
 -- 3. Per-schedule department timing overrides
@@ -113,6 +113,10 @@ BEGIN
         'sewadar_centre', v_s->>'centre',
         'dept_name', public.dept_name_by_id(v_dept));
     END IF;
+    -- FIX #1: The SELECT INTO above overwrites the := false default with NULL
+    -- when the nonce is not found (NOT FOUND). Re-default so the INSERT below
+    -- never writes NULL into the NOT NULL column.
+    v_is_late_in := false;
   END IF;
 
   IF NOT public.is_valid_badge_format(p_badge) THEN

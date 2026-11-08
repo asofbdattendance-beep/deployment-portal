@@ -9,6 +9,8 @@
 -- Non-destructive, idempotent, safe to re-run.
 -- ============================================================
 
+BEGIN;
+
 SET lock_timeout = '3s';
 
 CREATE INDEX IF NOT EXISTS idx_dp_att_scanner_in
@@ -19,12 +21,7 @@ CREATE INDEX IF NOT EXISTS idx_dp_att_scanner_out
 
 ANALYZE public.dp_attendance_sessions;
 
-CREATE OR REPLACE FUNCTION public.portal_app_version()
-RETURNS text
-LANGUAGE sql
-IMMUTABLE
-AS $$
-  SELECT 'v82'::text;
-$$;
+INSERT INTO public.portal_version (version) VALUES ('v82')
+ON CONFLICT (version) DO NOTHING;
 
-GRANT EXECUTE ON FUNCTION public.portal_app_version() TO anon, authenticated, service_role;
+COMMIT;

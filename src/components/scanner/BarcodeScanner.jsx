@@ -52,12 +52,12 @@ import { BADGE_REGEX, sanitizeScannedBadge } from '../../lib/logic'
 // cut a slow phone to ~1 decode/s. maxWidth caps the detection surface: 1080
 // keeps a portrait 1080p frame at full resolution (Code 39 bars need ~2 px to
 // survive soft focus); only a phone measured slow drops back to the old 720.
-// confirmThreshold is 1 across profiles: regex-validated badges are unambiguous
-// and single-frame confirmation prevents dropped scans during movement.
+// confirmThreshold is 2 across profiles to prevent single-frame Code-39 misreads
+// from scanning false barcodes while maintaining responsive detection.
 const DEVICE_PROFILES = {
-  fast:   { confirmWindow: 3, confirmThreshold: 1, minInterval: 50,  maxInterval: 150, frameSkip: 0, maxWidth: 1280 },
-  medium: { confirmWindow: 4, confirmThreshold: 1, minInterval: 100, maxInterval: 300, frameSkip: 0, maxWidth: 1080 },
-  slow:   { confirmWindow: 3, confirmThreshold: 1, minInterval: 200, maxInterval: 500, frameSkip: 0, maxWidth: 720 },
+  fast:   { confirmWindow: 3, confirmThreshold: 2, minInterval: 50,  maxInterval: 150, frameSkip: 0, maxWidth: 1280 },
+  medium: { confirmWindow: 4, confirmThreshold: 2, minInterval: 100, maxInterval: 300, frameSkip: 0, maxWidth: 1080 },
+  slow:   { confirmWindow: 3, confirmThreshold: 2, minInterval: 200, maxInterval: 500, frameSkip: 0, maxWidth: 720 },
 }
 
 const ENGINE_LABELS = { Native: 'Optimized', ZXing: 'Universal' }
@@ -435,7 +435,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     if (t.length > cfg.confirmWindow) t = t.slice(-cfg.confirmWindow)
     slidingWindowRef.current = t
     const c = t.filter(e => e.badge === badge).length
-    const threshold = BADGE_REGEX.test(badge) ? 1 : (cfg.confirmThreshold || 1)
+    const threshold = cfg.confirmThreshold || 2
     return { confirmed: c >= threshold, count: c }
   }, [])
 

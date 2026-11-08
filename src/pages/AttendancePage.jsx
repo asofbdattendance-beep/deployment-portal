@@ -329,6 +329,44 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     if (filterDept !== 'all' && !depts.includes(filterDept)) setFilterDept('all')
   }, [depts, filterDept])
 
+  // Pre-index session flags from logRows so Sewadars, Daily, and Scanner tabs
+  // filter consistently by Late In, Early Out, Auto Out, and Undeployed.
+  const flaggedIndices = useMemo(() => {
+    const badges = { lateIn: new Set(), earlyOut: new Set(), autoOut: new Set() }
+    const centreDept = { lateIn: new Set(), earlyOut: new Set(), autoOut: new Set(), undeployed: new Set() }
+    const scanners = { lateIn: new Set(), earlyOut: new Set(), autoOut: new Set(), undeployed: new Set() }
+    for (const r of logRows) {
+      const b = r.badge_number
+      const cd = `${r.sewadar_centre || UNASSIGNED_CENTRE}::${r.dept_name || ''}`
+      const inBy = r.in_by
+      const outBy = r.out_by
+      if (r.is_late_in) {
+        if (b) badges.lateIn.add(b)
+        centreDept.lateIn.add(cd)
+        if (inBy) scanners.lateIn.add(inBy)
+        if (outBy) scanners.lateIn.add(outBy)
+      }
+      if (r.is_early_out) {
+        if (b) badges.earlyOut.add(b)
+        centreDept.earlyOut.add(cd)
+        if (inBy) scanners.earlyOut.add(inBy)
+        if (outBy) scanners.earlyOut.add(outBy)
+      }
+      if (r.is_auto_out) {
+        if (b) badges.autoOut.add(b)
+        centreDept.autoOut.add(cd)
+        if (inBy) scanners.autoOut.add(inBy)
+        if (outBy) scanners.autoOut.add(outBy)
+      }
+      if (r.undeployed_scan) {
+        centreDept.undeployed.add(cd)
+        if (inBy) scanners.undeployed.add(inBy)
+        if (outBy) scanners.undeployed.add(outBy)
+      }
+    }
+    return { badges, centreDept, scanners }
+  }, [logRows])
+
   // Filter on centre → dept → flag → search, in that order, so the option lists stay
   // scoped to what the caller can actually see.
   const visible = useMemo(() => {
@@ -338,9 +376,15 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
       rows = rows.filter((r) => r.open_sessions > 0)
     } else if (filterFlag === 'undeployed') {
       rows = rows.filter((r) => r.undeployed_scan)
+    } else if (filterFlag === 'late_in') {
+      rows = rows.filter((r) => flaggedIndices.badges.lateIn.has(r.badge_number))
+    } else if (filterFlag === 'early_out') {
+      rows = rows.filter((r) => flaggedIndices.badges.earlyOut.has(r.badge_number))
+    } else if (filterFlag === 'auto_out') {
+      rows = rows.filter((r) => flaggedIndices.badges.autoOut.has(r.badge_number))
     }
     return searchRows(rows, search)
-  }, [centreFiltered, filterDept, filterFlag, search])
+  }, [centreFiltered, filterDept, filterFlag, search, flaggedIndices])
 
   // L-45: the header tiles describe the same filter set as the tables and
   // the export (ReportsPage already totals its visible rows) — never the
@@ -374,12 +418,17 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
       if (!centreMatches(r.centre)) return false
       if (filterDept !== 'all' && r.dept_name !== filterDept) return false
       if (filterFlag === 'open' && (!r.open_now || r.open_now <= 0)) return false
+      const cd = `${r.centre}::${r.dept_name || ''}`
+      if (filterFlag === 'late_in' && !flaggedIndices.centreDept.lateIn.has(cd)) return false
+      if (filterFlag === 'early_out' && !flaggedIndices.centreDept.earlyOut.has(cd)) return false
+      if (filterFlag === 'auto_out' && !flaggedIndices.centreDept.autoOut.has(cd)) return false
+      if (filterFlag === 'undeployed' && !flaggedIndices.centreDept.undeployed.has(cd)) return false
       return matchText(search, r.centre, r.dept_name)
     })
     // `centreMatches` / `matchText` are pure helpers redefined each render; the
     // listed deps fully determine the result.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dailyRows, filterCentre, filterDept, filterFlag, search, filtering])
+  }, [dailyRows, filterCentre, filterDept, filterFlag, search, filtering, flaggedIndices])
   const visibleTotals = useMemo(() => dailyTotals(visibleDaily), [visibleDaily])
 
   const visibleScanner = useMemo(() => {
@@ -389,10 +438,16 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
     return scannerRows.filter((r) => {
       if (!centreMatches(r.scanner_centre)) return false
       if (filterFlag === 'open' && (!r.open_now || r.open_now <= 0)) return false
+      const name = r.scanner_name
+      const badge = r.scanner_badge
+      if (filterFlag === 'late_in' && !flaggedIndices.scanners.lateIn.has(name) && !flaggedIndices.scanners.lateIn.has(badge)) return false
+      if (filterFlag === 'early_out' && !flaggedIndices.scanners.earlyOut.has(name) && !flaggedIndices.scanners.earlyOut.has(badge)) return false
+      if (filterFlag === 'auto_out' && !flaggedIndices.scanners.autoOut.has(name) && !flaggedIndices.scanners.autoOut.has(badge)) return false
+      if (filterFlag === 'undeployed' && !flaggedIndices.scanners.undeployed.has(name) && !flaggedIndices.scanners.undeployed.has(badge)) return false
       return matchText(search, r.scanner_name, r.scanner_badge, r.scanner_centre)
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scannerRows, filterCentre, filterFlag, search, filtering])
+  }, [scannerRows, filterCentre, filterFlag, search, filtering, flaggedIndices])
 
   // The Logs tab answers "who scanned what, when, by whom" for the whole
   // schedule: same centre/dept/search controls, plus the scanner identities and timing tags.

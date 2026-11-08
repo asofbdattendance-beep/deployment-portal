@@ -546,7 +546,6 @@ function DepartmentsPanel({ schedule, isSuper, toast }) {
         min_days: 1, requires_stay_at_bhati: false, requires_initiated: false,
         include_vss: false, vss_min_days: 1, vss_requires_stay_at_bhati: false,
         vss_requires_initiated: false, vss_requires_gender: null,
-        expected_in_time: '08:00', expected_out_time: '17:00',
       })
       .eq('id', deptId)
     if (error) { toast.error(error.message); return }
@@ -566,8 +565,8 @@ function DepartmentsPanel({ schedule, isSuper, toast }) {
   }
 
   const openRules = (dept) => {
-    let inTime = dept.expected_in_time ? String(dept.expected_in_time).slice(0, 5) : '08:00'
-    let outTime = dept.expected_out_time ? String(dept.expected_out_time).slice(0, 5) : '17:00'
+    let inTime = dept.expected_in_time ? String(dept.expected_in_time).slice(0, 5) : ''
+    let outTime = dept.expected_out_time ? String(dept.expected_out_time).slice(0, 5) : ''
     setRules({
       min_days: dept.min_days ?? 1, requires_stay_at_bhati: !!dept.requires_stay_at_bhati, requires_initiated: !!dept.requires_initiated,
       include_vss: !!dept.include_vss, vss_min_days: dept.vss_min_days ?? 1,
@@ -616,8 +615,6 @@ function DepartmentsPanel({ schedule, isSuper, toast }) {
         vss_min_days: (vssMinDays >= 1 && vssMinDays <= 5) ? vssMinDays : 1,
         vss_requires_stay_at_bhati: rules.vss_requires_stay_at_bhati, vss_requires_initiated: rules.vss_requires_initiated,
         vss_requires_gender: rules.vss_requires_gender || null,
-        expected_in_time: rules.expected_in_time || null,
-        expected_out_time: rules.expected_out_time || null,
       })
       .eq('id', deptId)
     if (error) { toast.error(error.message); return }

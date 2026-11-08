@@ -15,6 +15,7 @@ import ScannerPage from './ScannerPage'
 const mocks = vi.hoisted(() => ({
   openCamera: vi.fn(),
   fromCalls: [],
+  sessionsData: [],
   rpc: vi.fn(),
   fetchAllRows: vi.fn(),
   getQueuedScans: vi.fn(),
@@ -47,7 +48,7 @@ vi.mock('../lib/supabase', () => ({
         and: (...a) => { mocks.fromCalls.push(['and', ...a]); return q },
         order: (...a) => { mocks.fromCalls.push(['order', ...a]); return q },
         limit: (...a) => { mocks.fromCalls.push(['limit', ...a]); return q },
-        then: (res) => Promise.resolve(res({ data: [] })),
+        then: (res) => Promise.resolve(res({ data: mocks.sessionsData || [] })),
       }
       return q
     },
@@ -637,6 +638,85 @@ describe('ScannerPage ASO sewadar picker', () => {
       expect(screen.getAllByText('FB5971GA0001').length).toBeGreaterThanOrEqual(1)
       expect(screen.getAllByText('Out Tester').length).toBeGreaterThanOrEqual(1)
     } finally {
+      restore()
+    }
+  })
+
+  it('optimistic IN scan clears out_time, out_date, and early_out from previous closed session', async () => {
+    const restore = useDesktopMatchMedia()
+    try {
+      // Seed initial sessions with an already closed session for badge FB5971GA0001
+      mocks.sessionsData = [{
+        id: 'sess-closed-1',
+        badge_number: 'FB5971GA0001',
+        sewadar_name: 'Re-entry Tester',
+        sewadar_dept: 'dept-1',
+        in_date: todayStrIST(),
+        out_date: todayStrIST(),
+        in_time: '08:00:00',
+        out_time: '12:00:00',
+        is_early_out: true,
+        is_late_in: false,
+      }]
+
+      mocks.rpc.mockImplementation((fn) => {
+        if (fn === 'get_scan_state') {
+          return Promise.resolve({
+            data: {
+              open: null,
+              last_out: {
+                out_date: todayStrIST(),
+                out_time: '12:00:00',
+              },
+              sewadar: {
+                sewadar_name: 'Re-entry Tester',
+                sewadar_centre: 'DELHI',
+                dept_name: 'Langar',
+              },
+            },
+          })
+        }
+        if (fn === 'scan_in') {
+          return Promise.resolve({
+            data: {
+              ok: true,
+              sewadar_name: 'Re-entry Tester',
+              sewadar_centre: 'DELHI',
+              dept_name: 'Langar',
+              late_in: false,
+            },
+          })
+        }
+        return Promise.resolve({ data: null })
+      })
+
+      render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+      await settle()
+
+      // Open popup and mark IN
+      const input = screen.getByPlaceholderText('Manual FB/VS badge')
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        setter.call(input, 'FB5971GA0001')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByText('Mark In/Out'))
+        await new Promise(r => setTimeout(r, 50))
+      })
+
+      const markInBtn = screen.getByRole('button', { name: /^Mark IN$/i })
+      await act(async () => {
+        fireEvent.click(markInBtn)
+        await new Promise(r => setTimeout(r, 50))
+      })
+
+      // The recent scans table should show the session as open (no OUT time or Early tag rendered)
+      const table = screen.getByRole('table')
+      expect(table.textContent).toContain('Re-entry Tester')
+      expect(table.textContent).not.toContain('Early')
+    } finally {
+      mocks.sessionsData = []
       restore()
     }
   })
