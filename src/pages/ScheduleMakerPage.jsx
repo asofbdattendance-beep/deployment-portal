@@ -536,7 +536,9 @@ function DepartmentsPanel({ schedule, isSuper, toast }) {
           .delete()
           .eq('schedule_id', schedule.id)
           .eq('department_id', deptId)
-      } catch {}
+      } catch (err) {
+        console.warn('schedule_department_timings delete failed:', err.message)
+      }
     }
     setRulesDeptId(null)
     loadDepts()
@@ -559,7 +561,9 @@ function DepartmentsPanel({ schedule, isSuper, toast }) {
           if (data.expected_in_time) inTime = String(data.expected_in_time).slice(0, 5)
           if (data.expected_out_time) outTime = String(data.expected_out_time).slice(0, 5)
         }
-      } catch {}
+      } catch (err) {
+        console.warn('schedule_department_timings read failed:', err.message)
+      }
     }
     setRules({
       min_days: dept.min_days ?? 1, requires_stay_at_bhati: !!dept.requires_stay_at_bhati, requires_initiated: !!dept.requires_initiated,
