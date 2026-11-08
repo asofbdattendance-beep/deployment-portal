@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { withTimeout, friendly, todayStrIST, hhmmIST, hmsIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, isDecisionPopup, isEdgeDetection, detectionBox, isTimestampStale, CLOCK_SKEW_FUTURE_MS, CLOCK_SKEW_MAX_AGE_MS, rotateGray, SCAN_ROTATIONS, sanitizeBarcode, scoreSharpness, tileRois, mergeOptimisticSessions, getScannerRefreshDebounceMs } from './scannerUtils'
+import { withTimeout, friendly, todayStrIST, hhmmIST, hmsIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, isDecisionPopup, isEdgeDetection, detectionBox, isTimestampStale, CLOCK_SKEW_FUTURE_MS, CLOCK_SKEW_MAX_AGE_MS, rotateGray, SCAN_ROTATIONS, sanitizeBarcode, scoreSharpness, tileRois, mergeOptimisticSessions, getScannerRefreshDebounceMs, isForgotOutSession, sameDayAutoOutSession, FORGOT_OUT_MIN_OPEN_HOURS } from './scannerUtils'
 
 afterEach(() => { vi.useRealTimers() })
 
@@ -840,5 +840,54 @@ describe('getScannerRefreshDebounceMs', () => {
     globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__ = 150
     expect(getScannerRefreshDebounceMs()).toBe(150)
     delete globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__
+  })
+})
+
+/* ─── isForgotOutSession / sameDayAutoOutSession ─── */
+// NOW = 2026-11-08 22:00 IST (16:30Z): late evening, past the 21:00 sweep.
+const SWEEP_NOW = Date.parse('2026-11-08T16:30:00Z')
+
+describe('isForgotOutSession', () => {
+  it('never treats a same-date open session as forgotten, however long it has been open', () => {
+    const open = { id: 's1', in_date: '2026-11-08', in_time: '08:00:00' } // 14h open
+    expect(isForgotOutSession(open, SWEEP_NOW)).toBe(false)
+  })
+
+  it('treats an earlier-date session open past the threshold as forgotten', () => {
+    const open = { id: 's1', in_date: '2026-11-07', in_time: '09:00:00' }
+    expect(isForgotOutSession(open, SWEEP_NOW)).toBe(true)
+  })
+
+  it('keeps an overnight session (earlier date, under the threshold) as a plain OUT', () => {
+    const open = { id: 's1', in_date: '2026-11-07', in_time: '23:00:00' }
+    const morning = Date.parse('2026-11-08T01:30:00Z') // 07:00 IST, 8h open
+    expect(isForgotOutSession(open, morning)).toBe(false)
+  })
+
+  it('returns false for a missing or malformed session', () => {
+    expect(isForgotOutSession(null, SWEEP_NOW)).toBe(false)
+    expect(isForgotOutSession({ in_date: '2026-11-07' }, SWEEP_NOW)).toBe(false)
+    expect(FORGOT_OUT_MIN_OPEN_HOURS).toBe(12)
+  })
+})
+
+describe('sameDayAutoOutSession', () => {
+  const auto = { id: 'a1', status: 'CLOSED', is_auto_out: true, in_date: '2026-11-08', in_time: '09:00:00', out_date: '2026-11-08', out_time: '21:00:00' }
+
+  it('returns the session the 21:00 sweep closed today', () => {
+    expect(sameDayAutoOutSession(auto, SWEEP_NOW)).toBe(auto)
+  })
+
+  it('ignores a real (non-auto) OUT — re-entry after a real OUT stays a new IN', () => {
+    expect(sameDayAutoOutSession({ ...auto, is_auto_out: false }, SWEEP_NOW)).toBeNull()
+  })
+
+  it('ignores an auto-closed session from an earlier date', () => {
+    expect(sameDayAutoOutSession({ ...auto, in_date: '2026-11-07', out_date: '2026-11-07' }, SWEEP_NOW)).toBeNull()
+  })
+
+  it('returns null without a session id (cannot be pinned for scan_out)', () => {
+    expect(sameDayAutoOutSession({ ...auto, id: null }, SWEEP_NOW)).toBeNull()
+    expect(sameDayAutoOutSession(null, SWEEP_NOW)).toBeNull()
   })
 })

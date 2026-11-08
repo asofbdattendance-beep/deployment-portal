@@ -1,5 +1,5 @@
 // Offline queue — IndexedDB (robust, no data loss under jammers)
-import { safeOpenDB, CACHE_TTL, MAX_DRAIN_ATTEMPTS, withTimeout } from './scannerUtils'
+import { safeOpenDB, CACHE_TTL, MAX_DRAIN_ATTEMPTS, withTimeout, AUTO_OUT_GUARD_TEXT, autoOutSessionId } from './scannerUtils'
 import { supabase as defaultSupabase } from './supabase'
 
 // NULL-OWNER DECISION (D1a): rows enqueued while logged out (or when the
@@ -80,6 +80,34 @@ function quarantineRow(id, reason) {
   })
 }
 
+// ─── v83: same-date auto-out guard ───────────────────────────────────────────
+// scan_in refuses an IN when the 21:00 sweep already closed the badge's
+// session for that date: 'Auto-closed at 21:00 — scan OUT instead (session <uuid>)'.
+// AUTO_OUT_GUARD_TEXT / autoOutSessionId live in scannerUtils (pure, unmocked).
+export { autoOutSessionId }
+
+/**
+ * Replay a queued IN that hit the v83 guard as the OUT it really was: close
+ * the auto-closed session (scan_out pinned by id replaces an is_auto_out
+ * close) at the operator's scan time. Never opens a second session.
+ * @returns {Promise<string|null>} null on success, else the failure reason.
+ */
+async function replayAsAutoOutClose(client, q, ts, msg) {
+  const sessionId = autoOutSessionId(msg)
+  if (!sessionId) return msg || 'auto_out'
+  try {
+    const { error } = await withTimeout(
+      client.rpc('scan_out', { p_badge: q.badge, p_schedule: q.schedule_id, p_ts: ts, p_open_id: sessionId, p_is_manual: q.is_manual || false }),
+      10000,
+      'Drain OUT'
+    )
+    if (error) throw error
+    return null
+  } catch (e) {
+    return String(e?.message || msg || 'auto_out')
+  }
+}
+
 // ─── Error taxonomy (Task 1: L-04 + L-08; T8) ────────────────────────────
 // Pure classifier — no I/O, unit-tested in offlineQueue.test.js.
 // Server contracts from sql/v46 (scan_in) + sql/v41 (scan_out):
@@ -96,6 +124,9 @@ function quarantineRow(id, reason) {
 //  - retry: network/timeout/deploy-ordering → markFailed + backoff + break.
 export function classifyScanError(msg, err) {
   const s = String(msg || err?.message || '')
+  // v83: the badge's session for this date was closed by the 21:00 sweep —
+  // the queued IN was really that session's OUT (see replayAsAutoOutClose).
+  if (s.includes(AUTO_OUT_GUARD_TEXT)) return 'auto_out'
   if (s.includes('Already IN') || s.includes('No open session')) return 'dedup'
   // V5: unique-constraint violation on the open-session index — a benign
   // concurrent double-IN already recorded server-side → dedup (drop the row,
@@ -665,7 +696,23 @@ export async function drainQueue(supabase, onProgress) {
         } catch (e) {
           const msg = String(e?.message || '')
           const kind = classifyScanError(msg, e)
-          if (kind === 'dedup' || kind === 'drop') {
+          if (kind === 'auto_out') {
+            // v83: never a second session for the date — the scan becomes the
+            // real OUT of the auto-closed session. Any failure quarantines
+            // (visible for manual recovery), never deletes.
+            const failure = q.action === 'IN' ? await replayAsAutoOutClose(supabase, q, ts, msg) : msg
+            consecutivePermanent = 0
+            if (failure === null) {
+              await removeQueued(q.id)
+              drained++
+              _consecutiveFailures = Math.max(0, _consecutiveFailures - 1)
+              onProgress?.(q, true)
+            } else {
+              await quarantineRow(q.id, failure.slice(0, 160) || kind)
+              if (q.action === 'IN') failedInKeys.add(`${q.badge}␟${q.schedule_id}`)
+              onProgress?.(q, false, e)
+            }
+          } else if (kind === 'dedup' || kind === 'drop') {
             // T9: an OUT orphaned by its quarantined IN is quarantined, NOT
             // deleted — both rows stay visible for manual recovery instead
             // of vanishing as a pair.

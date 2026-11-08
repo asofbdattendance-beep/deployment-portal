@@ -124,6 +124,7 @@ export function friendly(msg) {
   if (s.includes('No open session')) return 'No open session to close'
   if (s.includes('Not authorized')) return 'Not authorized to scan'
   if (s.includes('Already IN')) return 'Already checked IN — please OUT first'
+  if (s.includes(AUTO_OUT_GUARD_TEXT)) return 'Auto-closed at 21:00 today — scan again to record the OUT'
   if (s.includes('timed out')) return s // pass through timeout messages
   if (s.includes('Failed to fetch')) return 'Network error — will retry when online'
   return s || 'Scan failed — try again'
@@ -812,3 +813,59 @@ export function mergeOptimisticSessions(prev, serverRows, limit = 10) {
   return [...pendingOpt, ...nonOverriddenServer].slice(0, limit)
 }
 
+
+// ─── Same-date session rules (forgot-OUT vs 21:00 auto-out) ────────────────
+/** An open session must be at least this old before it counts as a forgot-OUT. */
+export const FORGOT_OUT_MIN_OPEN_HOURS = 12
+
+/**
+ * Whether an OPEN session is a genuine forgot-OUT ("Close OUT then IN").
+ *
+ * A session from TODAY (IST) is never forgotten: today's forgot-OUTs are the
+ * 21:00 sweep's job, and the scan is simply that session's OUT. Only a session
+ * from an earlier date that has also been open past the threshold qualifies —
+ * the threshold keeps an overnight shift (IN 23:00, OUT 07:00) a plain OUT.
+ *
+ * @param {{in_date?: string, in_time?: string}|null} open
+ * @param {number} [nowMs]
+ * @returns {boolean}
+ */
+export function isForgotOutSession(open, nowMs = Date.now()) {
+  if (!open?.in_date || !open?.in_time) return false
+  if (open.in_date >= todayStrIST(new Date(nowMs))) return false
+  const inMs = new Date(`${open.in_date}T${open.in_time}+05:30`).getTime()
+  if (!Number.isFinite(inMs)) return false
+  return (nowMs - inMs) / 3600000 > FORGOT_OUT_MIN_OPEN_HOURS
+}
+
+/**
+ * The session the 21:00 sweep auto-closed TODAY (IST), if `lastOut` is one.
+ * A later scan on the same date is that session's real OUT — scan_out (v80)
+ * replaces an is_auto_out close when pinned by id — never a new IN session.
+ * A real OUT returns null, so lunch-break re-entry still opens a new session.
+ *
+ * @param {{id?: string, is_auto_out?: boolean, in_date?: string}|null} lastOut
+ * @param {number} [nowMs]
+ * @returns {object|null}
+ */
+export function sameDayAutoOutSession(lastOut, nowMs = Date.now()) {
+  if (!lastOut?.id || lastOut.is_auto_out !== true) return null
+  return lastOut.in_date === todayStrIST(new Date(nowMs)) ? lastOut : null
+}
+
+// ─── v83: same-date auto-out guard (scan_in error contract) ────────────────
+// scan_in refuses an IN when the 21:00 sweep already closed the badge's
+// session for that date: 'Auto-closed at 21:00 — scan OUT instead (session <uuid>)'.
+export const AUTO_OUT_GUARD_TEXT = 'Auto-closed at 21:00'
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+
+/**
+ * The auto-closed session id carried in a v83 guard message, or null.
+ * @param {string} msg
+ * @returns {string|null}
+ */
+export function autoOutSessionId(msg) {
+  const s = String(msg || '')
+  if (!s.includes(AUTO_OUT_GUARD_TEXT)) return null
+  return s.match(UUID_RE)?.[0] || null
+}
