@@ -347,3 +347,37 @@ describe('enginePool hardPass', () => {
     expect(engine).toBe('ZXing')
   })
 })
+
+describe('unrotatePoint & unrotateCornerPoints', () => {
+  it('correctly maps 90° clockwise rotated points back to original image space', async () => {
+    const { unrotatePoint, unrotateCornerPoints } = await import('./enginePool')
+    // Original image: 100 x 50 (width=100, height=50)
+    // Rotated 90°: 50 x 100
+    // A point at (10, 20) in original maps to (50 - 1 - 20, 10) = (29, 10) in rotated
+    const origW = 100, origH = 50
+    const ptRot = { x: 29, y: 10 }
+    const ptOrig = unrotatePoint(ptRot, 90, origW, origH)
+    expect(ptOrig).toEqual({ x: 10, y: 20 })
+
+    const corners = [{ x: 29, y: 10 }, { x: 19, y: 40 }]
+    const unrotated = unrotateCornerPoints(corners, 90, origW, origH)
+    expect(unrotated[0]).toEqual({ x: 10, y: 20 })
+    expect(unrotated[1]).toEqual({ x: 40, y: 30 })
+  })
+
+  it('correctly maps 180° rotated points back to original image space', async () => {
+    const { unrotatePoint } = await import('./enginePool')
+    const origW = 100, origH = 50
+    const ptRot = { x: 100 - 1 - 10, y: 50 - 1 - 20 } // (89, 29)
+    const ptOrig = unrotatePoint(ptRot, 180, origW, origH)
+    expect(ptOrig).toEqual({ x: 10, y: 20 })
+  })
+
+  it('correctly maps 270° rotated points back to original image space', async () => {
+    const { unrotatePoint } = await import('./enginePool')
+    const origW = 100, origH = 50
+    const ptRot = { x: 20, y: 100 - 1 - 10 } // (20, 89)
+    const ptOrig = unrotatePoint(ptRot, 270, origW, origH)
+    expect(ptOrig).toEqual({ x: 10, y: 20 })
+  })
+})

@@ -56,7 +56,7 @@ const RESOLUTION_CHAIN = [
   { width: { ideal: 480 }, height: { ideal: 360 } },
 ]
 
-const REAR_LABEL = /(back|rear|environment|world)/i
+const REAR_LABEL = /(back|rear|environment|world|camera2?\s*0)/i
 
 /** Narrow, defensive reads — several of these throw on odd WebViews. */
 function safeCall(fn, fallback = undefined) {
@@ -784,7 +784,8 @@ async function openCameraInner({ startIndex = 0, debug = false, preferredDeviceI
       // Ask once more for a usable resolution: some firmwares ignore `ideal`
       // and hand back 640x480 without throwing (see ensureUsableResolution).
       await ensureUsableResolution(track, { debug })
-      return { stream, track, torchSupported, deviceId, resolutionIndex: i, adopted: false }
+      const actualDeviceId = safeCall(() => track.getSettings?.().deviceId, null) || deviceId || null
+      return { stream, track, torchSupported, deviceId: actualDeviceId, resolutionIndex: i, adopted: false }
     } catch (e) {
       lastError = e
       if (debug) console.warn(`[CameraMgr] res#${i} failed:`, e?.message)
@@ -806,7 +807,8 @@ async function openCameraInner({ startIndex = 0, debug = false, preferredDeviceI
       safeCall(() => stream.getTracks?.().forEach(t => t.stop()))
       throw lastError || new Error('Camera returned no video track')
     }
-    return { stream, track, torchSupported: await probeTorch(track), deviceId: null, resolutionIndex: -1, adopted: false }
+    const actualDeviceId = safeCall(() => track.getSettings?.().deviceId, null) || null
+    return { stream, track, torchSupported: await probeTorch(track), deviceId: actualDeviceId, resolutionIndex: -1, adopted: false }
   } catch (e) {
     if (e?.name === 'NotAllowedError' || e?.name === 'SecurityError') throw e
     throw lastError || e

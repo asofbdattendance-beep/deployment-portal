@@ -257,6 +257,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const engineLoadingRef = useRef(false)
   const onScanRef = useRef(onScan)
   const lastScanRef = useRef({ badge: null, time: 0 })
+  const recentScansRef = useRef(new Map())
   // Busy-decline damp: a scan the handler declined (busy / decision-pending,
   // returns exactly false) never ran, so the 2s suppressor must NOT record it —
   // but re-firing vibrate + onScan every frame for the whole RPC storms the
@@ -498,7 +499,8 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       if (!confirmed) continue
 
       const now = Date.now()
-      if (lastScanRef.current.badge === cleaned && now - lastScanRef.current.time < 2000) break
+      const lastScanTime = recentScansRef.current.get(cleaned) || (lastScanRef.current.badge === cleaned ? lastScanRef.current.time : 0)
+      if (now - lastScanTime < 2000) break
       // Declined-vibrate damp: a badge declined moments ago (busy /
       // decision-pending) keeps re-offering onScan every confirmed frame per
       // the T11 contract — but the per-frame vibrate is pure storm, so damp
@@ -517,6 +519,12 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       const accepted = onScanRef.current?.(cleaned)
       if (accepted !== false) {
         lastScanRef.current = { badge: cleaned, time: now }
+        recentScansRef.current.set(cleaned, now)
+        if (recentScansRef.current.size > 20) {
+          for (const [b, t] of recentScansRef.current.entries()) {
+            if (now - t > 5000) recentScansRef.current.delete(b)
+          }
+        }
         lastDeclinedRef.current = { badge: null, time: 0 }
       } else {
         lastDeclinedRef.current = { badge: cleaned, time: now }
@@ -842,6 +850,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     if (refocusTimerRef.current) { clearInterval(refocusTimerRef.current); refocusTimerRef.current = null }
     if (rejectHintTimerRef.current) { clearTimeout(rejectHintTimerRef.current); rejectHintTimerRef.current = null }
     if (cameraToastTimerRef.current) { clearTimeout(cameraToastTimerRef.current); cameraToastTimerRef.current = null }
+    setCameraToast(null)
     channelRef.current?.close(); channelRef.current = null
     if (tapFocusCleanupRef.current) { try { tapFocusCleanupRef.current() } catch {} tapFocusCleanupRef.current = null }
     if (stopCamera) {
@@ -867,6 +876,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     // Same fresh-scan reset as startScanner (L-20): a stop() followed by an
     // external restart must not inherit the suppressor either.
     lastScanRef.current = { badge: null, time: 0 }
+    recentScansRef.current.clear()
     lastRawRef.current = null
     // A rectangle must not outlive the session that drew it — Retry, unmount
     // and a tab-leader yield all land here.
@@ -893,6 +903,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     // window — otherwise the first post-restart scan of the same badge is
     // silently dropped.
     lastScanRef.current = { badge: null, time: 0 }
+    recentScansRef.current.clear()
     lastRawRef.current = null
     rejectHintAtRef.current = 0
     slidingWindowRef.current = []
@@ -1186,6 +1197,9 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     setCurrentDeviceId(nextCam.deviceId)
     try { localStorage.setItem('dp_scanner_camera_id', nextCam.deviceId) } catch {}
 
+    teardown({ stopCamera: true })
+    startScanner({ reclaim: true, preferredDeviceId: nextCam.deviceId })
+
     if (cameraToastTimerRef.current) clearTimeout(cameraToastTimerRef.current)
     const label = nextCam.label
       ? (nextCam.label.length > 24 ? nextCam.label.slice(0, 22) + '…' : nextCam.label)
@@ -1195,9 +1209,6 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       cameraToastTimerRef.current = null
       setCameraToast(null)
     }, 2000)
-
-    teardown({ stopCamera: true })
-    startScanner({ reclaim: true, preferredDeviceId: nextCam.deviceId })
   }, [cameraList, currentDeviceId, teardown, startScanner])
 
   useImperativeHandle(ref, () => ({
@@ -1305,6 +1316,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
 
         {cameraList.length > 1 && (
           <button
+            type="button"
             onClick={handleCameraSwitch}
             aria-label="Switch camera lens"
             title="Switch camera lens"
@@ -1312,23 +1324,35 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
             style={{
               background: 'rgba(0,0,0,0.6)',
               color: '#fff', border: 'none', borderRadius: 8,
-              padding: '0.35rem 0.6rem', fontWeight: 700, fontSize: '0.75rem',
+              padding: '0.4rem 0.65rem', fontWeight: 700, fontSize: '0.75rem',
               display: 'flex', alignItems: 'center', gap: 4,
+              minHeight: 36, minWidth: 44,
               touchAction: 'manipulation', cursor: 'pointer',
             }}
           >
-            <SwitchCamera size={13} aria-hidden="true" />
+            <SwitchCamera size={14} aria-hidden="true" />
             <span>Lens</span>
           </button>
         )}
 
         {torchSupported ? (
-          <button onClick={handleTorchToggle} aria-pressed={torchOn} className="scanner-torch" style={{
-            background: torchOn ? '#f59e0b' : 'rgba(0,0,0,0.6)',
-            color: '#fff', border: 'none', borderRadius: 8,
-            padding: '0.35rem 0.6rem', fontWeight: 700, fontSize: '0.75rem',
-            touchAction: 'manipulation', cursor: 'pointer',
-          }}><Zap size={12} aria-hidden="true" /> {torchOn ? 'Torch on' : 'Torch'}</button>
+          <button
+            type="button"
+            onClick={handleTorchToggle}
+            aria-pressed={torchOn}
+            className="scanner-torch"
+            style={{
+              background: torchOn ? '#f59e0b' : 'rgba(0,0,0,0.6)',
+              color: '#fff', border: 'none', borderRadius: 8,
+              padding: '0.4rem 0.65rem', fontWeight: 700, fontSize: '0.75rem',
+              display: 'flex', alignItems: 'center', gap: 4,
+              minHeight: 36, minWidth: 44,
+              touchAction: 'manipulation', cursor: 'pointer',
+            }}
+          >
+            <Zap size={13} aria-hidden="true" />
+            <span>{torchOn ? 'Torch on' : 'Torch'}</span>
+          </button>
         ) : null}
       </div>
 
