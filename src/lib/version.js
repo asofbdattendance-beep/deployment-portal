@@ -10,7 +10,10 @@
  */
 
 /** Oldest DB this frontend works with. Bump when the frontend starts
- *  calling RPCs/columns a migration introduces. v79: the scan-log select
+ *  calling RPCs/columns a migration introduces. v81: department shift
+ *  cutoffs and timing tags (is_late_in, is_early_out) on
+ *  dp_attendance_sessions — without it the SCAN_LOG_SESSION_COLS select
+ *  fails with PGRST204. v79: the scan-log select
  *  reads dp_attendance_sessions.is_auto_out — the 21:00 IST auto-out tag —
  *  without it the shared SCAN_LOG_SESSION_COLS select fails with PGRST204
  *  and BOTH logs (Attendance Logs, Previsit Logs) go empty rather than
@@ -30,7 +33,7 @@
  *  session_count/is_open (Total, Present and Attention tabs + the day-count
  *  export depend on it), alongside the v60 window, v61 window-scoped
  *  visit RPCs, v62 previsit RPCs and v63 previsit_deployed. */
-export const MIN_SUPPORTED_DB_VERSION = 'v79'
+export const MIN_SUPPORTED_DB_VERSION = 'v81'
 
 /**
  * 'v50' → 50. Letter suffixes ('v38b') compare by their number — the
