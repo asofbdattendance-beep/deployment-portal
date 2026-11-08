@@ -517,6 +517,8 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
                 Status: r.status || '—', Manual: r.is_manual ? 'yes' : 'no',
                 Undeployed: r.undeployed_scan ? 'yes' : 'no',
                 'Auto out': r.is_auto_out ? 'yes' : 'no',
+                'Late In': r.is_late_in ? 'yes' : 'no',
+                'Early Out': r.is_early_out ? 'yes' : 'no',
               }
             }),
           },
@@ -724,10 +726,12 @@ export default function AttendancePage({ schedules = [], scheduleId }) {
       render: (r) => (
         <span style={{ display: 'inline-flex', gap: '0.25rem', flexWrap: 'wrap' }}>
           {r.status === 'OPEN' && <span className="pill pill-amber" title="Scanned IN, not yet OUT">Open</span>}
+          {r.is_late_in && <span className="pill pill-amber" title="Scanned IN after expected department cutoff">Late In</span>}
+          {r.is_early_out && <span className="pill pill-amber" title="Scanned OUT before expected department cutoff">Early Out</span>}
           {r.is_auto_out && <span className="pill pill-blue" title="Closed by the 21:00 auto-out sweep — no OUT scan was recorded, so these OUT times are assumed">Auto out</span>}
           {r.is_manual && <span className="pill pill-gray" title="Operator-entered, not a camera scan">Manual</span>}
           {r.undeployed_scan && <span className="pill pill-red" title="Scanned with no deployment for this schedule">Undeployed</span>}
-          {r.status !== 'OPEN' && !r.is_auto_out && !r.is_manual && !r.undeployed_scan && <span className="pill pill-gray">—</span>}
+          {r.status !== 'OPEN' && !r.is_late_in && !r.is_early_out && !r.is_auto_out && !r.is_manual && !r.undeployed_scan && <span className="pill pill-gray">—</span>}
         </span>
       ),
     },
