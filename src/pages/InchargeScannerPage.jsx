@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { jitteredInterval } from '../lib/jitter'
-import { fetchAllRows } from '../lib/supabase'
+import { supabase, fetchAllRows } from '../lib/supabase'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import BarcodeScanner from '../components/scanner/BarcodeScanner'
@@ -37,6 +37,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
   // cached snapshot first, live rows overwrite + refresh the cache.
   const [depts, syncDepts] = useDeptNames()
   const [sessions, setSessions] = useState([])
+  const [totalScansCount, setTotalScansCount] = useState(0)
   const [manualBadge, setManualBadge] = useState('')
   const [offline, setOffline] = useState(false)
   // Reactive connectivity — `navigator.onLine` read at render time never
@@ -78,15 +79,26 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
       const today = todayStrIST()
       // I4: v45 event-date law (IN *or* OUT today counts — in_date-only reads
       // miss overnight sessions and contradict the ASO's Daily tab).
-      const [deptAll, sessAll] = await Promise.all([
+      // v82 perf: fetch top 10 recent sessions bounded with count:'exact'
+      // instead of downloading thousands of rows across the schedule.
+      const [deptAll, sessRes] = await Promise.all([
         fetchAllRows('deployment_departments', 'id,name', (q) => q.order('name'), 'id'),
-        fetchAllRows('dp_attendance_sessions', SESSION_COLS, (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id'),
+        supabase
+          .from('dp_attendance_sessions')
+          .select(SESSION_COLS, { count: 'exact' })
+          .eq('schedule_id', selectedScheduleId)
+          .or(`in_date.eq.${today},out_date.eq.${today}`)
+          .order('created_at', { ascending: false })
+          .limit(10),
       ])
       if (!alive()) return
+      if (sessRes?.error) throw sessRes.error
       // syncDepts ignores empty live results so an offline/denied fetch
       // keeps the cached department names.
       syncDepts(deptAll)
-      setSessions(sessAll || [])
+      const data = sessRes?.data || []
+      setSessions(data)
+      setTotalScansCount(typeof sessRes?.count === 'number' ? sessRes.count : data.length)
       setOffline(false)
     } catch (e) {
       if (!alive()) return
@@ -98,19 +110,22 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
   // Light session poll (L-42): refresh sessions only — never the full load.
   // Same event-date predicate as the initial load (I4); sequenced like the
   // load so a slow poll cannot overwrite a newer one.
-  // v77 perf: NO count:'exact' on this 15 s poll ({ count: 'none' }) — the
-  // count on dp_attendance_sessions cost ~3.2 s mean / ~66% of all DB time
-  // production-wide, and this poll fires it from every open scanner page.
-  // The initial load() above keeps the count (and its mismatch guard) so a
-  // truncated first paint still fails loudly; the poll only overwrites
-  // already-rendered rows and keeps last data on error.
+  // v77 & v82 perf: NO count:'exact' on this 15 s poll ({ count: 'none' })
+  // and bounded .limit(10) — avoids downloading whole table on every tick.
   const refreshSessions = useCallback(async () => {
     if (!selectedScheduleId) return
     const seq = ++pollSeqRef.current
     const alive = () => mountedRef.current && seq === pollSeqRef.current
     try {
       const today = todayStrIST()
-      const sess = await fetchAllRows('dp_attendance_sessions', SESSION_COLS, (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id', { count: 'none' })
+      const { data: sess, error } = await supabase
+        .from('dp_attendance_sessions')
+        .select(SESSION_COLS, { count: 'none' })
+        .eq('schedule_id', selectedScheduleId)
+        .or(`in_date.eq.${today},out_date.eq.${today}`)
+        .order('created_at', { ascending: false })
+        .limit(10)
+      if (error) throw error
       if (!alive()) return
       setSessions(sess || [])
       setOffline(false)
@@ -129,6 +144,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
       // Departments are global reference data — never cleared on a schedule
       // switch (the cached names stay valid); only schedule-scoped rows reset.
       setSessions([])
+      setTotalScansCount(0)
       setManualBadge('')
       setRowsScheduleId(selectedScheduleId)
     }
@@ -261,7 +277,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
         pills={pillsNode}
       />
       <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-        <KpiTile label="Scans today" value={sessions.length} sub="last 5 shown" />
+        <KpiTile label="Scans today" value={totalScansCount || sessions.length} sub="last 5 shown" />
         <KpiTile label="Queued scans" value={queued.length} sub={syncing ? 'syncing…' : queued.length ? 'waiting for network' : 'nothing waiting'} tone={queued.length ? '#b45309' : undefined} />
       </div>
 
