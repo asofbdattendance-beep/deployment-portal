@@ -50,6 +50,7 @@ export function useRealtimeRefresh({
   debounceMs = 400,
   maxWaitMs = 2000,
   minIntervalMs = 0,
+  maxJitterMs = (import.meta.env?.MODE === 'test') ? 0 : 250,
 }) {
   const reloadRef = useRef(onReload)
   reloadRef.current = onReload
@@ -61,6 +62,8 @@ export function useRealtimeRefresh({
     if (!scheduleId) return undefined
     let alive = true
     let timer = null
+    let fallbackTimer = null
+    let needsReloadOnVisible = false
     // In-flight guard: on a weak network one reload can outlast maxWaitMs,
     // and every further event used to start ANOTHER full reload on top of
     // it — requests stacked faster than they completed (refetch storm).
@@ -68,6 +71,7 @@ export function useRealtimeRefresh({
     // runs after it settles, so the newest change is still picked up.
     let inFlight = false
     let dirty = false
+
     const fire = () => {
       if (!alive) return
       if (inFlight) { dirty = true; return }
@@ -81,8 +85,35 @@ export function useRealtimeRefresh({
           if (alive && dirty) { dirty = false; reload() }
         })
     }
+
+    const startFallback = () => {
+      if (fallbackTimer || !alive) return
+      // Safe passive polling every 45-60s when websocket channel cannot connect (e.g. 200 free tier limit)
+      const interval = 45000 + (maxJitterMs > 0 ? Math.floor(Math.random() * 15000) : 0)
+      fallbackTimer = setInterval(() => {
+        if (!alive) return
+        if (typeof document === 'undefined' || document.visibilityState !== 'hidden') {
+          fire()
+        }
+      }, interval)
+    }
+
+    const stopFallback = () => {
+      if (fallbackTimer) {
+        clearInterval(fallbackTimer)
+        fallbackTimer = null
+      }
+    }
+
     const reload = () => {
       if (!alive) return
+      // Background tab protection: if the tab is hidden / device locked,
+      // pause reloads so idle background tabs do not pound Supabase free tier.
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        needsReloadOnVisible = true
+        return
+      }
+
       const viewerRun = perfStart('viewer')
       perfMark('viewer', viewerRun, 'rt-event')
       const now = Date.now()
@@ -110,13 +141,28 @@ export function useRealtimeRefresh({
         return
       }
       if (timer) clearTimeout(timer)
+      // Jitter distributes concurrent subscriber requests smoothly across time
+      // to avoid connection pool spikes on Supabase free tier micro instances.
+      const jitter = maxJitterMs > 0 ? Math.floor(Math.random() * maxJitterMs) : 0
       timer = setTimeout(() => {
         timer = null
         if (!alive) return
         perfMark('viewer', viewerRun, 'reload-fired:debounced')
         fire()
-      }, debounceMs)
+      }, debounceMs + jitter)
     }
+
+    const onVisibilityChange = () => {
+      if (!alive) return
+      if (document.visibilityState === 'visible' && needsReloadOnVisible) {
+        needsReloadOnVisible = false
+        reload()
+      }
+    }
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('visibilitychange', onVisibilityChange)
+    }
+
     topicSeq += 1
     let channel = supabase.channel(`${channelName}-${topicSeq}`)
     for (const sub of subsRef.current || []) {
@@ -128,6 +174,11 @@ export function useRealtimeRefresh({
     }
     channel.subscribe((status) => {
       reportRealtimeStatus(label, status, alive)
+      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        startFallback()
+      } else if (status === 'SUBSCRIBED') {
+        stopFallback()
+      }
     })
     // Parity with the pages this was extracted from: their initial load()
     // stamps the last-fire time at mount, so an event landing mid-first-load
@@ -136,7 +187,11 @@ export function useRealtimeRefresh({
     return () => {
       alive = false
       if (timer) clearTimeout(timer)
+      stopFallback()
+      if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+        document.removeEventListener('visibilitychange', onVisibilityChange)
+      }
       supabase.removeChannel(channel)
     }
-  }, [scheduleId, channelName, label, debounceMs, maxWaitMs, minIntervalMs])
+  }, [scheduleId, channelName, label, debounceMs, maxWaitMs, minIntervalMs, maxJitterMs])
 }

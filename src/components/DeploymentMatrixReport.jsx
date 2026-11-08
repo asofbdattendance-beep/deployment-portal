@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, Fragment, forwardRef, useImperativeHandle } from 'react'
 import { fetchCentres, fetchAllRows, getRootCentre } from '../lib/supabase'
+import { cached } from '../lib/queryCache'
 import { deploymentCounts, verifyDeploymentCounts, reportCountProblems } from '../lib/counts'
 import { inferGenderFromBadge } from '../lib/logic'
 import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
@@ -48,7 +49,7 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     // undeployed (404) and this client path is the source of truth.
     // Do NOT re-enable the RPC call here until the RPC definition is fixed
     // to match the UI semantics.
-    fetchAllRows('vss_sewadars', 'badge_number', null, 'badge_number')
+    cached('vss:badges', 120000, () => fetchAllRows('vss_sewadars', 'badge_number', null, 'badge_number'))
       .then((data) => setVssBadges(new Set((data || []).map(v => v.badge_number))))
       .catch(() => {})
   }, [])
@@ -57,7 +58,7 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     const [deployAll, allocAll, deptAll] = await Promise.all([
       fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', scheduleId).order('centre'), 'id'),
       fetchAllRows('centre_allocations', '*', (q) => q.eq('schedule_id', scheduleId), 'id'),
-      fetchAllRows('deployment_departments', 'id, name', null, 'id'),
+      cached('depts:id_name', 60000, () => fetchAllRows('deployment_departments', 'id, name', null, 'id')),
     ])
     const deptNameById = {}
     ;(deptAll || []).forEach(d => { deptNameById[d.id] = d.name })
