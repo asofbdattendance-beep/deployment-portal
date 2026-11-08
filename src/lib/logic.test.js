@@ -51,6 +51,7 @@ import {
   BADGE_REGEX,
   isValidBadgeFormat,
   isFaridabadBadge,
+  inferGenderFromBadge,
   isUndeployedScan,
   sanitizeScannedBadge,
 } from '../lib/logic'
@@ -174,6 +175,17 @@ describe('badge format helpers (v25-v27)', () => {
     expect(isFaridabadBadge('BH1234AB0001')).toBe(false)
     expect(isFaridabadBadge('bad')).toBe(false)
     expect(isFaridabadBadge(null)).toBe(false)
+  })
+  it('inferGenderFromBadge infers MALE / FEMALE from RSSB badge format and handles nulls', () => {
+    expect(inferGenderFromBadge('FB5995GA0013')).toBe('MALE')
+    expect(inferGenderFromBadge('FB5982LA0015')).toBe('FEMALE')
+    expect(inferGenderFromBadge('fb5971ga0001')).toBe('MALE')
+    expect(inferGenderFromBadge('VSFB5978GB2872')).toBe('MALE')
+    expect(inferGenderFromBadge('VSFB5978LB1024')).toBe('FEMALE')
+    expect(inferGenderFromBadge('UNKNOWN')).toBeNull()
+    expect(inferGenderFromBadge(null)).toBeNull()
+    expect(inferGenderFromBadge(undefined)).toBeNull()
+    expect(inferGenderFromBadge('')).toBeNull()
   })
   it('isUndeployedScan checks deployedSet', () => {
     const set = new Set(['FB5971GA0001', 'VS123'])

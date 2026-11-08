@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, Fragment, forwardRef, useImperativeHandle } from 'react'
 import { fetchCentres, fetchAllRows, getRootCentre } from '../lib/supabase'
 import { deploymentCounts, verifyDeploymentCounts, reportCountProblems } from '../lib/counts'
+import { inferGenderFromBadge } from '../lib/logic'
 import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
 import EmptyState from './EmptyState'
 
@@ -64,7 +65,7 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     const rowsData = (deployAll || []).map(r => ({
       ...r,
       // effective department — what is happening now: finalized if exists, otherwise the centre's request
-      final_dept_name: deptNameById[r.deployed_department_id || r.department_id] || '—',
+      final_dept_name: deptNameById[r.deployed_department_id || r.department_id] || (r.deployed_department_id || r.department_id ? 'UNKNOWN DEPT' : 'UNASSIGNED'),
     }))
     setRows(rowsData)
     setAllocations(allocAll || [])
@@ -106,6 +107,9 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     subscriptions: [
       { table: 'deployments', filter: `schedule_id=eq.${scheduleId}` },
       { table: 'centre_allocations', filter: `schedule_id=eq.${scheduleId}` },
+      { table: 'sewadar_consents', filter: `schedule_id=eq.${scheduleId}` },
+      { table: 'centre_locks', filter: `schedule_id=eq.${scheduleId}` },
+      { table: 'deployment_departments' },
     ],
     onReload: () => load(scheduleId).catch((e) => { console.error('[Overview] reload failed:', e?.message) }),
     label: 'deploy-overview',
@@ -150,8 +154,12 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     d.deployed++
     if (vssBadges.has(r.badge_number)) { d.vss++; return }
     const sw = swFor(r)
-    if (!sw?.gender) { d.noGender++; return }
-    if (isMale(sw.gender)) d.male++; else d.female++
+    let g = sw?.gender
+    if (!g) {
+      g = inferGenderFromBadge(r.badge_number)
+    }
+    if (!g) { d.noGender++; return }
+    if (isMale(g)) d.male++; else d.female++
   })
 
   const deptSet = new Set()

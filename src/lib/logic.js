@@ -171,6 +171,23 @@ export function isValidBadgeFormat(badge) {
 export function isFaridabadBadge(badge) {
   return isValidBadgeFormat(badge)
 }
+
+/**
+ * Infer gender from badge number format.
+ * RSSB badges encode gender convention:
+ *   - 'GA' or 'GB' -> 'MALE' (Gents)
+ *   - 'LA' or 'LB' -> 'FEMALE' (Ladies)
+ * Applies to standard FB badges (e.g. FB5995GA0013, FB5982LA0015) and
+ * VSS badges (e.g. VSFB5978GB2872, VSFB5978LB1024).
+ * Returns 'MALE', 'FEMALE', or null if unrecognised.
+ */
+export function inferGenderFromBadge(badge) {
+  if (typeof badge !== 'string') return null
+  const b = badge.trim().toUpperCase()
+  if (/(GA|GB)/.test(b)) return 'MALE'
+  if (/(LA|LB)/.test(b)) return 'FEMALE'
+  return null
+}
 export function isUndeployedScan(badge, deployedSet) {
   if (!badge || !deployedSet) return true
   return !deployedSet.has(String(badge).toUpperCase())
