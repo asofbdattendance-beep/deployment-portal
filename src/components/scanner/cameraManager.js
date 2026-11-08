@@ -97,25 +97,91 @@ export function stopStream(stream) {
   if (_active?.stream === stream) _active = null
 }
 
-/* ─── Device selection ──────────────────────────────────────────────────────── */
+/* ─── Device selection & ranking ────────────────────────────────────────────── */
 
 /**
- * Find the rear camera's deviceId.
+ * Score a camera device based on label signals to prioritize the primary (1x)
+ * autofocus camera over ultra-wide, macro, depth, or telephoto lenses.
  *
- * Labels are only populated once camera permission has been granted, so a first
- * call can legitimately return null — the caller then falls back to
- * `facingMode`.
+ * Many multi-camera Android devices (e.g. OnePlus, Oppo, Realme, Samsung) expose
+ * the ultra-wide (0.6x) or fixed-focus macro lens as the first rear device.
+ * Those lenses have heavy distortion, tiny barcodes at normal 15-25cm distance,
+ * and lack autofocus, preventing reliable scanning.
  *
- * @returns {Promise<string|null>}
+ * @param {MediaDeviceInfo} device
+ * @param {number} [index]
+ * @returns {number}
  */
-export async function pickRearDeviceId() {
+export function scoreRearCamera(device, index = 0) {
+  const label = String(device?.label || '').toLowerCase()
+  let score = 100 - index // slight preference for earlier index if unlabelled
+
+  // Penalize lenses that fail on 1D barcodes at standard distance
+  if (/(ultra[- ]?wide|0\.[56]x)/i.test(label)) score -= 80
+  if (/macro/i.test(label)) score -= 90
+  if (/(depth|tof|bokeh|virtual)/i.test(label)) score -= 85
+  if (/(tele|telephoto|periscope|zoom|[2-9]x|10x)/i.test(label)) score -= 50
+
+  // Boost primary 1x autofocus camera
+  if (/(main|primary|standard)/i.test(label)) score += 60
+  if (/\b1x\b|\b1\.0x\b/i.test(label)) score += 50
+  if (/wide/i.test(label) && !/ultra/i.test(label)) score += 30
+  if (/(back|rear).*0\b/i.test(label) || /camera2?\s*0\b/i.test(label)) score += 15
+
+  return score
+}
+
+/**
+ * Enumerate all available rear cameras sorted by quality score.
+ *
+ * @returns {Promise<Array<MediaDeviceInfo & { score: number }>>}
+ */
+export async function getRearCameraList() {
   try {
     const devices = await navigator.mediaDevices?.enumerateDevices?.()
-    if (!Array.isArray(devices) || !devices.length) return null
-    const cams = devices.filter(d => d.kind === 'videoinput' && d.label)
-    if (!cams.length) return null
-    const rear = cams.find(d => REAR_LABEL.test(d.label))
-    return rear?.deviceId || null
+    if (!Array.isArray(devices) || !devices.length) return []
+    const cams = devices.filter(d => d.kind === 'videoinput')
+    if (!cams.length) return []
+
+    // If labels are not yet populated (before permission), return video devices
+    const labeled = cams.filter(d => d.label)
+    if (!labeled.length) return cams.map((d, i) => ({ ...d, score: 100 - i }))
+
+    const rearCams = labeled.filter(d => REAR_LABEL.test(d.label))
+    if (!rearCams.length) return []
+
+    return rearCams
+      .map((d, i) => ({ ...d, score: scoreRearCamera(d, i) }))
+      .sort((a, b) => b.score - a.score)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Find the rear camera's deviceId, preferring the primary autofocus lens.
+ *
+ * Labels are only populated once camera permission has been granted, so a first
+ * call can legitimately return null — the caller then falls back to `facingMode`.
+ *
+ * @param {{preferredDeviceId?: string|null, excludeDeviceId?: string|null}|string} [opts]
+ * @returns {Promise<string|null>}
+ */
+export async function pickRearDeviceId(opts = {}) {
+  const { preferredDeviceId = null, excludeDeviceId = null } =
+    (typeof opts === 'string' ? { preferredDeviceId: opts } : opts)
+  try {
+    const list = await getRearCameraList()
+    if (!list.length) return null
+
+    if (preferredDeviceId) {
+      const match = list.find(d => d.deviceId === preferredDeviceId)
+      if (match) return match.deviceId
+    }
+
+    const filtered = excludeDeviceId ? list.filter(d => d.deviceId !== excludeDeviceId) : list
+    const pick = filtered[0] || list[0]
+    return pick?.deviceId || null
   } catch {
     return null
   }
@@ -216,7 +282,12 @@ export async function ensureUsableResolution(track, opts = {}) {
   const read = () => { try { return track.getSettings() || {} } catch { return {} } }
   const before = read()
   const fromW = Number(before.width) || 0
-  if (fromW >= minWidth) return noop(fromW)
+  const fromH = Number(before.height) || 0
+  const maxDim = Math.max(fromW, fromH)
+  const minDim = Math.min(fromW, fromH)
+
+  // Already usable in either landscape (fromW >= minWidth) or portrait (maxDim >= minWidth && minDim >= 720)
+  if (fromW >= minWidth || (maxDim >= minWidth && minDim >= 720)) return noop(fromW)
 
   let caps
   try { caps = track.getCapabilities?.() || {} } catch { caps = {} }
@@ -307,7 +378,15 @@ export async function applyFocusConstraints(track, opts = {}) {
       try {
         await track.applyConstraints({ advanced: [focusSet] })
         if (focusSet.focusMode) result.focusApplied = true
-      } catch { /* unsupported set — zoom below still gets its own chance */ }
+      } catch {
+        // Fallback: if driver rejected combined set (OnePlus/OxygenOS/ColorOS), try focusMode independently
+        if (focusSet.focusMode) {
+          try {
+            await track.applyConstraints({ advanced: [{ focusMode: focusSet.focusMode }] })
+            result.focusApplied = true
+          } catch { /* unsupported */ }
+        }
+      }
     }
 
     // Digital zoom makes the barcode larger in the frame, but it CANNOT add
@@ -647,10 +726,13 @@ export function beginFocusHunt(track, opts = {}) {
  * @returns {Promise<{stream: MediaStream, track: MediaStreamTrack, torchSupported: boolean, deviceId: string|null, resolutionIndex: number, adopted: boolean}>}
  */
 export function openCamera(opts = {}) {
-  if (_active && isStreamLive(_active.stream)) {
-    return Promise.resolve({ ..._active, adopted: true })
+  const { preferredDeviceId = null, forceNew = false } = opts
+  if (!forceNew && _active && isStreamLive(_active.stream)) {
+    if (!preferredDeviceId || _active.deviceId === preferredDeviceId) {
+      return Promise.resolve({ ..._active, adopted: true })
+    }
   }
-  if (_active) stopStream(_active.stream) // dead stream sitting around
+  if (_active) stopStream(_active.stream) // switching camera or dead stream sitting around
 
   if (_openingPromise) return _openingPromise
 
@@ -680,8 +762,8 @@ export function openCamera(opts = {}) {
   return attempt
 }
 
-async function openCameraInner({ startIndex = 0, debug = false } = {}) {
-  let deviceId = await pickRearDeviceId()
+async function openCameraInner({ startIndex = 0, debug = false, preferredDeviceId = null } = {}) {
+  let deviceId = await pickRearDeviceId({ preferredDeviceId })
   const chain = RESOLUTION_CHAIN.slice(Math.max(0, startIndex))
   let lastError = null
 

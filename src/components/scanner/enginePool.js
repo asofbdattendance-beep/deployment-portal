@@ -117,6 +117,35 @@ const invertCanvas = (imageData) => {
 }
 
 /**
+ * Best-effort canvas rotation for Native BarcodeDetector in hardPass.
+ *
+ * jsdom has no 2d context, so it returns null safely. In real browsers
+ * (Chrome/Edge Android), this gives Native BarcodeDetector rotated frames
+ * so hardware-accelerated detection succeeds on 90° rotated barcodes.
+ *
+ * @param {HTMLCanvasElement} source
+ * @param {number} deg
+ * @returns {HTMLCanvasElement|null}
+ */
+const rotateCanvas = (source, deg) => {
+  if (!source || !source.width || !source.height) return null
+  try {
+    const c = document.createElement('canvas')
+    const swap = deg === 90 || deg === 270
+    c.width = swap ? source.height : source.width
+    c.height = swap ? source.width : source.height
+    const ctx = c.getContext && c.getContext('2d')
+    if (!ctx || typeof ctx.drawImage !== 'function' || typeof ctx.rotate !== 'function') return null
+    ctx.translate(c.width / 2, c.height / 2)
+    ctx.rotate((deg * Math.PI) / 180)
+    ctx.drawImage(source, -source.width / 2, -source.height / 2)
+    return c
+  } catch {
+    return null
+  }
+}
+
+/**
  * Create the detector-engine pool.
  *
  * @param {boolean} debug — log engine transitions to the console.
@@ -130,7 +159,7 @@ const invertCanvas = (imageData) => {
    *   second look never loses a capability the old all-symbologies reader had,
    *   while every normal frame stays 1D-only. Pass a tier's own list to narrow
    *   it.
- * @param {number} [opts.emptyHandoffAfter=8] — consecutive clean misses from
+ * @param {number} [opts.emptyHandoffAfter=6] — consecutive clean misses from
  *   the active engine before it hands off to the other ready engine.
  * @returns {{init: Function, armFallback: Function, detect: Function,
  *   getActiveId: Function, isReady: Function, fallback: Function,
@@ -146,12 +175,12 @@ export function createEnginePool(debug, opts = {}) {
       : [...BASE_1D_FORMATS, ...EXTENDED_1D_FORMATS]
   )]
   // Consecutive clean misses before the active engine hands off to the other
-  // ready one. 8 is long enough that a genuinely hard badge (a few blank
+  // ready one. 6 is long enough that a genuinely hard badge (a few blank
   // frames) doesn't trigger it, short enough that a dead-native situation
-  // recovers within a second or two of scanning.
+  // recovers rapidly within ~300ms of scanning.
   const emptyHandoffAfter = Number.isFinite(opts.emptyHandoffAfter) && opts.emptyHandoffAfter > 0
     ? Math.floor(opts.emptyHandoffAfter)
-    : 8
+    : 6
 
   const engines = [
     { id: 'Native', ready: false, detector: null, failures: 0, maxFailures: 3, emptyCount: 0 },
@@ -446,6 +475,8 @@ export function createEnginePool(debug, opts = {}) {
         variants.push({ canvas: source })
         const invCanvas = invertCanvas(imageData)
         if (invCanvas) variants.push({ canvas: invCanvas })
+        const rotCanvas = rotateCanvas(source, 90)
+        if (rotCanvas) variants.push({ canvas: rotCanvas })
       }
       for (const v of variants) {
         try {

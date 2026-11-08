@@ -629,3 +629,29 @@ describe('BarcodeScanner decode gate routes through the sanitizer (T4)', () => {
     }
   })
 })
+
+describe('BarcodeScanner camera lens switching', () => {
+  it('shows the lens switch button when multiple rear cameras exist and switches camera on click', async () => {
+    const stream1 = makeStream('cam1')
+    const stream2 = makeStream('cam2')
+    navigator.mediaDevices.enumerateDevices = vi.fn().mockResolvedValue([
+      { kind: 'videoinput', deviceId: 'cam1', label: 'Back Main Camera 1' },
+      { kind: 'videoinput', deviceId: 'cam2', label: 'Back Wide Camera 2' },
+    ])
+    mocks.openCamera
+      .mockResolvedValueOnce({ stream: stream1, track: stream1.track, torchSupported: false, deviceId: 'cam1', resolutionIndex: 0, adopted: false })
+      .mockResolvedValueOnce({ stream: stream2, track: stream2.track, torchSupported: false, deviceId: 'cam2', resolutionIndex: 0, adopted: false })
+
+    const { findByRole } = render(<BarcodeScanner onScan={vi.fn()} />)
+    const lensBtn = await findByRole('button', { name: /switch camera lens/i })
+    expect(lensBtn).toBeTruthy()
+
+    await act(async () => {
+      lensBtn.click()
+      await flush()
+    })
+
+    expect(mocks.openCamera).toHaveBeenCalledTimes(2)
+    expect(mocks.openCamera.mock.calls[1][0]).toMatchObject({ preferredDeviceId: 'cam2' })
+  })
+})
