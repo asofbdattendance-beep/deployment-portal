@@ -1,0 +1,31 @@
+name: Attendance 21:00 IST Auto-Out Sweep
+
+on:
+  schedule:
+    # 15:30 UTC == 21:00 IST every day
+    - cron: '30 15 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger attendance_auto_close_open_sessions
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+            echo "::error::SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY secrets required."
+            exit 1
+          fi
+          res=$(curl -sS --fail-with-body -X POST "$SUPABASE_URL/rest/v1/rpc/attendance_auto_close_open_sessions" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{}')
+          echo "Auto-out closed sessions count: $res"

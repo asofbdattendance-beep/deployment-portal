@@ -162,6 +162,7 @@ function rpcResult(name, params) {
         __status: 200,
         __body: {
           ok: true,
+          late_in: false,
           sewadar_name: 'RAM',
           sewadar_centre: 'DELHI',
           dept_name: 'MEDICAL',
@@ -172,6 +173,7 @@ function rpcResult(name, params) {
         __status: 200,
         __body: {
           ok: true,
+          early_out: false,
           sewadar_name: 'RAM',
           sewadar_centre: 'DELHI',
           dept_name: 'MEDICAL',

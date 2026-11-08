@@ -15,6 +15,8 @@ import {
   getActiveStream,
   isStreamLive,
   pickRearDeviceId,
+  getRearCameraList,
+  scoreRearCamera,
   probeTorch,
   cancelPendingOpen,
   applyFocusConstraints,
@@ -283,6 +285,23 @@ describe('pickRearDeviceId', () => {
     await expect(pickRearDeviceId()).resolves.toBe('b')
   })
 
+  it('prioritizes main 1x camera over ultra-wide and macro auxiliary lenses', async () => {
+    navigator.mediaDevices.enumerateDevices = vi.fn().mockResolvedValue([
+      { kind: 'videoinput', deviceId: 'ultra', label: 'camera2 0, facing back (ultra-wide 0.6x)' },
+      { kind: 'videoinput', deviceId: 'macro', label: 'camera2 2, facing back (macro)' },
+      { kind: 'videoinput', deviceId: 'main', label: 'camera2 1, facing back (main 1x)' },
+    ])
+    await expect(pickRearDeviceId()).resolves.toBe('main')
+  })
+
+  it('honours preferredDeviceId when it matches an enumerated camera', async () => {
+    navigator.mediaDevices.enumerateDevices = vi.fn().mockResolvedValue([
+      { kind: 'videoinput', deviceId: 'cam1', label: 'Back Camera 1' },
+      { kind: 'videoinput', deviceId: 'cam2', label: 'Back Camera 2' },
+    ])
+    await expect(pickRearDeviceId({ preferredDeviceId: 'cam2' })).resolves.toBe('cam2')
+  })
+
   it('ignores audio inputs and non-camera labels', async () => {
     navigator.mediaDevices.enumerateDevices = vi.fn().mockResolvedValue([
       { kind: 'audioinput', deviceId: 'mic', label: 'Back Microphone' },
@@ -295,6 +314,27 @@ describe('pickRearDeviceId', () => {
     await expect(pickRearDeviceId()).resolves.toBeNull() // stubbed to []
     navigator.mediaDevices.enumerateDevices = vi.fn().mockRejectedValue(new Error('nope'))
     await expect(pickRearDeviceId()).resolves.toBeNull()
+  })
+})
+
+describe('scoreRearCamera & getRearCameraList', () => {
+  it('scores primary/main lenses higher than ultra-wide and macro', () => {
+    const mainScore = scoreRearCamera({ label: 'Back Camera 1 (main 1x)' })
+    const ultraScore = scoreRearCamera({ label: 'Back Camera 0 (ultra-wide)' })
+    const macroScore = scoreRearCamera({ label: 'Back Camera 2 (macro)' })
+    expect(mainScore).toBeGreaterThan(ultraScore)
+    expect(mainScore).toBeGreaterThan(macroScore)
+  })
+
+  it('getRearCameraList returns rear cameras sorted by score', async () => {
+    navigator.mediaDevices.enumerateDevices = vi.fn().mockResolvedValue([
+      { kind: 'videoinput', deviceId: 'uw', label: 'Back Camera (ultrawide)' },
+      { kind: 'videoinput', deviceId: 'main', label: 'Back Camera (wide standard)' },
+    ])
+    const list = await getRearCameraList()
+    expect(list).toHaveLength(2)
+    expect(list[0].deviceId).toBe('main')
+    expect(list[1].deviceId).toBe('uw')
   })
 })
 

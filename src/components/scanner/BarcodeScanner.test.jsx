@@ -629,3 +629,109 @@ describe('BarcodeScanner decode gate routes through the sanitizer (T4)', () => {
     }
   })
 })
+
+describe('BarcodeScanner camera lens switching', () => {
+  it('shows the lens switch button when multiple rear cameras exist and switches camera on click', async () => {
+    const stream1 = makeStream('cam1')
+    const stream2 = makeStream('cam2')
+    navigator.mediaDevices.enumerateDevices = vi.fn().mockResolvedValue([
+      { kind: 'videoinput', deviceId: 'cam1', label: 'Back Main Camera 1' },
+      { kind: 'videoinput', deviceId: 'cam2', label: 'Back Wide Camera 2' },
+    ])
+    mocks.openCamera
+      .mockResolvedValueOnce({ stream: stream1, track: stream1.track, torchSupported: false, deviceId: 'cam1', resolutionIndex: 0, adopted: false })
+      .mockResolvedValueOnce({ stream: stream2, track: stream2.track, torchSupported: false, deviceId: 'cam2', resolutionIndex: 0, adopted: false })
+
+    const { findByRole } = render(<BarcodeScanner onScan={vi.fn()} />)
+    const lensBtn = await findByRole('button', { name: /switch camera lens/i })
+    expect(lensBtn).toBeTruthy()
+
+    await act(async () => {
+      lensBtn.click()
+      await flush()
+    })
+
+    expect(mocks.openCamera).toHaveBeenCalledTimes(2)
+    expect(mocks.openCamera.mock.calls[1][0]).toMatchObject({ preferredDeviceId: 'cam2' })
+  })
+
+  it('shows transient camera toast on lens switch and dismisses after 2s', async () => {
+    vi.useFakeTimers()
+    try {
+      const stream1 = makeStream('cam1')
+      const stream2 = makeStream('cam2')
+      navigator.mediaDevices.enumerateDevices = vi.fn().mockResolvedValue([
+        { kind: 'videoinput', deviceId: 'cam1', label: 'Back Main Camera 1' },
+        { kind: 'videoinput', deviceId: 'cam2', label: 'Back Wide Camera 2' },
+      ])
+      mocks.openCamera
+        .mockResolvedValueOnce({ stream: stream1, track: stream1.track, torchSupported: false, deviceId: 'cam1', resolutionIndex: 0, adopted: false })
+        .mockResolvedValueOnce({ stream: stream2, track: stream2.track, torchSupported: false, deviceId: 'cam2', resolutionIndex: 0, adopted: false })
+
+      const view = render(<BarcodeScanner onScan={vi.fn()} />)
+      await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+      const lensBtn = view.getByRole('button', { name: /switch camera lens/i })
+
+      await act(async () => {
+        lensBtn.click()
+        await vi.advanceTimersByTimeAsync(50)
+      })
+
+      expect(view.getByText(/back wide camera 2/i)).toBeTruthy()
+
+      // After 2.1s, toast should be gone
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2100)
+      })
+      expect(view.queryByText(/back wide camera 2/i)).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('BarcodeScanner multi-badge sliding suppressor', () => {
+  it('suppresses duplicate scan of badge A even if badge B was scanned in between within 2s', async () => {
+    vi.useFakeTimers()
+    try {
+      const stream = makeStream()
+      mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+
+      let currentCode = 'FB5971GA0001'
+      window.BarcodeDetector = class {
+        static getSupportedFormats = () => Promise.resolve(['code_39'])
+        detect = () => Promise.resolve([{ rawValue: currentCode, cornerPoints: [] }])
+      }
+      const onScan = vi.fn().mockReturnValue(true)
+      const { container } = render(<BarcodeScanner onScan={onScan} />)
+      const video = container.querySelector('video')
+      Object.defineProperty(video, 'videoWidth', { value: 1280, configurable: true })
+      Object.defineProperty(video, 'videoHeight', { value: 720, configurable: true })
+
+      // Scan badge A (t=0)
+      await act(async () => { await vi.advanceTimersByTimeAsync(800) })
+      expect(onScan).toHaveBeenCalledTimes(1)
+      expect(onScan).toHaveBeenLastCalledWith('FB5971GA0001')
+
+      // Switch to badge B (t=500ms)
+      currentCode = 'VSFB5971GA2927'
+      await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+      expect(onScan).toHaveBeenCalledTimes(2)
+      expect(onScan).toHaveBeenLastCalledWith('VSFB5971GA2927')
+
+      // Badge A enters view again at t=1000ms (<2000ms since A was scanned)
+      currentCode = 'FB5971GA0001'
+      await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+      // Suppressed! onScan should still only have been called twice
+      expect(onScan).toHaveBeenCalledTimes(2)
+
+      // Advance past 2000ms from badge A's original scan
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500) })
+      // Now badge A is accepted again!
+      expect(onScan).toHaveBeenCalledTimes(3)
+      expect(onScan).toHaveBeenLastCalledWith('FB5971GA0001')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

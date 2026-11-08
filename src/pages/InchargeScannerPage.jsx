@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { jitteredInterval } from '../lib/jitter'
-import { fetchAllRows } from '../lib/supabase'
+import { supabase, fetchAllRows } from '../lib/supabase'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
 import BarcodeScanner from '../components/scanner/BarcodeScanner'
 import ScanResultPopup from '../components/scanner/ScanResultPopup'
 import RecentScansTable from '../components/scanner/RecentScansTable'
-import { todayStrIST } from '../lib/scannerUtils'
+import { todayStrIST, hmsIST, mergeOptimisticSessions, getScannerRefreshDebounceMs } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import { useScannerSession } from '../hooks/useScannerSession'
 import { useSewadarDirectory } from '../hooks/useSewadarDirectory'
@@ -22,7 +22,7 @@ import { ScanLine, Clock, Wifi, WifiOff, RefreshCw, Loader2 } from 'lucide-react
 // Narrow session columns — this is all RecentScansTable reads. Same list as
 // DeptInchargePage (V9: `created_at` is load-bearing — recent scans are ordered
 // by it, not id; T5: `sewadar_centre` is load-bearing).
-const SESSION_COLS = 'id,badge_number,sewadar_name,sewadar_centre,sewadar_dept,in_date,out_date,in_time,out_time,is_vss,undeployed_scan,created_at'
+const SESSION_COLS = 'id,badge_number,sewadar_name,sewadar_centre,sewadar_dept,in_date,out_date,in_time,out_time,is_vss,undeployed_scan,is_late_in,is_early_out,created_at'
 
 // InchargeScannerPage — the scanner-only page for the dept_incharge
 // Attendance tab. Scan wiring mirrors DeptInchargePage's scan tab
@@ -37,6 +37,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
   // cached snapshot first, live rows overwrite + refresh the cache.
   const [depts, syncDepts] = useDeptNames()
   const [sessions, setSessions] = useState([])
+  const [totalScansCount, setTotalScansCount] = useState(0)
   const [manualBadge, setManualBadge] = useState('')
   const [offline, setOffline] = useState(false)
   // Reactive connectivity — `navigator.onLine` read at render time never
@@ -78,15 +79,26 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
       const today = todayStrIST()
       // I4: v45 event-date law (IN *or* OUT today counts — in_date-only reads
       // miss overnight sessions and contradict the ASO's Daily tab).
-      const [deptAll, sessAll] = await Promise.all([
+      // v82 perf: fetch top 10 recent sessions bounded with count:'exact'
+      // instead of downloading thousands of rows across the schedule.
+      const [deptAll, sessRes] = await Promise.all([
         fetchAllRows('deployment_departments', 'id,name', (q) => q.order('name'), 'id'),
-        fetchAllRows('dp_attendance_sessions', SESSION_COLS, (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id'),
+        supabase
+          .from('dp_attendance_sessions')
+          .select(SESSION_COLS, { count: 'exact' })
+          .eq('schedule_id', selectedScheduleId)
+          .or(`in_date.eq.${today},out_date.eq.${today}`)
+          .order('created_at', { ascending: false })
+          .limit(10),
       ])
       if (!alive()) return
+      if (sessRes?.error) throw sessRes.error
       // syncDepts ignores empty live results so an offline/denied fetch
       // keeps the cached department names.
       syncDepts(deptAll)
-      setSessions(sessAll || [])
+      const data = sessRes?.data || []
+      setSessions((prev) => mergeOptimisticSessions(prev, data, 10))
+      setTotalScansCount(typeof sessRes?.count === 'number' ? sessRes.count : data.length)
       setOffline(false)
     } catch (e) {
       if (!alive()) return
@@ -98,21 +110,24 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
   // Light session poll (L-42): refresh sessions only — never the full load.
   // Same event-date predicate as the initial load (I4); sequenced like the
   // load so a slow poll cannot overwrite a newer one.
-  // v77 perf: NO count:'exact' on this 15 s poll ({ count: 'none' }) — the
-  // count on dp_attendance_sessions cost ~3.2 s mean / ~66% of all DB time
-  // production-wide, and this poll fires it from every open scanner page.
-  // The initial load() above keeps the count (and its mismatch guard) so a
-  // truncated first paint still fails loudly; the poll only overwrites
-  // already-rendered rows and keeps last data on error.
+  // v77 & v82 perf: NO count:'exact' on this 15 s poll ({ count: 'none' })
+  // and bounded .limit(10) — avoids downloading whole table on every tick.
   const refreshSessions = useCallback(async () => {
     if (!selectedScheduleId) return
     const seq = ++pollSeqRef.current
     const alive = () => mountedRef.current && seq === pollSeqRef.current
     try {
       const today = todayStrIST()
-      const sess = await fetchAllRows('dp_attendance_sessions', SESSION_COLS, (q) => q.eq('schedule_id', selectedScheduleId).or(`in_date.eq.${today},out_date.eq.${today}`), 'id', { count: 'none' })
+      const { data: sess, error } = await supabase
+        .from('dp_attendance_sessions')
+        .select(SESSION_COLS, { count: 'none' })
+        .eq('schedule_id', selectedScheduleId)
+        .or(`in_date.eq.${today},out_date.eq.${today}`)
+        .order('created_at', { ascending: false })
+        .limit(10)
+      if (error) throw error
       if (!alive()) return
-      setSessions(sess || [])
+      setSessions((prev) => mergeOptimisticSessions(prev, sess, 10))
       setOffline(false)
     } catch (e) {
       if (!alive()) return
@@ -129,6 +144,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
       // Departments are global reference data — never cleared on a schedule
       // switch (the cached names stay valid); only schedule-scoped rows reset.
       setSessions([])
+      setTotalScansCount(0)
       setManualBadge('')
       setRowsScheduleId(selectedScheduleId)
     }
@@ -160,6 +176,64 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
   // unchanged while desktop offline gains popup identity.
   const directoryByBadge = useSewadarDirectory({ scheduleId: selectedScheduleId, enabled: true })
 
+  // Debounced post-scan background refresh — prevents query storms on fast burst scanning
+  const refreshTimerRef = useRef(null)
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
+    const delay = getScannerRefreshDebounceMs()
+    if (delay <= 0) {
+      refreshSessions()
+      return
+    }
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null
+      refreshSessions()
+    }, delay)
+  }, [refreshSessions])
+
+  useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
+    }
+  }, [])
+
+  // Optimistic local prepend for 0ms operator feedback
+  const onAfterScan = useCallback((scan) => {
+    if (scan?.badge) {
+      const today = todayStrIST()
+      const nowHms = hmsIST()
+      const isOut = scan.action === 'OUT'
+      setSessions((prev) => {
+        const existingIdx = prev.findIndex((s) => s.badge_number === scan.badge)
+        const existing = existingIdx >= 0 ? prev[existingIdx] : null
+        const optRow = {
+          id: existing?.id ? `opt-${existing.id}` : `opt-${Date.now()}-${scan.badge}`,
+          _optimistic: true,
+          badge_number: scan.badge,
+          sewadar_name: scan.sewadar_name || existing?.sewadar_name || '',
+          sewadar_centre: scan.sewadar_centre || existing?.sewadar_centre || '',
+          sewadar_dept: scan.dept_id || existing?.sewadar_dept || null,
+          in_date: isOut ? (existing?.in_date || today) : today,
+          out_date: isOut ? today : (existing?.out_date || null),
+          in_time: isOut ? (existing?.in_time || null) : (scan.in_time || nowHms),
+          out_time: isOut ? (scan.out_time || nowHms) : (existing?.out_time || null),
+          is_vss: !!scan.is_vss || !!existing?.is_vss,
+          undeployed_scan: !!scan.undeployed || !!existing?.undeployed_scan,
+          is_late_in: scan.is_late_in !== undefined ? !!scan.is_late_in : !!existing?.is_late_in,
+          is_early_out: scan.is_early_out !== undefined ? !!scan.is_early_out : !!existing?.is_early_out,
+          updated_at: new Date().toISOString(),
+          created_at: existing?.created_at || new Date().toISOString(),
+        }
+        const rest = existingIdx >= 0 ? prev.filter((_, i) => i !== existingIdx) : prev
+        return [optRow, ...rest].slice(0, 10)
+      })
+      if (scan.action === 'IN') {
+        setTotalScansCount((prev) => prev + 1)
+      }
+    }
+    scheduleRefresh()
+  }, [scheduleRefresh])
+
   const {
     popup, outTime, setOutTime, closePopup,
     handleScan, handleCameraScan, commitScan, confirmForgot,
@@ -172,7 +246,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
     deptNameById,
     directoryByBadge,
     toast,
-    onAfterScan: refreshSessions,
+    onAfterScan,
     forgotSuccessToast: 'OUT closed, now you can IN',
     clearManual,
   })
@@ -229,6 +303,8 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
       onOutTimeChange={setOutTime}
       onClose={closePopup}
       onConfirm={popup?.status === 'forgot' ? confirmForgot : popup?.status === 'choose' ? commitScan : closePopup}
+      is_late_in={popup?.is_late_in}
+      is_early_out={popup?.is_early_out}
     />
   )
 
@@ -259,7 +335,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
         pills={pillsNode}
       />
       <div className="stat-row" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-        <KpiTile label="Scans today" value={sessions.length} sub="last 5 shown" />
+        <KpiTile label="Scans today" value={totalScansCount || sessions.length} sub="last 5 shown" />
         <KpiTile label="Queued scans" value={queued.length} sub={syncing ? 'syncing…' : queued.length ? 'waiting for network' : 'nothing waiting'} tone={queued.length ? '#b45309' : undefined} />
       </div>
 

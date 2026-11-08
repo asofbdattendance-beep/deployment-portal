@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { supabase, fetchSubtreeCentres, fetchCentres, fetchAllRows, fetchAsoDeptKeys, getRootCentre, eligibleBadgeStatusFilter, isAssoDepartment, fetchPortalSettings, shouldHideFromConsent } from '../lib/supabase'
+import { cached } from '../lib/queryCache'
 import { computeEditGates, isDeptSelectable, isUndeployedCohort, computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, aggregateQuotaAllocations, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, changedConsentFields, consentRowKey, buildConsentSnapshot, groupConsentPatches, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
 import { consentCounts } from '../lib/counts'
 import { REALTIME_RELOAD_DEBOUNCE_MS, REALTIME_SELF_SKIP_MS } from '../lib/realtimeDeploy'
@@ -161,10 +162,10 @@ export default function ConsentPage({ schedules, scheduleId }) {
       const [sewAll, consAll, deptAll, allocAll, deployAll, prevAll, asoAll] = await Promise.all([
         fetchAllRows('dp_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, gender', (q) => q.or(eligibleBadgeStatusFilter()).in('centre', subtree).order('sewadar_name'), ['centre', 'badge_number']),
         fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree), 'id'),
-        fetchAllRows('deployment_departments', '*', (q) => q.eq('is_active', true).order('name'), 'id'),
+        cached('depts:active', 60000, () => fetchAllRows('deployment_departments', '*', (q) => q.eq('is_active', true).order('name'), 'id')),
         fetchAllRows('centre_allocations', '*', (q) => q.eq('schedule_id', selectedScheduleId), 'id'),
         fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree), 'id'),
-        fetchAllRows('prev_year_deployments', 'badge_number, prev_department, attendance_reported', null, 'badge_number'),
+        cached('prev_year_deployments', 600000, () => fetchAllRows('prev_year_deployments', 'badge_number, prev_department, attendance_reported', null, 'badge_number')),
         fetchAsoDeptKeys(subtree),
       ])
       setAsoKeys(asoAll || new Set())

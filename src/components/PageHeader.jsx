@@ -22,7 +22,7 @@ export function ViewOnlyPill({
  * PageHeader — the one page header every report/dashboard surface shares.
  *
  * Layout mirrors the AttendancePage header block exactly (same classes, same
- * inline skeleton): title block on the left (icon + title, sub, then a
+ * skeleton, now as .page-header-* classes): title block on the left (icon + title, sub, then a
  * pills/actions row), free-form `aside` on the right (scan-day pickers,
  * schedule selects, filter counts). Nothing here fetches or subscribes —
  * the page passes nodes in.
@@ -38,18 +38,18 @@ export function ViewOnlyPill({
 export default function PageHeader({ icon, title, sub, pills, actions, aside }) {
   return (
     <div className="page-header" style={{ alignItems: 'center', gap: '1.25rem' }}>
-      <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
+      <div className="page-header-main">
         <h2 className="page-title">{icon}{title}</h2>
         {sub && <div className="page-sub">{sub}</div>}
         {(pills || actions) && (
-          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          <div className="page-header-row">
             {pills}
             {actions}
           </div>
         )}
       </div>
       {aside && (
-        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+        <div className="page-header-aside">
           {aside}
         </div>
       )}

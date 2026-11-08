@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { jitteredInterval } from '../lib/jitter'
 import { supabase } from '../lib/supabase'
 import { usePortalAuth } from '../context/PortalAuthContext'
@@ -11,7 +11,7 @@ import { useScannerSession } from '../hooks/useScannerSession'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import ScanModeShell from '../components/mobile/ScanModeShell'
 import MobileScanFeed from '../components/mobile/MobileScanFeed'
-import { todayStrIST } from '../lib/scannerUtils'
+import { todayStrIST, hmsIST, mergeOptimisticSessions, getScannerRefreshDebounceMs } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import { useSewadarDirectory } from '../hooks/useSewadarDirectory'
 import { useDeptNames, refreshDeptNames } from '../hooks/useDeptNames'
@@ -75,7 +75,7 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
       // Narrow column list — this is all RecentScansTable + the header read.
       // `select('*')` would also drag in any future fat column on every poll.
       let q = supabase.from('dp_attendance_sessions')
-        .select('id,badge_number,sewadar_name,sewadar_dept,in_date,out_date,in_time,out_time,is_vss,undeployed_scan,updated_at')
+        .select('id,badge_number,sewadar_name,sewadar_dept,in_date,out_date,in_time,out_time,is_vss,undeployed_scan,is_late_in,is_early_out,updated_at')
         .eq('schedule_id',scheduleId).or(badgeOr)
       // supabase-js RESOLVES with { data, error } — it never rejects — so a
       // `.then(r => r.data || [])` here turned a denied/failed read into a
@@ -84,7 +84,7 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
       const { data: sess, error: sessError } = await q
         .order('updated_at',{ascending:false}).order('created_at',{ascending:false}).limit(10)
       if (sessError) throw new Error(`Recent scans: ${sessError.message || sessError.code || 'failed'}`)
-      setSessions(Array.isArray(sess) ? sess : [])
+      setSessions((prev) => mergeOptimisticSessions(prev, sess, 10))
       setOffline(false)
     } catch(e){ console.warn('[Scanner] session refresh failed — keeping last data:', e?.message); setOffline(true) }
   },[scheduleId,myBadge])
@@ -111,6 +111,62 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
 
   const clearManual = useCallback(() => setManualBadge(''), [])
 
+  // Debounced post-scan background refresh — prevents query storms on fast burst scanning
+  const refreshTimerRef = useRef(null)
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
+    const delay = getScannerRefreshDebounceMs()
+    if (delay <= 0) {
+      refresh()
+      return
+    }
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null
+      refresh()
+    }, delay)
+  }, [refresh])
+
+  useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
+    }
+  }, [])
+
+  // Optimistic local prepend so the scanner operator sees the updated row
+  // with 0ms UI delay without waiting for server roundtrips.
+  const onAfterScan = useCallback((scan) => {
+    if (scan?.badge) {
+      const today = todayStrIST()
+      const nowHms = hmsIST()
+      const isOut = scan.action === 'OUT'
+      setSessions((prev) => {
+        const existingIdx = prev.findIndex((s) => s.badge_number === scan.badge)
+        const existing = existingIdx >= 0 ? prev[existingIdx] : null
+        const optRow = {
+          id: existing?.id ? `opt-${existing.id}` : `opt-${Date.now()}-${scan.badge}`,
+          _optimistic: true,
+          badge_number: scan.badge,
+          sewadar_name: scan.sewadar_name || existing?.sewadar_name || '',
+          sewadar_centre: scan.sewadar_centre || existing?.sewadar_centre || '',
+          sewadar_dept: scan.dept_id || existing?.sewadar_dept || null,
+          in_date: isOut ? (existing?.in_date || today) : today,
+          out_date: isOut ? today : (existing?.out_date || null),
+          in_time: isOut ? (existing?.in_time || null) : (scan.in_time || nowHms),
+          out_time: isOut ? (scan.out_time || nowHms) : (existing?.out_time || null),
+          is_vss: !!scan.is_vss || !!existing?.is_vss,
+          undeployed_scan: !!scan.undeployed || !!existing?.undeployed_scan,
+          is_late_in: scan.is_late_in !== undefined ? !!scan.is_late_in : !!existing?.is_late_in,
+          is_early_out: scan.is_early_out !== undefined ? !!scan.is_early_out : !!existing?.is_early_out,
+          updated_at: new Date().toISOString(),
+          created_at: existing?.created_at || new Date().toISOString(),
+        }
+        const rest = existingIdx >= 0 ? prev.filter((_, i) => i !== existingIdx) : prev
+        return [optRow, ...rest].slice(0, 10)
+      })
+    }
+    scheduleRefresh()
+  }, [scheduleRefresh])
+
   const {
     popup, outTime, setOutTime, closePopup,
     handleScan, handleCameraScan, commitScan, confirmForgot,
@@ -123,7 +179,7 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
     deptNameById,
     directoryByBadge,
     toast,
-    onAfterScan: refresh,
+    onAfterScan,
     forgotSuccessToast: 'OUT closed',
     clearManual,
   })
@@ -179,6 +235,8 @@ export default function ScannerPage({ schedules, scheduleId, sewaMode }){
       onOutTimeChange={setOutTime}
       onClose={closePopup}
       onConfirm={popup?.status==='forgot' ? confirmForgot : popup?.status==='choose' ? commitScan : closePopup}
+      is_late_in={popup?.is_late_in}
+      is_early_out={popup?.is_early_out}
     />
   )
   const manualSubmit = () => { handleScan(manualBadge, { manual: true }) }

@@ -29,6 +29,7 @@ const {
   requestDrain,
   registerBackgroundSync,
   notifySessionAvailable,
+  getReconnectDelay,
   __resetOfflineSyncForTests,
 } = await import('./offlineSync')
 
@@ -65,12 +66,14 @@ beforeEach(() => {
   getQueuedScans.mockReset()
   drainQueue.mockResolvedValue(0)
   getQueuedScans.mockResolvedValue([])
+  globalThis.__OFFLINESYNC_RECONNECT_DELAY_MS__ = 0
 })
 
 afterEach(() => {
   uninstallOfflineSync()
   __resetOfflineSyncForTests()
   unmockServiceWorker()
+  delete globalThis.__OFFLINESYNC_RECONNECT_DELAY_MS__
 })
 
 describe('offlineSync engine', () => {
@@ -82,6 +85,17 @@ describe('offlineSync engine', () => {
     await tick()
     expect(drainQueue).toHaveBeenCalledTimes(1)
     expect(typeof off1).toBe('function')
+  })
+
+  it('staggers onOnline reconnect drain with jitter to protect connection pool', () => {
+    delete globalThis.__OFFLINESYNC_RECONNECT_DELAY_MS__
+    const delays = Array.from({ length: 20 }, () => getReconnectDelay())
+    for (const d of delays) {
+      expect(d).toBeGreaterThanOrEqual(200)
+      expect(d).toBeLessThanOrEqual(2200)
+    }
+    const uniqueDelays = new Set(delays)
+    expect(uniqueDelays.size).toBeGreaterThan(1)
   })
 
   it('an online event drains even with no subscriber (D4: backgrounded reconnect is not dropped)', async () => {

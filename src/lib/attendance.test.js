@@ -1349,6 +1349,20 @@ describe('toLogRow / buildLogRows', () => {
       .toMatchObject({ is_auto_out: true, is_manual: true })
   })
 
+  it('carries Late In and Early Out tags from session rows', () => {
+    const row = toLogRow({
+      ...SESSION,
+      is_late_in: true,
+      is_early_out: true,
+    }, {})
+    expect(row.is_late_in).toBe(true)
+    expect(row.is_early_out).toBe(true)
+
+    const defaultRow = toLogRow(SESSION, {})
+    expect(defaultRow.is_late_in).toBe(false)
+    expect(defaultRow.is_early_out).toBe(false)
+  })
+
   it('nulls become safe display values, never blanks that read as missing', () => {
     const r = toLogRow({ badge_number: 'FB2' }, {})
     expect(r.sewadar_name).toBe('')

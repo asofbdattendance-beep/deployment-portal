@@ -28,7 +28,7 @@
  *     touched on real changes.
  */
 import { useState, useRef, useEffect, forwardRef, useImperativeHandle, useCallback } from 'react'
-import { CameraOff, RefreshCw, Zap, Focus } from 'lucide-react'
+import { CameraOff, RefreshCw, Zap, Focus, SwitchCamera } from 'lucide-react'
 import { withTimeout, CAMERA_INIT_TIMEOUT, computeRoi, waitForVideoReady, isSecureCameraContext, isEdgeDetection, detectionBox, rgbaToGray } from '../../lib/scannerUtils'
 import {
   openCamera,
@@ -41,6 +41,7 @@ import {
   describeCamera,
   platform,
   beginFocusHunt,
+  getRearCameraList,
 } from './cameraManager'
 import { BADGE_REGEX, sanitizeScannedBadge } from '../../lib/logic'
 
@@ -51,9 +52,11 @@ import { BADGE_REGEX, sanitizeScannedBadge } from '../../lib/logic'
 // cut a slow phone to ~1 decode/s. maxWidth caps the detection surface: 1080
 // keeps a portrait 1080p frame at full resolution (Code 39 bars need ~2 px to
 // survive soft focus); only a phone measured slow drops back to the old 720.
+// confirmThreshold is 1 across profiles: regex-validated badges are unambiguous
+// and single-frame confirmation prevents dropped scans during movement.
 const DEVICE_PROFILES = {
-  fast:   { confirmWindow: 3, confirmThreshold: 2, minInterval: 50,  maxInterval: 150, frameSkip: 0, maxWidth: 1280 },
-  medium: { confirmWindow: 4, confirmThreshold: 2, minInterval: 100, maxInterval: 300, frameSkip: 0, maxWidth: 1080 },
+  fast:   { confirmWindow: 3, confirmThreshold: 1, minInterval: 50,  maxInterval: 150, frameSkip: 0, maxWidth: 1280 },
+  medium: { confirmWindow: 4, confirmThreshold: 1, minInterval: 100, maxInterval: 300, frameSkip: 0, maxWidth: 1080 },
   slow:   { confirmWindow: 3, confirmThreshold: 1, minInterval: 200, maxInterval: 500, frameSkip: 0, maxWidth: 720 },
 }
 
@@ -93,11 +96,11 @@ const AIM_HINT_EVERY = 6
 const CODE39_MODULES = 211
 const MIN_DECODABLE_PPM = 2.2
 // Consecutive misses before the hard-pass second look runs, and its stride.
-// hardPass tries every ready engine x normal+inverted (+ widened 2D for ZXing)
-// so it buys capability the base pass lacks — but at ~2-4x frame cost, hence
-// gated well behind the cheap passes.
-const HARD_PASS_AFTER = 10
-const HARD_PASS_EVERY = 10
+// hardPass tries every ready engine x normal+inverted (+ rotated for ZXing & Native).
+// Gated by miss count: 4 misses (~200ms) allows rotated/tilted badges to decode
+// rapidly without taxing normal 0° frames.
+const HARD_PASS_AFTER = 4
+const HARD_PASS_EVERY = 3
 // Source-resolution crop: after this many consecutive misses, locate the badge
 // on the band and re-decode a 1:1 crop of it. The reason is pixels, not effort:
 // computeRoi downscales the band only when its cap is below the band width, so
@@ -254,6 +257,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const engineLoadingRef = useRef(false)
   const onScanRef = useRef(onScan)
   const lastScanRef = useRef({ badge: null, time: 0 })
+  const recentScansRef = useRef(new Map())
   // Busy-decline damp: a scan the handler declined (busy / decision-pending,
   // returns exactly false) never ran, so the 2s suppressor must NOT record it —
   // but re-firing vibrate + onScan every frame for the whole RPC storms the
@@ -311,6 +315,12 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const [guidanceMsg, setGuidanceMsg] = useState(null)
   const [torchOn, setTorchOn] = useState(false)
   const [torchSupported, setTorchSupported] = useState(false)
+  const [cameraList, setCameraList] = useState([])
+  const [currentDeviceId, setCurrentDeviceId] = useState(() => {
+    try { return localStorage.getItem('dp_scanner_camera_id') || null } catch { return null }
+  })
+  const [cameraToast, setCameraToast] = useState(null)
+  const cameraToastTimerRef = useRef(null)
   const [lastRaw, setLastRaw] = useState(null)
   // Dedicated reject-hint state. NOT guidanceMsg: that is recomputed from
   // quality/fail counters every frame (setGuidance in detectLoop) and would
@@ -425,7 +435,8 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     if (t.length > cfg.confirmWindow) t = t.slice(-cfg.confirmWindow)
     slidingWindowRef.current = t
     const c = t.filter(e => e.badge === badge).length
-    return { confirmed: c >= cfg.confirmThreshold, count: c }
+    const threshold = BADGE_REGEX.test(badge) ? 1 : (cfg.confirmThreshold || 1)
+    return { confirmed: c >= threshold, count: c }
   }, [])
 
   // Dedicated transient hint for reads the sanitizer could not recover.
@@ -488,7 +499,8 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       if (!confirmed) continue
 
       const now = Date.now()
-      if (lastScanRef.current.badge === cleaned && now - lastScanRef.current.time < 2000) break
+      const lastScanTime = recentScansRef.current.get(cleaned) || (lastScanRef.current.badge === cleaned ? lastScanRef.current.time : 0)
+      if (now - lastScanTime < 2000) break
       // Declined-vibrate damp: a badge declined moments ago (busy /
       // decision-pending) keeps re-offering onScan every confirmed frame per
       // the T11 contract — but the per-frame vibrate is pure storm, so damp
@@ -507,6 +519,12 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       const accepted = onScanRef.current?.(cleaned)
       if (accepted !== false) {
         lastScanRef.current = { badge: cleaned, time: now }
+        recentScansRef.current.set(cleaned, now)
+        if (recentScansRef.current.size > 20) {
+          for (const [b, t] of recentScansRef.current.entries()) {
+            if (now - t > 5000) recentScansRef.current.delete(b)
+          }
+        }
         lastDeclinedRef.current = { badge: null, time: 0 }
       } else {
         lastDeclinedRef.current = { badge: cleaned, time: now }
@@ -831,6 +849,8 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     cancelFrame()
     if (refocusTimerRef.current) { clearInterval(refocusTimerRef.current); refocusTimerRef.current = null }
     if (rejectHintTimerRef.current) { clearTimeout(rejectHintTimerRef.current); rejectHintTimerRef.current = null }
+    if (cameraToastTimerRef.current) { clearTimeout(cameraToastTimerRef.current); cameraToastTimerRef.current = null }
+    setCameraToast(null)
     channelRef.current?.close(); channelRef.current = null
     if (tapFocusCleanupRef.current) { try { tapFocusCleanupRef.current() } catch {} tapFocusCleanupRef.current = null }
     if (stopCamera) {
@@ -856,6 +876,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     // Same fresh-scan reset as startScanner (L-20): a stop() followed by an
     // external restart must not inherit the suppressor either.
     lastScanRef.current = { badge: null, time: 0 }
+    recentScansRef.current.clear()
     lastRawRef.current = null
     // A rectangle must not outlive the session that drew it — Retry, unmount
     // and a tab-leader yield all land here.
@@ -864,7 +885,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
 
   // ─── Start ──────────────────────────────────────────────────────────
 
-  const startScanner = useCallback(async ({ reclaim = false } = {}) => {
+  const startScanner = useCallback(async ({ reclaim = false, preferredDeviceId = null } = {}) => {
     if (!mountedRef.current) return
     // An explicit Retry re-claims leadership — otherwise the button on the
     // "another tab" screen is dead.
@@ -882,6 +903,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     // window — otherwise the first post-restart scan of the same badge is
     // silently dropped.
     lastScanRef.current = { badge: null, time: 0 }
+    recentScansRef.current.clear()
     lastRawRef.current = null
     rejectHintAtRef.current = 0
     slidingWindowRef.current = []
@@ -954,10 +976,15 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     if (debugOn) pushDebug(`start session #${session} · secure=${window.isSecureContext} · ${platform.isIOS ? 'iOS' : 'other'} · permission: ${permState}`)
 
     // ── 1. Camera first. Nothing else may delay the preview.
+    let activeDeviceId = preferredDeviceId !== null ? preferredDeviceId : currentDeviceId
+    if (!activeDeviceId) {
+      try { activeDeviceId = localStorage.getItem('dp_scanner_camera_id') || null } catch {}
+    }
+
     let opened
     try {
       const openTimeout = permState === 'granted' ? CAMERA_INIT_TIMEOUT : CAMERA_PROMPT_TIMEOUT
-      opened = await withTimeout(openCamera({ debug: debugOn }), openTimeout, 'Camera')
+      opened = await withTimeout(openCamera({ preferredDeviceId: activeDeviceId, forceNew: !!preferredDeviceId, debug: debugOn }), openTimeout, 'Camera')
     } catch (err) {
       // An abandoned open is a normal cancellation, never a user-facing error.
       if (err?.name === 'AbortError' || !isCurrent(session) || !mountedRef.current) return
@@ -990,6 +1017,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     streamRef.current = stream
     trackRef.current = opened.track || stream.getVideoTracks()[0] || null
     setTorchSupported(!!opened.torchSupported)
+    if (opened.deviceId) {
+      setCurrentDeviceId(opened.deviceId)
+      try { localStorage.setItem('dp_scanner_camera_id', opened.deviceId) } catch {}
+    }
 
     const video = videoRef.current
     if (!video) { stopStream(stream); setStatus('error'); setErrorMsg('Video element missing'); return }
@@ -1024,6 +1055,13 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     setStatus('ready')
     qualityRef.current = createQualityChecker()
     surfaceRef.current = createDetectSurface()
+
+    // Enumerate rear camera list for lens switching
+    getRearCameraList().then(list => {
+      if (mountedRef.current && Array.isArray(list) && list.length > 0) {
+        setCameraList(list)
+      }
+    }).catch(() => {})
 
     if (trackRef.current) {
       applyFocusConstraints(trackRef.current, { applyZoom: true, debug: debugOn }).then(r => {
@@ -1065,7 +1103,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
 
     // ── 3. Engines in the background — never block the preview.
     ensureEngines(session)
-  }, [debugOn, pushDebug, setGuidance, isCurrent, detectLoop, ensureEngines, teardown, cancelFrame, clearAim])
+  }, [debugOn, pushDebug, setGuidance, isCurrent, detectLoop, ensureEngines, teardown, cancelFrame, clearAim, currentDeviceId])
 
   // ─── Lifecycle ──────────────────────────────────────────────────────
 
@@ -1148,8 +1186,34 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     return () => window.removeEventListener('online', onOnline)
   }, [ensureEngines])
 
+  // ─── Camera lens switching ──────────────────────────────────────────
+  const handleCameraSwitch = useCallback(async () => {
+    if (!cameraList || cameraList.length <= 1) return
+    const currentIdx = cameraList.findIndex(c => c.deviceId === currentDeviceId)
+    const nextIdx = (currentIdx + 1) % cameraList.length
+    const nextCam = cameraList[nextIdx]
+    if (!nextCam?.deviceId) return
+
+    setCurrentDeviceId(nextCam.deviceId)
+    try { localStorage.setItem('dp_scanner_camera_id', nextCam.deviceId) } catch {}
+
+    teardown({ stopCamera: true })
+    startScanner({ reclaim: true, preferredDeviceId: nextCam.deviceId })
+
+    if (cameraToastTimerRef.current) clearTimeout(cameraToastTimerRef.current)
+    const label = nextCam.label
+      ? (nextCam.label.length > 24 ? nextCam.label.slice(0, 22) + '…' : nextCam.label)
+      : `Camera ${nextIdx + 1}`
+    setCameraToast(label)
+    cameraToastTimerRef.current = setTimeout(() => {
+      cameraToastTimerRef.current = null
+      setCameraToast(null)
+    }, 2000)
+  }, [cameraList, currentDeviceId, teardown, startScanner])
+
   useImperativeHandle(ref, () => ({
     restart: startScanner,
+    switchCamera: handleCameraSwitch,
     stop: () => teardown(),
     // L-46: the pages' "camera paused" claim is only true if the decode loop
     // actually halts. pause() stops scheduling (the preview keeps its last
@@ -1176,7 +1240,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       if (!isCurrent(session) || visibilityPausedRef.current || decisionPausedRef.current) return
       detectLoop()
     },
-  }), [startScanner, teardown, cancelFrame, detectLoop, isCurrent])
+  }), [startScanner, handleCameraSwitch, teardown, cancelFrame, detectLoop, isCurrent])
 
   // ─── Error State ────────────────────────────────────────────────────
 
@@ -1239,23 +1303,68 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         {lastRaw && <span className="pill" style={{ background: 'rgba(59,130,246,0.9)', color: '#fff', fontSize: '0.62rem' }}>{lastRaw}</span>}
       </div>
 
-      {torchSupported ? (
-        <button onClick={handleTorchToggle} aria-pressed={torchOn} className="scanner-torch" style={{
-          position: 'absolute', top: 8, right: 8,
-          background: torchOn ? '#f59e0b' : 'rgba(0,0,0,0.6)',
-          color: '#fff', border: 'none', borderRadius: 8,
-          padding: '0.35rem 0.6rem', fontWeight: 700, fontSize: '0.75rem',
-          touchAction: 'manipulation',
-        }}><Zap size={12} aria-hidden="true" /> {torchOn ? 'Torch on' : 'Torch'}</button>
-      ) : null}
+      {/* Top right controls: Tap to focus hint, Lens switch, Torch */}
+      <div style={{ position: 'absolute', top: 8, right: 8, display: 'flex', gap: 6, alignItems: 'center' }}>
+        {status === 'ready' && !hasEverDetectedRef.current && (
+          <div style={{
+            background: 'rgba(0,0,0,0.5)', color: '#fff', borderRadius: 6,
+            padding: '0.25rem 0.5rem', fontSize: '0.6rem', display: 'flex', alignItems: 'center', gap: 4,
+          }}>
+            <Focus size={10} /> Tap to focus
+          </div>
+        )}
 
-      {status === 'ready' && !hasEverDetectedRef.current && (
+        {cameraList.length > 1 && (
+          <button
+            type="button"
+            onClick={handleCameraSwitch}
+            aria-label="Switch camera lens"
+            title="Switch camera lens"
+            className="scanner-cam-switch"
+            style={{
+              background: 'rgba(0,0,0,0.6)',
+              color: '#fff', border: 'none', borderRadius: 8,
+              padding: '0.4rem 0.65rem', fontWeight: 700, fontSize: '0.75rem',
+              display: 'flex', alignItems: 'center', gap: 4,
+              minHeight: 36, minWidth: 44,
+              touchAction: 'manipulation', cursor: 'pointer',
+            }}
+          >
+            <SwitchCamera size={14} aria-hidden="true" />
+            <span>Lens</span>
+          </button>
+        )}
+
+        {torchSupported ? (
+          <button
+            type="button"
+            onClick={handleTorchToggle}
+            aria-pressed={torchOn}
+            className="scanner-torch"
+            style={{
+              background: torchOn ? '#f59e0b' : 'rgba(0,0,0,0.6)',
+              color: '#fff', border: 'none', borderRadius: 8,
+              padding: '0.4rem 0.65rem', fontWeight: 700, fontSize: '0.75rem',
+              display: 'flex', alignItems: 'center', gap: 4,
+              minHeight: 36, minWidth: 44,
+              touchAction: 'manipulation', cursor: 'pointer',
+            }}
+          >
+            <Zap size={13} aria-hidden="true" />
+            <span>{torchOn ? 'Torch on' : 'Torch'}</span>
+          </button>
+        ) : null}
+      </div>
+
+      {cameraToast && (
         <div style={{
-          position: 'absolute', top: 8, right: torchSupported ? 80 : 8,
-          background: 'rgba(0,0,0,0.5)', color: '#fff', borderRadius: 6,
-          padding: '0.25rem 0.5rem', fontSize: '0.6rem', display: 'flex', alignItems: 'center', gap: 4,
+          position: 'absolute', top: 46, right: 8,
+          background: 'rgba(16,185,129,0.95)', color: '#fff',
+          padding: '0.25rem 0.6rem', borderRadius: 6,
+          fontSize: '0.7rem', fontWeight: 600,
+          boxShadow: '0 2px 8px rgba(0,0,0,0.2)', pointerEvents: 'none',
         }}>
-          <Focus size={10} /> Tap to focus
+          {cameraToast}
         </div>
       )}
 

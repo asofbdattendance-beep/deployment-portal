@@ -239,7 +239,7 @@ export default function CentreDeptMatrixCard({ rows = [], centres = [], error = 
           suite queries tables document-wide). One card per department. */}
       <div data-testid="dept-strip" style={{ padding: '0.9rem 0 0' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.6rem' }}>
-          <span style={{ fontSize: '0.75rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.06em', color: '#64748b' }}>Departments</span>
+          <span style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--text)' }}>Departments</span>
           <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
             {deptCols.length} department{deptCols.length === 1 ? '' : 's'} · {totals.present} of {totals.deployed} scanned {isDayScope ? 'today' : ''}
           </span>

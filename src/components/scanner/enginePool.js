@@ -70,6 +70,10 @@ const sameFormats = (a, b) => {
   return b.every(f => set.has(f))
 }
 
+let _scratchInvCanvas = null
+let _scratchRotCanvas = null
+let _scratchInvBuffer = null
+
 /**
  * Invert luminance (255 − v per pixel) for the hard path.
  *
@@ -77,6 +81,7 @@ const sameFormats = (a, b) => {
  * inversion is the cheap second look that needs no rotation or deskew (the
  * caller owns rotation). Alpha is preserved — inverting it would make the
  * frame fully transparent and the binarizer would see nothing at all.
+ * Reuses a single typed array buffer to eliminate GC pauses on mobile devices.
  *
  * @param {{data: Uint8ClampedArray, width: number, height: number}} imageData
  * @returns {{data: Uint8ClampedArray, width: number, height: number}}
@@ -84,7 +89,10 @@ const sameFormats = (a, b) => {
 const invertImageData = (imageData) => {
   const { data, width, height } = imageData || {}
   if (!data || !width || !height) return imageData
-  const out = new Uint8ClampedArray(data.length)
+  if (!_scratchInvBuffer || _scratchInvBuffer.length !== data.length) {
+    _scratchInvBuffer = new Uint8ClampedArray(data.length)
+  }
+  const out = _scratchInvBuffer
   for (let i = 0; i < data.length; i += 4) {
     out[i] = 255 - data[i]
     out[i + 1] = 255 - data[i + 1]
@@ -96,9 +104,7 @@ const invertImageData = (imageData) => {
 
 /**
  * Best-effort canvas for the inverted Native variant.
- *
- * jsdom has no 2d context, so a test surface yields null and the caller skips
- * the inverted native pass rather than throwing. Production always has one.
+ * Reuses a scratch canvas to avoid 2D context churning and memory pressure.
  *
  * @param {{data: Uint8ClampedArray, width: number, height: number}} imageData
  * @returns {HTMLCanvasElement|null}
@@ -106,14 +112,79 @@ const invertImageData = (imageData) => {
 const invertCanvas = (imageData) => {
   try {
     const inv = invertImageData(imageData)
-    const c = document.createElement('canvas')
-    c.width = inv.width
-    c.height = inv.height
-    const ctx = c.getContext && c.getContext('2d')
+    if (typeof document === 'undefined') return null
+    if (!_scratchInvCanvas) _scratchInvCanvas = document.createElement('canvas')
+    if (_scratchInvCanvas.width !== inv.width) _scratchInvCanvas.width = inv.width
+    if (_scratchInvCanvas.height !== inv.height) _scratchInvCanvas.height = inv.height
+    const ctx = _scratchInvCanvas.getContext && _scratchInvCanvas.getContext('2d')
     if (!ctx || typeof ctx.putImageData !== 'function') return null
     ctx.putImageData(inv, 0, 0)
-    return c
+    return _scratchInvCanvas
   } catch { return null }
+}
+
+/**
+ * Best-effort canvas rotation for Native BarcodeDetector in hardPass.
+ * Reuses a scratch canvas to prevent memory and context churn.
+ *
+ * @param {HTMLCanvasElement} source
+ * @param {number} deg
+ * @returns {HTMLCanvasElement|null}
+ */
+const rotateCanvas = (source, deg) => {
+  if (!source || !source.width || !source.height || typeof document === 'undefined') return null
+  try {
+    const swap = deg === 90 || deg === 270
+    const targetW = swap ? source.height : source.width
+    const targetH = swap ? source.width : source.height
+    if (!_scratchRotCanvas) _scratchRotCanvas = document.createElement('canvas')
+    if (_scratchRotCanvas.width !== targetW) _scratchRotCanvas.width = targetW
+    if (_scratchRotCanvas.height !== targetH) _scratchRotCanvas.height = targetH
+    const ctx = _scratchRotCanvas.getContext && _scratchRotCanvas.getContext('2d')
+    if (!ctx || typeof ctx.drawImage !== 'function' || typeof ctx.rotate !== 'function') return null
+    ctx.save()
+    ctx.clearRect(0, 0, targetW, targetH)
+    ctx.translate(targetW / 2, targetH / 2)
+    ctx.rotate((deg * Math.PI) / 180)
+    ctx.drawImage(source, -source.width / 2, -source.height / 2)
+    ctx.restore()
+    return _scratchRotCanvas
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Transform a corner point from a rotated image back to original unrotated canvas coordinates.
+ *
+ * @param {{x:number, y:number}} p
+ * @param {number} deg
+ * @param {number} origW
+ * @param {number} origH
+ * @returns {{x:number, y:number}}
+ */
+export function unrotatePoint(p, deg, origW, origH) {
+  if (!p || typeof p.x !== 'number' || typeof p.y !== 'number' || !deg || !origW || !origH) return p
+  const px = p.x
+  const py = p.y
+  let x = px
+  let y = py
+  if (deg === 90) {
+    x = py
+    y = Math.max(0, origH - 1 - px)
+  } else if (deg === 180) {
+    x = Math.max(0, origW - 1 - px)
+    y = Math.max(0, origH - 1 - py)
+  } else if (deg === 270) {
+    x = Math.max(0, origW - 1 - py)
+    y = px
+  }
+  return { x, y }
+}
+
+export function unrotateCornerPoints(points, deg, origW, origH) {
+  if (!Array.isArray(points) || !points.length || !deg) return points
+  return points.map(pt => unrotatePoint(pt, deg, origW, origH))
 }
 
 /**
@@ -130,7 +201,7 @@ const invertCanvas = (imageData) => {
    *   second look never loses a capability the old all-symbologies reader had,
    *   while every normal frame stays 1D-only. Pass a tier's own list to narrow
    *   it.
- * @param {number} [opts.emptyHandoffAfter=8] — consecutive clean misses from
+ * @param {number} [opts.emptyHandoffAfter=6] — consecutive clean misses from
  *   the active engine before it hands off to the other ready engine.
  * @returns {{init: Function, armFallback: Function, detect: Function,
  *   getActiveId: Function, isReady: Function, fallback: Function,
@@ -146,12 +217,12 @@ export function createEnginePool(debug, opts = {}) {
       : [...BASE_1D_FORMATS, ...EXTENDED_1D_FORMATS]
   )]
   // Consecutive clean misses before the active engine hands off to the other
-  // ready one. 8 is long enough that a genuinely hard badge (a few blank
+  // ready one. 6 is long enough that a genuinely hard badge (a few blank
   // frames) doesn't trigger it, short enough that a dead-native situation
-  // recovers within a second or two of scanning.
+  // recovers rapidly within ~300ms of scanning.
   const emptyHandoffAfter = Number.isFinite(opts.emptyHandoffAfter) && opts.emptyHandoffAfter > 0
     ? Math.floor(opts.emptyHandoffAfter)
-    : 8
+    : 6
 
   const engines = [
     { id: 'Native', ready: false, detector: null, failures: 0, maxFailures: 3, emptyCount: 0 },
@@ -439,6 +510,7 @@ export function createEnginePool(debug, opts = {}) {
             variants.push({
               imageData: { gray: r.gray, width: r.width, height: r.height },
               zxHints: zxingReader?.hardHints,
+              rot: deg,
             })
           }
         }
@@ -446,14 +518,19 @@ export function createEnginePool(debug, opts = {}) {
         variants.push({ canvas: source })
         const invCanvas = invertCanvas(imageData)
         if (invCanvas) variants.push({ canvas: invCanvas })
+        const rotCanvas = rotateCanvas(source, 90)
+        if (rotCanvas) variants.push({ canvas: rotCanvas, rot: 90 })
       }
+      const origW = imageData?.width || source?.width || 0
+      const origH = imageData?.height || source?.height || 0
       for (const v of variants) {
         try {
           const barcodes = await runEngine(engine, v)
           for (const b of barcodes || []) {
             if (!b || seen.has(b.rawValue)) continue
             seen.add(b.rawValue)
-            merged.push(b)
+            const pts = v.rot ? unrotateCornerPoints(b.cornerPoints, v.rot, origW, origH) : b.cornerPoints
+            merged.push({ ...b, cornerPoints: pts })
             if (!hitEngine) hitEngine = engine.id
           }
         } catch (e) {

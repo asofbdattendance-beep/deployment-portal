@@ -641,11 +641,14 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
         <KpiTile
           label="Attendance %"
           value={sec.daily.error ? <span title="Attendance rate could not be loaded">—</span> : (
-            <div className="progress" style={{ height: 10 }}>
-              <div className={`progress-bar${bandBar(rateBand(totals.rate))}`} style={{ width: `${totals.rate}%` }} />
-            </div>
+            <>
+              {totals.rate}%
+              <div className="progress" style={{ height: 8 }}>
+                <div className={`progress-bar${bandBar(rateBand(totals.rate))}`} style={{ width: `${totals.rate}%` }} />
+              </div>
+            </>
           )}
-          sub={sec.daily.error ? 'could not be loaded' : `${totals.rate}% present today`}
+          sub={sec.daily.error ? 'could not be loaded' : 'present today'}
           tone={sec.daily.error ? '#b45309' : undefined}
           onPress={() => go('reports')}
           title="Open the Attendance reports for today"
@@ -701,7 +704,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
         </div></div>
       ) : (
         <>
-          <div className="card" style={{ marginTop: '0.75rem' }}>
+          <div className="card card-pad" style={{ marginTop: '0.75rem' }}>
             <div className="card-title">Present by visit day</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.5rem' }}>
               {visitByDay.map((d) => (
@@ -721,7 +724,7 @@ export default function DashboardPage({ schedules = [], scheduleId, onNavigate }
             </div>
           </div>
 
-          <div className="card" style={{ marginTop: '0.75rem' }}>
+          <div className="card card-pad" style={{ marginTop: '0.75rem' }}>
             <div className="card-title">Attendance by centre</div>
             <div className="card-sub">
               Present / deployed for every centre, one column per visit day; totals count distinct sewadars scanned today

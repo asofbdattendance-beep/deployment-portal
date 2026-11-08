@@ -536,6 +536,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
 
     setBusySafe()
     let scanOk = false
+    let scanSession = null
     // Phase-0 latency tripwire: tap → lookup → write → popup(first paint of
     // the verdict). Paste via __portalPerfDump.
     const scanRun = perfStart('scan')
@@ -569,6 +570,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
               status: 'out', badge: b,
               name: display?.name ?? null, centre: display?.centre ?? null, deptName: display?.deptName ?? null,
               time: new Date().toLocaleTimeString(), message: 'OUT already recorded — no change',
+              is_early_out: Boolean(outFastData?.early_out),
               ...eventStamp(),
             })
             toast.warning(`OUT already recorded ${b}`)
@@ -578,10 +580,20 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
             status: 'out', badge: b,
             name: display?.name ?? null, centre: display?.centre ?? null, deptName: display?.deptName ?? null,
             time: new Date().toLocaleTimeString(), message: 'OUT marked',
+            is_early_out: Boolean(outFastData?.early_out),
             ...eventStamp(),
           })
           toast.success(`OUT ${b}`)
           scanOk = true
+          scanSession = {
+            badge: b,
+            action: 'OUT',
+            sewadar_name: display?.name ?? outFastData?.sewadar_name ?? null,
+            sewadar_centre: display?.centre ?? outFastData?.sewadar_centre ?? null,
+            dept_name: display?.deptName ?? outFastData?.dept_name ?? null,
+            is_early_out: Boolean(outFastData?.early_out),
+            out_time: hmsIST(),
+          }
           }
         } catch (e) {
           const msg = String(e.message || '')
@@ -609,6 +621,15 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
             if (ackQO.warn) toast.warning(ackQO.toast)
             else toast.success(ackQO.toast)
             scanOk = true
+            scanSession = {
+              badge: b,
+              action: 'OUT',
+              sewadar_name: display?.name ?? dirQO.name,
+              sewadar_centre: display?.centre ?? dirQO.centre,
+              dept_name: display?.deptName ?? dirQO.deptName,
+              out_time: hmsIST(),
+              queued: true,
+            }
             onQueued?.()
           } else if (isClockSkewed(msg, tsFast)) {
             // V14: the device clock disagrees with the server — say so instead
@@ -620,7 +641,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
             toast.error(friendly(msg))
           }
         }
-        onAfterScan?.()
+        onAfterScan?.(scanSession)
         return { ok: scanOk }
       }
 
@@ -815,9 +836,20 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
             ...eventStamp(),
             flag: data?.undeployed ? `Not deployed to ${deptName || 'your dept'} — flagged` : null,
             message: `IN marked${flag}`,
+            is_late_in: Boolean(data?.late_in),
           })
           toast[data?.undeployed ? 'warning' : 'success'](`IN ${b}${flag}`)
           scanOk = true
+          scanSession = {
+            badge: b,
+            action: 'IN',
+            sewadar_name: dispIn.name,
+            sewadar_centre: dispIn.centre,
+            dept_name: dispIn.deptName,
+            is_late_in: Boolean(data?.late_in),
+            undeployed: Boolean(data?.undeployed),
+            in_time: hmsIST(),
+          }
         } catch (e) {
           const msg = String(e.message || '')
           if (msg.includes('Already IN')) {
@@ -896,6 +928,15 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
             if (ackQI.warn) toast.warning(ackQI.toast)
             else toast.success(ackQI.toast)
             scanOk = true
+            scanSession = {
+              badge: b,
+              action: 'IN',
+              sewadar_name: display?.name ?? dirQI.name,
+              sewadar_centre: display?.centre ?? dirQI.centre,
+              dept_name: display?.deptName ?? dirQI.deptName,
+              in_time: hmsIST(),
+              queued: true,
+            }
             onQueued?.()
           } else if (isClockSkewed(msg, ts)) {
             // V14: device clock vs server clock — warn instead of the raw
@@ -908,7 +949,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
           }
         }
       }
-      onAfterScan?.()
+      onAfterScan?.(scanSession)
       perfMark('scan', scanRun, scanOk ? 'done:ok' : 'done:not-ok')
       return { ok: scanOk }
     } finally {

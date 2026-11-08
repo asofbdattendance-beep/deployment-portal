@@ -138,4 +138,35 @@ describe('useRealtimeRefresh', () => {
     await act(async () => { vi.advanceTimersByTime(400) })
     expect(bad).toHaveBeenCalledTimes(1)
   })
+
+  it('pauses reloads when document is hidden and reloads once when document becomes visible', async () => {
+    const { onReload } = setup()
+    // Simulate tab backgrounded
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
+    await act(async () => { pgHandlers[0]() })
+    await act(async () => { vi.advanceTimersByTime(1000) })
+    expect(onReload).not.toHaveBeenCalled()
+
+    // Tab returns to foreground
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
+    await act(async () => { vi.advanceTimersByTime(400) })
+    expect(onReload).toHaveBeenCalledTimes(1)
+  })
+
+  it('arms fallback polling when channel status is CHANNEL_ERROR or TIMED_OUT', async () => {
+    const { onReload } = setup({ maxJitterMs: 0 })
+    expect(subscribeCb.current).toBeTypeOf('function')
+    await act(async () => { subscribeCb.current('CHANNEL_ERROR') })
+    expect(onReload).not.toHaveBeenCalled()
+
+    // Advances past the fallback polling interval (45s)
+    await act(async () => { vi.advanceTimersByTime(46000) })
+    expect(onReload).toHaveBeenCalledTimes(1)
+
+    // When connection recovers, fallback is stopped
+    await act(async () => { subscribeCb.current('SUBSCRIBED') })
+    await act(async () => { vi.advanceTimersByTime(50000) })
+    expect(onReload).toHaveBeenCalledTimes(1)
+  })
 })

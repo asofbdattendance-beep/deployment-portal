@@ -764,3 +764,51 @@ export function tileRois(roi, opts = {}) {
   }
   return tiles
 }
+
+// ─── mergeOptimisticSessions & getScannerRefreshDebounceMs ──────────────────
+export const SCANNER_REFRESH_DEBOUNCE_MS = 600
+
+/**
+ * Returns the debounce delay (ms) for post-scan recent feed refreshes.
+ * Injectable via globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__ for tests.
+ */
+export function getScannerRefreshDebounceMs() {
+  try {
+    if (typeof globalThis !== 'undefined' && globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__ !== undefined) {
+      return Number(globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__) || 0
+    }
+  } catch { /* ignore */ }
+  return SCANNER_REFRESH_DEBOUNCE_MS
+}
+
+/**
+ * Merges server session rows with pending optimistic rows from the previous
+ * state, ensuring:
+ * 1. Uncommitted/offline scans are not wiped when a background poll returns.
+ * 2. An optimistic OUT scan is NOT reverted back to an open session if the
+ *    server has not yet recorded the checkout (out_date / out_time).
+ * 3. Confirmed server records cleanly replace optimistic placeholders without
+ *    duplicate rows.
+ * 4. Total rows are bounded to `limit` to prevent memory leaks.
+ */
+export function mergeOptimisticSessions(prev, serverRows, limit = 10) {
+  const server = Array.isArray(serverRows) ? serverRows : []
+  const prevList = Array.isArray(prev) ? prev : []
+
+  const pendingOpt = prevList.filter((p) => {
+    const isOpt = Boolean(p?._optimistic) || (typeof p?.id === 'string' && p.id.startsWith('opt-'))
+    if (!isOpt) return false
+    const match = server.find((s) => s.badge_number === p.badge_number)
+    if (!match) return true
+    // If optimistic row was an OUT scan, keep it while server has not yet recorded OUT
+    if (p.out_time) {
+      return !match.out_time && !match.out_date
+    }
+    // If optimistic row was an IN scan, server row has it
+    return false
+  })
+
+  const nonOverriddenServer = server.filter((s) => !pendingOpt.some((p) => p.badge_number === s.badge_number))
+  return [...pendingOpt, ...nonOverriddenServer].slice(0, limit)
+}
+

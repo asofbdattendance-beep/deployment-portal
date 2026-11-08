@@ -809,4 +809,47 @@ describe('Logs — the whole-schedule scan record, one compact line per session'
     fireEvent.click(screen.getByText('Logs'))
     expect(screen.getByText('No scans logged')).toBeTruthy()
   })
+
+  it('filters scan logs by Late In and Early Out flags and renders summary counters', async () => {
+    respondWith({
+      log: [
+        {
+          ...LOG[0], id: 'log-late', badge_number: 'FB5971GA0001', sewadar_name: 'RAM',
+          is_late_in: true, is_early_out: false,
+        },
+        {
+          ...LOG[1], id: 'log-early', badge_number: 'FB5971GA0002', sewadar_name: 'SHAM',
+          is_late_in: false, is_early_out: true,
+        },
+      ],
+    })
+    await renderPage()
+    fireEvent.click(screen.getByText('Logs'))
+
+    // Summary pills
+    expect(screen.getByText('Late In: 1')).toBeTruthy()
+    expect(screen.getByText('Early Out: 1')).toBeTruthy()
+
+    // Filter by Late In
+    fireEvent.change(screen.getByLabelText('Filter by flag'), { target: { value: 'late_in' } })
+    await settle()
+    let table = screen.getByRole('table', { name: 'Scan log' })
+    expect(table.textContent).toContain('FB5971GA0001')
+    expect(table.textContent).not.toContain('FB5971GA0002')
+
+    // Filter by Early Out
+    fireEvent.change(screen.getByLabelText('Filter by flag'), { target: { value: 'early_out' } })
+    await settle()
+    table = screen.getByRole('table', { name: 'Scan log' })
+    expect(table.textContent).toContain('FB5971GA0002')
+    expect(table.textContent).not.toContain('FB5971GA0001')
+
+    // Text search matches "late"
+    fireEvent.change(screen.getByLabelText('Filter by flag'), { target: { value: 'all' } })
+    fireEvent.change(screen.getByLabelText('Search attendance'), { target: { value: 'late' } })
+    await settle()
+    table = screen.getByRole('table', { name: 'Scan log' })
+    expect(table.textContent).toContain('FB5971GA0001')
+    expect(table.textContent).not.toContain('FB5971GA0002')
+  })
 })

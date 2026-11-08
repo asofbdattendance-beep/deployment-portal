@@ -132,7 +132,7 @@ export default function ScheduleMakerPage({ refreshSchedules }) {
 
       {selectedSchedule && (
         <>
-          <DepartmentsPanel isSuper={isSuper} toast={toast} />
+          <DepartmentsPanel schedule={selectedSchedule} isSuper={isSuper} toast={toast} />
           {/* key remounts the panel per schedule — stale form/expanded-editor
               counts from schedule A must never be saved under schedule B */}
           <AllocationsPanel key={selectedSchedule?.id || 'none'} schedule={selectedSchedule} isSuper={isSuper} toast={toast} />
@@ -452,7 +452,7 @@ function SchedulesPanel({ schedules, selectedScheduleId, setSelectedScheduleId, 
 }
 
 /* ─── Departments + restriction rules ─── */
-function DepartmentsPanel({ isSuper, toast }) {
+function DepartmentsPanel({ schedule, isSuper, toast }) {
   const { profile } = usePortalAuth()
   const [depts, setDepts] = useState([])
   const [newDeptName, setNewDeptName] = useState('')
@@ -463,14 +463,35 @@ function DepartmentsPanel({ isSuper, toast }) {
     min_days: 1, requires_stay_at_bhati: false, requires_initiated: false,
     include_vss: false, vss_min_days: 1, vss_requires_stay_at_bhati: false,
     vss_requires_initiated: false, vss_requires_gender: '',
+    expected_in_time: '08:00', expected_out_time: '17:00',
   })
 
   const loadDepts = useCallback(async () => {
     try {
       const data = await fetchAllRows('deployment_departments', '*', (q) => q.order('name'), 'id')
-      setDepts(data || [])
+      let list = data || []
+      if (schedule?.id) {
+        try {
+          const sdtList = await fetchAllRows('schedule_department_timings', '*', (q) => q.eq('schedule_id', schedule.id), ['schedule_id', 'department_id'])
+          if (Array.isArray(sdtList) && sdtList.length > 0) {
+            const timingMap = new Map(sdtList.map(t => [t.department_id, t]))
+            list = list.map(d => {
+              const timing = timingMap.get(d.id)
+              if (!timing) return d
+              return {
+                ...d,
+                expected_in_time: timing.expected_in_time || d.expected_in_time,
+                expected_out_time: timing.expected_out_time || d.expected_out_time,
+              }
+            })
+          }
+        } catch (err) {
+          console.warn('schedule_department_timings list failed:', err.message)
+        }
+      }
+      setDepts(list)
     } catch (err) { toast.error(`Could not load departments: ${err.message}`) }
-  }, [toast])
+  }, [schedule?.id, toast])
 
   useEffect(() => { loadDepts() }, [loadDepts])
 
@@ -525,22 +546,58 @@ function DepartmentsPanel({ isSuper, toast }) {
         min_days: 1, requires_stay_at_bhati: false, requires_initiated: false,
         include_vss: false, vss_min_days: 1, vss_requires_stay_at_bhati: false,
         vss_requires_initiated: false, vss_requires_gender: null,
+        expected_in_time: '08:00', expected_out_time: '17:00',
       })
       .eq('id', deptId)
     if (error) { toast.error(error.message); return }
+    if (schedule?.id) {
+      const { error: delErr } = await supabase.from('schedule_department_timings')
+        .delete()
+        .eq('schedule_id', schedule.id)
+        .eq('department_id', deptId)
+      if (delErr) {
+        toast.error(`Could not reset schedule timings: ${delErr.message}`)
+        return
+      }
+    }
     setRulesDeptId(null)
     loadDepts()
     toast.success('Rules reset to defaults')
   }
 
   const openRules = (dept) => {
-    setRulesDeptId(dept.id)
+    let inTime = dept.expected_in_time ? String(dept.expected_in_time).slice(0, 5) : '08:00'
+    let outTime = dept.expected_out_time ? String(dept.expected_out_time).slice(0, 5) : '17:00'
     setRules({
       min_days: dept.min_days ?? 1, requires_stay_at_bhati: !!dept.requires_stay_at_bhati, requires_initiated: !!dept.requires_initiated,
       include_vss: !!dept.include_vss, vss_min_days: dept.vss_min_days ?? 1,
       vss_requires_stay_at_bhati: !!dept.vss_requires_stay_at_bhati, vss_requires_initiated: !!dept.vss_requires_initiated,
       vss_requires_gender: dept.vss_requires_gender || '',
+      expected_in_time: inTime,
+      expected_out_time: outTime,
     })
+    setRulesDeptId(dept.id)
+
+    if (schedule?.id) {
+      supabase
+        .from('schedule_department_timings')
+        .select('expected_in_time, expected_out_time')
+        .eq('schedule_id', schedule.id)
+        .eq('department_id', dept.id)
+        .maybeSingle()
+        .then(({ data }) => {
+          if (data) {
+            setRules(prev => ({
+              ...prev,
+              expected_in_time: data.expected_in_time ? String(data.expected_in_time).slice(0, 5) : prev.expected_in_time,
+              expected_out_time: data.expected_out_time ? String(data.expected_out_time).slice(0, 5) : prev.expected_out_time,
+            }))
+          }
+        })
+        .catch(err => {
+          console.warn('schedule_department_timings read failed:', err.message)
+        })
+    }
   }
 
   const saveRules = async (deptId) => {
@@ -559,9 +616,26 @@ function DepartmentsPanel({ isSuper, toast }) {
         vss_min_days: (vssMinDays >= 1 && vssMinDays <= 5) ? vssMinDays : 1,
         vss_requires_stay_at_bhati: rules.vss_requires_stay_at_bhati, vss_requires_initiated: rules.vss_requires_initiated,
         vss_requires_gender: rules.vss_requires_gender || null,
+        expected_in_time: rules.expected_in_time || null,
+        expected_out_time: rules.expected_out_time || null,
       })
       .eq('id', deptId)
     if (error) { toast.error(error.message); return }
+
+    if (schedule?.id) {
+      const { error: timingErr } = await supabase.from('schedule_department_timings').upsert({
+        schedule_id: schedule.id,
+        department_id: deptId,
+        expected_in_time: rules.expected_in_time || null,
+        expected_out_time: rules.expected_out_time || null,
+        updated_at: new Date().toISOString(),
+      })
+      if (timingErr) {
+        toast.error(`Could not save schedule timings: ${timingErr.message}`)
+        return
+      }
+    }
+
     setRulesDeptId(null)
     loadDepts()
     toast.success('Department rules saved')
@@ -595,6 +669,8 @@ function DepartmentsPanel({ isSuper, toast }) {
                 {d.requires_stay_at_bhati && <span className="pill pill-red">STAY AT BHATI</span>}
                 {d.requires_initiated && <span className="pill pill-amber">INITIATED</span>}
                 {d.include_vss && <span className="pill pill-green">VSS</span>}
+                {d.expected_in_time && <span className="pill" style={{ background: '#f3f4f6', color: '#374151' }}>IN {String(d.expected_in_time).slice(0, 5)}</span>}
+                {d.expected_out_time && <span className="pill" style={{ background: '#f3f4f6', color: '#374151' }}>OUT {String(d.expected_out_time).slice(0, 5)}</span>}
                 <div style={{ flex: 1 }} />
                 {editDeptId === d.id ? (
                   <>
@@ -669,6 +745,32 @@ function DepartmentsPanel({ isSuper, toast }) {
                         </label>
                       </div>
                     )}
+                  </div>
+
+                  <div style={{ marginTop: '0.6rem', paddingTop: '0.6rem', borderTop: '1px dashed #e5e7eb', display: 'flex', alignItems: 'center', gap: '1.25rem', flexWrap: 'wrap' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem', fontWeight: 600, color: '#374151' }}>
+                      Expected IN Time (Cutoff):
+                      <input
+                        type="time"
+                        aria-label="Expected IN Time (Cutoff)"
+                        value={rules.expected_in_time || ''}
+                        onChange={e => setRules(r => ({ ...r, expected_in_time: e.target.value }))}
+                        style={{ padding: '0.25rem 0.4rem', border: '1px solid #e5e7eb', borderRadius: 4, fontSize: '0.8rem' }}
+                      />
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem', fontWeight: 600, color: '#374151' }}>
+                      Expected OUT Time (Cutoff):
+                      <input
+                        type="time"
+                        aria-label="Expected OUT Time (Cutoff)"
+                        value={rules.expected_out_time || ''}
+                        onChange={e => setRules(r => ({ ...r, expected_out_time: e.target.value }))}
+                        style={{ padding: '0.25rem 0.4rem', border: '1px solid #e5e7eb', borderRadius: 4, fontSize: '0.8rem' }}
+                      />
+                    </label>
+                    <span style={{ fontSize: '0.75rem', color: '#6b7280' }}>
+                      Scans after IN cutoff are tagged "Late In"; scans before OUT cutoff are tagged "Early Out".
+                    </span>
                   </div>
                 </div>
               )}

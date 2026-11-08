@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, Fragment, forwardRef, useImperativeHandle } from 'react'
 import { fetchCentres, fetchAllRows, getRootCentre } from '../lib/supabase'
+import { cached } from '../lib/queryCache'
 import { deploymentCounts, verifyDeploymentCounts, reportCountProblems } from '../lib/counts'
+import { inferGenderFromBadge } from '../lib/logic'
 import { useRealtimeRefresh } from '../hooks/useRealtimeRefresh'
 import EmptyState from './EmptyState'
 
@@ -47,7 +49,7 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     // undeployed (404) and this client path is the source of truth.
     // Do NOT re-enable the RPC call here until the RPC definition is fixed
     // to match the UI semantics.
-    fetchAllRows('vss_sewadars', 'badge_number', null, 'badge_number')
+    cached('vss:badges', 120000, () => fetchAllRows('vss_sewadars', 'badge_number', null, 'badge_number'))
       .then((data) => setVssBadges(new Set((data || []).map(v => v.badge_number))))
       .catch(() => {})
   }, [])
@@ -56,7 +58,7 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     const [deployAll, allocAll, deptAll] = await Promise.all([
       fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', scheduleId).order('centre'), 'id'),
       fetchAllRows('centre_allocations', '*', (q) => q.eq('schedule_id', scheduleId), 'id'),
-      fetchAllRows('deployment_departments', 'id, name', null, 'id'),
+      cached('depts:id_name', 60000, () => fetchAllRows('deployment_departments', 'id, name', null, 'id')),
     ])
     const deptNameById = {}
     ;(deptAll || []).forEach(d => { deptNameById[d.id] = d.name })
@@ -64,7 +66,7 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     const rowsData = (deployAll || []).map(r => ({
       ...r,
       // effective department — what is happening now: finalized if exists, otherwise the centre's request
-      final_dept_name: deptNameById[r.deployed_department_id || r.department_id] || '—',
+      final_dept_name: deptNameById[r.deployed_department_id || r.department_id] || (r.deployed_department_id || r.department_id ? 'UNKNOWN DEPT' : 'UNASSIGNED'),
     }))
     setRows(rowsData)
     setAllocations(allocAll || [])
@@ -106,6 +108,9 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     subscriptions: [
       { table: 'deployments', filter: `schedule_id=eq.${scheduleId}` },
       { table: 'centre_allocations', filter: `schedule_id=eq.${scheduleId}` },
+      { table: 'sewadar_consents', filter: `schedule_id=eq.${scheduleId}` },
+      { table: 'centre_locks', filter: `schedule_id=eq.${scheduleId}` },
+      { table: 'deployment_departments' },
     ],
     onReload: () => load(scheduleId).catch((e) => { console.error('[Overview] reload failed:', e?.message) }),
     label: 'deploy-overview',
@@ -150,8 +155,12 @@ const DeploymentMatrixReport = forwardRef(function DeploymentMatrixReport({ sche
     d.deployed++
     if (vssBadges.has(r.badge_number)) { d.vss++; return }
     const sw = swFor(r)
-    if (!sw?.gender) { d.noGender++; return }
-    if (isMale(sw.gender)) d.male++; else d.female++
+    let g = sw?.gender
+    if (!g) {
+      g = inferGenderFromBadge(r.badge_number)
+    }
+    if (!g) { d.noGender++; return }
+    if (isMale(g)) d.male++; else d.female++
   })
 
   const deptSet = new Set()

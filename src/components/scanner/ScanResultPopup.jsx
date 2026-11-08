@@ -156,6 +156,10 @@ export default function ScanResultPopup({
   onConfirm,
   confirmLabel,
   dismissible,
+  is_late_in,
+  isLateIn,
+  is_early_out,
+  isEarlyOut,
 }) {
   const key = (variant || status || 'in').toLowerCase()
   const cfg = VARIANT[key] || VARIANT.in
@@ -339,8 +343,8 @@ export default function ScanResultPopup({
           willChange: 'transform, opacity',
         }}
       >
-        {/* accent hairline */}
-        <div style={{ height: 3, background: cfg.accent }} />
+        {/* status band — thick enough to read the colour at arm's length */}
+        <div className="scan-popup-band" style={{ height: 6, background: cfg.accent }} />
         {isMobileScan && (
           <div style={{ width: 40, height: 4, borderRadius: 999, background: 'var(--border)', margin: '0.5rem auto 0' }} aria-hidden="true" />
         )}
@@ -376,24 +380,24 @@ export default function ScanResultPopup({
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start' }}>
             <div
               style={{
-                width: 44,
-                height: 44,
+                width: 48,
+                height: 48,
                 borderRadius: 999,
-                background: cfg.iconBg,
-                border: `1px solid ${cfg.border}`,
+                // Solid status disc + white glyph: IN / OUT / problem reads
+                // from the colour alone, before the text is read.
+                background: cfg.iconColor,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 flexShrink: 0,
-                color: cfg.iconColor,
-                boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.8)',
+                color: '#fff',
               }}
             >
-              <Icon size={22} strokeWidth={2} />
+              <Icon size={26} strokeWidth={2.25} />
             </div>
             <div style={{ flex: 1, minWidth: 0, paddingRight: canBackdropClose ? 28 : 0 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <h3 id="scan-popup-title" style={{ fontSize: '0.95rem', fontWeight: 700, letterSpacing: '-0.01em', lineHeight: 1.2, color: 'var(--text)' }}>
+                <h3 id="scan-popup-title" style={{ fontSize: '1.1rem', fontWeight: 700, letterSpacing: '-0.01em', lineHeight: 1.2, color: 'var(--text)' }}>
                   {title}
                 </h3>
                 {/* status pill */}
@@ -415,6 +419,34 @@ export default function ScanResultPopup({
                     : key === 'confirm_in' ? 'CONFIRM IN'
                     : key.toUpperCase()}
                 </span>
+                {(is_late_in || isLateIn) && (
+                  <span
+                    className="pill pill-amber"
+                    style={{
+                      fontSize: '0.72rem',
+                      fontWeight: 700,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                    }}
+                  >
+                    <Clock size={11} /> Late In
+                  </span>
+                )}
+                {(is_early_out || isEarlyOut) && (
+                  <span
+                    className="pill pill-amber"
+                    style={{
+                      fontSize: '0.72rem',
+                      fontWeight: 700,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                    }}
+                  >
+                    <Clock size={11} /> Early Out
+                  </span>
+                )}
               </div>
 
               {/* badge */}

@@ -240,4 +240,14 @@ describe('ScanResultPopup — date + time (in/out) event stamp', () => {
     expect(screen.getByText('2026-10-04')).toBeTruthy()
     expect(screen.getByText('Time (IN)')).toBeTruthy()
   })
+
+  it('displays Late In tag when is_late_in is true', () => {
+    open('in', { is_late_in: true })
+    expect(screen.getByText(/Late In/i)).toBeTruthy()
+  })
+
+  it('displays Early Out tag when is_early_out is true', () => {
+    open('out', { is_early_out: true })
+    expect(screen.getByText(/Early Out/i)).toBeTruthy()
+  })
 })

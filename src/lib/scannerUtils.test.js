@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { withTimeout, friendly, todayStrIST, hhmmIST, hmsIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, isDecisionPopup, isEdgeDetection, detectionBox, isTimestampStale, CLOCK_SKEW_FUTURE_MS, CLOCK_SKEW_MAX_AGE_MS, rotateGray, SCAN_ROTATIONS, sanitizeBarcode, scoreSharpness, tileRois } from './scannerUtils'
+import { withTimeout, friendly, todayStrIST, hhmmIST, hmsIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, isDecisionPopup, isEdgeDetection, detectionBox, isTimestampStale, CLOCK_SKEW_FUTURE_MS, CLOCK_SKEW_MAX_AGE_MS, rotateGray, SCAN_ROTATIONS, sanitizeBarcode, scoreSharpness, tileRois, mergeOptimisticSessions, getScannerRefreshDebounceMs } from './scannerUtils'
 
 afterEach(() => { vi.useRealTimers() })
 
@@ -759,5 +759,86 @@ describe('tileRois', () => {
     expect(tileRois(roi, { rows: -5 })).toHaveLength(1)
     expect(tileRois(null)).toEqual([])
     expect(tileRois({ sx: 0, sy: 0, sw: 0, sh: 0 })).toEqual([])
+  })
+})
+
+/* ─── mergeOptimisticSessions & getScannerRefreshDebounceMs ─── */
+describe('mergeOptimisticSessions', () => {
+  it('returns server rows directly when prev is empty', () => {
+    const server = [{ id: 's1', badge_number: 'FB01' }]
+    expect(mergeOptimisticSessions([], server)).toEqual(server)
+  })
+
+  it('preserves an optimistic IN scan when server has not returned it yet', () => {
+    const prev = [{ id: 'opt-1', _optimistic: true, badge_number: 'FB01', in_time: '10:00', out_time: null }]
+    const server = [{ id: 's2', badge_number: 'FB02' }]
+    const merged = mergeOptimisticSessions(prev, server)
+    expect(merged).toHaveLength(2)
+    expect(merged[0].badge_number).toBe('FB01')
+    expect(merged[1].badge_number).toBe('FB02')
+  })
+
+  it('replaces an optimistic IN scan when server row matches the badge', () => {
+    const prev = [{ id: 'opt-1', _optimistic: true, badge_number: 'FB01', in_time: '10:00', out_time: null }]
+    const server = [{ id: 'server-uuid-1', badge_number: 'FB01', in_time: '10:00:00', out_time: null }]
+    const merged = mergeOptimisticSessions(prev, server)
+    expect(merged).toHaveLength(1)
+    expect(merged[0].id).toBe('server-uuid-1')
+  })
+
+  it('preserves an optimistic OUT scan when server still returns an open session', () => {
+    const prev = [
+      {
+        id: 'opt-s1-FB01',
+        _optimistic: true,
+        badge_number: 'FB01',
+        in_time: '10:00',
+        out_time: '12:00',
+      },
+    ]
+    // Server still holds the open session (out_time null)
+    const server = [{ id: 's1', badge_number: 'FB01', in_time: '10:00:00', out_time: null, out_date: null }]
+    const merged = mergeOptimisticSessions(prev, server)
+    expect(merged).toHaveLength(1)
+    expect(merged[0].id).toBe('opt-s1-FB01')
+    expect(merged[0].out_time).toBe('12:00')
+  })
+
+  it('replaces an optimistic OUT scan when server returns closed session with out_time', () => {
+    const prev = [
+      {
+        id: 'opt-s1-FB01',
+        _optimistic: true,
+        badge_number: 'FB01',
+        in_time: '10:00',
+        out_time: '12:00',
+      },
+    ]
+    const server = [{ id: 's1', badge_number: 'FB01', in_time: '10:00:00', out_time: '12:00:00', out_date: '2026-11-08' }]
+    const merged = mergeOptimisticSessions(prev, server)
+    expect(merged).toHaveLength(1)
+    expect(merged[0].id).toBe('s1')
+    expect(merged[0].out_time).toBe('12:00:00')
+  })
+
+  it('slices to limit to prevent unbounded memory growth', () => {
+    const server = Array.from({ length: 15 }, (_, i) => ({ id: `s-${i}`, badge_number: `FB${i}` }))
+    const merged = mergeOptimisticSessions([], server, 10)
+    expect(merged).toHaveLength(10)
+  })
+})
+
+describe('getScannerRefreshDebounceMs', () => {
+  it('returns default 600ms when no override is set', () => {
+    delete globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__
+    expect(getScannerRefreshDebounceMs()).toBe(600)
+  })
+
+  it('honors globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__ override', () => {
+    globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__ = 0
+    expect(getScannerRefreshDebounceMs()).toBe(0)
+    globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__ = 150
+    expect(getScannerRefreshDebounceMs()).toBe(150)
+    delete globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__
   })
 })

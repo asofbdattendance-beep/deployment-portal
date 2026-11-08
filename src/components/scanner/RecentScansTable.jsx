@@ -69,8 +69,14 @@ export default function RecentScansTable({ rows = [], deptNameById, limit, empty
                   <td className="scans-dept">
                     {deptName ? <span className="pill pill-blue">{deptName}</span> : EM_DASH}
                   </td>
-                  <td className="scans-time">{hms(row.in_time)}</td>
-                  <td className="scans-time">{hms(row.out_time) || EM_DASH}</td>
+                  <td className="scans-time">
+                    {hms(row.in_time)}
+                    {row.is_late_in ? <span className="pill pill-amber scans-pill" style={{ marginLeft: 4, fontSize: '0.65rem' }}>Late</span> : null}
+                  </td>
+                  <td className="scans-time">
+                    {hms(row.out_time) || EM_DASH}
+                    {row.is_early_out ? <span className="pill pill-amber scans-pill" style={{ marginLeft: 4, fontSize: '0.65rem' }}>Early</span> : null}
+                  </td>
                 </tr>
               )
             })

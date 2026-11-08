@@ -46,6 +46,8 @@ export default function MobileScanFeed({ rows = [], deptNameById, limit, emptyMe
               <span className="scan-feed-badge">{row.badge_number}</span>
               {row.is_vss ? <span className="pill pill-amber">VSS</span> : null}
               {row.undeployed_scan ? <span className="pill pill-red">Flagged</span> : null}
+              {row.is_late_in ? <span className="pill pill-amber">Late In</span> : null}
+              {row.is_early_out ? <span className="pill pill-amber">Early Out</span> : null}
               <span className={`pill ${open ? 'pill-green' : 'pill-gray'} scan-feed-status`}>
                 {open ? 'In' : 'Out'}
               </span>
