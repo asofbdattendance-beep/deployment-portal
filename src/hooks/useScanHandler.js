@@ -569,6 +569,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
               status: 'out', badge: b,
               name: display?.name ?? null, centre: display?.centre ?? null, deptName: display?.deptName ?? null,
               time: new Date().toLocaleTimeString(), message: 'OUT already recorded — no change',
+              is_early_out: Boolean(outFastData?.early_out),
               ...eventStamp(),
             })
             toast.warning(`OUT already recorded ${b}`)
@@ -578,6 +579,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
             status: 'out', badge: b,
             name: display?.name ?? null, centre: display?.centre ?? null, deptName: display?.deptName ?? null,
             time: new Date().toLocaleTimeString(), message: 'OUT marked',
+            is_early_out: Boolean(outFastData?.early_out),
             ...eventStamp(),
           })
           toast.success(`OUT ${b}`)
@@ -815,6 +817,7 @@ export function useScanHandler({ scheduleId, profile, deptName, deptNameById, di
             ...eventStamp(),
             flag: data?.undeployed ? `Not deployed to ${deptName || 'your dept'} — flagged` : null,
             message: `IN marked${flag}`,
+            is_late_in: Boolean(data?.late_in),
           })
           toast[data?.undeployed ? 'warning' : 'success'](`IN ${b}${flag}`)
           scanOk = true

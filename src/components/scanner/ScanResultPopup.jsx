@@ -156,6 +156,10 @@ export default function ScanResultPopup({
   onConfirm,
   confirmLabel,
   dismissible,
+  is_late_in,
+  isLateIn,
+  is_early_out,
+  isEarlyOut,
 }) {
   const key = (variant || status || 'in').toLowerCase()
   const cfg = VARIANT[key] || VARIANT.in
@@ -415,6 +419,34 @@ export default function ScanResultPopup({
                     : key === 'confirm_in' ? 'CONFIRM IN'
                     : key.toUpperCase()}
                 </span>
+                {(is_late_in || isLateIn) && (
+                  <span
+                    className="pill pill-amber"
+                    style={{
+                      fontSize: '0.72rem',
+                      fontWeight: 700,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                    }}
+                  >
+                    <Clock size={11} /> Late In
+                  </span>
+                )}
+                {(is_early_out || isEarlyOut) && (
+                  <span
+                    className="pill pill-amber"
+                    style={{
+                      fontSize: '0.72rem',
+                      fontWeight: 700,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                    }}
+                  >
+                    <Clock size={11} /> Early Out
+                  </span>
+                )}
               </div>
 
               {/* badge */}

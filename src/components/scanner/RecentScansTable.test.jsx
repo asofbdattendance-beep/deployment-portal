@@ -169,4 +169,14 @@ describe('RecentScansTable', () => {
     const times = [...container.querySelectorAll('td.scans-time')].map((td) => td.textContent)
     expect(times).toEqual(['14:30:05', '18:02:59'])
   })
+
+  it('renders Late badge on row with is_late_in: true', () => {
+    render(<RecentScansTable rows={[{ id: 's-late', badge_number: 'FB1', sewadar_name: 'Dev Kumar', sewadar_dept: 'd-1', in_time: '09:30', out_time: null, is_late_in: true }]} deptNameById={DEPTS} />)
+    expect(screen.getByText('Late')).toBeTruthy()
+  })
+
+  it('renders Early badge on row with is_early_out: true', () => {
+    render(<RecentScansTable rows={[{ id: 's-early', badge_number: 'FB1', sewadar_name: 'Dev Kumar', sewadar_dept: 'd-1', in_time: '08:00', out_time: '16:00', is_early_out: true }]} deptNameById={DEPTS} />)
+    expect(screen.getByText('Early')).toBeTruthy()
+  })
 })

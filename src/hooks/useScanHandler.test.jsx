@@ -1691,3 +1691,29 @@ describe('submitForgotOut timeout on a stale-ts device (skew order)', () => {
     expect(showPopup).not.toHaveBeenCalled()
   })
 })
+
+describe('shift cutoff tagging (Late In / Early Out)', () => {
+  it('passes is_late_in: true to showPopup when scan_in reports late_in', async () => {
+    rpc.mockResolvedValueOnce({ data: { ok: true, late_in: true, sewadar_name: 'RAM' } })
+    const { result, showPopup } = setup()
+    await act(async () => {
+      await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'IN' })
+    })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'in',
+      is_late_in: true,
+    }))
+  })
+
+  it('passes is_early_out: true to showPopup when scan_out reports early_out', async () => {
+    rpc.mockResolvedValueOnce({ data: { ok: true, early_out: true, sewadar_name: 'RAM' } })
+    const { result, showPopup } = setup()
+    await act(async () => {
+      await result.current.handleScan(BADGE, { confirmed: true, confirmFor: 'OUT', openId: 'open-1' })
+    })
+    expect(showPopup).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'out',
+      is_early_out: true,
+    }))
+  })
+})
