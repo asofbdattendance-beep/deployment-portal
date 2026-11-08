@@ -121,6 +121,7 @@ const rowFor = (today) => ({
 })
 
 beforeEach(() => {
+  globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__ = 0
   mocks.fetchAllRows.mockReset()
   mocks.filterCalls.length = 0
   mocks.fromCalls.length = 0
@@ -131,10 +132,17 @@ beforeEach(() => {
 
   // The success path: a scan appends today's session, then the page's
   // onAfterScan (refreshSessions) re-reads it.
-  mocks.handleScan = vi.fn(async (_badge) => {
+  mocks.handleScan = vi.fn(async (badge) => {
     mocks.sessionRows = [rowFor(todayStrIST())]
     mocks.sessionCount = 1
-    await mocks.scannerCfg?.onAfterScan?.()
+    await mocks.scannerCfg?.onAfterScan?.({
+      badge,
+      action: 'IN',
+      sewadar_name: 'Test Sewadar',
+      sewadar_centre: 'DELHI',
+      dept_id: 'd1',
+      dept_name: 'LANGAR',
+    })
     mocks.scannerCfg?.clearManual?.()
     return { ok: true }
   })
@@ -147,6 +155,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  delete globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__
   vi.useRealTimers()
 })
 
@@ -241,5 +250,103 @@ describe('InchargeScannerPage — scan during a slow initial load', () => {
     await act(async () => { releaseDepts() })
     await settle()
     expect(screen.getAllByText('LANGAR').length).toBeGreaterThan(0)
+  })
+})
+
+describe('InchargeScannerPage optimistic feed & debounce', () => {
+  it('preserves pending optimistic scan across background refresh when server has not caught up', async () => {
+    // Initial load: 0 sessions
+    mocks.sessionRows = []
+    render(<InchargeScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+    await settle()
+    expect(screen.getByText('No scans today')).toBeTruthy()
+
+    // Operator scans FB123 IN
+    await act(async () => {
+      mocks.scannerCfg.onAfterScan({
+        badge: 'FB123',
+        action: 'IN',
+        sewadar_name: 'Optimistic Sewadar',
+        sewadar_centre: 'DELHI',
+        dept_name: 'LANGAR',
+      })
+    })
+
+    // Immediately rendered optimistically
+    expect(screen.queryByText('No scans today')).toBeNull()
+    expect(screen.getByText('FB123')).toBeTruthy()
+    expect(screen.getByText('Optimistic Sewadar')).toBeTruthy()
+
+    // Background refresh fires while server still returns empty rows (e.g. queue not drained)
+    mocks.sessionRows = []
+    await act(async () => {
+      // Simulate another background refresh tick
+      await mocks.scannerCfg.onAfterScan()
+    })
+
+    // FB123 must NOT be wiped
+    expect(screen.getByText('FB123')).toBeTruthy()
+    expect(screen.getByText('Optimistic Sewadar')).toBeTruthy()
+  })
+
+  it('OUT scan updates session but does not increment totalScansCount KPI tile', async () => {
+    mocks.sessionRows = []
+    mocks.sessionCount = 0
+    render(<InchargeScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+    await settle()
+    const getScansTodayValue = () => {
+      const label = screen.getByText('Scans today')
+      const tile = label.closest('.kpi-tile') || label.closest('.stat-box') || label.parentElement
+      return tile.querySelector('.stat-value')?.textContent?.trim()
+    }
+    expect(getScansTodayValue()).toBe('0')
+
+    // Scan IN -> increments count
+    await act(async () => {
+      mocks.scannerCfg.onAfterScan({
+        badge: 'FB123',
+        action: 'IN',
+        sewadar_name: 'Sewadar One',
+      })
+    })
+    expect(getScansTodayValue()).toBe('1')
+
+    // Scan OUT for same sewadar -> updates session, count stays 1
+    await act(async () => {
+      mocks.scannerCfg.onAfterScan({
+        badge: 'FB123',
+        action: 'OUT',
+        sewadar_name: 'Sewadar One',
+      })
+    })
+    expect(getScansTodayValue()).toBe('1')
+  })
+
+  it('debounces rapid burst scans into a single background refresh query', async () => {
+    globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__ = 50
+    mocks.sessionRows = []
+    render(<InchargeScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+    await settle()
+
+    const selectCallsBefore = mocks.fromCalls.filter(c => c[0] === 'select').length
+
+    // Rapid burst of 3 scans
+    await act(async () => {
+      mocks.scannerCfg.onAfterScan({ badge: 'FB1', action: 'IN' })
+      mocks.scannerCfg.onAfterScan({ badge: 'FB2', action: 'IN' })
+      mocks.scannerCfg.onAfterScan({ badge: 'FB3', action: 'IN' })
+    })
+
+    // Before debounce delay elapses, no extra query
+    const selectCallsImmediate = mocks.fromCalls.filter(c => c[0] === 'select').length
+    expect(selectCallsImmediate).toBe(selectCallsBefore)
+
+    // Wait for debounce timer to fire
+    await act(async () => {
+      await new Promise(r => setTimeout(r, 70))
+    })
+
+    const selectCallsAfter = mocks.fromCalls.filter(c => c[0] === 'select').length
+    expect(selectCallsAfter).toBe(selectCallsBefore + 1)
   })
 })

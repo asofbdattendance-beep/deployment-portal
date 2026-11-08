@@ -579,4 +579,65 @@ describe('ScannerPage ASO sewadar picker', () => {
       restore()
     }
   })
+
+  it('preserves optimistic OUT scan without reverting to open session when server still returns open state', async () => {
+    const restore = useDesktopMatchMedia()
+    try {
+      mocks.rpc.mockImplementation((fn) => {
+        if (fn === 'get_scan_state') {
+          return Promise.resolve({
+            data: {
+              open: {
+                id: 's-open-1',
+                in_date: todayStrIST(),
+                in_time: '09:00:00',
+              },
+              last_out: null,
+              sewadar: {
+                sewadar_name: 'Out Tester',
+                sewadar_centre: 'DELHI',
+                sewadar_dept: 'dept-1',
+                dept_name: 'Langar',
+              },
+            },
+          })
+        }
+        if (fn === 'scan_out') {
+          return Promise.resolve({
+            data: {
+              ok: true,
+              early_out: false,
+            },
+          })
+        }
+        return Promise.resolve({ data: null })
+      })
+
+      render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+      await settle()
+
+      const input = screen.getByPlaceholderText('Manual FB/VS badge')
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        setter.call(input, 'FB5971GA0001')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByText('Mark In/Out'))
+        await new Promise(r => setTimeout(r, 50))
+      })
+
+      const markOutBtn = screen.getByRole('button', { name: /^Mark OUT$/i })
+      await act(async () => {
+        fireEvent.click(markOutBtn)
+        await new Promise(r => setTimeout(r, 50))
+      })
+
+      expect(screen.queryByText('No scans by you yet today')).toBeNull()
+      expect(screen.getAllByText('FB5971GA0001').length).toBeGreaterThanOrEqual(1)
+      expect(screen.getAllByText('Out Tester').length).toBeGreaterThanOrEqual(1)
+    } finally {
+      restore()
+    }
+  })
 })

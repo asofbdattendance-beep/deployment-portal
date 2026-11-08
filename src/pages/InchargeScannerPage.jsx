@@ -6,7 +6,7 @@ import { useToast } from '../components/Toast'
 import BarcodeScanner from '../components/scanner/BarcodeScanner'
 import ScanResultPopup from '../components/scanner/ScanResultPopup'
 import RecentScansTable from '../components/scanner/RecentScansTable'
-import { todayStrIST, hmsIST } from '../lib/scannerUtils'
+import { todayStrIST, hmsIST, mergeOptimisticSessions, getScannerRefreshDebounceMs } from '../lib/scannerUtils'
 import { deptNameMap } from '../lib/scanDisplay'
 import { useScannerSession } from '../hooks/useScannerSession'
 import { useSewadarDirectory } from '../hooks/useSewadarDirectory'
@@ -97,7 +97,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
       // keeps the cached department names.
       syncDepts(deptAll)
       const data = sessRes?.data || []
-      setSessions(data)
+      setSessions((prev) => mergeOptimisticSessions(prev, data, 10))
       setTotalScansCount(typeof sessRes?.count === 'number' ? sessRes.count : data.length)
       setOffline(false)
     } catch (e) {
@@ -127,7 +127,7 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
         .limit(10)
       if (error) throw error
       if (!alive()) return
-      setSessions(sess || [])
+      setSessions((prev) => mergeOptimisticSessions(prev, sess, 10))
       setOffline(false)
     } catch (e) {
       if (!alive()) return
@@ -176,24 +176,47 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
   // unchanged while desktop offline gains popup identity.
   const directoryByBadge = useSewadarDirectory({ scheduleId: selectedScheduleId, enabled: true })
 
+  // Debounced post-scan background refresh — prevents query storms on fast burst scanning
+  const refreshTimerRef = useRef(null)
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
+    const delay = getScannerRefreshDebounceMs()
+    if (delay <= 0) {
+      refreshSessions()
+      return
+    }
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null
+      refreshSessions()
+    }, delay)
+  }, [refreshSessions])
+
+  useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
+    }
+  }, [])
+
   // Optimistic local prepend for 0ms operator feedback
   const onAfterScan = useCallback((scan) => {
     if (scan?.badge) {
       const today = todayStrIST()
       const nowHms = hmsIST()
+      const isOut = scan.action === 'OUT'
       setSessions((prev) => {
         const existingIdx = prev.findIndex((s) => s.badge_number === scan.badge)
         const existing = existingIdx >= 0 ? prev[existingIdx] : null
         const optRow = {
-          id: existing?.id || `opt-${Date.now()}`,
+          id: existing?.id ? `opt-${existing.id}` : `opt-${Date.now()}-${scan.badge}`,
+          _optimistic: true,
           badge_number: scan.badge,
           sewadar_name: scan.sewadar_name || existing?.sewadar_name || '',
           sewadar_centre: scan.sewadar_centre || existing?.sewadar_centre || '',
           sewadar_dept: scan.dept_id || existing?.sewadar_dept || null,
-          in_date: scan.action === 'IN' ? today : (existing?.in_date || today),
-          out_date: scan.action === 'OUT' ? today : (existing?.out_date || null),
-          in_time: scan.action === 'IN' ? (scan.in_time || nowHms) : (existing?.in_time || nowHms),
-          out_time: scan.action === 'OUT' ? (scan.out_time || nowHms) : (existing?.out_time || null),
+          in_date: isOut ? (existing?.in_date || today) : today,
+          out_date: isOut ? today : (existing?.out_date || null),
+          in_time: isOut ? (existing?.in_time || null) : (scan.in_time || nowHms),
+          out_time: isOut ? (scan.out_time || nowHms) : (existing?.out_time || null),
           is_vss: !!scan.is_vss || !!existing?.is_vss,
           undeployed_scan: !!scan.undeployed || !!existing?.undeployed_scan,
           is_late_in: scan.is_late_in !== undefined ? !!scan.is_late_in : !!existing?.is_late_in,
@@ -204,10 +227,12 @@ export default function InchargeScannerPage({ schedules = [], scheduleId, sewaMo
         const rest = existingIdx >= 0 ? prev.filter((_, i) => i !== existingIdx) : prev
         return [optRow, ...rest].slice(0, 10)
       })
-      setTotalScansCount((prev) => prev + 1)
+      if (scan.action === 'IN') {
+        setTotalScansCount((prev) => prev + 1)
+      }
     }
-    refreshSessions()
-  }, [refreshSessions])
+    scheduleRefresh()
+  }, [scheduleRefresh])
 
   const {
     popup, outTime, setOutTime, closePopup,
