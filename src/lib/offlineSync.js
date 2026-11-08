@@ -167,8 +167,23 @@ export function requestDrain(delayMs = KICK_DEBOUNCE_MS) {
   }
 }
 
+/**
+ * Calculate reconnect backoff delay with randomized jitter (200ms–2200ms).
+ * Anti-thundering herd: when gate network drops and restores, 150 scanners
+ * must not all hammer PgBouncer in the same millisecond.
+ * Injectable via globalThis.__OFFLINESYNC_RECONNECT_DELAY_MS__ for tests.
+ */
+export function getReconnectDelay() {
+  try {
+    if (typeof globalThis !== 'undefined' && globalThis.__OFFLINESYNC_RECONNECT_DELAY_MS__ !== undefined) {
+      return Number(globalThis.__OFFLINESYNC_RECONNECT_DELAY_MS__) || 0
+    }
+  } catch { /* ignore */ }
+  return Math.floor(Math.random() * 2000) + 200
+}
+
 function onOnline() {
-  requestDrain(0)
+  requestDrain(getReconnectDelay())
 }
 
 /**
