@@ -29,10 +29,11 @@
  *    low-res badges make Native return [] without throwing) no longer pins
  *    the pool forever — after a run of clean misses it hands off to the
  *    other ready engine exactly once, mirroring fallback()'s anti-flapping.
- *  - hardPass(surface): the "hard path" second look — every ready engine,
- *    normal, inverted, and rotated luminance, merged + deduped, never throws.
+ *  - hardPass(surface): the "hard path" second look — every ready engine on
+ *    the raw frame, an enhanced (sharpened + contrast-stretched) copy, the
+ *    inverted luminance and rotations; stops at the first hit, never throws.
  */
-import { rgbaToGray, rotateGray, SCAN_ROTATIONS } from '../../lib/scannerUtils'
+import { rgbaToGray, rotateGray, SCAN_ROTATIONS, enhanceGray, grayToRgba } from '../../lib/scannerUtils'
 import { BASE_1D_FORMATS, EXTENDED_1D_FORMATS, HARD_PATH_2D_FORMATS } from '../../lib/deviceCapabilities'
 import { loadZxingCpp, toCppFormats } from './zxingCppEngine'
 
@@ -118,6 +119,37 @@ function withDeadline(promise, ms) {
 }
 
 let _scratchInvCanvas = null
+let _scratchEnhCanvas = null
+
+/**
+ * canvas.putImageData() only accepts a real ImageData in browsers; a plain
+ * {data, width, height} throws ("parameter 1 is not of type 'ImageData'").
+ * The old inverted-native path passed a plain object, the throw was
+ * swallowed, and that variant silently never ran. Wrap when we can.
+ */
+const asImageData = (img) => {
+  if (typeof ImageData !== 'function' || img instanceof ImageData) return img
+  return new ImageData(img.data, img.width, img.height)
+}
+
+/** Draw `img` into a reusable scratch canvas; null when no 2D canvas exists. */
+const paintScratch = (img, which) => {
+  try {
+    if (typeof document === 'undefined') return null
+    let c = which === 'inv' ? _scratchInvCanvas : _scratchEnhCanvas
+    if (!c) {
+      c = document.createElement('canvas')
+      if (which === 'inv') _scratchInvCanvas = c
+      else _scratchEnhCanvas = c
+    }
+    if (c.width !== img.width) c.width = img.width
+    if (c.height !== img.height) c.height = img.height
+    const ctx = c.getContext && c.getContext('2d')
+    if (!ctx || typeof ctx.putImageData !== 'function') return null
+    ctx.putImageData(asImageData(img), 0, 0)
+    return c
+  } catch { return null }
+}
 let _scratchRotCanvas = null
 let _scratchInvBuffer = null
 
@@ -157,17 +189,8 @@ const invertImageData = (imageData) => {
  * @returns {HTMLCanvasElement|null}
  */
 const invertCanvas = (imageData) => {
-  try {
-    const inv = invertImageData(imageData)
-    if (typeof document === 'undefined') return null
-    if (!_scratchInvCanvas) _scratchInvCanvas = document.createElement('canvas')
-    if (_scratchInvCanvas.width !== inv.width) _scratchInvCanvas.width = inv.width
-    if (_scratchInvCanvas.height !== inv.height) _scratchInvCanvas.height = inv.height
-    const ctx = _scratchInvCanvas.getContext && _scratchInvCanvas.getContext('2d')
-    if (!ctx || typeof ctx.putImageData !== 'function') return null
-    ctx.putImageData(inv, 0, 0)
-    return _scratchInvCanvas
-  } catch { return null }
+  const inv = invertImageData(imageData)
+  return inv?.data ? paintScratch(inv, 'inv') : null
 }
 
 /**
@@ -622,11 +645,13 @@ export function createEnginePool(debug, opts = {}) {
   /**
    * The "hard path" second look, used only when a normal pass missed.
    *
-   * Runs EVERY ready engine (not just the active one), each on the normal
-   * orientation and then the inverted luminance, and merges the hits deduped
-   * by rawValue. Never throws: one engine's failure must not cost the other
-   * its chance, and an empty frame is just a miss. Returns the id of the
-   * first engine that produced a hit (getActiveId() when nothing did).
+   * Runs EVERY ready engine (not just the active one), each on the raw
+   * frame, then an enhanced copy (enhanceGray: a soft, sleeve-glared badge
+   * that no engine reads raw — field case FB5978GA0008 — reads after it),
+   * then the inverted luminance (and rotations for ZXing-JS when zxing-cpp is
+   * not loaded). Returns at the FIRST hit. Never throws: one engine's failure
+   * must not cost the other its chance, and an empty frame is just a miss.
+   * Returns the id of the engine that hit (getActiveId() when nothing did).
    *
    * @param {{canvas: HTMLCanvasElement, read: () => ImageData|null}} surface
    * @returns {Promise<{barcodes: Array, engine: string}>}
@@ -638,6 +663,13 @@ export function createEnginePool(debug, opts = {}) {
     if (!imageData) return { barcodes: [], engine: getActiveId() }
 
     const inverted = invertImageData(imageData)
+    // Enhanced copy (sharpen + contrast stretch) for a soft or sleeve-glared
+    // badge — see enhanceGray. Built once and shared by every engine; always
+    // tried AFTER the raw frame, because on an already-clean frame the
+    // enhancement can cost a read (measured on synthetic badges).
+    const { width: fw, height: fh } = imageData
+    const enhancedGray = imageData.data && fw && fh ? enhanceGray(rgbaToGray(imageData), fw, fh) : null
+    const enhancedRgba = enhancedGray?.length ? grayToRgba(enhancedGray, fw, fh) : null
     const seen = new Set()
     const merged = []
     let hitEngine = null
@@ -649,19 +681,19 @@ export function createEnginePool(debug, opts = {}) {
         // The C++ reader runs its own rotate + invert search; the explicit
         // inverted copy is the same belt-and-braces the JS path gets (on
         // synthetic white-on-black badges the built-in invert alone missed).
-        variants.push(
-          { imageData, cppOpts: cppHard },
-          { imageData: inverted, cppOpts: cppHard },
-        )
+        variants.push({ imageData, cppOpts: cppHard })
+        if (enhancedRgba) variants.push({ imageData: enhancedRgba, cppOpts: cppHard })
+        variants.push({ imageData: inverted, cppOpts: cppHard })
       } else if (engine.id === 'ZXing') {
         // Widened symbologies (2D etc.) — this is the ONLY pass that gets
         // them, so the normal frame budget is never taxed for formats this
         // product doesn't scan. hardHints === baseHints when the tier didn't
         // widen, in which case no reader rebuild happens at all.
-        variants.push(
-          { imageData, zxHints: zxingReader?.hardHints },
-          { imageData: inverted, zxHints: zxingReader?.hardHints },
-        )
+        variants.push({ imageData, zxHints: zxingReader?.hardHints })
+        if (enhancedGray?.length) {
+          variants.push({ imageData: { gray: enhancedGray, width: fw, height: fh }, zxHints: zxingReader?.hardHints })
+        }
+        variants.push({ imageData: inverted, zxHints: zxingReader?.hardHints })
         // Rotated normal-gray variants (normal gray ONLY — the inverted
         // frame is never rotated). 90° first: a sideways badge is the common
         // case and the dedupe loop keeps the first hit, so the cheapest
@@ -688,6 +720,8 @@ export function createEnginePool(debug, opts = {}) {
         }
       } else {
         variants.push({ canvas: source })
+        const enhCanvas = enhancedRgba ? paintScratch(enhancedRgba, 'enh') : null
+        if (enhCanvas) variants.push({ canvas: enhCanvas })
         const invCanvas = invertCanvas(imageData)
         if (invCanvas) variants.push({ canvas: invCanvas })
         const rotCanvas = rotateCanvas(source, 90)
@@ -705,6 +739,10 @@ export function createEnginePool(debug, opts = {}) {
             merged.push({ ...b, cornerPoints: pts })
             if (!hitEngine) hitEngine = engine.id
           }
+          // First hit wins: a badge is one barcode, so once a variant reads
+          // it the remaining engines/variants are pure cost (up to ~10
+          // decodes on a phone that is already struggling).
+          if (merged.length) return { barcodes: merged, engine: hitEngine }
         } catch (e) {
           // hardPass never throws: one engine's failure must not cost the
           // other its chance, and an empty frame is just a miss.

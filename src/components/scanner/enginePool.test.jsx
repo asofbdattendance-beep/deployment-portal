@@ -229,16 +229,16 @@ describe('enginePool zxing-cpp (WebAssembly) engine', () => {
     expect(pool.getActiveId()).toBe('ZXingCpp')
   })
 
-  it('hardPass gives zxing-cpp the widened 2D formats and an explicitly inverted copy', async () => {
+  it('hardPass gives zxing-cpp the widened 2D formats, an enhanced copy and an inverted copy', async () => {
     mocks.cppDecode = async () => []
     mocks.decodeImpl = notFound
     const pool = createEnginePool(false)
     await pool.init()
     await pool.armFallback()
     await pool.hardPass(SURFACE)
-    expect(mocks.cppCalls).toHaveLength(2)
+    expect(mocks.cppCalls).toHaveLength(3)   // normal, enhanced, inverted
     expect(mocks.cppCalls[0].opts.formats).toContain('QRCode')
-    const [normal, inverted] = mocks.cppCalls.map(c => c.img.data[0])
+    const [normal, , inverted] = mocks.cppCalls.map(c => c.img.data[0])
     expect(inverted).toBe(255 - normal)
   })
 
@@ -316,7 +316,7 @@ describe('enginePool zxing-cpp (WebAssembly) engine', () => {
     await pool.init()
     await pool.armFallback()
     await pool.hardPass({ canvas: {}, read: () => ({ data: new Uint8ClampedArray(8 * 4 * 4), width: 8, height: 4 }) })
-    expect(jsShapes).toHaveLength(2)   // normal + inverted only, no 90/180/270
+    expect(jsShapes).toHaveLength(3)   // normal + enhanced + inverted, no 90/180/270
   })
 
   it('hardPass keeps the ZXing-JS rotations when zxing-cpp is unavailable', async () => {
@@ -325,7 +325,7 @@ describe('enginePool zxing-cpp (WebAssembly) engine', () => {
     const pool = createEnginePool(false)
     await pool.init()
     await pool.hardPass({ canvas: {}, read: () => ({ data: new Uint8ClampedArray(8 * 4 * 4), width: 8, height: 4 }) })
-    expect(jsShapes).toHaveLength(5)   // normal + inverted + 3 rotations
+    expect(jsShapes).toHaveLength(6)   // normal + enhanced + inverted + 3 rotations
   })
 
   it('hardPass merges a zxing-cpp hit and credits the engine', async () => {
@@ -523,7 +523,7 @@ describe('enginePool tier-driven formats', () => {
 })
 
 describe('enginePool hardPass', () => {
-  it('merges and dedupes results across engines, reporting the first hit', async () => {
+  it('stops at the first hit and credits that engine', async () => {
     mockNativeDetector()
     const pool = createEnginePool(false)
     await pool.init()
@@ -616,6 +616,79 @@ describe('enginePool hardPass', () => {
     expect(barcodes).toHaveLength(1)
     expect(barcodes[0].rawValue).toBe('ZX789')
     expect(engine).toBe('ZXing')
+  })
+})
+
+// Real field case (2026-11-09): a badge photographed through its plastic
+// sleeve (FB5978GA0008) that neither ZXing-JS nor zxing-cpp could read raw,
+// but both read after enhanceGray (sharpen + contrast stretch). The hard pass
+// now gives every engine that enhanced copy, AFTER the raw frame.
+describe('enginePool hardPass enhanced copy', () => {
+  const FRAME = () => {
+    const w = 16, h = 4
+    const data = new Uint8ClampedArray(w * h * 4)
+    for (let i = 0; i < w * h; i++) {
+      const v = 110 + ((i % w) % 4 < 2 ? 0 : 50)   // soft, low-contrast stripes
+      data[i * 4] = v; data[i * 4 + 1] = v; data[i * 4 + 2] = v; data[i * 4 + 3] = 255
+    }
+    return { canvas: {}, read: () => ({ data, width: w, height: h }) }
+  }
+
+  it('hands ZXing-JS the raw frame first, then an enhanced (wider-range) copy', async () => {
+    const seen = []
+    mocks.decodeImpl = (bitmap) => { seen.push(Array.from(bitmap.b.s.bytes)); return notFound() }
+    const pool = createEnginePool(false)
+    await pool.init()
+    await pool.hardPass(FRAME())
+    const range = (a) => Math.max(...a) - Math.min(...a)
+    expect(range(seen[0])).toBe(50)                  // raw
+    expect(range(seen[1])).toBeGreaterThan(200)      // enhanced: stretched
+  })
+
+  it('reads a badge that only the enhanced copy can decode', async () => {
+    mocks.decodeImpl = (bitmap) => {
+      const b = bitmap.b.s.bytes
+      return Math.max(...b) - Math.min(...b) > 200 ? zxingResult('FB5978GA0008') : notFound()
+    }
+    const pool = createEnginePool(false)
+    await pool.init()
+    const hard = await pool.hardPass(FRAME())
+    expect(hard.barcodes.map(b => b.rawValue)).toEqual(['FB5978GA0008'])
+  })
+
+  it('stops at the first hit — later engines and variants are not run', async () => {
+    mockNativeDetector()
+    mocks.nativeDetectImpl = () => Promise.resolve([{ rawValue: 'FB5971GA0001', cornerPoints: [] }])
+    mocks.cppDecode = async () => []
+    let jsCalls = 0
+    mocks.decodeImpl = () => { jsCalls++; return notFound() }
+    const pool = createEnginePool(false)
+    await pool.init()
+    await pool.armFallback()
+    const hard = await pool.hardPass(SURFACE)
+    expect(hard.engine).toBe('Native')
+    expect(mocks.cppCalls).toHaveLength(0)
+    expect(jsCalls).toBe(0)
+  })
+
+  it('gives the native detector a real ImageData (browsers reject a plain object)', async () => {
+    const put = []
+    window.ImageData = class { constructor(data, w, h) { this.data = data; this.width = w; this.height = h } }
+    window.HTMLCanvasElement.prototype.getContext = () => ({
+      putImageData: (img) => put.push(img),
+      save() {}, restore() {}, clearRect() {}, translate() {}, rotate() {}, drawImage() {},
+    })
+    try {
+      mockNativeDetector()
+      mocks.nativeDetectImpl = () => Promise.resolve([])
+      const pool = createEnginePool(false)
+      await pool.init()
+      await pool.hardPass(FRAME())
+      expect(put.length).toBeGreaterThanOrEqual(2)    // inverted + enhanced canvases
+      for (const img of put) expect(img).toBeInstanceOf(window.ImageData)
+    } finally {
+      delete window.ImageData
+    }
   })
 })
 
