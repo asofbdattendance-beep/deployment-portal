@@ -350,6 +350,22 @@ describe('enginePool zxing-cpp (WebAssembly) engine', () => {
     expect(new Set(seen)).toEqual(new Set(['Native', 'ZXingCpp']))
   })
 
+  it('garbled invalid reads count toward empty-result rotation when validateBarcode is supplied', async () => {
+    mockNativeDetector()
+    // Native repeatedly hallucinates a partial read like FB5978080 on blurry/glared frames
+    mocks.nativeDetectImpl = () => Promise.resolve([{ rawValue: 'FB5978080', cornerPoints: [] }])
+    mocks.cppDecode = async () => []
+    mocks.decodeImpl = notFound
+    const validateBarcode = (raw) => raw === 'FB5971GA0001'
+    const pool = createEnginePool(false, { emptyHandoffAfter: 1, validateBarcode })
+    await pool.init()
+    await pool.armFallback()
+    expect(pool.getActiveId()).toBe('Native')
+    await pool.detect(SURFACE)
+    // Because FB5978080 is invalid, Native hands off to ZXingCpp
+    expect(pool.getActiveId()).toBe('ZXingCpp')
+  })
+
   it('a loader that throws is treated as unavailable and scanning falls back to ZXing-JS', async () => {
     mocks.cppThrows = true
     const pool = createEnginePool(false)

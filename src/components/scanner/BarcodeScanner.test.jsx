@@ -685,6 +685,25 @@ describe('BarcodeScanner camera decode gate (strict)', () => {
       vi.useRealTimers()
     }
   })
+
+  it('lastRaw pill clears after inactivity and does not freeze on partial misreads (Galaxy A35 fix)', async () => {
+    vi.useFakeTimers()
+    try {
+      const onScan = vi.fn()
+      const view = renderDecoding('FB5978080', { rejectCalls: 6, onScan })
+      await act(async () => { await vi.advanceTimersByTimeAsync(800) })
+
+      // Misread displayed in the raw pill
+      expect(view.getByText('FB5978080')).toBeTruthy()
+      expect(onScan).not.toHaveBeenCalled()
+
+      // After 2.2s of no reads, raw pill automatically clears
+      await act(async () => { await vi.advanceTimersByTimeAsync(2200) })
+      expect(view.queryByText('FB5978080')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 describe('BarcodeScanner camera lens switching', () => {

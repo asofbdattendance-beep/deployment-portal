@@ -378,12 +378,16 @@ export async function applyFocusConstraints(track, opts = {}) {
 
     // A focus region is the sharpest primitive available on Chrome/Android —
     // it beats both continuous AF and a distance guess for a small badge.
-    if (point && typeof track.setPointOfInterest === 'function') {
-      try {
-        await track.setPointOfInterest(point.x, point.y)
-        result.poiApplied = true
-        if (debug) console.log(`[CameraMgr] focus ROI at (${point.x.toFixed(2)}, ${point.y.toFixed(2)})`)
-      } catch { /* unsupported region */ }
+    if (point && typeof point.x === 'number' && typeof point.y === 'number') {
+      if (typeof track.setPointOfInterest === 'function') {
+        try {
+          await track.setPointOfInterest(point.x, point.y)
+          result.poiApplied = true
+          if (debug) console.log(`[CameraMgr] focus ROI at (${point.x.toFixed(2)}, ${point.y.toFixed(2)})`)
+        } catch { /* unsupported region */ }
+      } else if (caps.pointsOfInterest) {
+        focusSet.pointsOfInterest = [{ x: point.x, y: point.y }]
+      }
     }
 
     const focusModes = Array.isArray(caps.focusMode) ? caps.focusMode : []
@@ -427,11 +431,17 @@ export async function applyFocusConstraints(track, opts = {}) {
     // (OxygenOS/ColorOS hand back 640x480 no matter what you ask) zooming just
     // shrinks the field of view for the same pixel budget, pushing the badge
     // closer to the px/module cliff. Only zoom when the stream is wide enough
-    // that a crop still leaves detail behind. Unknown width (fake tracks in
-    // tests, odd firmware) keeps the old behaviour.
+    // that a crop still leaves detail behind. In portrait mode, height is the
+    // longer dimension (1920x1080), so test the maximum dimension.
     let streamWidth = 0
-    try { streamWidth = Number(track.getSettings?.().width) || 0 } catch { streamWidth = 0 }
-    if (applyZoom && caps.zoom && (streamWidth === 0 || streamWidth >= 1440)) {
+    let streamHeight = 0
+    try {
+      const s = track.getSettings?.() || {}
+      streamWidth = Number(s.width) || 0
+      streamHeight = Number(s.height) || 0
+    } catch { streamWidth = 0; streamHeight = 0 }
+    const maxDim = Math.max(streamWidth, streamHeight)
+    if (applyZoom && caps.zoom && (maxDim === 0 || maxDim >= 1280)) {
       const maxZoom = Number(caps.zoom.max) || 1
       const idealZoom = Math.min(1.25, maxZoom)
       if (idealZoom > 1) {
@@ -458,11 +468,13 @@ export async function applyFocusConstraints(track, opts = {}) {
  * needed). Falls back to the legacy `focusMode: 'manual'` + `focusDistance`
  * heuristic on devices that only expose distance control, and schedules a
  * revert to continuous AF.
+ * On modern Android devices without manual distance (e.g. Samsung Galaxy A35),
+ * triggers an active single-shot AF scan cycle and reverts to continuous AF.
  *
  * @param {MediaStreamTrack} track
  * @param {number} x — 0-1 across the video
  * @param {number} y — 0-1 down the video
- * @returns {Promise<{applied:boolean, mode:'poi'|'distance'|null, cleanup:()=>void}>}
+ * @returns {Promise<{applied:boolean, mode:'poi'|'distance'|'single-shot'|null, cleanup:()=>void}>}
  */
 export async function applyTapFocus(track, x, y) {
   if (!track) return { applied: false, mode: null, cleanup: () => {} }
@@ -475,26 +487,47 @@ export async function applyTapFocus(track, x, y) {
   }
 
   const caps = safeCall(() => track.getCapabilities?.(), {}) || {}
-  if (!Array.isArray(caps.focusMode) || !caps.focusMode.includes('manual')) {
-    return { applied: false, mode: null, cleanup: () => {} }
+  const focusModes = Array.isArray(caps.focusMode) ? caps.focusMode : []
+
+  if (focusModes.includes('manual') && caps.focusDistance) {
+    try {
+      const minDist = caps.focusDistance?.min || 0
+      const maxDist = caps.focusDistance?.max || 10
+      // Centre of frame = far subject, edges = near (rough but effective).
+      const distFromCenter = Math.sqrt((x - 0.5) ** 2 + (y - 0.5) ** 2)
+      const focusDist = Math.max(minDist, Math.min(maxDist, maxDist - distFromCenter * (maxDist - minDist)))
+
+      await track.applyConstraints({ advanced: [{ focusMode: 'manual', focusDistance: focusDist }] })
+      const revertTimer = setTimeout(() => {
+        applyFocusConstraints(track).catch(() => {})
+      }, 3000)
+
+      return { applied: true, mode: 'distance', cleanup: () => clearTimeout(revertTimer) }
+    } catch {
+      return { applied: false, mode: null, cleanup: () => {} }
+    }
   }
 
-  try {
-    const minDist = caps.focusDistance?.min || 0
-    const maxDist = caps.focusDistance?.max || 10
-    // Centre of frame = far subject, edges = near (rough but effective).
-    const distFromCenter = Math.sqrt((x - 0.5) ** 2 + (y - 0.5) ** 2)
-    const focusDist = Math.max(minDist, Math.min(maxDist, maxDist - distFromCenter * (maxDist - minDist)))
-
-    await track.applyConstraints({ advanced: [{ focusMode: 'manual', focusDistance: focusDist }] })
-    const revertTimer = setTimeout(() => {
-      applyFocusConstraints(track).catch(() => {})
-    }, 3000)
-
-    return { applied: true, mode: 'distance', cleanup: () => clearTimeout(revertTimer) }
-  } catch {
-    return { applied: false, mode: null, cleanup: () => {} }
+  // Devices that expose single-shot or continuous AF without manual distance
+  // (e.g. Samsung Galaxy A35): trigger an active single-shot refocus cycle, then revert.
+  if (focusModes.includes('single-shot') || (platform.isAndroid && focusModes.length === 0)) {
+    try {
+      const advanced = []
+      if (caps.pointsOfInterest) {
+        advanced.push({ pointsOfInterest: [{ x, y }] })
+      }
+      advanced.push({ focusMode: 'single-shot' })
+      await track.applyConstraints({ advanced })
+      const revertTimer = setTimeout(() => {
+        track.applyConstraints?.({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {})
+      }, 1500)
+      return { applied: true, mode: 'single-shot', cleanup: () => clearTimeout(revertTimer) }
+    } catch {
+      return { applied: false, mode: null, cleanup: () => {} }
+    }
   }
+
+  return { applied: false, mode: null, cleanup: () => {} }
 }
 
 /* ─── Adaptive focus hunt & zoom ────────────────────────────────────────────── */

@@ -627,10 +627,15 @@ export function createEnginePool(debug, opts = {}) {
         engine.failures = 0
       }
       barcodes = barcodes || []
-      // Empty-result handoff: a clean miss is not a failure, but a run of them
-      // means the active engine can't read THIS badge. Hand off once — the
-      // new engine's counter starts at 0, so it can't bounce straight back.
-      if (barcodes.length === 0) {
+      const isValid = (raw) => {
+        if (typeof opts.validateBarcode !== 'function') return true
+        return !!opts.validateBarcode(raw)
+      }
+      const hasValidHit = barcodes.length > 0 && barcodes.some(b => isValid(b.rawValue))
+      // Empty-result handoff: a clean miss or garbled invalid read is not an engine failure,
+      // but a run of them means the active engine can't decode THIS badge cleanly.
+      // Hand off once to let another ready engine try.
+      if (!hasValidHit) {
         engine.emptyCount = (engine.emptyCount || 0) + 1
         if (engine.emptyCount >= emptyHandoffAfter) handoffEmpty()
       } else {

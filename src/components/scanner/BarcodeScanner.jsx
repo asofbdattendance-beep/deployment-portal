@@ -43,6 +43,7 @@ import {
   beginFocusHunt,
   getRearCameraList,
   isAbandonedOpen,
+  zoomRampForMisses,
 } from './cameraManager'
 import { BADGE_REGEX, strictCameraBadge } from '../../lib/logic'
 
@@ -56,11 +57,11 @@ import { BADGE_REGEX, strictCameraBadge } from '../../lib/logic'
 // confirmThreshold is 2 across profiles to prevent single-frame Code-39 misreads
 // from scanning false barcodes while maintaining responsive detection.
 const DEVICE_PROFILES = {
-  fast:   { confirmWindow: 3, confirmThreshold: 2, minInterval: 50,  maxInterval: 150, frameSkip: 0, maxWidth: 1280 },
-  medium: { confirmWindow: 4, confirmThreshold: 2, minInterval: 100, maxInterval: 300, frameSkip: 0, maxWidth: 1080 },
+  fast:   { confirmWindow: 3, confirmThreshold: 2, minInterval: 0,   maxInterval: 50,  frameSkip: 0, maxWidth: 1280 },
+  medium: { confirmWindow: 4, confirmThreshold: 2, minInterval: 16,  maxInterval: 100, frameSkip: 0, maxWidth: 1080 },
   // slow keeps 1080 too: the portal's badges are DENSE Code 39 (~0.2 mm bars);
   // 720 px drops them below decodable px/module, trading every read for speed.
-  slow:   { confirmWindow: 3, confirmThreshold: 2, minInterval: 200, maxInterval: 500, frameSkip: 0, maxWidth: 1080 },
+  slow:   { confirmWindow: 3, confirmThreshold: 2, minInterval: 33,  maxInterval: 150, frameSkip: 0, maxWidth: 1080 },
 }
 
 const ENGINE_LABELS = { Native: 'Optimized', ZXingCpp: 'Universal', ZXing: 'Compatibility' }
@@ -332,6 +333,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   // Latest startScanner, so the frame watchdog can restart with fresh state.
   const startScannerRef = useRef(null)
   const lastRawRef = useRef(null)
+  const rawTimerRef = useRef(null)
   // Reject-hint throttle (epoch ms of the last shown hint) and its hide
   // timeout — the "invalid badge" pill is transient and must not re-flash on
   // every rejected frame.
@@ -493,10 +495,15 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       // that can yield another sewadar's badge (see strictCameraBadge). Typed
       // input keeps the lenient sanitizer in useScanHandler.
       const cleaned = strictCameraBadge(b.rawValue)
-      // Every dedupe key below is the CLEANED value: '*FB…*' and 'FB…*' are
-      // one badge, so window counts, the 2s suppressor and the pill's
-      // change-detection must not re-arm when only the guards differ.
-      if (cleaned !== lastRawRef.current) { lastRawRef.current = cleaned; setLastRaw(raw) }
+      if (raw !== lastRawRef.current) {
+        lastRawRef.current = raw
+        setLastRaw(raw)
+      }
+      if (rawTimerRef.current) clearTimeout(rawTimerRef.current)
+      rawTimerRef.current = setTimeout(() => {
+        setLastRaw(null)
+        lastRawRef.current = null
+      }, 2000)
       if (!cleaned || !BADGE_REGEX.test(cleaned)) { throttledRejectHint(); continue }
 
       // Reject detections hugging the frame edge. cornerPoints arrive in
@@ -683,7 +690,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       fpsRef.current = { frames: 0, last: Date.now() }
     }
 
-    if (barcodes?.length) {
+    const validBarcodes = (barcodes || []).filter(b => strictCameraBadge(b.rawValue))
+    const hasValid = validBarcodes.length > 0
+
+    if (hasValid) {
       consecutiveFailsRef.current = 0
       // Re-narrow the crop once a badge reads, so a full-frame pass doesn't
       // permanently halve the frame rate on a low-end phone.
@@ -691,6 +701,20 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       handleBarcodes(barcodes, detectRoi, engine)
     } else {
       consecutiveFailsRef.current++
+      if (barcodes?.length) {
+        handleBarcodes(barcodes, detectRoi, engine)
+      }
+      // Miss-driven gentle zoom ramp: allows the phone to stay 20-25cm away
+      // outside the macro blur distance while still giving the decoder sufficient pixels.
+      if (trackRef.current && consecutiveFailsRef.current >= 4 && consecutiveFailsRef.current % 4 === 0 && consecutiveFailsRef.current <= 16) {
+        try {
+          const caps = trackRef.current.getCapabilities?.() || {}
+          if (caps.zoom) {
+            const z = zoomRampForMisses(consecutiveFailsRef.current, caps)
+            if (z && z > 1) trackRef.current.applyConstraints({ advanced: [{ zoom: z }] }).catch(() => {})
+          }
+        } catch {}
+      }
       // Point at the barcode while the DECODER is the thing failing. Throttled
       // both by miss count and frame number so a hopeless loop never pays the
       // localizer on every pass. Pure overlay — see publishLocalizerAim.
@@ -715,9 +739,12 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
           if (!isCurrent(session) || !mountedRef.current) return
           if (gen !== loopGenRef.current) return
           if (visibilityPausedRef.current || decisionPausedRef.current) return
-          if (hard?.barcodes?.length) {
+          const hardValid = (hard?.barcodes || []).filter(b => strictCameraBadge(b.rawValue))
+          if (hardValid.length > 0) {
             consecutiveFailsRef.current = 0
             if (roiModeRef.current === 'full') roiModeRef.current = 'band'
+            handleBarcodes(hard.barcodes, roi, hard.engine || 'hard')
+          } else if (hard?.barcodes?.length) {
             handleBarcodes(hard.barcodes, roi, hard.engine || 'hard')
           }
         } catch { /* hardPass never throws by contract; belt-and-braces */ }
@@ -742,7 +769,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     function scheduleNext(detectMs = 0) {
       if (!isCurrent(session) || !mountedRef.current || visibilityPausedRef.current || decisionPausedRef.current || gen !== loopGenRef.current) return
       const c = configRef.current
-      const wait = Math.max(c.minInterval, Math.min(c.maxInterval, (detectMs || 0) / 0.5))
+      const wait = Math.max(c.minInterval, Math.min(c.maxInterval, detectMs > 25 ? Math.round(detectMs * 0.4) : c.minInterval))
       frameApiRef.current = 'timeout'
       frameHandleRef.current = setTimeout(() => {
         if (!isCurrent(session) || !mountedRef.current || visibilityPausedRef.current || decisionPausedRef.current || gen !== loopGenRef.current) { frameHandleRef.current = null; return }
@@ -832,7 +859,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     if (engineLoadingRef.current) return
     engineLoadingRef.current = true
     try {
-      const pool = createEnginePool(debugOn)
+      const pool = createEnginePool(debugOn, { validateBarcode: (raw) => !!strictCameraBadge(raw) })
       await pool.init()
 
       // The engine bundle is session-INDEPENDENT. Publish it even if this
@@ -897,6 +924,8 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     if (rejectHintTimerRef.current) { clearTimeout(rejectHintTimerRef.current); rejectHintTimerRef.current = null }
     if (cameraToastTimerRef.current) { clearTimeout(cameraToastTimerRef.current); cameraToastTimerRef.current = null }
     setCameraToast(null)
+    if (rawTimerRef.current) { clearTimeout(rawTimerRef.current); rawTimerRef.current = null }
+    setLastRaw(null)
     channelRef.current?.close(); channelRef.current = null
     if (tapFocusCleanupRef.current) { try { tapFocusCleanupRef.current() } catch {} tapFocusCleanupRef.current = null }
     if (stopCamera) {
@@ -924,6 +953,8 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     lastScanRef.current = { badge: null, time: 0 }
     recentScansRef.current.clear()
     lastRawRef.current = null
+    if (rawTimerRef.current) { clearTimeout(rawTimerRef.current); rawTimerRef.current = null }
+    setLastRaw(null)
     // A rectangle must not outlive the session that drew it — Retry, unmount
     // and a tab-leader yield all land here.
     clearAim()
@@ -951,6 +982,8 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     lastScanRef.current = { badge: null, time: 0 }
     recentScansRef.current.clear()
     lastRawRef.current = null
+    if (rawTimerRef.current) { clearTimeout(rawTimerRef.current); rawTimerRef.current = null }
+    setLastRaw(null)
     rejectHintAtRef.current = 0
     slidingWindowRef.current = []
     frameCountRef.current = 0
