@@ -1637,12 +1637,12 @@ select.previsit-control { max-width: 15rem; }
    ratio). Centre names are long ("AREA SECRETARY OFFICE") and wrap — never
    ellipsise — so the identity survives the narrow pane. */
 @media (max-width: 768px) {
-  .att-table.att-table-centre thead th { padding: 0.32rem 0.1rem; }
-  .att-table.att-table-centre tbody th.att-col-badge { padding: 0.4rem 0.35rem; }
+  .att-table.att-table-centre thead th { padding: 0.32rem 0.08rem; }
+  .att-table.att-table-centre tbody th.att-col-badge { padding: 0.4rem 0.25rem; }
   .att-table.att-table-centre .att-day { white-space: normal; }
-  .att-table.att-table-centre .att-cell { padding: 0.2rem 0.06rem; }
+  .att-table.att-table-centre .att-cell { padding: 0.2rem 0.04rem; }
   .att-table.att-table-centre .att-cell .att-mark { font-size: 0.62rem; }
-  .att-table.att-table-centre .att-days { padding: 0.22rem 0.1rem; font-size: 0.68rem; }
+  .att-table.att-table-centre .att-days { padding: 0.22rem 0.08rem; font-size: 0.68rem; }
 }
 
 /* Trailing summary column — centred days-present pill. */

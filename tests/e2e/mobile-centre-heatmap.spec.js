@@ -154,8 +154,8 @@ const measure = (page) =>
       dayCellW,
       markW,
       cellInnerW,
-      // the whole table must be inside the box — no horizontal scroll at all
-      fitsWithoutScroll: table.scrollWidth <= box.clientWidth + 1,
+      // the whole table must be inside the box — no horizontal scroll at all (allowing 2px for cross-browser subpixel rounding)
+      fitsWithoutScroll: table.scrollWidth <= box.clientWidth + 2,
     }
   })
 

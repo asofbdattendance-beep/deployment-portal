@@ -500,10 +500,15 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         setLastRaw(raw)
       }
       if (rawTimerRef.current) clearTimeout(rawTimerRef.current)
-      rawTimerRef.current = setTimeout(() => {
-        setLastRaw(null)
-        lastRawRef.current = null
-      }, 2000)
+      // Only transiently show invalid/unrecognized barcodes so the pill does not
+      // freeze permanently on partial misreads (e.g. FB5978080), while valid barcodes
+      // stay visible for operator confirmation.
+      if (!cleaned) {
+        rawTimerRef.current = setTimeout(() => {
+          setLastRaw(null)
+          lastRawRef.current = null
+        }, 1500)
+      }
       if (!cleaned || !BADGE_REGEX.test(cleaned)) { throttledRejectHint(); continue }
 
       // Reject detections hugging the frame edge. cornerPoints arrive in
@@ -1443,7 +1448,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
               color: '#fff', border: 'none', borderRadius: 8,
               padding: '0.4rem 0.65rem', fontWeight: 700, fontSize: '0.75rem',
               display: 'flex', alignItems: 'center', gap: 4,
-              minHeight: 36, minWidth: 44,
+              minHeight: 44, minWidth: 44,
               touchAction: 'manipulation', cursor: 'pointer',
             }}
           >
@@ -1463,7 +1468,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
               color: '#fff', border: 'none', borderRadius: 8,
               padding: '0.4rem 0.65rem', fontWeight: 700, fontSize: '0.75rem',
               display: 'flex', alignItems: 'center', gap: 4,
-              minHeight: 36, minWidth: 44,
+              minHeight: 44, minWidth: 44,
               touchAction: 'manipulation', cursor: 'pointer',
             }}
           >
