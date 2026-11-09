@@ -569,6 +569,97 @@ export function waitForVideoReady(video, ms = 4000) {
   })
 }
 
+// ─── enhanceGray ──────────────────────────────────────────────────────────────
+/**
+ * Sharpen, then stretch contrast, for a soft or washed-out badge frame.
+ *
+ * WHY: the portal's badges carry a DENSE Code 39 (12 characters in ~4.5 cm, a
+ * ~0.2 mm narrow bar) behind a plastic sleeve. The phone has to be close to
+ * resolve it, near its minimum focus distance, so the frame is soft, and the
+ * sleeve adds glare that greys the bars. Measured on a real badge photo
+ * (FB5978GA0008) that neither ZXing-JS nor zxing-cpp could read raw: after this
+ * unsharp mask + 2% contrast stretch BOTH engines read it, under every
+ * binarizer. A badge that already read (FB5978GA0013) still reads.
+ *
+ * Unsharp mask: out = v + AMOUNT * (v − boxBlur(v)), box radius 2 (two
+ * separable passes approximate the Gaussian the measurement used). Then a
+ * percentile stretch maps the 2nd..98th luminance percentile to 0..255, so a
+ * glare streak or a dark sleeve edge cannot pin the range.
+ *
+ * Pure: returns a new buffer, never mutates the input.
+ *
+ * @param {Uint8ClampedArray|Uint8Array} gray — width*height bytes
+ * @param {number} width
+ * @param {number} height
+ * @returns {Uint8ClampedArray} enhanced copy (empty when the input is unusable)
+ */
+const ENHANCE_RADIUS = 2
+const ENHANCE_AMOUNT = 2
+const ENHANCE_CUTOFF = 0.02
+export function enhanceGray(gray, width, height) {
+  const n = width * height
+  if (!gray || !width || !height || gray.length < n) return new Uint8ClampedArray(0)
+
+  // Separable box blur (horizontal into tmp, vertical into blur).
+  const r = ENHANCE_RADIUS
+  const tmp = new Float32Array(n)
+  for (let y = 0; y < height; y++) {
+    const row = y * width
+    for (let x = 0; x < width; x++) {
+      let s = 0, c = 0
+      for (let k = -r; k <= r; k++) {
+        const xx = x + k
+        if (xx >= 0 && xx < width) { s += gray[row + xx]; c++ }
+      }
+      tmp[row + x] = s / c
+    }
+  }
+  const sharp = new Float32Array(n)
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let s = 0, c = 0
+      for (let k = -r; k <= r; k++) {
+        const yy = y + k
+        if (yy >= 0 && yy < height) { s += tmp[yy * width + x]; c++ }
+      }
+      const i = y * width + x
+      sharp[i] = gray[i] + ENHANCE_AMOUNT * (gray[i] - s / c)
+    }
+  }
+
+  // Percentile contrast stretch over the sharpened values (clamped 0..255).
+  const hist = new Uint32Array(256)
+  for (let i = 0; i < n; i++) {
+    const v = sharp[i] < 0 ? 0 : sharp[i] > 255 ? 255 : sharp[i] | 0
+    hist[v]++
+  }
+  const cut = Math.floor(n * ENHANCE_CUTOFF)
+  let lo = 0, hi = 255, acc = 0
+  for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc > cut) { lo = v; break } }
+  acc = 0
+  for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc > cut) { hi = v; break } }
+  const span = hi > lo ? hi - lo : 1
+
+  const out = new Uint8ClampedArray(n)
+  for (let i = 0; i < n; i++) out[i] = ((sharp[i] - lo) * 255) / span
+  return out
+}
+
+/**
+ * Expand a 1-byte gray buffer to an RGBA `{data, width, height}` frame, for
+ * engines that take colour pixels (zxing-cpp, a canvas for native).
+ * @returns {{data: Uint8ClampedArray, width: number, height: number}}
+ */
+export function grayToRgba(gray, width, height) {
+  const n = width * height
+  const data = new Uint8ClampedArray(n * 4)
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    const v = gray[i]
+    data[p] = v; data[p + 1] = v; data[p + 2] = v; data[p + 3] = 255
+  }
+  return { data, width, height }
+}
+
 // ─── rotateGray ───────────────────────────────────────────────────────────────
 /**
  * The three rotation angles worth trying on a missed frame, in order of cost.

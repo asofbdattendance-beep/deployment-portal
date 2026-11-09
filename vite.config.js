@@ -32,6 +32,10 @@ export default defineConfig(({ command, mode }) => {
       manifest: false,
       injectManifest: {
         maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
+        // The default pattern is js/css/html. `wasm` adds the zxing-cpp
+        // barcode reader (~0.9 MB) so the scanner decodes offline on a
+        // phone that has never had signal since installing the app.
+        globPatterns: ['**/*.{js,css,html,wasm}'],
       },
       devOptions: {
         enabled: false,
@@ -45,6 +49,14 @@ export default defineConfig(({ command, mode }) => {
     // page (mixed content), but the mock Supabase backend is plain HTTP.
     // DISABLE_TLS=1 serves plain HTTP for the mobile-safari project only —
     // every other command keeps the local-TLS default.
+    https: useHttps && env.DISABLE_TLS !== '1' ? {
+      key: fs.readFileSync(path.join(certDir, 'local-key.pem')),
+      cert: fs.readFileSync(path.join(certDir, 'local-cert.pem')),
+    } : undefined,
+  },
+  preview: {
+    host: true,
+    port: 5175,
     https: useHttps && env.DISABLE_TLS !== '1' ? {
       key: fs.readFileSync(path.join(certDir, 'local-key.pem')),
       cert: fs.readFileSync(path.join(certDir, 'local-cert.pem')),

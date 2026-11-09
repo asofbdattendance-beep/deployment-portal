@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   notElderlyFilter,
+  strictCameraBadge,
   isElderly,
   badgeStatusEligible,
   eligibleBadgeStatusFilter,
@@ -148,13 +149,15 @@ describe('shouldHideFromConsent', () => {
 
 
 describe('badge format helpers (v25-v27)', () => {
-  it('BADGE_REGEX matches FB / VS patterns (as implemented)', () => {
+  it('BADGE_REGEX matches the real FB / VSFB badge shapes', () => {
     // FB pattern requires trailing 4 digits after GA/LA (real badges: FB5982GA0025)
     expect(BADGE_REGEX.test('FB5971GA0001')).toBe(true)
     expect(BADGE_REGEX.test('FB6000LA0002')).toBe(true)
     expect(BADGE_REGEX.test('BH1234AB0001')).toBe(false)
-    expect(BADGE_REGEX.test('VSABC123')).toBe(true)
-    expect(BADGE_REGEX.test('VS123')).toBe(true)
+    expect(BADGE_REGEX.test('VSFB5978GB2872')).toBe(true)
+    // Free-form VS strings were accepted before the real badge list was known.
+    expect(BADGE_REGEX.test('VSABC123')).toBe(false)
+    expect(BADGE_REGEX.test('VS123')).toBe(false)
     expect(BADGE_REGEX.test('INVALID')).toBe(false)
     expect(BADGE_REGEX.test('')).toBe(false)
     // FB without trailing 4 digits is rejected (must be GA/LA + 4 digits)
@@ -162,7 +165,8 @@ describe('badge format helpers (v25-v27)', () => {
   })
   it('isValidBadgeFormat validates FB/BH/VS and is null-safe', () => {
     expect(isValidBadgeFormat('FB5971GA0001')).toBe(true)
-    expect(isValidBadgeFormat(' VS123 ')).toBe(true)
+    expect(isValidBadgeFormat(' VSFB5971GA2927 ')).toBe(true)
+    expect(isValidBadgeFormat(' VS123 ')).toBe(false)
     expect(isValidBadgeFormat('BH1234AB0001')).toBe(false)
     expect(isValidBadgeFormat('bad')).toBe(false)
     expect(isValidBadgeFormat(null)).toBe(false)
@@ -171,7 +175,8 @@ describe('badge format helpers (v25-v27)', () => {
   })
   it('isFaridabadBadge mirrors isValidBadgeFormat (currently)', () => {
     expect(isFaridabadBadge('FB5971GA0001')).toBe(true)
-    expect(isFaridabadBadge('VS123')).toBe(true)
+    expect(isFaridabadBadge('VSFB5971GA2927')).toBe(true)
+    expect(isFaridabadBadge('VS123')).toBe(false)
     expect(isFaridabadBadge('BH1234AB0001')).toBe(false)
     expect(isFaridabadBadge('bad')).toBe(false)
     expect(isFaridabadBadge(null)).toBe(false)
@@ -1407,5 +1412,110 @@ describe('sanitizeScannedBadge', () => {
     // the conservative bias preserves the value rather than risk scanning the
     // wrong sewadar.
     expect(sanitizeScannedBadge('VSFB5978GA2644')).toBe('VSFB5978GA2644')
+  })
+})
+
+// ─── Real badge grammar (from the full badge list, 2026-11-09) ───────────────
+// Every badge the scanner may accept is one of exactly two shapes:
+//   FB   + 5971–6011 + GA|LA          + 4 digits   (e.g. FB5971GA0001)
+//   VSFB + 5971–6011 + GA|GB|LA|LB|LC + 4 digits   (e.g. VSFB5973LC0451)
+// Anything else is a misread and must be rejected at the camera.
+describe('BADGE_REGEX — real badge grammar', () => {
+  it.each([
+    'FB5971GA0001', 'FB5971LA0159', 'FB6011GA0023', 'FB6011LA0019', 'FB6002GA0095', 'FB5999LA0016',
+    'VSFB5971GA2927', 'VSFB5971GB4627', 'VSFB5971LB6469', 'VSFB5973LC0451', 'VSFB5978LA4821', 'VSFB6009GA4443',
+  ])('accepts real badge %s', (badge) => {
+    expect(BADGE_REGEX.test(badge)).toBe(true)
+  })
+
+  it.each([
+    ['VS0001', 'short VS placeholder'],
+    ['VSSTMP00001', 'temporary registration id (VSS-TMP-00001 sanitised)'],
+    ['VS8F5971GA0001', 'garbled VS prefix'],
+    ['VSFB5970GA0001', 'centre code below 5971'],
+    ['VSFB6012GA0001', 'centre code above 6011'],
+    ['VSFB5971GC0001', 'unknown VS group GC'],
+    ['VSFB5971GA001', 'VS badge one digit short'],
+    ['VSFB5971GA00011', 'VS badge one digit long'],
+    ['FB5971GB0001', 'FB badges are only GA or LA'],
+    ['FB5971LC0001', 'LC exists only on VS badges'],
+  ])('rejects %s (%s)', (badge) => {
+    expect(BADGE_REGEX.test(badge)).toBe(false)
+  })
+})
+
+describe('sanitizeScannedBadge — VS badge repair', () => {
+  it('repairs a VS badge whose B was misread as 8', () => {
+    expect(sanitizeScannedBadge('VSFB5978G82872')).toBe('VSFB5978GB2872')
+  })
+
+  it('repairs a VS badge whose 0 was misread as O', () => {
+    expect(sanitizeScannedBadge('VSFB5973LC O451'.replace(' ', ''))).toBe('VSFB5973LC0451')
+  })
+
+  it('strips Code 39 guards from a VS badge', () => {
+    expect(sanitizeScannedBadge('*VSFB5971LB6469*')).toBe('VSFB5971LB6469')
+  })
+
+  it('leaves an unrecoverable VS read invalid instead of guessing', () => {
+    const out = sanitizeScannedBadge('VSXX5971GA0001')
+    expect(BADGE_REGEX.test(out)).toBe(false)
+  })
+})
+
+// ─── Camera reads are checked strictly (2026-11-09, Galaxy A35) ──────────────
+// A blurry badge read as "FB597808Z AE". The lenient sanitiser strips spaces
+// and "repairs" letter/digit confusions — right for typed input, wrong for a
+// barcode: Code 39 encodes O and 0 (B and 8 …) with entirely different bars,
+// so a "repair" is a guess that can turn a misread into ANOTHER sewadar's
+// valid badge. A camera read must already BE a badge.
+describe('strictCameraBadge', () => {
+  it.each([
+    ['FB5978GA0013', 'FB5978GA0013'],
+    ['  fb5978ga0013 ', 'FB5978GA0013'],
+    ['*FB5978GA0013*', 'FB5978GA0013'],
+    ['VSFB5973LC0451', 'VSFB5973LC0451'],
+  ])('accepts a clean read %j', (raw, expected) => {
+    expect(strictCameraBadge(raw)).toBe(expected)
+  })
+
+  it.each([
+    ['FB597808Z AE', 'field misread with a space'],
+    ['FB5978 GA0013', 'internal space'],
+    ['FB5978GA0O13', 'letter O where a digit belongs — no repair'],
+    ['FB5978GA001B', 'B where 8 might be — no repair to a different badge'],
+    ['VSFB5978G82872', 'VS badge with 8 for B — no repair'],
+    ['FB5978-GA0013', 'stray punctuation'],
+    ['**FB5978GA0013', 'malformed guards'],
+    ['', 'empty'],
+  ])('rejects %j (%s)', (raw) => {
+    expect(strictCameraBadge(raw)).toBe('')
+  })
+
+  it('is total for non-strings', () => {
+    expect(strictCameraBadge(null)).toBe('')
+    expect(strictCameraBadge(undefined)).toBe('')
+    expect(strictCameraBadge(42)).toBe('')
+  })
+})
+
+// Every FB badge in the full list has a serial 0001–0228: the first digit is
+// always 0. A leading non-zero is a misread (e.g. 0 read as 8).
+describe('BADGE_REGEX — FB serial', () => {
+  it('accepts FB serials 0001–0999', () => {
+    expect(BADGE_REGEX.test('FB5978GA0001')).toBe(true)
+    expect(BADGE_REGEX.test('FB6008LA0228')).toBe(true)
+    expect(BADGE_REGEX.test('FB6008LA0999')).toBe(true)
+  })
+
+  it('rejects an FB serial that does not start with 0, or is 0000', () => {
+    expect(BADGE_REGEX.test('FB5978GA8013')).toBe(false)
+    expect(BADGE_REGEX.test('FB5978GA1013')).toBe(false)
+    expect(BADGE_REGEX.test('FB5978GA0000')).toBe(false)
+  })
+
+  it('leaves VS serials as any four digits (the list spans 0451–9986)', () => {
+    expect(BADGE_REGEX.test('VSFB6008LA9986')).toBe(true)
+    expect(BADGE_REGEX.test('VSFB5973LC0451')).toBe(true)
   })
 })

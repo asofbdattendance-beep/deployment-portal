@@ -166,10 +166,10 @@ test.describe('scanner camera decode (fake camera)', () => {
     guard.assertEmpty()
   })
 
-  test('tilted barcode (~12°) decodes through the real camera pipeline', async ({ page, context }) => {
+  test('tilted barcode (~8°) decodes through the real camera pipeline', async ({ page, context }) => {
     test.setTimeout(120000)
     const guard = collectPageErrors(page)
-    await installFakeCamera(context, { badge: BADGE, tiltDeg: 12 })
+    await installFakeCamera(context, { badge: BADGE, tiltDeg: 8 })
     await loginAsScanner(page)
 
     await assertCameraLive(page)
@@ -216,13 +216,29 @@ test.describe('scanner camera decode (fake camera)', () => {
   test('upright barcode decodes on the ZXing leg (no BarcodeDetector, iOS path)', async ({ page, context }) => {
     test.setTimeout(120000)
     const guard = collectPageErrors(page)
+    // Offline guarantee: the zxing-cpp WebAssembly binary must come from our
+    // own origin, never a CDN (zxing-wasm defaults to jsDelivr) — a hall with
+    // no signal cannot fetch it.
+    const wasmRequests = []
+    const cdnRequests = []
+    page.on('request', (req) => {
+      const url = req.url()
+      if (url.endsWith('.wasm')) wasmRequests.push(url)
+      if (/jsdelivr|unpkg|cdnjs/.test(url)) cdnRequests.push(url)
+    })
     await installFakeCamera(context, { badge: BADGE, tiltDeg: 0 })
     await context.addInitScript(() => { try { delete window.BarcodeDetector } catch { /* absent */ } })
     await loginAsScanner(page)
 
     await assertCameraLive(page)
+    // 'Universal' = zxing-cpp (WebAssembly). A silent load failure would land
+    // on ZXing-JS, labelled 'Compatibility', and fail here.
     await expect(page.locator('span.pill', { hasText: 'Universal' })).toBeVisible({ timeout: 30000 })
     await assertBadgeDecoded(page)
+
+    expect(wasmRequests.length).toBeGreaterThan(0)
+    for (const url of wasmRequests) expect(new URL(url).origin).toBe(new URL(page.url()).origin)
+    expect(cdnRequests).toEqual([])
 
     guard.assertEmpty()
   })

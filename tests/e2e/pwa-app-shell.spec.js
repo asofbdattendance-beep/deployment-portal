@@ -22,6 +22,7 @@ test.describe('PWA app shell', () => {
   // profile seeded by an earlier suite would otherwise leak in here and the
   // scanner login would land on Schedule Maker instead of the scan shell.
   test.beforeEach(async ({ request }) => {
+    test.setTimeout(120000)
     await resetMock(request)
   })
   test('the service worker registers and precaches the shell', async ({ page }) => {

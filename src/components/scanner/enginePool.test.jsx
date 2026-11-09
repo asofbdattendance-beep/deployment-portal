@@ -21,7 +21,28 @@ const mocks = vi.hoisted(() => ({
   nativeDetectImpl: () => Promise.resolve([]),
   lastHints: null,
   nativeFormats: undefined,
+  // zxing-cpp: null = WebAssembly engine unavailable (the default, so every
+  // pre-existing test keeps its Native → ZXing-JS behaviour).
+  cppDecode: null,
+  cppCalls: [],
+  // A pending promise = the .wasm download is stalled (captive portal, 2G).
+  cppGate: null,
+  cppThrows: false,
 }))
+
+vi.mock('./zxingCppEngine', async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    loadZxingCpp: async () => {
+      if (mocks.cppThrows) throw new Error('unexpected loader crash')
+      if (mocks.cppGate) await mocks.cppGate
+      return mocks.cppDecode
+        ? async (img, opts) => { mocks.cppCalls.push({ img, opts }); return mocks.cppDecode(img, opts) }
+        : null
+    },
+  }
+})
 
 vi.mock('@zxing/library', () => {
   class MultiFormatReader {
@@ -80,11 +101,307 @@ beforeEach(() => {
   mocks.nativeDetectImpl = () => Promise.resolve([])
   mocks.lastHints = null
   mocks.nativeFormats = undefined
+  mocks.cppDecode = null
+  mocks.cppCalls = []
+  mocks.cppGate = null
+  mocks.cppThrows = false
   // jsdom has no 2d context: stub getContext so hardPass's inverted-Native
   // probe returns null silently instead of logging "Not implemented".
   if (typeof window !== 'undefined' && window.HTMLCanvasElement) {
     window.HTMLCanvasElement.prototype.getContext = () => null
   }
+})
+
+/**
+ * A ZXing miss as it looks in the PRODUCTION bundle: the minifier renames the
+ * exception class, so `name` is a mangled identifier ('e'), but the library's
+ * own static `kind` string survives (and getKind() reads it).
+ */
+const minifiedNotFound = () => {
+  function e(msg) { this.message = msg }
+  e.kind = 'NotFoundException'
+  e.prototype = Object.create(Error.prototype)
+  e.prototype.constructor = e
+  e.prototype.name = 'e'
+  e.prototype.getKind = function () { return this.constructor.kind }
+  throw new e('no barcode here')
+}
+
+const cppHit = (text = 'FB5971GA0001') => [{ rawValue: text, cornerPoints: [{ x: 1, y: 1 }, { x: 9, y: 1 }, { x: 9, y: 4 }, { x: 1, y: 4 }] }]
+
+// The native BarcodeDetector on Android is backed by a Google Play Services
+// module. When that module is missing or mid-update, getSupportedFormats() or
+// detect() can return a promise that NEVER settles — no error, the scan loop
+// just stops. That reads in the field as "the scanner never works on this
+// phone". Every native call now has a deadline.
+describe('enginePool native detector that hangs', () => {
+  const never = () => new Promise(() => {})
+
+  it('init moves past a getSupportedFormats() that never answers', async () => {
+    window.BarcodeDetector = class {
+      static getSupportedFormats = never
+      detect = never
+    }
+    const pool = createEnginePool(false, { nativeTimeoutMs: 20 })
+    await pool.init()
+    expect(pool.getActiveId()).toBe('ZXing')
+  })
+
+  it('a detect() that never answers drops native at once and scanning continues', async () => {
+    mockNativeDetector()
+    mocks.nativeDetectImpl = never
+    const pool = createEnginePool(false, { nativeTimeoutMs: 20 })
+    await pool.init()
+    await pool.armFallback()
+    expect(pool.getActiveId()).toBe('Native')
+
+    const res = await pool.detect(SURFACE)          // must return, not hang
+    expect(res.barcodes).toEqual([])
+    expect(pool.getActiveId()).toBe('ZXing')        // one hang is enough
+
+    const next = await pool.detect(SURFACE)
+    expect(next.engine).toBe('ZXing')
+    expect(next.barcodes).toHaveLength(1)
+  })
+
+  it('hardPass finishes and still reads with the other engines when native hangs', async () => {
+    mockNativeDetector()
+    mocks.nativeDetectImpl = never
+    const pool = createEnginePool(false, { nativeTimeoutMs: 20 })
+    await pool.init()
+    await pool.armFallback()
+    const hard = await pool.hardPass(SURFACE)
+    expect(hard.barcodes.map(b => b.rawValue)).toEqual(['FB5971GA0001'])
+  })
+})
+
+describe('enginePool zxing-cpp (WebAssembly) engine', () => {
+  it('is picked ahead of ZXing-JS when there is no native detector', async () => {
+    mocks.cppDecode = async () => cppHit()
+    const pool = createEnginePool(false)
+    await pool.init()
+    expect(pool.getActiveId()).toBe('ZXingCpp')
+
+    const res = await pool.detect(SURFACE)
+    expect(res.engine).toBe('ZXingCpp')
+    expect(res.barcodes[0].rawValue).toBe('FB5971GA0001')
+    expect(res.barcodes[0].cornerPoints).toHaveLength(4)
+  })
+
+  it('decodes the RGBA frame with the tier 1D formats only on normal frames', async () => {
+    mocks.cppDecode = async () => []
+    const pool = createEnginePool(false)
+    await pool.init()
+    await pool.detect(SURFACE)
+    const { img, opts } = mocks.cppCalls[0]
+    expect(img.width).toBe(1)
+    expect(opts.formats).toContain('Code39')
+    expect(opts.formats).not.toContain('QRCode')
+    expect(opts.tryRotate).toBe(true)
+  })
+
+  it('an empty frame is a clean miss, not a failure', async () => {
+    mocks.cppDecode = async () => []
+    const pool = createEnginePool(false)
+    await pool.init()
+    await pool.armFallback()
+    for (let i = 0; i < 5; i++) await pool.detect(SURFACE)
+    expect(pool.getActiveId()).toBe('ZXingCpp')
+  })
+
+  it('falls back to ZXing-JS after three hard WebAssembly errors', async () => {
+    mocks.cppDecode = async () => { throw new Error('memory access out of bounds') }
+    const pool = createEnginePool(false)
+    await pool.init()
+    await pool.armFallback()
+    await pool.detect(SURFACE); await pool.detect(SURFACE); await pool.detect(SURFACE)
+    expect(pool.getActiveId()).toBe('ZXing')
+    const again = await pool.detect(SURFACE)
+    expect(again.barcodes).toHaveLength(1)
+  })
+
+  it('arms BOTH remaining engines when native wins init', async () => {
+    mockNativeDetector()
+    mocks.cppDecode = async () => cppHit('FB5972GA0002')
+    const pool = createEnginePool(false)
+    await pool.init()
+    expect(pool.getActiveId()).toBe('Native')
+    expect(await pool.armFallback()).toBe(true)
+    mocks.nativeDetectImpl = () => Promise.reject(new Error('camera busy'))
+    await pool.detect(SURFACE); await pool.detect(SURFACE); await pool.detect(SURFACE)
+    expect(pool.getActiveId()).toBe('ZXingCpp')
+  })
+
+  it('hardPass gives zxing-cpp the widened 2D formats, an enhanced copy and an inverted copy', async () => {
+    mocks.cppDecode = async () => []
+    mocks.decodeImpl = notFound
+    const pool = createEnginePool(false)
+    await pool.init()
+    await pool.armFallback()
+    await pool.hardPass(SURFACE)
+    expect(mocks.cppCalls).toHaveLength(3)   // normal, enhanced, inverted
+    expect(mocks.cppCalls[0].opts.formats).toContain('QRCode')
+    const [normal, , inverted] = mocks.cppCalls.map(c => c.img.data[0])
+    expect(inverted).toBe(255 - normal)
+  })
+
+  it('a stalled WebAssembly download does not block scanning — ZXing-JS takes over', async () => {
+    let release
+    mocks.cppGate = new Promise(r => { release = r })
+    mocks.cppDecode = async () => cppHit()
+    const pool = createEnginePool(false, { slowEngineMs: 20 })
+
+    await pool.init()          // must resolve even though the wasm never arrived
+    expect(pool.isReady()).toBe(true)
+    expect(pool.getActiveId()).toBe('ZXing')
+    const res = await pool.detect(SURFACE)
+    expect(res.barcodes).toHaveLength(1)
+
+    release()
+    await mocks.cppGate
+  })
+
+  it('a late WebAssembly load takes over from ZXing-JS as soon as it lands', async () => {
+    let release
+    mocks.cppGate = new Promise(r => { release = r })
+    mocks.cppDecode = async () => cppHit()
+    const pool = createEnginePool(false, { slowEngineMs: 20 })
+    await pool.init()
+    expect(pool.getActiveId()).toBe('ZXing')
+
+    release()
+    await new Promise(r => setTimeout(r, 0))
+    await new Promise(r => setTimeout(r, 0))
+
+    // Preferred engine is back: no waiting for a run of misses.
+    expect(pool.getActiveId()).toBe('ZXingCpp')
+    const res = await pool.detect(SURFACE)
+    expect(res.engine).toBe('ZXingCpp')
+  })
+
+  it('a late WebAssembly load never displaces the native detector', async () => {
+    mockNativeDetector()
+    let release
+    mocks.cppGate = new Promise(r => { release = r })
+    mocks.cppDecode = async () => cppHit()
+    const pool = createEnginePool(false, { slowEngineMs: 20 })
+    await pool.init()
+    pool.armFallback()
+    release()
+    await new Promise(r => setTimeout(r, 0))
+    await new Promise(r => setTimeout(r, 0))
+    expect(pool.getActiveId()).toBe('Native')
+  })
+
+  it('retryUpgrade re-attempts zxing-cpp after it failed, and promotes it', async () => {
+    mocks.cppDecode = null                 // every download attempt fails
+    const pool = createEnginePool(false)
+    await pool.init()
+    expect(pool.getActiveId()).toBe('ZXing')
+
+    mocks.cppDecode = async () => cppHit() // back online
+    expect(await pool.retryUpgrade()).toBe(true)
+    expect(pool.getActiveId()).toBe('ZXingCpp')
+  })
+
+  it('retryUpgrade is a no-op once zxing-cpp is loaded', async () => {
+    mocks.cppDecode = async () => cppHit()
+    const pool = createEnginePool(false)
+    await pool.init()
+    expect(await pool.retryUpgrade()).toBe(false)
+  })
+
+  // Field case (Galaxy A35, 3 fps): with zxing-cpp loaded, hardPass still ran
+  // ZXing-JS on the raw, enhanced and inverted ~1 MP frame — hundreds of ms on
+  // a phone, every third missed frame. zxing-cpp covers the same variants ~6x
+  // faster, so ZXing-JS now sits out the hard pass while zxing-cpp is ready.
+  it('hardPass skips ZXing-JS entirely when zxing-cpp is loaded', async () => {
+    mocks.cppDecode = async () => []
+    const jsShapes = []
+    mocks.decodeImpl = (bitmap) => { jsShapes.push(bitmap); return notFound() }
+    const pool = createEnginePool(false)
+    await pool.init()
+    await pool.armFallback()
+    await pool.hardPass({ canvas: {}, read: () => ({ data: new Uint8ClampedArray(8 * 4 * 4), width: 8, height: 4 }) })
+    expect(jsShapes).toHaveLength(0)
+    expect(mocks.cppCalls).toHaveLength(3)   // zxing-cpp: raw, enhanced, inverted
+  })
+
+  it('hardPass keeps the ZXing-JS rotations when zxing-cpp is unavailable', async () => {
+    const jsShapes = []
+    mocks.decodeImpl = (bitmap) => { jsShapes.push(bitmap); return notFound() }
+    const pool = createEnginePool(false)
+    await pool.init()
+    await pool.hardPass({ canvas: {}, read: () => ({ data: new Uint8ClampedArray(8 * 4 * 4), width: 8, height: 4 }) })
+    expect(jsShapes).toHaveLength(6)   // normal + enhanced + inverted + 3 rotations
+  })
+
+  it('empty-result rotation alternates Native and zxing-cpp, skipping the slow ZXing-JS', async () => {
+    mockNativeDetector()
+    mocks.nativeDetectImpl = () => Promise.resolve([])
+    mocks.cppDecode = async () => []
+    mocks.decodeImpl = notFound
+    const pool = createEnginePool(false, { emptyHandoffAfter: 1 })
+    await pool.init()
+    await pool.armFallback()
+    const seen = []
+    for (let i = 0; i < 6; i++) { await pool.detect(SURFACE); seen.push(pool.getActiveId()) }
+    expect(seen).not.toContain('ZXing')
+    expect(new Set(seen)).toEqual(new Set(['Native', 'ZXingCpp']))
+  })
+
+  it('garbled invalid reads count toward empty-result rotation when validateBarcode is supplied', async () => {
+    mockNativeDetector()
+    // Native repeatedly hallucinates a partial read like FB5978080 on blurry/glared frames
+    mocks.nativeDetectImpl = () => Promise.resolve([{ rawValue: 'FB5978080', cornerPoints: [] }])
+    mocks.cppDecode = async () => []
+    mocks.decodeImpl = notFound
+    const validateBarcode = (raw) => raw === 'FB5971GA0001'
+    const pool = createEnginePool(false, { emptyHandoffAfter: 1, validateBarcode })
+    await pool.init()
+    await pool.armFallback()
+    expect(pool.getActiveId()).toBe('Native')
+    await pool.detect(SURFACE)
+    // Because FB5978080 is invalid, Native hands off to ZXingCpp
+    expect(pool.getActiveId()).toBe('ZXingCpp')
+  })
+
+  it('a loader that throws is treated as unavailable and scanning falls back to ZXing-JS', async () => {
+    mocks.cppThrows = true
+    const pool = createEnginePool(false)
+    await pool.init()
+    expect(pool.getActiveId()).toBe('ZXing')
+    expect((await pool.detect(SURFACE)).barcodes).toHaveLength(1)
+  })
+
+  it('hardPass merges a zxing-cpp hit and credits the engine', async () => {
+    mocks.cppDecode = async () => cppHit()
+    mocks.decodeImpl = notFound
+    const pool = createEnginePool(false)
+    await pool.init()
+    const hard = await pool.hardPass(SURFACE)
+    expect(hard.engine).toBe('ZXingCpp')
+    expect(hard.barcodes.map(b => b.rawValue)).toEqual(['FB5971GA0001'])
+  })
+})
+
+describe('enginePool ZXing miss classification survives minification', () => {
+  it('a minified NotFoundException is a clean miss, not an engine failure', async () => {
+    mockNativeDetector()
+    const pool = createEnginePool(false)
+    await pool.init()
+    await pool.armFallback()
+    // Knock Native out so ZXing is the active engine.
+    mocks.nativeDetectImpl = () => Promise.reject(new Error('camera busy'))
+    await pool.detect(SURFACE); await pool.detect(SURFACE); await pool.detect(SURFACE)
+    expect(pool.getActiveId()).toBe('ZXing')
+
+    // Three empty frames from ZXing (below the 6-miss empty handoff). If they
+    // were misread as failures, the 3-strike fallback would bounce to Native.
+    mocks.decodeImpl = minifiedNotFound
+    await pool.detect(SURFACE); await pool.detect(SURFACE); await pool.detect(SURFACE)
+    expect(pool.getActiveId()).toBe('ZXing')
+  })
 })
 
 describe('enginePool fallback coherence (L-14)', () => {
@@ -252,7 +569,7 @@ describe('enginePool tier-driven formats', () => {
 })
 
 describe('enginePool hardPass', () => {
-  it('merges and dedupes results across engines, reporting the first hit', async () => {
+  it('stops at the first hit and credits that engine', async () => {
     mockNativeDetector()
     const pool = createEnginePool(false)
     await pool.init()
@@ -345,6 +662,79 @@ describe('enginePool hardPass', () => {
     expect(barcodes).toHaveLength(1)
     expect(barcodes[0].rawValue).toBe('ZX789')
     expect(engine).toBe('ZXing')
+  })
+})
+
+// Real field case (2026-11-09): a badge photographed through its plastic
+// sleeve (FB5978GA0008) that neither ZXing-JS nor zxing-cpp could read raw,
+// but both read after enhanceGray (sharpen + contrast stretch). The hard pass
+// now gives every engine that enhanced copy, AFTER the raw frame.
+describe('enginePool hardPass enhanced copy', () => {
+  const FRAME = () => {
+    const w = 16, h = 4
+    const data = new Uint8ClampedArray(w * h * 4)
+    for (let i = 0; i < w * h; i++) {
+      const v = 110 + ((i % w) % 4 < 2 ? 0 : 50)   // soft, low-contrast stripes
+      data[i * 4] = v; data[i * 4 + 1] = v; data[i * 4 + 2] = v; data[i * 4 + 3] = 255
+    }
+    return { canvas: {}, read: () => ({ data, width: w, height: h }) }
+  }
+
+  it('hands ZXing-JS the raw frame first, then an enhanced (wider-range) copy', async () => {
+    const seen = []
+    mocks.decodeImpl = (bitmap) => { seen.push(Array.from(bitmap.b.s.bytes)); return notFound() }
+    const pool = createEnginePool(false)
+    await pool.init()
+    await pool.hardPass(FRAME())
+    const range = (a) => Math.max(...a) - Math.min(...a)
+    expect(range(seen[0])).toBe(50)                  // raw
+    expect(range(seen[1])).toBeGreaterThan(200)      // enhanced: stretched
+  })
+
+  it('reads a badge that only the enhanced copy can decode', async () => {
+    mocks.decodeImpl = (bitmap) => {
+      const b = bitmap.b.s.bytes
+      return Math.max(...b) - Math.min(...b) > 200 ? zxingResult('FB5978GA0008') : notFound()
+    }
+    const pool = createEnginePool(false)
+    await pool.init()
+    const hard = await pool.hardPass(FRAME())
+    expect(hard.barcodes.map(b => b.rawValue)).toEqual(['FB5978GA0008'])
+  })
+
+  it('stops at the first hit — later engines and variants are not run', async () => {
+    mockNativeDetector()
+    mocks.nativeDetectImpl = () => Promise.resolve([{ rawValue: 'FB5971GA0001', cornerPoints: [] }])
+    mocks.cppDecode = async () => []
+    let jsCalls = 0
+    mocks.decodeImpl = () => { jsCalls++; return notFound() }
+    const pool = createEnginePool(false)
+    await pool.init()
+    await pool.armFallback()
+    const hard = await pool.hardPass(SURFACE)
+    expect(hard.engine).toBe('Native')
+    expect(mocks.cppCalls).toHaveLength(0)
+    expect(jsCalls).toBe(0)
+  })
+
+  it('gives the native detector a real ImageData (browsers reject a plain object)', async () => {
+    const put = []
+    window.ImageData = class { constructor(data, w, h) { this.data = data; this.width = w; this.height = h } }
+    window.HTMLCanvasElement.prototype.getContext = () => ({
+      putImageData: (img) => put.push(img),
+      save() {}, restore() {}, clearRect() {}, translate() {}, rotate() {}, drawImage() {},
+    })
+    try {
+      mockNativeDetector()
+      mocks.nativeDetectImpl = () => Promise.resolve([])
+      const pool = createEnginePool(false)
+      await pool.init()
+      await pool.hardPass(FRAME())
+      expect(put.length).toBeGreaterThanOrEqual(2)    // inverted + enhanced canvases
+      for (const img of put) expect(img).toBeInstanceOf(window.ImageData)
+    } finally {
+      delete window.ImageData
+    }
   })
 })
 

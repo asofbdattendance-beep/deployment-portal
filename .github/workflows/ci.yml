@@ -289,9 +289,19 @@ jobs:
             if not exists (select 1 from pg_roles where rolname='service_role') then create role service_role nologin; end if;
             if not exists (select 1 from pg_publication where pubname='supabase_realtime') then create publication supabase_realtime; end if;
           end $$;
-          create or replace function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('request.jwt.claims', true),'')::uuid $$;
-          create or replace function auth.role() returns text language sql stable as $$ select nullif(current_setting('request.jwt.claims', true),'') $$;
-          create or replace function auth.jwt() returns jsonb language sql stable as $$ select nullif(current_setting('request.jwt.claims', true),'')::jsonb $$;
+          create or replace function auth.jwt() returns jsonb language sql stable as $$
+            select case
+              when nullif(current_setting('request.jwt.claims', true),'') is null then null
+              when left(trim(current_setting('request.jwt.claims', true)), 1) = '{' then current_setting('request.jwt.claims', true)::jsonb
+              else jsonb_build_object('sub', current_setting('request.jwt.claims', true))
+            end
+          $$;
+          create or replace function auth.uid() returns uuid language sql stable as $$
+            select coalesce(nullif(auth.jwt()->>'sub','')::uuid, nullif(current_setting('request.jwt.claims', true),'')::uuid)
+          $$;
+          create or replace function auth.role() returns text language sql stable as $$
+            select coalesce(auth.jwt()->>'role', nullif(current_setting('request.jwt.claims', true),''))
+          $$;
           create table if not exists auth.users (id uuid primary key default gen_random_uuid(), email text, encrypted_password text, instance_id uuid);
           create table if not exists auth.identities (id uuid primary key default gen_random_uuid(), user_id uuid, provider text, identity_data jsonb);
           create table if not exists storage.buckets (id text primary key, name text, public boolean);

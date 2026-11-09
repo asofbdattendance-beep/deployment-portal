@@ -43,7 +43,7 @@ test.describe('app-level offline sync', () => {
     await loginAsIncharge(page)
 
     await context.setOffline(true)
-    await inchargeScan(page, 'FB5971GA2001')
+    await inchargeScan(page, 'FB5971GA0001')
     // Explicit choice first: the unreachable lookup offers Mark IN, and the
     // tap queues it.
     await expect(page.getByRole('dialog').getByRole('button', { name: 'Mark IN', exact: true })).toBeVisible()
@@ -51,7 +51,7 @@ test.describe('app-level offline sync', () => {
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
 
     const queued = await queueRows(page)
-    const row = queued.find((r) => r.badge === 'FB5971GA2001' && r.action === 'IN')
+    const row = queued.find((r) => r.badge === 'FB5971GA0001' && r.action === 'IN')
     expect(row).toBeTruthy()
 
     // Leave the scanner: the scanner page (and the old page-scoped drainer
@@ -91,13 +91,13 @@ test.describe('app-level offline sync', () => {
     await loginAsScanner(page)
 
     await context.setOffline(true)
-    await manualScan(page, 'FB5971GA2002')
+    await manualScan(page, 'FB5971GA0002')
     await expect(page.getByRole('dialog').getByRole('button', { name: 'Mark IN', exact: true })).toBeVisible()
     await page.getByRole('dialog').getByRole('button', { name: 'Mark IN', exact: true }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
 
     const queued = await queueRows(page)
-    const row = queued.find((r) => r.badge === 'FB5971GA2002' && r.action === 'IN')
+    const row = queued.find((r) => r.badge === 'FB5971GA0002' && r.action === 'IN')
     expect(row).toBeTruthy()
 
     // Park on a blank page BEFORE reconnecting: the live engine would

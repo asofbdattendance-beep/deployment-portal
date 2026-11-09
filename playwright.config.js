@@ -19,7 +19,12 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: {
+          args: ['--ignore-certificate-errors', '--allow-insecure-localhost'],
+        },
+      },
       // Mobile specs assert phone-width behaviour — they fail by design at
       // 1280px, so desktop never runs them.
       testIgnore: /(mobile|pwa)-.*\.spec\.js/,
@@ -28,7 +33,12 @@ export default defineConfig({
     // Only mobile-*.spec.js runs here; the desktop suite stays on chromium.
     {
       name: 'mobile-chrome',
-      use: { ...devices['Pixel 5'] },
+      use: {
+        ...devices['Pixel 5'],
+        launchOptions: {
+          args: ['--ignore-certificate-errors', '--allow-insecure-localhost'],
+        },
+      },
       testMatch: /mobile-.*\.spec\.js/,
     },
     // PWA gate: runs against a PRODUCTION preview build, because the service
@@ -37,7 +47,13 @@ export default defineConfig({
       name: 'mobile-pwa',
       // `vite preview` inherits the repo's local TLS cert (certs/local-cert.pem),
       // so this project is https + ignoreHTTPSErrors (set globally in `use`).
-      use: { ...devices['Pixel 5'], baseURL: 'https://localhost:5175' },
+      use: {
+        ...devices['Pixel 5'],
+        baseURL: 'https://localhost:5175',
+        launchOptions: {
+          args: ['--ignore-certificate-errors', '--allow-insecure-localhost'],
+        },
+      },
       testMatch: /pwa-.*\.spec\.js/,
     },
     {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { withTimeout, friendly, todayStrIST, hhmmIST, hmsIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, isDecisionPopup, isEdgeDetection, detectionBox, isTimestampStale, CLOCK_SKEW_FUTURE_MS, CLOCK_SKEW_MAX_AGE_MS, rotateGray, SCAN_ROTATIONS, sanitizeBarcode, scoreSharpness, tileRois, mergeOptimisticSessions, getScannerRefreshDebounceMs, isForgotOutSession, sameDayAutoOutSession, FORGOT_OUT_MIN_OPEN_HOURS } from './scannerUtils'
+import { withTimeout, friendly, todayStrIST, hhmmIST, hmsIST, resolveForgotOutTime, FORGOT_OUT_MIN_GAP_MIN, safeOpenDB, rgbaToGray, computeRoi, waitForVideoReady, isSecureCameraContext, SCAN_RPC_TIMEOUT, MAX_DRAIN_ATTEMPTS, CACHE_TTL, isDecisionPopup, isEdgeDetection, detectionBox, isTimestampStale, CLOCK_SKEW_FUTURE_MS, CLOCK_SKEW_MAX_AGE_MS, rotateGray, SCAN_ROTATIONS, sanitizeBarcode, scoreSharpness, tileRois, mergeOptimisticSessions, getScannerRefreshDebounceMs, isForgotOutSession, sameDayAutoOutSession, FORGOT_OUT_MIN_OPEN_HOURS, enhanceGray } from './scannerUtils'
 
 afterEach(() => { vi.useRealTimers() })
 
@@ -889,5 +889,61 @@ describe('sameDayAutoOutSession', () => {
   it('returns null without a session id (cannot be pinned for scan_out)', () => {
     expect(sameDayAutoOutSession({ ...auto, id: null }, SWEEP_NOW)).toBeNull()
     expect(sameDayAutoOutSession(null, SWEEP_NOW)).toBeNull()
+  })
+})
+
+// ─── enhanceGray ────────────────────────────────────────────────────────────
+// Field case: a dense Code 39 badge behind a plastic sleeve — soft focus plus a
+// glare streak. The synthetic frame below reproduces it (found by sweeping
+// blur / glare / contrast): raw fails, enhanced reads, with the REAL ZXing-JS.
+describe('enhanceGray', () => {
+  it('returns a new buffer and never mutates the input', () => {
+    const g = Uint8ClampedArray.from([10, 200, 10, 200, 10, 200, 10, 200, 10])
+    const copy = Uint8ClampedArray.from(g)
+    const out = enhanceGray(g, 3, 3)
+    expect(out).not.toBe(g)
+    expect(Array.from(g)).toEqual(Array.from(copy))
+    expect(out).toHaveLength(9)
+  })
+
+  it('returns an empty buffer for unusable input', () => {
+    expect(enhanceGray(null, 3, 3)).toHaveLength(0)
+    expect(enhanceGray(new Uint8ClampedArray(4), 3, 3)).toHaveLength(0)
+    expect(enhanceGray(new Uint8ClampedArray(9), 0, 3)).toHaveLength(0)
+  })
+
+  it('stretches a washed-out frame to the full range', () => {
+    const g = Uint8ClampedArray.from({ length: 64 }, (_, i) => (i % 2 ? 150 : 110))
+    const out = enhanceGray(g, 8, 8)
+    expect(Math.min(...out)).toBe(0)
+    expect(Math.max(...out)).toBe(255)
+  })
+
+  it('makes a soft, glared badge readable that the raw frame is not', async () => {
+    const zx = await import('@zxing/library')
+    const { BADGE, encodeCode39, renderAt, boxBlurGray, addSensorNoise } = await import('./barcodeFixtures')
+    const hints = new Map([[zx.DecodeHintType.TRY_HARDER, true], [zx.DecodeHintType.POSSIBLE_FORMATS, [zx.BarcodeFormat.CODE_39]]])
+    const reader = new zx.MultiFormatReader()
+    reader.setHints(hints)
+    const read = (g, w, h) => {
+      const warn = console.warn
+      console.warn = () => {}
+      try { return reader.decode(new zx.BinaryBitmap(new zx.HybridBinarizer(new zx.RGBLuminanceSource(g, w, h))), hints).getText() } catch { return null } finally { console.warn = warn }
+    }
+
+    // 2.5 px/module, three soft blur passes, contrast 70..200, a glare band
+    // over the left third (like a sleeve reflection), mild sensor noise.
+    const f = renderAt(encodeCode39(BADGE), 2.5, { heightPx: 60 })
+    let g = f.gray
+    for (let p = 0; p < 3; p++) g = boxBlurGray(g, f.width, f.height, 1)
+    const W = f.width
+    g = Uint8ClampedArray.from(g, (v, i) => {
+      const x = i % W
+      return 70 + (v / 240) * 130 + 40 * Math.max(0, 1 - Math.abs(x - W * 0.3) / (W * 0.18))
+    })
+    g = addSensorNoise(g, 3, 9)
+
+    expect(read(g, f.width, f.height)).toBeNull()
+    expect(read(enhanceGray(g, f.width, f.height), f.width, f.height)).toBe(BADGE)
   })
 })
