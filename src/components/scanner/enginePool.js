@@ -507,13 +507,14 @@ export function createEnginePool(debug, opts = {}) {
   // captive portal or 2G line where the fetch can stall with no error at all.
   // init() must not wait on that forever — ZXing-JS is already in the bundle
   // and can scan today. The download keeps running in the background and the
-  // engine joins the pool (via the empty-result handoff) when it lands.
+  // engine takes over as soon as it lands (see initCpp).
   const slowEngineMs = Number.isFinite(opts.slowEngineMs) && opts.slowEngineMs > 0
     ? opts.slowEngineMs
     : 4000
+  // `promise` comes from load(), which never rejects (it maps a throw to false).
   const waitAtMost = (promise, ms) => new Promise(resolve => {
     const timer = setTimeout(() => resolve(false), ms)
-    promise.then(ok => { clearTimeout(timer); resolve(ok) }, () => { clearTimeout(timer); resolve(false) })
+    promise.then(ok => { clearTimeout(timer); resolve(ok) })
   })
 
   const init = async () => {
@@ -561,9 +562,15 @@ export function createEnginePool(debug, opts = {}) {
    */
   const handoffEmpty = () => {
     const prev = getActive().id
+    // ZXing-JS is the slowest and least capable reader. Once zxing-cpp is
+    // loaded it stays out of the miss rotation (Native <-> zxing-cpp); it is
+    // still the hard-failure fallback and still runs in hardPass. Field case:
+    // a Galaxy A35 kept landing on it ("Compatibility") between reads.
+    const skipJs = byId('ZXingCpp').ready
     for (let step = 1; step <= engines.length; step++) {
       const i = (activeIndex + step) % engines.length
       if (!engines[i].ready) continue
+      if (skipJs && engines[i].id === 'ZXing' && i !== activeIndex) continue
       if (i === activeIndex) {
         // Wrapped all the way around: the current engine is the only ready
         // one — reset and hold. Stepping onto itself would flap the label.

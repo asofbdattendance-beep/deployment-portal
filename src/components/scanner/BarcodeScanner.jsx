@@ -58,7 +58,9 @@ import { BADGE_REGEX, sanitizeScannedBadge } from '../../lib/logic'
 const DEVICE_PROFILES = {
   fast:   { confirmWindow: 3, confirmThreshold: 2, minInterval: 50,  maxInterval: 150, frameSkip: 0, maxWidth: 1280 },
   medium: { confirmWindow: 4, confirmThreshold: 2, minInterval: 100, maxInterval: 300, frameSkip: 0, maxWidth: 1080 },
-  slow:   { confirmWindow: 3, confirmThreshold: 2, minInterval: 200, maxInterval: 500, frameSkip: 0, maxWidth: 720 },
+  // slow keeps 1080 too: the portal's badges are DENSE Code 39 (~0.2 mm bars);
+  // 720 px drops them below decodable px/module, trading every read for speed.
+  slow:   { confirmWindow: 3, confirmThreshold: 2, minInterval: 200, maxInterval: 500, frameSkip: 0, maxWidth: 1080 },
 }
 
 const ENGINE_LABELS = { Native: 'Optimized', ZXingCpp: 'Universal', ZXing: 'Compatibility' }
@@ -94,8 +96,6 @@ const AIM_HINT_EVERY = 6
 // px/module, which is the number that actually decides decode success: below
 // ~2 px/module a blurred capture is unreadable by any engine (measured: 10/10
 // at 2.0 px/module with 1px blur, 0/10 at 1.75 and below).
-const CODE39_MODULES = 211
-const MIN_DECODABLE_PPM = 2.2
 // Consecutive misses before the hard-pass second look runs, and its stride.
 // hardPass tries every ready engine x normal+inverted (+ rotated for ZXing & Native).
 // Gated by miss count: 4 misses (~200ms) allows rotated/tilted badges to decode
@@ -127,6 +127,8 @@ const CROP_PAD = 8
 // onScan every frame for the whole RPC. 1500ms damps the storm while the
 // operator's retry after ~1.5s still goes through.
 const DECLINED_DAMP_MS = 1500
+// Frames between re-checks of the speed profile against the rolling decode time.
+const PROFILE_REFRESH_FRAMES = 30
 
 // ─── Lens memory ──────────────────────────────────────────────────────────────
 // A lens is remembered only after it has READ A BADGE. The old code saved the
@@ -195,15 +197,15 @@ function createQualityChecker() {
   }
 }
 
-export function guidanceFor(reason, elapsed, hasEverDetected, consecutiveFails, tooFar = false) {
+export function guidanceFor(reason, elapsed, hasEverDetected, consecutiveFails) {
   if (reason === 'dark') return 'Better lighting needed'
   if (reason === 'bright') return 'Reduce glare'
   if (reason === 'blurry') return 'Hold steady'
   if (reason === 'low-contrast') return 'Move badge into the light'
-  // A located badge that is physically too small in the frame cannot be
-  // decoded by any engine — telling the operator to align it is a lie that
-  // produces the "it just refuses" experience.
-  if (tooFar) return 'Move closer to the badge'
+  // No "Move closer" hint: it relied on the stripe locator's barcode width,
+  // and on real badge frames the locator boxes a small text patch instead of
+  // the barcode — so it told operators to move closer while the badge filled
+  // the frame, pushing the phone past its focus distance.
   if (elapsed > 6000 && consecutiveFails > GUIDANCE_AFTER) {
     return hasEverDetected ? 'Align badge within the frame' : 'Tap the video to focus'
   }
@@ -214,6 +216,7 @@ export function guidanceFor(reason, elapsed, hasEverDetected, consecutiveFails, 
 import { createEnginePool } from './enginePool'
 import { locateBarcode } from './barcodeLocator'
 import { planSourceCrop } from './cropPlan'
+import { profileForDetectMs, profileFromSamples, pushConfirmRead } from './scanTuning'
 
 
 // ─── Detection surface ────────────────────────────────────────────────────────
@@ -302,7 +305,6 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const surfaceRef = useRef(null)
   // Set by the locator pass: true when the badge is physically too small in
   // the frame for ANY engine to decode it. Drives "Move closer" guidance.
-  const tooFarRef = useRef(false)
   const qualityRef = useRef(null)
   const hasEverDetectedRef = useRef(false)
   const consecutiveFailsRef = useRef(0)
@@ -443,12 +445,6 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       if (!img || !video?.videoWidth) return
       const box = locateBarcode(rgbaToGray(img), img.width, img.height, { minConfidence: 0.55 })
       if (!box) return
-      // px/module in SOURCE pixels: the box is measured on the detect surface,
-      // which computeRoi may have downscaled by roi.scale. On the crop path the
-      // pseudo-roi has scale 1, so this is identity there too.
-      const scale = Number(roi?.scale) || 1
-      const ppm = box.width / scale / CODE39_MODULES
-      if (ppm > 0) tooFarRef.current = ppm < MIN_DECODABLE_PPM
       // detectionBox speaks in corner points; a rect's four corners are enough
       // to recover it, and they arrive in the same detect-canvas space the ROI
       // describes.
@@ -466,15 +462,9 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   // Declared before detectLoop, which depends on them (const TDZ).
 
   const updateWindow = useCallback((badge, cfg) => {
-    const now = Date.now()
-    const w = slidingWindowRef.current
-    w.push({ badge, time: now })
-    let t = w.filter(e => e.time > now - 3000)
-    if (t.length > cfg.confirmWindow) t = t.slice(-cfg.confirmWindow)
-    slidingWindowRef.current = t
-    const c = t.filter(e => e.badge === badge).length
-    const threshold = cfg.confirmThreshold || 2
-    return { confirmed: c >= threshold, count: c }
+    const res = pushConfirmRead(slidingWindowRef.current, badge, Date.now(), cfg)
+    slidingWindowRef.current = res.entries
+    return { confirmed: res.confirmed, count: res.count }
   }, [])
 
   // Dedicated transient hint for reads the sanitizer could not recover.
@@ -546,7 +536,6 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       const declinedDamped = lastDeclinedRef.current.badge === cleaned && now - lastDeclinedRef.current.time < DECLINED_DAMP_MS
       if (!declinedDamped) { try { navigator.vibrate?.(80) } catch {} }
       pushDebug(`SCAN OK [${engine}]: ${cleaned}`)
-      tooFarRef.current = false
       if (focusHuntStopRef.current) { focusHuntStopRef.current(); focusHuntStopRef.current = null }
       // Camera-suppressor contract (see the busy guard in useScanHandler.js):
       // the suppressor records only on ACCEPTANCE. A declined scan (the
@@ -619,7 +608,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     // scanning look broken on Android.
     const elapsed = Date.now() - startTimeRef.current
     const hint = qualityRef.current?.(video) || null
-    setGuidance(guidanceFor(hint, elapsed, hasEverDetectedRef.current, consecutiveFailsRef.current, tooFarRef.current))
+    setGuidance(guidanceFor(hint, elapsed, hasEverDetectedRef.current, consecutiveFailsRef.current))
     // A streak of misses usually means the lens is parked, so start the
     // already-built focus-hunt chain (this is its only caller). The success
     // path and the camera teardown both stop it.
@@ -668,6 +657,16 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     const elapsedMs = performance.now() - t0
     detectMsRef.current.last = elapsedMs
     detectMsRef.current.avg = detectMsRef.current.avg ? detectMsRef.current.avg * 0.8 + elapsedMs * 0.2 : elapsedMs
+    // Re-check the speed profile from the rolling decode time, so one bad
+    // startup measurement (or a phone that cools down / heats up) cannot pin
+    // the wrong frame budget for the whole session.
+    if (frameCountRef.current % PROFILE_REFRESH_FRAMES === 0) {
+      const next = DEVICE_PROFILES[profileForDetectMs(detectMsRef.current.avg)]
+      if (next && next !== configRef.current) {
+        configRef.current = next
+        if (debugOn) pushDebug(`profile -> ${profileForDetectMs(detectMsRef.current.avg)} (~${Math.round(detectMsRef.current.avg)}ms)`)
+      }
+    }
 
     // A newer session took over while we were decoding — drop the result.
     // A newer generation (pause/restart/resume bumped loopGenRef mid-decode)
@@ -867,7 +866,9 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       // the same crop path as the real loop so the timing is representative.
       const v = videoRef.current
       const frames = []
-      for (let i = 0; i < 3 && v?.videoWidth; i++) {
+      // 4 decodes, the first ignored: it pays one-off warm-up cost and used to
+      // tag mid-range phones (Galaxy A35) 'slow' for the whole session.
+      for (let i = 0; i < 4 && v?.videoWidth; i++) {
         if (!isCurrent(session)) break   // don't burn decodes for a dead session
         const roi = computeRoi(v.videoWidth, v.videoHeight, { mode: roiModeRef.current, maxWidth: configRef.current.maxWidth })
         if (!surfaceRef.current?.grab(v, roi)) break
@@ -875,11 +876,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         await pool.detect(surfaceRef.current)
         frames.push(performance.now() - t0)
       }
-      if (frames.length === 3 && isCurrent(session) && mountedRef.current) {
-        const avg = frames.reduce((a, b) => a + b, 0) / frames.length
-        const prof = avg < 30 ? 'fast' : avg < 120 ? 'medium' : 'slow'
+      const prof = profileFromSamples(frames)
+      if (prof && isCurrent(session) && mountedRef.current) {
         configRef.current = DEVICE_PROFILES[prof]
-        if (debugOn) pushDebug(`profile ${prof} (~${Math.round(avg)}ms/frame)`)
+        if (debugOn) pushDebug(`profile ${prof} (${frames.map(Math.round).join('/')} ms, first ignored)`)
       }
     } catch { /* engine pool already logged; the loop just keeps retrying */ }
     finally {

@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   cppCalls: [],
   // A pending promise = the .wasm download is stalled (captive portal, 2G).
   cppGate: null,
+  cppThrows: false,
 }))
 
 vi.mock('./zxingCppEngine', async (importOriginal) => {
@@ -34,6 +35,7 @@ vi.mock('./zxingCppEngine', async (importOriginal) => {
   return {
     ...actual,
     loadZxingCpp: async () => {
+      if (mocks.cppThrows) throw new Error('unexpected loader crash')
       if (mocks.cppGate) await mocks.cppGate
       return mocks.cppDecode
         ? async (img, opts) => { mocks.cppCalls.push({ img, opts }); return mocks.cppDecode(img, opts) }
@@ -102,6 +104,7 @@ beforeEach(() => {
   mocks.cppDecode = null
   mocks.cppCalls = []
   mocks.cppGate = null
+  mocks.cppThrows = false
   // jsdom has no 2d context: stub getContext so hardPass's inverted-Native
   // probe returns null silently instead of logging "Not implemented".
   if (typeof window !== 'undefined' && window.HTMLCanvasElement) {
@@ -326,6 +329,28 @@ describe('enginePool zxing-cpp (WebAssembly) engine', () => {
     await pool.init()
     await pool.hardPass({ canvas: {}, read: () => ({ data: new Uint8ClampedArray(8 * 4 * 4), width: 8, height: 4 }) })
     expect(jsShapes).toHaveLength(6)   // normal + enhanced + inverted + 3 rotations
+  })
+
+  it('empty-result rotation alternates Native and zxing-cpp, skipping the slow ZXing-JS', async () => {
+    mockNativeDetector()
+    mocks.nativeDetectImpl = () => Promise.resolve([])
+    mocks.cppDecode = async () => []
+    mocks.decodeImpl = notFound
+    const pool = createEnginePool(false, { emptyHandoffAfter: 1 })
+    await pool.init()
+    await pool.armFallback()
+    const seen = []
+    for (let i = 0; i < 6; i++) { await pool.detect(SURFACE); seen.push(pool.getActiveId()) }
+    expect(seen).not.toContain('ZXing')
+    expect(new Set(seen)).toEqual(new Set(['Native', 'ZXingCpp']))
+  })
+
+  it('a loader that throws is treated as unavailable and scanning falls back to ZXing-JS', async () => {
+    mocks.cppThrows = true
+    const pool = createEnginePool(false)
+    await pool.init()
+    expect(pool.getActiveId()).toBe('ZXing')
+    expect((await pool.detect(SURFACE)).barcodes).toHaveLength(1)
   })
 
   it('hardPass merges a zxing-cpp hit and credits the engine', async () => {
