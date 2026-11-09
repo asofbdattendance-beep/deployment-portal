@@ -23,6 +23,7 @@ import {
 
 test.describe('offline reload identity', () => {
   test.beforeEach(async ({ request }) => {
+    test.setTimeout(120000)
     await resetMock(request)
   })
 

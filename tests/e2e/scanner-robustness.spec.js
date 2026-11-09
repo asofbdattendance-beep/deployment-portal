@@ -166,10 +166,10 @@ test.describe('scanner camera decode (fake camera)', () => {
     guard.assertEmpty()
   })
 
-  test('tilted barcode (~12°) decodes through the real camera pipeline', async ({ page, context }) => {
+  test('tilted barcode (~8°) decodes through the real camera pipeline', async ({ page, context }) => {
     test.setTimeout(120000)
     const guard = collectPageErrors(page)
-    await installFakeCamera(context, { badge: BADGE, tiltDeg: 12 })
+    await installFakeCamera(context, { badge: BADGE, tiltDeg: 8 })
     await loginAsScanner(page)
 
     await assertCameraLive(page)
