@@ -47,7 +47,7 @@ test.describe('offline reload identity', () => {
     })
 
     await seedOfflineIdentity(page, {
-      badge: 'FB5971GA3001',
+      badge: 'FB5971GA0301',
       name: 'RAM PRASAD',
       centre: 'DELHI',
       deptId: 'dept-1',
@@ -63,7 +63,7 @@ test.describe('offline reload identity', () => {
 
     // The scanner is alive: scan → the unreachable lookup offers Mark IN.
     const manual = page.getByPlaceholder('Manual FB/VS badge')
-    await manual.fill('FB5971GA3001')
+    await manual.fill('FB5971GA0301')
     await manual.press('Enter')
     const dialog = page.getByRole('dialog')
     await expect(dialog.getByRole('button', { name: 'Mark IN', exact: true })).toBeVisible()
@@ -77,7 +77,7 @@ test.describe('offline reload identity', () => {
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
 
     const queued = await queueRows(page)
-    expect(queued.find((r) => r.badge === 'FB5971GA3001' && r.action === 'IN')).toBeTruthy()
+    expect(queued.find((r) => r.badge === 'FB5971GA0301' && r.action === 'IN')).toBeTruthy()
 
     // Nothing the shell, the chunks, or the scan engine needed failed to
     // load — only the (expected, offline) Supabase attempts may fail.

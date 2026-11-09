@@ -43,10 +43,10 @@ test.describe('queue matrix', () => {
     await seedMock(page.request, { scan_in: 'hang' })
     await putRawRows(
       page,
-      Array.from({ length: MAX + 1 }, (_, i) => liveRow({ id: `fill-${i}`, badge: 'FB5971GA1001' })),
+      Array.from({ length: MAX + 1 }, (_, i) => liveRow({ id: `fill-${i}`, badge: 'FB5971GA0001' })),
     )
     await context.setOffline(true)
-    await manualScan(page, 'FB5971GA1002')
+    await manualScan(page, 'FB5971GA0002')
     // Explicit choice: the unreachable lookup offers Mark IN; the tap
     // attempts the write, which fails offline and hits the full queue.
     await expect(page.getByRole('dialog').getByRole('button', { name: 'Mark IN', exact: true })).toBeVisible()
@@ -76,21 +76,21 @@ test.describe('queue matrix', () => {
         .then(() => page.getByPlaceholder('Manual FB/VS badge').press('Enter'))
     const choose = (name) =>
       expect(page.getByRole('dialog').getByRole('button', { name, exact: true })).toBeVisible().then(() => page.getByRole('dialog').getByRole('button', { name, exact: true }).click())
-    await tap('FB5971GA1003')
+    await tap('FB5971GA0003')
     await choose('Mark IN')
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
-    await tap('FB5971GA1003')
+    await tap('FB5971GA0003')
     await choose('Mark OUT')
     // Tap 3 must land AFTER tap 2 completes (else the busy flag swallows it
     // silently).
     await expect
-      .poll(async () => (await queueRows(page)).filter((r) => r.badge === 'FB5971GA1003').length)
+      .poll(async () => (await queueRows(page)).filter((r) => r.badge === 'FB5971GA0003').length)
       .toBe(2)
-    await tap('FB5971GA1003')
+    await tap('FB5971GA0003')
     const dialog = page.getByRole('dialog')
     await expect(dialog.getByRole('button', { name: 'Mark IN', exact: true })).toBeVisible()
     await expect(dialog.getByRole('button', { name: 'Mark OUT', exact: true })).toHaveCount(0)
-    const rows = (await queueRows(page)).filter((r) => r.badge === 'FB5971GA1003')
+    const rows = (await queueRows(page)).filter((r) => r.badge === 'FB5971GA0003')
     expect(rows).toHaveLength(2)
     expect(rows.map((r) => r.action).sort()).toEqual(['IN', 'OUT'])
     guard.assertEmpty()
@@ -104,7 +104,7 @@ test.describe('queue matrix', () => {
     const guard = collectPageErrors(page)
     await seedMock(request, { get_scan_state: OLD_OPEN })
     await loginAsScanner(page)
-    await manualScan(page, 'FB5971GA1004')
+    await manualScan(page, 'FB5971GA0004')
     await expect(page.getByText('Forgot OUT?')).toBeVisible()
 
     await context.setOffline(true)
@@ -112,7 +112,7 @@ test.describe('queue matrix', () => {
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
 
     const rows = await queueRows(page)
-    const row = rows.find((r) => r.badge === 'FB5971GA1004')
+    const row = rows.find((r) => r.badge === 'FB5971GA0004')
     expect(row).toMatchObject({ action: 'OUT', open_id: 'open-9' })
     // Nothing reached the server while offline — the write survived locally.
     const calls = await mockCalls(request)
@@ -124,7 +124,7 @@ test.describe('queue matrix', () => {
     const guard = collectPageErrors(page)
     await seedMock(request, { get_scan_state: OLD_OPEN })
     await loginAsScanner(page)
-    await manualScan(page, 'FB5971GA1005')
+    await manualScan(page, 'FB5971GA0005')
     await expect(page.getByText('Forgot OUT?')).toBeVisible()
     await context.setOffline(true)
     await page.getByRole('button', { name: 'Close OUT then IN' }).click()
@@ -135,10 +135,10 @@ test.describe('queue matrix', () => {
       request,
       (c) => c.rpc === 'scan_out' && c.params?.p_open_id === 'open-9',
     )
-    expect(sent.params.p_badge).toBe('FB5971GA1005')
+    expect(sent.params.p_badge).toBe('FB5971GA0005')
     expect(typeof sent.params.p_ts).toBe('string')
     await expect
-      .poll(async () => (await queueRows(page)).filter((r) => r.badge === 'FB5971GA1005').length, {
+      .poll(async () => (await queueRows(page)).filter((r) => r.badge === 'FB5971GA0005').length, {
         timeout: 25000,
       })
       .toBe(0)
@@ -153,24 +153,24 @@ test.describe('queue matrix', () => {
     const guard = collectPageErrors(page)
     await loginAsScanner(page)
     await context.setOffline(true)
-    await manualScan(page, 'FB5971GA1901')
+    await manualScan(page, 'FB5971GA0901')
     await page.getByRole('dialog').getByRole('button', { name: 'Mark IN', exact: true }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
-    await manualScan(page, 'FB5971GA1902')
+    await manualScan(page, 'FB5971GA0902')
     await page.getByRole('dialog').getByRole('button', { name: 'Mark IN', exact: true }).click()
     await expect.poll(async () => (await queueRows(page)).length).toBe(2)
 
     await seedMock(request, {
-      scan_in_error_for: { FB5971GA1901: { message: 'Not authorized to scan', code: 'AUTH' } },
+      scan_in_error_for: { FB5971GA0901: { message: 'Not authorized to scan', code: 'AUTH' } },
     })
     await context.setOffline(false)
-    await waitForRpc(request, (c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA1902')
+    await waitForRpc(request, (c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA0902')
 
     const rows = await queueRows(page)
-    const poison = rows.find((r) => r.badge === 'FB5971GA1901')
+    const poison = rows.find((r) => r.badge === 'FB5971GA0901')
     expect(poison?.failed).toBe(true)
     expect(poison?.failReason).toContain('Not authorized')
-    expect(rows.find((r) => r.badge === 'FB5971GA1902')).toBeUndefined()
+    expect(rows.find((r) => r.badge === 'FB5971GA0902')).toBeUndefined()
     guard.assertEmpty()
   })
 
@@ -178,8 +178,8 @@ test.describe('queue matrix', () => {
     const guard = collectPageErrors(page)
     await loginAsScanner(page)
     await putRawRows(page, [
-      liveRow({ id: 'bad-ts-e2e', badge: 'FB5971GA1601', ts: 'not-a-date' }),
-      liveRow({ id: 'good-ts-e2e', badge: 'FB5971GA1602' }),
+      liveRow({ id: 'bad-ts-e2e', badge: 'FB5971GA0601', ts: 'not-a-date' }),
+      liveRow({ id: 'good-ts-e2e', badge: 'FB5971GA0602' }),
     ])
     // No toggles: the scheduled drain fires on its own. End-state only —
     // whichever pass runs first converges to the same rows.
@@ -192,7 +192,7 @@ test.describe('queue matrix', () => {
     expect(rows.find((r) => r.id === 'bad-ts-e2e')?.failReason).toBe('bad-timestamp')
     expect(rows.find((r) => r.id === 'good-ts-e2e')).toBeUndefined()
     const calls = await mockCalls(request)
-    expect(calls.some((c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA1602')).toBe(true)
+    expect(calls.some((c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA0602')).toBe(true)
     guard.assertEmpty()
   })
 
@@ -204,32 +204,32 @@ test.describe('queue matrix', () => {
     const guard = collectPageErrors(page)
     await seedMock(request, { get_scan_state: OLD_OPEN })
     await loginAsScanner(page)
-    await manualScan(page, 'FB5971GA1701')
+    await manualScan(page, 'FB5971GA0701')
     await expect(page.getByText('Forgot OUT?')).toBeVisible()
     await context.setOffline(true)
     await page.getByRole('button', { name: 'Close OUT then IN' }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
-    await manualScan(page, 'FB5971GA1702')
+    await manualScan(page, 'FB5971GA0702')
     await page.getByRole('dialog').getByRole('button', { name: 'Mark IN', exact: true }).click()
     await expect.poll(async () => (await queueRows(page)).length).toBe(2)
 
     await seedMock(request, {
       scan_out_error_for: {
-        FB5971GA1701: { message: 'Session does not match badge/schedule', code: 'MISMATCH' },
+        FB5971GA0701: { message: 'Session does not match badge/schedule', code: 'MISMATCH' },
       },
     })
     await context.setOffline(false)
     // The IN behind it still syncs — one dead row never wedges the queue.
-    await waitForRpc(request, (c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA1702')
+    await waitForRpc(request, (c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA0702')
     await expect
-      .poll(async () => (await queueRows(page)).filter((r) => r.badge === 'FB5971GA1702').length, {
+      .poll(async () => (await queueRows(page)).filter((r) => r.badge === 'FB5971GA0702').length, {
         timeout: 25000,
       })
       .toBe(0)
     // T9/C3: an OUT orphaned by a stale p_open_id is QUARANTINED with a
     // reason — visible for manual recovery — never silently dropped.
     const rows = await queueRows(page)
-    const orphan = rows.find((r) => r.badge === 'FB5971GA1701')
+    const orphan = rows.find((r) => r.badge === 'FB5971GA0701')
     expect(orphan).toBeTruthy()
     expect(orphan.failed).toBe(true)
     expect(orphan.failReason).toContain('Session does not match')
@@ -240,19 +240,19 @@ test.describe('queue matrix', () => {
     const guard = collectPageErrors(page)
     await loginAsScanner(page)
     await context.setOffline(true)
-    await manualScan(page, 'FB5971GA1801')
+    await manualScan(page, 'FB5971GA0801')
     // The choice popup carries the manual flag through to the commit, so the
     // queued row (and the drained scan_in) keeps its audit mark.
     await page.getByRole('dialog').getByRole('button', { name: 'Mark IN', exact: true }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
 
-    const row = (await queueRows(page)).find((r) => r.badge === 'FB5971GA1801')
+    const row = (await queueRows(page)).find((r) => r.badge === 'FB5971GA0801')
     expect(row?.is_manual).toBe(true)
 
     await context.setOffline(false)
     const sent = await waitForRpc(
       request,
-      (c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA1801',
+      (c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA0801',
     )
     expect(sent.params.p_is_manual).toBe(true)
     guard.assertEmpty()
@@ -262,7 +262,7 @@ test.describe('queue matrix', () => {
     const guard = collectPageErrors(page)
     await loginAsScanner(page)
     await putRawRows(page, [
-      liveRow({ id: 'doomed-1', badge: 'FB5971GA1903', failed: true, status: 'failed', failReason: 'x' }),
+      liveRow({ id: 'doomed-1', badge: 'FB5971GA0903', failed: true, status: 'failed', failReason: 'x' }),
     ])
     await page.reload()
     await expect(page.getByPlaceholder('Manual FB/VS badge')).toBeVisible()
@@ -275,10 +275,10 @@ test.describe('queue matrix', () => {
     const guard = collectPageErrors(page)
     await loginAsScanner(page)
     await context.setOffline(true)
-    await manualScan(page, 'FB5971GA1101')
+    await manualScan(page, 'FB5971GA0101')
     await page.getByRole('dialog').getByRole('button', { name: 'Mark IN', exact: true }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
-    const before = (await queueRows(page)).find((r) => r.badge === 'FB5971GA1101')
+    const before = (await queueRows(page)).find((r) => r.badge === 'FB5971GA0101')
     expect(before).toBeTruthy()
 
     // A reload needs the network for the document itself, so come back
@@ -300,7 +300,7 @@ test.describe('queue matrix', () => {
     await loginAsScanner(page)
     await expect(page.getByText('Online', { exact: true }).first()).toBeVisible()
     await context.setOffline(true)
-    await manualScan(page, 'FB5971GA1201')
+    await manualScan(page, 'FB5971GA0201')
     await page.getByRole('dialog').getByRole('button', { name: 'Mark IN', exact: true }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
     // A scan forces the state flush that re-renders the header pill.
@@ -316,23 +316,23 @@ test.describe('queue matrix', () => {
     const guard = collectPageErrors(page)
     await loginAsScanner(page)
     await context.setOffline(true)
-    await manualScan(page, 'FB5971GA1301')
+    await manualScan(page, 'FB5971GA0301')
     await page.getByRole('dialog').getByRole('button', { name: 'Mark IN', exact: true }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
 
     // The server already applied this scan (commit-then-lost-response): the
     // replay answers Already IN, and the row must drop, not stick.
     await seedMock(request, {
-      scan_in_error_for: { FB5971GA1301: { message: 'Already IN — session open', code: 'DUP' } },
+      scan_in_error_for: { FB5971GA0301: { message: 'Already IN — session open', code: 'DUP' } },
       // C6 (offlineQueue.js:546-581): an uncertain IN answered 'Already IN'
       // first resolves the real open session and replays the OUT — which is
       // what a real server (that already applied the IN) would return.
-      get_open_session: { id: 'sess-m12', badge: 'FB5971GA1301' },
+      get_open_session: { id: 'sess-m12', badge: 'FB5971GA0301' },
     })
     await context.setOffline(false)
-    await waitForRpc(request, (c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA1301')
+    await waitForRpc(request, (c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA0301')
     await expect
-      .poll(async () => (await queueRows(page)).filter((r) => r.badge === 'FB5971GA1301').length, {
+      .poll(async () => (await queueRows(page)).filter((r) => r.badge === 'FB5971GA0301').length, {
         timeout: 25000,
       })
       .toBe(0)

@@ -1333,7 +1333,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '0.6rem' }}><CameraOff size={28} style={{ color: '#b91c1c' }} /></div>
       <div style={{ fontWeight: 700, marginBottom: '0.4rem' }}>Camera error</div>
       <div style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '0.9rem' }}>{errorMsg}</div>
-      <button onClick={() => startScanner({ reclaim: true })} className="btn btn-primary"><RefreshCw size={14} /> Retry</button>
+      <button onClick={() => startScanner({ reclaim: true })} className="btn btn-primary" style={{ minHeight: 44, minWidth: 44, touchAction: 'manipulation' }}><RefreshCw size={14} /> Retry</button>
     </div>
   )
 

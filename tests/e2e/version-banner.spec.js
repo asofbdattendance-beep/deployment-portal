@@ -19,7 +19,7 @@ test.beforeEach(async ({ request }) => {
 
 test('current database: no banner at all', async ({ page, request }) => {
   const errors = collectPageErrors(page)
-  await seedMock(request, { portal_app_version: 'v79' })
+  await seedMock(request, { portal_app_version: 'v81' })
   await loginAsScanner(page)
 
   await expect(page.locator('.db-version-banner')).toHaveCount(0)
@@ -36,7 +36,7 @@ test('behind database: banner names the version and the floor', async ({ page, r
   const banner = page.locator('.db-version-banner')
   await expect(banner).toBeVisible()
   await expect(banner).toContainText('v45')
-  await expect(banner).toContainText('v79+')
+  await expect(banner).toContainText('v81+')
   errors.assertEmpty()
 })
 

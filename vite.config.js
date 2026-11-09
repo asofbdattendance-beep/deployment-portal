@@ -54,6 +54,14 @@ export default defineConfig(({ command, mode }) => {
       cert: fs.readFileSync(path.join(certDir, 'local-cert.pem')),
     } : undefined,
   },
+  preview: {
+    host: true,
+    port: 5175,
+    https: useHttps && env.DISABLE_TLS !== '1' ? {
+      key: fs.readFileSync(path.join(certDir, 'local-key.pem')),
+      cert: fs.readFileSync(path.join(certDir, 'local-cert.pem')),
+    } : undefined,
+  },
   test: {
     environment: 'node',
     // The Playwright specs under tests/e2e are run by `npm run test:e2e`.

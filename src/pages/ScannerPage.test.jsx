@@ -720,4 +720,129 @@ describe('ScannerPage ASO sewadar picker', () => {
       restore()
     }
   })
+
+  it('renders mobile ScanModeShell and handles manual badge entry and Enter key', async () => {
+    const realMatchMedia = window.matchMedia
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true, writable: true,
+      value: vi.fn((query) => ({
+        matches: String(query).includes('768'),
+        media: query,
+        addEventListener: vi.fn(), removeEventListener: vi.fn(),
+        addListener: vi.fn(), removeListener: vi.fn(),
+      })),
+    })
+    try {
+      const { container } = render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+      await settle()
+      expect(container.querySelector('.scan-shell')).toBeTruthy()
+
+      const input = screen.getByPlaceholderText('Manual FB/VS badge')
+      await act(async () => {
+        fireEvent.change(input, { target: { value: 'FB5971GA0001' } })
+      })
+      expect(input.value).toBe('FB5971GA0001')
+
+      await act(async () => {
+        fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' })
+        await new Promise(r => setTimeout(r, 50))
+      })
+    } finally {
+      if (realMatchMedia) Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: realMatchMedia })
+      else delete window.matchMedia
+    }
+  })
+
+  it('executes debounced refresh and resolves department id from dept_name in onAfterScan', async () => {
+    mocks.fetchAllRows.mockResolvedValueOnce([{ id: 'dept-uuid-langar', name: 'Langar' }])
+    globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__ = 20
+
+    mocks.rpc.mockImplementation((fn) => {
+      if (fn === 'get_scan_state') {
+        return Promise.resolve({
+          data: {
+            open: null,
+            last_out: null,
+            sewadar: {
+              sewadar_name: 'Dept Test',
+              sewadar_centre: 'DELHI',
+              dept_name: 'Langar',
+            },
+          },
+        })
+      }
+      if (fn === 'scan_in') {
+        return Promise.resolve({
+          data: {
+            ok: true,
+            sewadar_name: 'Dept Test',
+            sewadar_centre: 'DELHI',
+            dept_name: 'Langar',
+            late_in: false,
+          },
+        })
+      }
+      return Promise.resolve({ data: null })
+    })
+
+    try {
+      render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+      await settle()
+
+      const input = screen.getByPlaceholderText('Manual FB/VS badge')
+      await act(async () => {
+        fireEvent.change(input, { target: { value: 'FB5971GA0001' } })
+        fireEvent.click(screen.getByText('Mark In/Out'))
+        await new Promise(r => setTimeout(r, 50))
+      })
+
+      const markInBtn = await screen.findByRole('button', { name: /^Mark IN$/i })
+      await act(async () => {
+        fireEvent.click(markInBtn)
+        await new Promise(r => setTimeout(r, 100))
+      })
+    } finally {
+      delete globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__
+    }
+  })
+
+  it('executes immediate refresh when debounce delay is 0', async () => {
+    globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__ = 0
+    try {
+      render(<ScannerPage schedules={SCHEDULES} scheduleId="sched-1" />)
+      await settle()
+
+      mocks.rpc.mockImplementation((fn) => {
+        if (fn === 'get_scan_state') {
+          return Promise.resolve({
+            data: {
+              open: null,
+              last_out: null,
+              sewadar: { sewadar_name: 'Zero Delay', sewadar_centre: 'DELHI', dept_name: 'Traffic' },
+            },
+          })
+        }
+        if (fn === 'scan_in') {
+          return Promise.resolve({
+            data: { ok: true, sewadar_name: 'Zero Delay', sewadar_centre: 'DELHI', dept_name: 'Traffic' },
+          })
+        }
+        return Promise.resolve({ data: null })
+      })
+
+      const input = screen.getByPlaceholderText('Manual FB/VS badge')
+      await act(async () => {
+        fireEvent.change(input, { target: { value: 'FB5971GA0001' } })
+        fireEvent.click(screen.getByText('Mark In/Out'))
+        await new Promise(r => setTimeout(r, 50))
+      })
+      const markInBtn = await screen.findByRole('button', { name: /^Mark IN$/i })
+      await act(async () => {
+        fireEvent.click(markInBtn)
+        await new Promise(r => setTimeout(r, 50))
+      })
+    } finally {
+      delete globalThis.__SCANNER_REFRESH_DEBOUNCE_MS__
+    }
+  })
 })

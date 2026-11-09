@@ -42,7 +42,7 @@ test.describe('offline ladder', () => {
   }) => {
     const guard = collectPageErrors(page)
     await loginAsScanner(page)
-    await manualScan(page, 'FB5971GA4002')
+    await manualScan(page, 'FB5971GA0002')
     const dialog = page.getByRole('dialog')
     await expect(dialog.getByRole('button', { name: 'Mark IN', exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: 'Mark IN', exact: true }).click()
@@ -50,7 +50,7 @@ test.describe('offline ladder', () => {
     await expect(dialog.getByText('RAM')).toBeVisible()
     await expect(dialog.getByText('DELHI')).toBeVisible()
     await expect(dialog.getByText('MEDICAL', { exact: true })).toBeVisible()
-    const sent = await waitForRpc(request, (c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA4002')
+    const sent = await waitForRpc(request, (c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA0002')
     expect(typeof sent.params.p_nonce).toBe('string')
     guard.assertEmpty()
   })
@@ -71,7 +71,7 @@ test.describe('offline ladder', () => {
       },
     })
     await loginAsScanner(page)
-    await manualScan(page, 'FB5971GA4003')
+    await manualScan(page, 'FB5971GA0003')
     const dialog = page.getByRole('dialog')
     await expect(dialog.getByRole('button', { name: 'Mark OUT', exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: 'Mark OUT', exact: true }).click()
@@ -80,7 +80,7 @@ test.describe('offline ladder', () => {
       request,
       (c) => c.rpc === 'scan_out' && c.params?.p_open_id === 'open-9',
     )
-    expect(sent.params.p_badge).toBe('FB5971GA4003')
+    expect(sent.params.p_badge).toBe('FB5971GA0003')
     guard.assertEmpty()
   })
 
@@ -92,14 +92,14 @@ test.describe('offline ladder', () => {
     const guard = collectPageErrors(page)
     await loginAsScanner(page)
     await context.setOffline(true)
-    await manualScan(page, 'FB5971GA4004')
+    await manualScan(page, 'FB5971GA0004')
     const dialog = page.getByRole('dialog')
     await expect(dialog.getByRole('button', { name: 'Mark IN', exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: 'Mark IN', exact: true }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
 
     const queued = await queueRows(page)
-    const row = queued.find((r) => r.badge === 'FB5971GA4004')
+    const row = queued.find((r) => r.badge === 'FB5971GA0004')
     expect(row).toMatchObject({ action: 'IN', owner: 'user-scanner-1', synced: false })
     expect(row.attempts || 0).toBe(0)
     expect(typeof row.id).toBe('string')
@@ -130,17 +130,17 @@ test.describe('offline ladder', () => {
     await loginAsScanner(page)
     await context.setOffline(true)
     const manual = page.getByPlaceholder('Manual FB/VS badge')
-    await manual.fill('FB5971GA4005')
+    await manual.fill('FB5971GA0005')
     await manual.press('Enter')
     // A second scan while the decision popup is open is dropped, not queued.
-    await manual.fill('FB5971GA4005')
+    await manual.fill('FB5971GA0005')
     await manual.press('Enter')
     const dialog = page.getByRole('dialog')
     await expect(dialog.getByRole('button', { name: 'Mark IN', exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: 'Mark IN', exact: true }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
     await expect
-      .poll(async () => (await queueRows(page)).filter((r) => r.badge === 'FB5971GA4005').length, {
+      .poll(async () => (await queueRows(page)).filter((r) => r.badge === 'FB5971GA0005').length, {
         timeout: 10000,
       })
       .toBe(1)
@@ -152,13 +152,13 @@ test.describe('offline ladder', () => {
     const guard = collectPageErrors(page)
     await loginAsScanner(page)
     await context.setOffline(true)
-    await manualScan(page, 'FB5971GA4006')
+    await manualScan(page, 'FB5971GA0006')
     let dialog = page.getByRole('dialog')
     await expect(dialog.getByRole('button', { name: 'Mark IN', exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: 'Mark IN', exact: true }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
     // The queued popup auto-dismisses (~2.5s); the pending IN then offers OUT.
-    await manualScan(page, 'FB5971GA4006')
+    await manualScan(page, 'FB5971GA0006')
     dialog = page.getByRole('dialog')
     await expect(dialog.getByRole('button', { name: 'Mark OUT', exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: 'Mark OUT', exact: true }).click()
@@ -195,11 +195,11 @@ test.describe('offline ladder', () => {
     await loginAsScanner(page)
     await seedMock(request, {
       scan_in_error_for: {
-        FB5971GA4011: { message: 'Not authorized to scan', code: '42501' },
+        FB5971GA0011: { message: 'Not authorized to scan', code: '42501' },
       },
     })
     await context.setOffline(true)
-    for (const badge of ['FB5971GA4011', 'FB5971GA4012']) {
+    for (const badge of ['FB5971GA0011', 'FB5971GA0012']) {
       await manualScan(page, badge)
       const dialog = page.getByRole('dialog')
       await expect(dialog.getByRole('button', { name: 'Mark IN', exact: true })).toBeVisible()
@@ -213,7 +213,7 @@ test.describe('offline ladder', () => {
       .poll(
         async () =>
           (await mockCalls(request)).filter(
-            (c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA4012',
+            (c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA0012',
           ).length,
         { timeout: 25000 },
       )
@@ -223,8 +223,8 @@ test.describe('offline ladder', () => {
     // assert the recovery bar's exact pill).
     await expect(page.getByText('1 failed', { exact: true })).toBeVisible({ timeout: 25000 })
     const rows = await queueRows(page)
-    expect(rows.find((r) => r.badge === 'FB5971GA4011')?.failed).toBe(true)
-    expect(rows.find((r) => r.badge === 'FB5971GA4012')).toBeUndefined()
+    expect(rows.find((r) => r.badge === 'FB5971GA0011')?.failed).toBe(true)
+    expect(rows.find((r) => r.badge === 'FB5971GA0012')).toBeUndefined()
     guard.assertEmpty()
   })
 
@@ -238,13 +238,13 @@ test.describe('offline ladder', () => {
     await loginAsScanner(page)
     await seedMock(request, {
       scan_in_error_for: {
-        FB5971GA4021: { message: 'Not authorized to scan', code: '42501' },
-        FB5971GA4022: { message: 'Not authorized to scan', code: '42501' },
-        FB5971GA4023: { message: 'Not authorized to scan', code: '42501' },
+        FB5971GA0021: { message: 'Not authorized to scan', code: '42501' },
+        FB5971GA0022: { message: 'Not authorized to scan', code: '42501' },
+        FB5971GA0023: { message: 'Not authorized to scan', code: '42501' },
       },
     })
     await context.setOffline(true)
-    for (const badge of ['FB5971GA4021', 'FB5971GA4022', 'FB5971GA4023', 'FB5971GA4024']) {
+    for (const badge of ['FB5971GA0021', 'FB5971GA0022', 'FB5971GA0023', 'FB5971GA0024']) {
       await manualScan(page, badge)
       const dialog = page.getByRole('dialog')
       await expect(dialog.getByRole('button', { name: 'Mark IN', exact: true })).toBeVisible()
@@ -260,13 +260,13 @@ test.describe('offline ladder', () => {
         timeout: 25000,
       })
       .toBe(3)
-    const spared = (await queueRows(page)).find((r) => r.badge === 'FB5971GA4024')
+    const spared = (await queueRows(page)).find((r) => r.badge === 'FB5971GA0024')
     expect(spared.failed).not.toBe(true)
     await expect
       .poll(
         async () =>
           (await mockCalls(request)).filter(
-            (c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA4024',
+            (c) => c.rpc === 'scan_in' && c.params?.p_badge === 'FB5971GA0024',
           ).length,
         { timeout: 40000 },
       )
@@ -282,7 +282,7 @@ test.describe('offline ladder', () => {
     await loginAsScanner(page)
     await context.setOffline(true)
     for (let i = 0; i < 5; i++) {
-      const badge = `FB5971GA403${i}`
+      const badge = `FB5971GA003${i}`
       await manualScan(page, badge)
       const dialog = page.getByRole('dialog')
       await expect(dialog.getByRole('button', { name: 'Mark IN', exact: true })).toBeVisible()
@@ -309,12 +309,12 @@ test.describe('offline ladder', () => {
     const guard = collectPageErrors(page)
     await loginAsScanner(page)
     await context.setOffline(true)
-    await manualScan(page, 'FB5971GA4101')
+    await manualScan(page, 'FB5971GA0101')
     const dialog = page.getByRole('dialog')
     await expect(dialog.getByRole('button', { name: 'Mark IN', exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: 'Mark IN', exact: true }).click()
     await expect(page.getByText('Queued offline', { exact: true })).toBeVisible()
-    const row = (await queueRows(page)).find((r) => r.badge === 'FB5971GA4101')
+    const row = (await queueRows(page)).find((r) => r.badge === 'FB5971GA0101')
     expect(row).toBeTruthy()
 
     // Reconnect, then open a second tab on the same origin: both engines
