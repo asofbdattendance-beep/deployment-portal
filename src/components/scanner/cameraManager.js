@@ -28,17 +28,35 @@
 
 /* ─── Platform detection ────────────────────────────────────────────────────── */
 
-const UA = typeof navigator !== 'undefined' ? navigator.userAgent : ''
-
-export const platform = {
-  isIOS: /iPad|iPhone|iPod/.test(UA),
-  isSafari: /^((?!chrome|android).)*safari/i.test(UA),
-  isChrome: /chrome|chromium|crios/i.test(UA) && !/edge|edg/i.test(UA),
-  isFirefox: /firefox|fxios/i.test(UA),
-  isSamsung: /samsungbrowser/i.test(UA),
-  isAndroid: /android/i.test(UA),
-  isMobile: /android|iphone|ipad|ipod|mobile/i.test(UA),
+/**
+ * Classify the browser from its UA. Pure so it can be tested per device.
+ *
+ * iPadOS 13+ Safari defaults to "Request Desktop Website" and sends a plain
+ * Macintosh UA, so a UA-only check classes every modern iPad as a Mac — it
+ * then gets the wrong permission hint. A Mac never reports touch points, an
+ * iPad does, which is the standard way to tell them apart.
+ *
+ * @param {string} ua
+ * @param {number} [maxTouchPoints]
+ */
+export function detectPlatform(ua, maxTouchPoints = 0) {
+  const s = String(ua || '')
+  const isIPadDesktop = /Macintosh/.test(s) && Number(maxTouchPoints) > 1
+  const isIOS = /iPad|iPhone|iPod/.test(s) || isIPadDesktop
+  return {
+    isIOS,
+    isSafari: /^((?!chrome|android).)*safari/i.test(s),
+    isChrome: /chrome|chromium|crios/i.test(s) && !/edge|edg/i.test(s),
+    isFirefox: /firefox|fxios/i.test(s),
+    isSamsung: /samsungbrowser/i.test(s),
+    isAndroid: /android/i.test(s),
+    isMobile: isIOS || /android|iphone|ipad|ipod|mobile/i.test(s),
+  }
 }
+
+export const platform = typeof navigator !== 'undefined'
+  ? detectPlatform(navigator.userAgent, navigator.maxTouchPoints)
+  : detectPlatform('')
 
 // ─── Resolution Chain ─────────────────────────────────────────────────────────
 // Progressive fallback: start high, drop down if the camera can't handle it.
@@ -143,9 +161,13 @@ export async function getRearCameraList() {
     const cams = devices.filter(d => d.kind === 'videoinput')
     if (!cams.length) return []
 
-    // If labels are not yet populated (before permission), return video devices
+    // No labels yet (before permission). We cannot tell front from back, and
+    // Firefox lists real deviceIds here with the selfie camera often first, so
+    // pinning cams[0] by exact id opened the FRONT camera. Return nothing and
+    // let the caller fall back to facingMode: 'environment', which every
+    // browser resolves to the rear camera.
     const labeled = cams.filter(d => d.label)
-    if (!labeled.length) return cams.map((d, i) => ({ ...d, score: 100 - i }))
+    if (!labeled.length) return []
 
     const rearCams = labeled.filter(d => REAR_LABEL.test(d.label))
     if (!rearCams.length) return []
@@ -198,6 +220,17 @@ export async function pickRearDeviceId(opts = {}) {
  *
  * @returns {boolean} true if an in-flight attempt was abandoned
  */
+/**
+ * True only for OUR cancellation (cancelPendingOpen). A getUserMedia
+ * AbortError is a real hardware failure (Firefox "Starting videoinput
+ * failed", a camera grabbed by another app) and must reach the user as an
+ * error with Retry — matching on `name` alone hid it behind an endless spinner.
+ * @param {unknown} err
+ */
+export function isAbandonedOpen(err) {
+  return !!(err && typeof err === 'object' && err.abandoned === true)
+}
+
 export function cancelPendingOpen() {
   if (!_openingPromise) return false
   _openingPromise = null
@@ -746,6 +779,7 @@ export function openCamera(opts = {}) {
         safeCall(() => res.stream?.getTracks?.().forEach(t => t.stop()))
         const err = new Error('Camera open was abandoned')
         err.name = 'AbortError'
+        err.abandoned = true
         throw err
       }
       _active = {
@@ -763,6 +797,14 @@ export function openCamera(opts = {}) {
 }
 
 async function openCameraInner({ startIndex = 0, debug = false, preferredDeviceId = null } = {}) {
+  // No camera API at all: plain-HTTP page (getUserMedia exists only in a
+  // secure context), or an old in-app WebView. Fail once with a clear name
+  // instead of walking the whole resolution chain on a TypeError.
+  if (typeof navigator === 'undefined' || typeof navigator.mediaDevices?.getUserMedia !== 'function') {
+    const err = new Error('Camera API unavailable in this browser')
+    err.name = 'NotSupportedError'
+    throw err
+  }
   let deviceId = await pickRearDeviceId({ preferredDeviceId })
   const chain = RESOLUTION_CHAIN.slice(Math.max(0, startIndex))
   let lastError = null

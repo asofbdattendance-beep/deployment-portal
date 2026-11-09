@@ -21,18 +21,36 @@ export function ToastProvider({ children }) {
     }
   }, [])
 
+  // Messages currently on screen, keyed by type + text. A caller that fires
+  // the same toast many times a second (the camera re-offering a badge while
+  // a save is in flight) shows ONE toast, not a stack that buries the screen.
+  // Maps key → the id of the copy currently showing. Releasing a key checks
+  // the id, so a closed toast's stale timer can never free a NEWER copy.
+  const visibleRef = useRef(new Map())
+  const release = (key, id) => {
+    if (visibleRef.current.get(key) === id) visibleRef.current.delete(key)
+  }
+
   const addToast = useCallback((message, type = 'info', duration = 3000) => {
+    const key = `${type}\u0000${message}`
+    if (visibleRef.current.has(key)) return
     const id = ++toastSeq
-    setToasts(prev => [...prev, { id, message, type }])
+    visibleRef.current.set(key, id)
+    setToasts(prev => [...prev, { id, message, type, key }])
     const timer = setTimeout(() => {
       timersRef.current.delete(timer)
+      release(key, id)
       setToasts(prev => prev.filter(t => t.id !== id))
     }, duration)
     timersRef.current.add(timer)
   }, [])
 
   const removeToast = useCallback((id) => {
-    setToasts(prev => prev.filter(t => t.id !== id))
+    setToasts(prev => {
+      const gone = prev.find(t => t.id === id)
+      if (gone) release(gone.key, id)
+      return prev.filter(t => t.id !== id)
+    })
   }, [])
 
   // Stable identity — the toast object must not change between renders,

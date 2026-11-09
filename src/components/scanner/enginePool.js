@@ -1,8 +1,12 @@
 /**
  * enginePool.js - detector-engine pool for the barcode scanner.
  *
- * Pure factory, no React: Native BarcodeDetector (Chrome / Edge / Android)
- * first, @zxing/library (universal, fully offline) as the armed fallback.
+ * Pure factory, no React. Engine order:
+ *   1. Native BarcodeDetector (Chrome / Edge on Android, macOS, ChromeOS).
+ *   2. ZXing-C++ via WebAssembly (zxingCppEngine.js) — every modern browser,
+ *      offline, ~6x faster than the JS port and better on rotated badges.
+ *   3. @zxing/library (pure JS) — last resort for a browser or WebView with
+ *      no usable WebAssembly.
  *
  * The undecaf WASM polyfill was removed on purpose: its module does an
  * absolute CDN import of zbar-wasm, so behind a bundler it can never
@@ -30,6 +34,7 @@
  */
 import { rgbaToGray, rotateGray, SCAN_ROTATIONS } from '../../lib/scannerUtils'
 import { BASE_1D_FORMATS, EXTENDED_1D_FORMATS, HARD_PATH_2D_FORMATS } from '../../lib/deviceCapabilities'
+import { loadZxingCpp, toCppFormats } from './zxingCppEngine'
 
 /**
  * Map our format strings to zx.BarcodeFormat enum members.
@@ -68,6 +73,32 @@ const sameFormats = (a, b) => {
   if (a.length !== b.length) return false
   const set = new Set(a)
   return b.every(f => set.has(f))
+}
+
+// ZXing's "nothing here" outcomes. They are normal empty frames, not failures.
+const ZXING_MISS_KINDS = new Set(['NotFoundException', 'FormatException', 'ChecksumException'])
+
+/**
+ * Is this ZXing throw just an empty frame?
+ *
+ * `e.name` alone is NOT enough: ts-custom-error sets `name` from the class's
+ * constructor name, and the production minifier renames that class (the
+ * built bundle has `NotFoundException` as `e`). Matching on name worked in
+ * tests and silently failed in production, so every empty frame counted as an
+ * engine failure and the pool bounced engines every 3 frames. The library's
+ * static `kind` string is a literal the minifier cannot touch, so check that
+ * first (via getKind() or the constructor), and keep `name` for unminified
+ * builds and hand-made test errors.
+ *
+ * @param {unknown} e
+ * @returns {boolean}
+ */
+export function isZxingMiss(e) {
+  if (!e || typeof e !== 'object') return false
+  let kind
+  try { kind = typeof e.getKind === 'function' ? e.getKind() : undefined } catch { kind = undefined }
+  if (!kind) kind = e.constructor?.kind
+  return ZXING_MISS_KINDS.has(kind) || ZXING_MISS_KINDS.has(e.name)
 }
 
 let _scratchInvCanvas = null
@@ -201,9 +232,11 @@ export function unrotateCornerPoints(points, deg, origW, origH) {
    *   second look never loses a capability the old all-symbologies reader had,
    *   while every normal frame stays 1D-only. Pass a tier's own list to narrow
    *   it.
+ * @param {number} [opts.slowEngineMs=4000] — how long init() waits for the
+ *   zxing-cpp WebAssembly download before scanning with ZXing-JS meanwhile.
  * @param {number} [opts.emptyHandoffAfter=6] — consecutive clean misses from
  *   the active engine before it hands off to the other ready engine.
- * @returns {{init: Function, armFallback: Function, detect: Function,
+ * @returns {{init: Function, armFallback: Function, retryUpgrade: Function, detect: Function,
  *   getActiveId: Function, isReady: Function, fallback: Function,
  *   hardPass: Function}}
  */
@@ -226,10 +259,23 @@ export function createEnginePool(debug, opts = {}) {
 
   const engines = [
     { id: 'Native', ready: false, detector: null, failures: 0, maxFailures: 3, emptyCount: 0 },
+    { id: 'ZXingCpp', ready: false, detector: null, failures: 0, maxFailures: 3, emptyCount: 0 },
     { id: 'ZXing', ready: false, detector: null, failures: 0, maxFailures: 3, emptyCount: 0 },
   ]
+  const indexOf = (id) => engines.findIndex(e => e.id === id)
+  const byId = (id) => engines[indexOf(id)]
   let activeIndex = 0
   let zxingReader = null
+  let cppDecode = null
+
+  // zxing-cpp reader options. Normal frames get the tier's 1D list with the
+  // library's own rotate/invert search (cheap in C++); the hard path widens
+  // to 2D, mirroring the ZXing-JS hint split below.
+  const cppHardList = Array.isArray(opts.hardPathFormats) && opts.hardPathFormats.length
+    ? opts.hardPathFormats
+    : [...formats, ...HARD_PATH_2D_FORMATS]
+  const cppBase = { formats: toCppFormats(formats), tryHarder: true, tryRotate: true, tryInvert: true, maxNumberOfSymbols: 1 }
+  const cppHard = { ...cppBase, formats: toCppFormats(cppHardList), maxNumberOfSymbols: 4 }
 
   const getActive = () => engines[activeIndex]
 
@@ -246,7 +292,11 @@ export function createEnginePool(debug, opts = {}) {
    *   imageData (+ an optional hint Map for the hard path), Native takes a canvas.
    * @returns {Array<{rawValue: string, cornerPoints: Array}>}
    */
-  const runEngine = (engine, { imageData, canvas, zxHints }) => {
+  const runEngine = (engine, { imageData, canvas, zxHints, cppOpts }) => {
+    if (engine.id === 'ZXingCpp') {
+      if (!cppDecode) throw new Error('zxing-cpp not loaded')
+      return cppDecode(imageData, cppOpts || cppBase)
+    }
     if (engine.id === 'ZXing') {
       if (!zxingReader) throw new Error('ZXing reader not loaded')
       const result = zxingReader.decode(imageData, zxHints)
@@ -260,15 +310,16 @@ export function createEnginePool(debug, opts = {}) {
   }
 
   const initNative = async () => {
-    if (!('BarcodeDetector' in window)) return false
+    if (typeof window === 'undefined' || !('BarcodeDetector' in window)) return false
     try {
       const fmts = await window.BarcodeDetector.getSupportedFormats()
       // Never ask native for a format it doesn't support — filter the tier
       // list down to what this build can actually decode.
       const usable = formats.filter(f => fmts.includes(f))
       if (!usable.length) return false
-      engines[0].detector = new window.BarcodeDetector({ formats: usable })
-      engines[0].ready = true
+      const native = byId('Native')
+      native.detector = new window.BarcodeDetector({ formats: usable })
+      native.ready = true
       if (debug) console.log('[Engine] Native BarcodeDetector ready:', usable.join(','))
       return true
     } catch { return false }
@@ -347,7 +398,7 @@ export function createEnginePool(debug, opts = {}) {
           }
         },
       }
-      engines[1].ready = true
+      byId('ZXing').ready = true
       if (debug) console.log('[Engine] ZXing ready')
       return true
     } catch (e) {
@@ -356,9 +407,62 @@ export function createEnginePool(debug, opts = {}) {
     }
   }
 
+  const initCpp = async () => {
+    if (!cppBase.formats.length) return false
+    const decode = await loadZxingCpp({ debug })
+    if (!decode) return false
+    cppDecode = decode
+    const cpp = byId('ZXingCpp')
+    cpp.ready = true
+    cpp.failures = 0
+    cpp.emptyCount = 0
+    // Engine preference is Native → zxing-cpp → ZXing-JS. If the download
+    // landed late (init gave up waiting and the pool is scanning on ZXing-JS,
+    // or nothing is ready yet), take over now instead of waiting for a run of
+    // misses. Never displace a working native detector.
+    const active = getActive()
+    if (!active.ready || active.id === 'ZXing') {
+      activeIndex = indexOf('ZXingCpp')
+      if (debug) console.log('[Engine] zxing-cpp ready — promoted over', active.id)
+    } else if (debug) {
+      console.log('[Engine] zxing-cpp ready')
+    }
+    return true
+  }
+
+  const loaders = { Native: initNative, ZXingCpp: initCpp, ZXing: initZXing }
+
+  // Engines whose load is in flight, so init() and armFallback() never load
+  // the same engine twice in parallel.
+  const loading = new Map()
+  const load = (id) => {
+    if (byId(id).ready) return Promise.resolve(true)
+    if (!loading.has(id)) {
+      loading.set(id, loaders[id]().catch(() => false).finally(() => loading.delete(id)))
+    }
+    return loading.get(id)
+  }
+
+  // The zxing-cpp .wasm (~0.9 MB) is the one engine that can need the
+  // network: the first visit before the service worker has cached it, on a
+  // captive portal or 2G line where the fetch can stall with no error at all.
+  // init() must not wait on that forever — ZXing-JS is already in the bundle
+  // and can scan today. The download keeps running in the background and the
+  // engine joins the pool (via the empty-result handoff) when it lands.
+  const slowEngineMs = Number.isFinite(opts.slowEngineMs) && opts.slowEngineMs > 0
+    ? opts.slowEngineMs
+    : 4000
+  const waitAtMost = (promise, ms) => new Promise(resolve => {
+    const timer = setTimeout(() => resolve(false), ms)
+    promise.then(ok => { clearTimeout(timer); resolve(ok) }, () => { clearTimeout(timer); resolve(false) })
+  })
+
   const init = async () => {
-    if (await initNative()) { activeIndex = 0; return }
-    if (await initZXing()) { activeIndex = 1; return }
+    for (const e of engines) {
+      const pending = load(e.id)
+      const ok = e.id === 'ZXingCpp' ? await waitAtMost(pending, slowEngineMs) : await pending
+      if (ok) { activeIndex = indexOf(e.id); return }
+    }
   }
 
   /**
@@ -371,10 +475,20 @@ export function createEnginePool(debug, opts = {}) {
    * Returns the loader promise so tests can await a deterministic state;
    * production callers fire-and-forget (the loader never rejects).
    */
+  /**
+   * Try the zxing-cpp download again (e.g. when the phone comes back online
+   * after every attempt failed). Resolves true when it loaded and took over,
+   * false when it was already loaded or still cannot load.
+   */
+  const retryUpgrade = () => {
+    if (byId('ZXingCpp').ready) return Promise.resolve(false)
+    return load('ZXingCpp')
+  }
+
   const armFallback = () => {
-    if (activeIndex === 0 && !engines[1].ready) return initZXing()
-    if (activeIndex === 1 && !engines[0].ready) return initNative()
-    return Promise.resolve(false)
+    const pending = engines.filter(e => !e.ready).map(e => load(e.id))
+    if (!pending.length) return Promise.resolve(false)
+    return Promise.all(pending).then(results => results.some(Boolean))
   }
 
   /**
@@ -420,7 +534,12 @@ export function createEnginePool(debug, opts = {}) {
 
     try {
       let barcodes
-      if (engine.id === 'ZXing') {
+      if (engine.id === 'ZXingCpp') {
+        const imageData = surface.read()
+        if (!imageData) { engine.failures = 0; return { barcodes: [], engine: engine.id } }
+        barcodes = await runEngine(engine, { imageData })
+        engine.failures = 0
+      } else if (engine.id === 'ZXing') {
         if (!zxingReader) { fallback(); return { barcodes: [], engine: engine.id } }
         const imageData = surface.read()
         if (!imageData) { engine.failures = 0; return { barcodes: [], engine: engine.id } }
@@ -430,7 +549,7 @@ export function createEnginePool(debug, opts = {}) {
         } catch (e) {
           // An empty frame is the normal case, not an engine failure — counting
           // it would make the pool thrash and flap the engine label.
-          if (e?.name === 'NotFoundException' || e?.name === 'FormatException' || e?.name === 'ChecksumException') {
+          if (isZxingMiss(e)) {
             engine.failures = 0
             barcodes = []
           } else {
@@ -486,7 +605,15 @@ export function createEnginePool(debug, opts = {}) {
     for (const engine of engines) {
       if (!engine.ready) continue
       const variants = []
-      if (engine.id === 'ZXing') {
+      if (engine.id === 'ZXingCpp') {
+        // The C++ reader runs its own rotate + invert search; the explicit
+        // inverted copy is the same belt-and-braces the JS path gets (on
+        // synthetic white-on-black badges the built-in invert alone missed).
+        variants.push(
+          { imageData, cppOpts: cppHard },
+          { imageData: inverted, cppOpts: cppHard },
+        )
+      } else if (engine.id === 'ZXing') {
         // Widened symbologies (2D etc.) — this is the ONLY pass that gets
         // them, so the normal frame budget is never taxed for formats this
         // product doesn't scan. hardHints === baseHints when the tier didn't
@@ -502,8 +629,13 @@ export function createEnginePool(debug, opts = {}) {
         // synchronously up front because rgbaToGray shares one scratch
         // buffer across calls — every rotateGray must finish before the
         // first decode below overwrites it.
+        //
+        // Skipped when zxing-cpp is loaded: it already searches rotations
+        // natively (and read 90° badges 2x as often in the benchmark), while
+        // these three JS decodes are the most expensive part of a hard pass —
+        // a visible stall on a low-end phone exactly when a badge is hard.
         const { data, width, height } = imageData || {}
-        if (data && width && height) {
+        if (data && width && height && !byId('ZXingCpp').ready) {
           const gray = rgbaToGray(imageData)
           for (const deg of SCAN_ROTATIONS) {
             const r = rotateGray(gray, width, height, deg)
@@ -573,5 +705,5 @@ export function createEnginePool(debug, opts = {}) {
   const getActiveId = () => getActive().id
   const isReady = () => engines.some(e => e.ready)
 
-  return { init, armFallback, detect, getActiveId, isReady, fallback, hardPass }
+  return { init, armFallback, retryUpgrade, detect, getActiveId, isReady, fallback, hardPass }
 }

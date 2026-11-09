@@ -180,6 +180,40 @@ describe('BarcodeScanner camera session lifecycle', () => {
     expect(getByRole('button', { name: /retry/i })).toBeTruthy()
   })
 
+  it('shows an error with Retry when getUserMedia itself throws AbortError (Firefox / busy camera)', async () => {
+    const err = new Error('Starting videoinput failed')
+    err.name = 'AbortError'
+    mocks.openCamera.mockRejectedValue(err)
+
+    const { getByText, getByRole } = render(<BarcodeScanner onScan={vi.fn()} />)
+    await flush()
+
+    expect(getByText(/camera is busy/i)).toBeTruthy()
+    expect(getByRole('button', { name: /retry/i })).toBeTruthy()
+  })
+
+  it('tells the operator another app holds the camera on NotReadableError', async () => {
+    const err = new Error('Could not start video source')
+    err.name = 'NotReadableError'
+    mocks.openCamera.mockRejectedValue(err)
+
+    const { getByText } = render(<BarcodeScanner onScan={vi.fn()} />)
+    await flush()
+
+    expect(getByText(/camera is busy/i)).toBeTruthy()
+  })
+
+  it('points to a supported browser when the camera API is missing', async () => {
+    const err = new Error('Camera API unavailable in this browser')
+    err.name = 'NotSupportedError'
+    mocks.openCamera.mockRejectedValue(err)
+
+    const { getByText } = render(<BarcodeScanner onScan={vi.fn()} />)
+    await flush()
+
+    expect(getByText(/open this page in chrome or safari/i)).toBeTruthy()
+  })
+
   it('never mutates state after unmount (no act() warnings from late resolutions)', async () => {
     const stream = makeStream()
     const late = deferred()

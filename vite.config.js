@@ -32,6 +32,10 @@ export default defineConfig(({ command, mode }) => {
       manifest: false,
       injectManifest: {
         maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
+        // The default pattern is js/css/html. `wasm` adds the zxing-cpp
+        // barcode reader (~0.9 MB) so the scanner decodes offline on a
+        // phone that has never had signal since installing the app.
+        globPatterns: ['**/*.{js,css,html,wasm}'],
       },
       devOptions: {
         enabled: false,

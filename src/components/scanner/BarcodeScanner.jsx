@@ -42,6 +42,7 @@ import {
   platform,
   beginFocusHunt,
   getRearCameraList,
+  isAbandonedOpen,
 } from './cameraManager'
 import { BADGE_REGEX, sanitizeScannedBadge } from '../../lib/logic'
 
@@ -60,7 +61,7 @@ const DEVICE_PROFILES = {
   slow:   { confirmWindow: 3, confirmThreshold: 2, minInterval: 200, maxInterval: 500, frameSkip: 0, maxWidth: 720 },
 }
 
-const ENGINE_LABELS = { Native: 'Optimized', ZXing: 'Universal' }
+const ENGINE_LABELS = { Native: 'Optimized', ZXingCpp: 'Universal', ZXing: 'Compatibility' }
 
 // getUserMedia's wait includes the permission prompt. 10s is plenty for an
 // already-granted camera, but a first-time operator reading the prompt is not
@@ -813,7 +814,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       if (!isCurrent(session) || !mountedRef.current) return
       if (!pool.isReady() && !engineRef.current?.isReady()) {
         setStatus('error')
-        setErrorMsg('No barcode detection engine available — try Chrome or Edge')
+        // ZXing ships in the app bundle and runs on every browser, so reaching
+        // here means it failed to load — a reload/Retry is the fix, not a
+        // different browser (iPhone has no "Chrome engine" to switch to).
+        setErrorMsg('Barcode reader failed to load — check your connection and tap Retry')
         return
       }
 
@@ -987,7 +991,9 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       opened = await withTimeout(openCamera({ preferredDeviceId: activeDeviceId, forceNew: !!preferredDeviceId, debug: debugOn }), openTimeout, 'Camera')
     } catch (err) {
       // An abandoned open is a normal cancellation, never a user-facing error.
-      if (err?.name === 'AbortError' || !isCurrent(session) || !mountedRef.current) return
+      // Only OUR cancellation is silent; a getUserMedia AbortError is a real
+      // failure and must reach the operator with Retry, not an endless spinner.
+      if (isAbandonedOpen(err) || !isCurrent(session) || !mountedRef.current) return
       const msg = String(err?.message || '')
       if (msg.includes('timed out')) {
         setStatus('error'); setErrorMsg('Camera took too long to start — tap Retry')
@@ -998,6 +1004,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         setStatus('error'); setErrorMsg(`Camera permission denied — ${hint}`)
       } else if (err?.name === 'NotFoundError') {
         setStatus('error'); setErrorMsg('No camera found on this device')
+      } else if (err?.name === 'NotReadableError' || err?.name === 'AbortError' || err?.name === 'TrackStartError') {
+        setStatus('error'); setErrorMsg('Camera is busy — close other apps or tabs using the camera, then tap Retry')
+      } else if (err?.name === 'NotSupportedError') {
+        setStatus('error'); setErrorMsg('This browser cannot use the camera — open this page in Chrome or Safari')
       } else {
         setStatus('error'); setErrorMsg(msg || 'Camera failed to start')
       }
@@ -1180,7 +1190,12 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       if (!mountedRef.current) return
       if (!engineRef.current?.isReady() && !engineLoadingRef.current) {
         ensureEngines(sessionRef.current)
+        return
       }
+      // Scanning on the old ZXing-JS reader because every zxing-cpp download
+      // attempt failed offline: try the faster reader again now that the
+      // network is back. The pool switches to it as soon as it loads.
+      engineRef.current?.retryUpgrade?.()?.catch?.(() => {})
     }
     window.addEventListener('online', onOnline)
     return () => window.removeEventListener('online', onOnline)

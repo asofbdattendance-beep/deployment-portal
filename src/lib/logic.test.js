@@ -148,13 +148,15 @@ describe('shouldHideFromConsent', () => {
 
 
 describe('badge format helpers (v25-v27)', () => {
-  it('BADGE_REGEX matches FB / VS patterns (as implemented)', () => {
+  it('BADGE_REGEX matches the real FB / VSFB badge shapes', () => {
     // FB pattern requires trailing 4 digits after GA/LA (real badges: FB5982GA0025)
     expect(BADGE_REGEX.test('FB5971GA0001')).toBe(true)
     expect(BADGE_REGEX.test('FB6000LA0002')).toBe(true)
     expect(BADGE_REGEX.test('BH1234AB0001')).toBe(false)
-    expect(BADGE_REGEX.test('VSABC123')).toBe(true)
-    expect(BADGE_REGEX.test('VS123')).toBe(true)
+    expect(BADGE_REGEX.test('VSFB5978GB2872')).toBe(true)
+    // Free-form VS strings were accepted before the real badge list was known.
+    expect(BADGE_REGEX.test('VSABC123')).toBe(false)
+    expect(BADGE_REGEX.test('VS123')).toBe(false)
     expect(BADGE_REGEX.test('INVALID')).toBe(false)
     expect(BADGE_REGEX.test('')).toBe(false)
     // FB without trailing 4 digits is rejected (must be GA/LA + 4 digits)
@@ -162,7 +164,8 @@ describe('badge format helpers (v25-v27)', () => {
   })
   it('isValidBadgeFormat validates FB/BH/VS and is null-safe', () => {
     expect(isValidBadgeFormat('FB5971GA0001')).toBe(true)
-    expect(isValidBadgeFormat(' VS123 ')).toBe(true)
+    expect(isValidBadgeFormat(' VSFB5971GA2927 ')).toBe(true)
+    expect(isValidBadgeFormat(' VS123 ')).toBe(false)
     expect(isValidBadgeFormat('BH1234AB0001')).toBe(false)
     expect(isValidBadgeFormat('bad')).toBe(false)
     expect(isValidBadgeFormat(null)).toBe(false)
@@ -171,7 +174,8 @@ describe('badge format helpers (v25-v27)', () => {
   })
   it('isFaridabadBadge mirrors isValidBadgeFormat (currently)', () => {
     expect(isFaridabadBadge('FB5971GA0001')).toBe(true)
-    expect(isFaridabadBadge('VS123')).toBe(true)
+    expect(isFaridabadBadge('VSFB5971GA2927')).toBe(true)
+    expect(isFaridabadBadge('VS123')).toBe(false)
     expect(isFaridabadBadge('BH1234AB0001')).toBe(false)
     expect(isFaridabadBadge('bad')).toBe(false)
     expect(isFaridabadBadge(null)).toBe(false)
@@ -1407,5 +1411,53 @@ describe('sanitizeScannedBadge', () => {
     // the conservative bias preserves the value rather than risk scanning the
     // wrong sewadar.
     expect(sanitizeScannedBadge('VSFB5978GA2644')).toBe('VSFB5978GA2644')
+  })
+})
+
+// ─── Real badge grammar (from the full badge list, 2026-11-09) ───────────────
+// Every badge the scanner may accept is one of exactly two shapes:
+//   FB   + 5971–6011 + GA|LA          + 4 digits   (e.g. FB5971GA0001)
+//   VSFB + 5971–6011 + GA|GB|LA|LB|LC + 4 digits   (e.g. VSFB5973LC0451)
+// Anything else is a misread and must be rejected at the camera.
+describe('BADGE_REGEX — real badge grammar', () => {
+  it.each([
+    'FB5971GA0001', 'FB5971LA0159', 'FB6011GA0023', 'FB6011LA0019', 'FB6002GA0095', 'FB5999LA0016',
+    'VSFB5971GA2927', 'VSFB5971GB4627', 'VSFB5971LB6469', 'VSFB5973LC0451', 'VSFB5978LA4821', 'VSFB6009GA4443',
+  ])('accepts real badge %s', (badge) => {
+    expect(BADGE_REGEX.test(badge)).toBe(true)
+  })
+
+  it.each([
+    ['VS0001', 'short VS placeholder'],
+    ['VSSTMP00001', 'temporary registration id (VSS-TMP-00001 sanitised)'],
+    ['VS8F5971GA0001', 'garbled VS prefix'],
+    ['VSFB5970GA0001', 'centre code below 5971'],
+    ['VSFB6012GA0001', 'centre code above 6011'],
+    ['VSFB5971GC0001', 'unknown VS group GC'],
+    ['VSFB5971GA001', 'VS badge one digit short'],
+    ['VSFB5971GA00011', 'VS badge one digit long'],
+    ['FB5971GB0001', 'FB badges are only GA or LA'],
+    ['FB5971LC0001', 'LC exists only on VS badges'],
+  ])('rejects %s (%s)', (badge) => {
+    expect(BADGE_REGEX.test(badge)).toBe(false)
+  })
+})
+
+describe('sanitizeScannedBadge — VS badge repair', () => {
+  it('repairs a VS badge whose B was misread as 8', () => {
+    expect(sanitizeScannedBadge('VSFB5978G82872')).toBe('VSFB5978GB2872')
+  })
+
+  it('repairs a VS badge whose 0 was misread as O', () => {
+    expect(sanitizeScannedBadge('VSFB5973LC O451'.replace(' ', ''))).toBe('VSFB5973LC0451')
+  })
+
+  it('strips Code 39 guards from a VS badge', () => {
+    expect(sanitizeScannedBadge('*VSFB5971LB6469*')).toBe('VSFB5971LB6469')
+  })
+
+  it('leaves an unrecoverable VS read invalid instead of guessing', () => {
+    const out = sanitizeScannedBadge('VSXX5971GA0001')
+    expect(BADGE_REGEX.test(out)).toBe(false)
   })
 })

@@ -29,6 +29,8 @@ import {
   shouldSuggestTorch,
   beginFocusHunt,
   platform,
+  detectPlatform,
+  isAbandonedOpen,
 } from './cameraManager'
 
 /* ── helpers ────────────────────────────────────────────────────────────────── */
@@ -192,6 +194,79 @@ describe('openCamera acquisition', () => {
   })
 })
 
+describe('openCamera cross-browser failures', () => {
+  it('fails fast with NotSupportedError when mediaDevices is missing (HTTP / old WebView)', async () => {
+    navigator.mediaDevices = undefined
+
+    await expect(openCamera()).rejects.toMatchObject({ name: 'NotSupportedError' })
+  })
+
+  it('fails fast with NotSupportedError when getUserMedia is missing', async () => {
+    navigator.mediaDevices = { enumerateDevices: vi.fn().mockResolvedValue([]) }
+
+    await expect(openCamera()).rejects.toMatchObject({ name: 'NotSupportedError' })
+  })
+
+  it('a genuine getUserMedia AbortError is NOT reported as an abandoned open', async () => {
+    gum.mockRejectedValue(gumError('AbortError', 'Starting videoinput failed'))
+
+    const err = await openCamera().catch(e => e)
+
+    expect(err.name).toBe('AbortError')
+    expect(isAbandonedOpen(err)).toBe(false)
+  })
+})
+
+describe('pre-permission camera lists (no labels)', () => {
+  it('does not pin an unlabeled device by exact id — lets facingMode pick the rear camera', async () => {
+    // Firefox before permission: real deviceIds, empty labels, front listed first.
+    navigator.mediaDevices.enumerateDevices = vi.fn().mockResolvedValue([
+      { kind: 'videoinput', deviceId: 'front-id', label: '' },
+      { kind: 'videoinput', deviceId: 'rear-id', label: '' },
+    ])
+    gum.mockResolvedValue(makeStream())
+
+    await openCamera()
+
+    const video = gum.mock.calls[0][0].video
+    expect(video.deviceId).toBeUndefined()
+    expect(video.facingMode).toEqual({ ideal: 'environment' })
+  })
+
+  it('pickRearDeviceId returns null when no label is known yet', async () => {
+    navigator.mediaDevices.enumerateDevices = vi.fn().mockResolvedValue([
+      { kind: 'videoinput', deviceId: 'front-id', label: '' },
+    ])
+    expect(await pickRearDeviceId()).toBeNull()
+  })
+})
+
+describe('detectPlatform', () => {
+  const IPAD_DESKTOP_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15'
+
+  it('treats iPadOS desktop-mode Safari (Macintosh UA + touch) as iOS', () => {
+    const p = detectPlatform(IPAD_DESKTOP_UA, 5)
+    expect(p.isIOS).toBe(true)
+    expect(p.isMobile).toBe(true)
+  })
+
+  it('keeps a real Mac (no touch points) as non-iOS', () => {
+    expect(detectPlatform(IPAD_DESKTOP_UA, 0).isIOS).toBe(false)
+  })
+
+  it('detects iPhone, Android and Samsung Internet from the UA', () => {
+    expect(detectPlatform('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)', 5).isIOS).toBe(true)
+    const sam = detectPlatform('Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/25.0 Chrome/121.0 Mobile Safari/537.36', 5)
+    expect(sam.isAndroid).toBe(true)
+    expect(sam.isSamsung).toBe(true)
+    expect(sam.isIOS).toBe(false)
+  })
+
+  it('never throws on an empty UA', () => {
+    expect(detectPlatform('', undefined).isIOS).toBe(false)
+  })
+})
+
 describe('cancelPendingOpen', () => {
   it('is a no-op when nothing is opening', () => {
     expect(cancelPendingOpen()).toBe(false)
@@ -206,7 +281,9 @@ describe('cancelPendingOpen', () => {
     expect(cancelPendingOpen()).toBe(true)
     resolveGum(stream)
 
-    await expect(opening).rejects.toMatchObject({ name: 'AbortError' })
+    const err = await opening.catch(e => e)
+    expect(err).toMatchObject({ name: 'AbortError' })
+    expect(isAbandonedOpen(err)).toBe(true)
     expect(stream.track.stop).toHaveBeenCalled()
     expect(getActiveStream()).toBeNull()
   })
