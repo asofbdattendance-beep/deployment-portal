@@ -681,8 +681,13 @@ export function createEnginePool(debug, opts = {}) {
     const merged = []
     let hitEngine = null
 
+    // ZXing-JS sits out while zxing-cpp is ready: it would decode the same
+    // raw / enhanced / inverted frame ~6x slower (field case: a Galaxy A35
+    // fell to ~3 fps). It still runs here when zxing-cpp is not available.
+    const cppReady = byId('ZXingCpp').ready
     for (const engine of engines) {
       if (!engine.ready) continue
+      if (engine.id === 'ZXing' && cppReady) continue
       const variants = []
       if (engine.id === 'ZXingCpp') {
         // The C++ reader runs its own rotate + invert search; the explicit
@@ -708,13 +713,9 @@ export function createEnginePool(debug, opts = {}) {
         // synchronously up front because rgbaToGray shares one scratch
         // buffer across calls — every rotateGray must finish before the
         // first decode below overwrites it.
-        //
-        // Skipped when zxing-cpp is loaded: it already searches rotations
-        // natively (and read 90° badges 2x as often in the benchmark), while
-        // these three JS decodes are the most expensive part of a hard pass —
-        // a visible stall on a low-end phone exactly when a badge is hard.
+        // (Only reached when zxing-cpp is not loaded — see cppReady above.)
         const { data, width, height } = imageData || {}
-        if (data && width && height && !byId('ZXingCpp').ready) {
+        if (data && width && height) {
           const gray = rgbaToGray(imageData)
           for (const deg of SCAN_ROTATIONS) {
             const r = rotateGray(gray, width, height, deg)

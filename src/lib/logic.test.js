@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   notElderlyFilter,
+  strictCameraBadge,
   isElderly,
   badgeStatusEligible,
   eligibleBadgeStatusFilter,
@@ -1459,5 +1460,62 @@ describe('sanitizeScannedBadge — VS badge repair', () => {
   it('leaves an unrecoverable VS read invalid instead of guessing', () => {
     const out = sanitizeScannedBadge('VSXX5971GA0001')
     expect(BADGE_REGEX.test(out)).toBe(false)
+  })
+})
+
+// ─── Camera reads are checked strictly (2026-11-09, Galaxy A35) ──────────────
+// A blurry badge read as "FB597808Z AE". The lenient sanitiser strips spaces
+// and "repairs" letter/digit confusions — right for typed input, wrong for a
+// barcode: Code 39 encodes O and 0 (B and 8 …) with entirely different bars,
+// so a "repair" is a guess that can turn a misread into ANOTHER sewadar's
+// valid badge. A camera read must already BE a badge.
+describe('strictCameraBadge', () => {
+  it.each([
+    ['FB5978GA0013', 'FB5978GA0013'],
+    ['  fb5978ga0013 ', 'FB5978GA0013'],
+    ['*FB5978GA0013*', 'FB5978GA0013'],
+    ['VSFB5973LC0451', 'VSFB5973LC0451'],
+  ])('accepts a clean read %j', (raw, expected) => {
+    expect(strictCameraBadge(raw)).toBe(expected)
+  })
+
+  it.each([
+    ['FB597808Z AE', 'field misread with a space'],
+    ['FB5978 GA0013', 'internal space'],
+    ['FB5978GA0O13', 'letter O where a digit belongs — no repair'],
+    ['FB5978GA001B', 'B where 8 might be — no repair to a different badge'],
+    ['VSFB5978G82872', 'VS badge with 8 for B — no repair'],
+    ['FB5978-GA0013', 'stray punctuation'],
+    ['**FB5978GA0013', 'malformed guards'],
+    ['', 'empty'],
+  ])('rejects %j (%s)', (raw) => {
+    expect(strictCameraBadge(raw)).toBe('')
+  })
+
+  it('is total for non-strings', () => {
+    expect(strictCameraBadge(null)).toBe('')
+    expect(strictCameraBadge(undefined)).toBe('')
+    expect(strictCameraBadge(42)).toBe('')
+  })
+})
+
+// Every FB badge in the full list has a serial 0001–0228: the first digit is
+// always 0. A leading non-zero is a misread (e.g. 0 read as 8).
+describe('BADGE_REGEX — FB serial', () => {
+  it('accepts FB serials 0001–0999', () => {
+    expect(BADGE_REGEX.test('FB5978GA0001')).toBe(true)
+    expect(BADGE_REGEX.test('FB6008LA0228')).toBe(true)
+    expect(BADGE_REGEX.test('FB6008LA0999')).toBe(true)
+  })
+
+  it('rejects an FB serial that does not start with 0, or is 0000', () => {
+    expect(BADGE_REGEX.test('FB5978GA8013')).toBe(false)
+    expect(BADGE_REGEX.test('FB5978GA1013')).toBe(false)
+    expect(BADGE_REGEX.test('FB5978GA0000')).toBe(false)
+  })
+
+  it('leaves VS serials as any four digits (the list spans 0451–9986)', () => {
+    expect(BADGE_REGEX.test('VSFB6008LA9986')).toBe(true)
+    expect(BADGE_REGEX.test('VSFB5973LC0451')).toBe(true)
   })
 })

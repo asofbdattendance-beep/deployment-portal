@@ -580,13 +580,11 @@ describe('BarcodeScanner camera suppressor acceptance (T11)', () => {
   })
 })
 
-// T4: the camera decode gate runs through sanitizeScannedBadge. Code-39
-// start/stop guards, lower case and O↔0-style confusion misreads used to die
-// silently at the BADGE_REGEX gate (raw `*FB5971GA0001*` never matched, so a
-// perfectly good badge scanned nothing). Now: guards/confusions are recovered
-// and the CLEANED value flows downstream; unreadable values surface a dedicated
-// transient reject hint instead of vanishing.
-describe('BarcodeScanner decode gate routes through the sanitizer (T4)', () => {
+// Camera decode gate (strictCameraBadge): Code-39 start/stop guards and case
+// are normalised, and the CLEANED value flows downstream; anything that is not
+// then exactly a badge is rejected with a transient hint (no repair, no
+// stripping of inner characters — see strictCameraBadge).
+describe('BarcodeScanner camera decode gate (strict)', () => {
   function renderDecoding(rawValue, { rejectCalls = Infinity, onScan = vi.fn() } = {}) {
     const stream = makeStream()
     mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
@@ -622,16 +620,41 @@ describe('BarcodeScanner decode gate routes through the sanitizer (T4)', () => {
     }
   })
 
-  it('repairs a 1-char confusion misread — onScan fires with the repaired badge', async () => {
+  // Camera reads are checked STRICTLY (2026-11-09): no confusion repair. For a
+  // barcode, O and 0 have entirely different bar patterns, so "repairing" one
+  // into the other is a guess that can produce another sewadar's badge.
+  it('does NOT repair a confusion misread from the camera — no onScan', async () => {
     vi.useFakeTimers()
     try {
       const onScan = vi.fn()
-      // Letter O read for zero at both digit slots: repairBadgeConfusions
-      // fixes exactly those two positions and the result matches BADGE_REGEX.
       renderDecoding('FB5971GAOO01', { onScan })
       await act(async () => { await vi.advanceTimersByTimeAsync(800) })
+      expect(onScan).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('rejects the Galaxy A35 field misread "FB597808Z AE" (space is not stripped)', async () => {
+    vi.useFakeTimers()
+    try {
+      const onScan = vi.fn()
+      const view = renderDecoding('FB597808Z AE', { onScan })
+      await act(async () => { await vi.advanceTimersByTimeAsync(800) })
+      expect(onScan).not.toHaveBeenCalled()
+      expect(view.getByText(/invalid badge/i)).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('accepts lower-case or padded clean reads', async () => {
+    vi.useFakeTimers()
+    try {
+      const onScan = vi.fn()
+      renderDecoding(' fb5971ga0001 ', { onScan })
+      await act(async () => { await vi.advanceTimersByTimeAsync(800) })
       expect(onScan).toHaveBeenCalledWith('FB5971GA0001')
-      expect(onScan).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()
     }

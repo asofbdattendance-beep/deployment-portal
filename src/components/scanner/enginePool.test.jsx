@@ -311,7 +311,11 @@ describe('enginePool zxing-cpp (WebAssembly) engine', () => {
     expect(await pool.retryUpgrade()).toBe(false)
   })
 
-  it('hardPass skips the slow ZXing-JS rotations when zxing-cpp is loaded (it rotates natively)', async () => {
+  // Field case (Galaxy A35, 3 fps): with zxing-cpp loaded, hardPass still ran
+  // ZXing-JS on the raw, enhanced and inverted ~1 MP frame — hundreds of ms on
+  // a phone, every third missed frame. zxing-cpp covers the same variants ~6x
+  // faster, so ZXing-JS now sits out the hard pass while zxing-cpp is ready.
+  it('hardPass skips ZXing-JS entirely when zxing-cpp is loaded', async () => {
     mocks.cppDecode = async () => []
     const jsShapes = []
     mocks.decodeImpl = (bitmap) => { jsShapes.push(bitmap); return notFound() }
@@ -319,7 +323,8 @@ describe('enginePool zxing-cpp (WebAssembly) engine', () => {
     await pool.init()
     await pool.armFallback()
     await pool.hardPass({ canvas: {}, read: () => ({ data: new Uint8ClampedArray(8 * 4 * 4), width: 8, height: 4 }) })
-    expect(jsShapes).toHaveLength(3)   // normal + enhanced + inverted, no 90/180/270
+    expect(jsShapes).toHaveLength(0)
+    expect(mocks.cppCalls).toHaveLength(3)   // zxing-cpp: raw, enhanced, inverted
   })
 
   it('hardPass keeps the ZXing-JS rotations when zxing-cpp is unavailable', async () => {

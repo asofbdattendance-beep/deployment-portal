@@ -172,8 +172,34 @@ export function isVssBadge(badge) {
 // (and the VSS-TMP-xxxxx registration ids) through as a valid badge. Exact
 // shapes let the camera reject misreads instantly and let the positional
 // repair below fix VS badges too.
+// FB serials in the full list run 0001–0228, so the first digit is always 0
+// and 0000 never occurs: a leading non-zero is a misread (0 read as 8 etc.).
+// VS serials span 0451–9986, so they stay any four digits.
 const CENTRE = '(597[1-9]|59[89]\\d|600\\d|601[01])'
-export const BADGE_REGEX = new RegExp(`^(FB${CENTRE}(GA|LA)\\d{4}|VSFB${CENTRE}(GA|GB|LA|LB|LC)\\d{4})$`, 'i')
+const FB_SERIAL = '0(?!000)\\d{3}'
+export const BADGE_REGEX = new RegExp(`^(FB${CENTRE}(GA|LA)${FB_SERIAL}|VSFB${CENTRE}(GA|GB|LA|LB|LC)\\d{4})$`, 'i')
+
+/**
+ * Strict check for a CAMERA read: the decoded text must already BE a badge.
+ *
+ * Only trims, uppercases and drops Code 39's optional start/stop guard
+ * ('*…*'). Nothing else is stripped or repaired — unlike sanitizeScannedBadge,
+ * which is right for TYPED input. For a barcode a "repair" is a guess: Code 39
+ * encodes O and 0 (B and 8, S and 5 …) with entirely different bar patterns,
+ * so mapping one to the other can turn a misread into ANOTHER sewadar's valid
+ * badge. Field case (Galaxy A35): FB5978GA0013 read as "FB597808Z AE"; the
+ * lenient path stripped the space before validating. A rejected camera read
+ * costs nothing — the next frame tries again.
+ *
+ * @param {unknown} raw decoder output
+ * @returns {string} the badge, or '' when the read is not exactly a badge
+ */
+export function strictCameraBadge(raw) {
+  if (typeof raw !== 'string') return ''
+  let v = raw.trim().toUpperCase()
+  if (v.length > 2 && v.startsWith('*') && v.endsWith('*')) v = v.slice(1, -1)
+  return BADGE_REGEX.test(v) ? v : ''
+}
 export function isValidBadgeFormat(badge) {
   return typeof badge === 'string' && BADGE_REGEX.test(badge.trim())
 }

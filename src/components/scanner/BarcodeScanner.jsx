@@ -44,7 +44,7 @@ import {
   getRearCameraList,
   isAbandonedOpen,
 } from './cameraManager'
-import { BADGE_REGEX, sanitizeScannedBadge } from '../../lib/logic'
+import { BADGE_REGEX, strictCameraBadge } from '../../lib/logic'
 
 
 // ─── Device Profiles ──────────────────────────────────────────────────────────
@@ -487,12 +487,12 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     const cfg = configRef.current
     for (const b of barcodes) {
       const raw = String(b.rawValue || '').trim().toUpperCase()
-      // The decode gate runs through the sanitizer: Code-39 guards, case and
-      // confusion misreads are recovered here instead of dying at the regex.
-      // The sanitizer returns the ORIGINAL (normalised) value when nothing
-      // can be recovered — its codified contract (logic.test.js) — so
-      // validity is still judged on the cleaned result, never the raw read.
-      const cleaned = sanitizeScannedBadge(b.rawValue)
+      // STRICT camera gate: only case, whitespace at the ends and Code-39
+      // '*' guards are normalised; the read must then BE a badge. No inner
+      // stripping and no O/0-style "repair" — for a barcode that is a guess
+      // that can yield another sewadar's badge (see strictCameraBadge). Typed
+      // input keeps the lenient sanitizer in useScanHandler.
+      const cleaned = strictCameraBadge(b.rawValue)
       // Every dedupe key below is the CLEANED value: '*FB…*' and 'FB…*' are
       // one badge, so window counts, the 2s suppressor and the pill's
       // change-detection must not re-arm when only the guards differ.
