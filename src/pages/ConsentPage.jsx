@@ -3,6 +3,7 @@ import { supabase, fetchSubtreeCentres, fetchCentres, fetchAllRows, fetchAsoDept
 import { cached } from '../lib/queryCache'
 import { computeEditGates, isDeptSelectable, isUndeployedCohort, computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, aggregateQuotaAllocations, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, changedConsentFields, consentRowKey, buildConsentSnapshot, groupConsentPatches, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
 import { consentCounts } from '../lib/counts'
+import { buildPrevReference, isNotReported } from '../lib/prevSession'
 import { REALTIME_RELOAD_DEBOUNCE_MS, REALTIME_SELF_SKIP_MS } from '../lib/realtimeDeploy'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
@@ -159,7 +160,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
     const prevSubtree = liveRef.current.subtree
     try {
       // Supabase max-rows=1000 — paginate every table that can exceed 1000
-      const [sewAll, consAll, deptAll, allocAll, deployAll, prevAll, asoAll] = await Promise.all([
+      const [sewAll, consAll, deptAll, allocAll, deployAll, prevAll, asoAll, prevSession] = await Promise.all([
         fetchAllRows('dp_sewadars', 'badge_number, sewadar_name, department, centre, is_initiated, gender', (q) => q.or(eligibleBadgeStatusFilter()).in('centre', subtree).order('sewadar_name'), ['centre', 'badge_number']),
         fetchAllRows('sewadar_consents', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree), 'id'),
         cached('depts:active', 60000, () => fetchAllRows('deployment_departments', '*', (q) => q.eq('is_active', true).order('name'), 'id')),
@@ -167,6 +168,17 @@ export default function ConsentPage({ schedules, scheduleId }) {
         fetchAllRows('deployments', '*', (q) => q.eq('schedule_id', selectedScheduleId).in('centre', subtree), 'id'),
         cached('prev_year_deployments', 600000, () => fetchAllRows('prev_year_deployments', 'badge_number, prev_department, attendance_reported', null, 'badge_number')),
         fetchAsoDeptKeys(subtree),
+        // v84: Prev. Dept / Attendance Reported from the schedule before this
+        // one. A failure (e.g. migration not applied yet) must not block the
+        // page — buildPrevReference then falls back to prev_year_deployments.
+        cached(`prev_session:${selectedScheduleId}`, 600000, async () => {
+          const { data, error } = await supabase.rpc('prev_session_reference', { p_schedule: selectedScheduleId })
+          if (error) throw error
+          return data
+        }).catch((err) => {
+          console.warn('prev_session_reference unavailable, using prev_year_deployments:', err?.message)
+          return null
+        }),
       ])
       setAsoKeys(asoAll || new Set())
       const sewadars = (sewAll || []).filter(sw => !shouldHideFromConsent(sw, profile?.role))
@@ -180,8 +192,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
       // keep the whole deployment row so the page knows which sewadars the ASO
       // has FINALIZED — those rows are locked on the centre side
       ;(deployAll || []).forEach(d => { deployMap[`${d.centre}|${d.badge_number}`] = d })
-      const prevMap = {}
-      ;(prevAll || []).forEach(p => { prevMap[p.badge_number] = p })
+      const prevMap = buildPrevReference(prevSession, prevAll).map
       const rows = {}
       const deptNameById = {}
       ;(deptAll || []).forEach(d => { deptNameById[d.id] = d.name })
@@ -1586,7 +1597,9 @@ export default function ConsentPage({ schedules, scheduleId }) {
       'Days': r.consent_given ? r.available_days_count : '—',
       'Deployment': deptNameOf(r.final_dept || r.requested_dept) || '',
       'Prev. Dept': r.prev_department || '',
-      'Attendance Reported': r.prev_attendance != null ? attendanceDisplay(r.prev_attendance, r.prev_department) : '',
+      'Attendance Reported': isNotReported(r.prev_attendance, r.prev_department)
+        ? 'Not Reported'
+        : r.prev_attendance != null ? attendanceDisplay(r.prev_attendance, r.prev_department) : '',
     }))
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), 'Consent & Deployment')
     const name = (schedule?.name || 'schedule').replace(/[^a-z0-9]+/gi, '_')
@@ -1959,7 +1972,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
                           </thead>
                           <tbody>
                             {rows.map((r, i) => (
-                              <tr key={`${r.centre}|${r.badge_number}`} style={{ background: selected[`${r.centre}|${r.badge_number}`] ? '#f5f3ff' : undefined }}>
+                              <tr key={`${r.centre}|${r.badge_number}`} className={isNotReported(r.prev_attendance, r.prev_department) ? 'row-not-reported' : undefined} style={{ background: selected[`${r.centre}|${r.badge_number}`] ? '#f5f3ff' : undefined }}>
                                 <td style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.78rem', fontWeight: 600 }} data-label="S.No.">{i + 1}</td>
                                 <td style={{ textAlign: 'center' }} data-label="Select">
                                   <input type="checkbox" checked={!!selected[`${r.centre}|${r.badge_number}`]} onChange={() => toggleSelect(`${r.centre}|${r.badge_number}`)} disabled={!(consentEditable || deploymentEditable) || isRowLocked(r)} style={{ cursor: (consentEditable || deploymentEditable) && !isRowLocked(r) ? 'pointer' : 'not-allowed' }} title={r.finalized ? 'Finalized by the ASO — locked' : (undeployedOverrideOpen && r.requested_dept ? 'Already deployed — locked under this override' : undefined)} aria-label={`Select ${r.badge_number}`} />
@@ -1992,7 +2005,13 @@ export default function ConsentPage({ schedules, scheduleId }) {
                                       {r.prev_department}
                                     </td>
                                     <td data-label="Attendance Reported" style={{ textAlign: 'center', fontSize: '0.8rem', fontWeight: 700 }}>
-                                      <span className={attendanceClass(r)}>{attendanceDisplay(r.prev_attendance, r.prev_department)}</span>
+                                      {isNotReported(r.prev_attendance, r.prev_department) ? (
+                                        <span className="attendance-pill low not-reported" title="Deployed last session but no attendance was recorded">
+                                          <AlertTriangle size={13} aria-hidden="true" /> Not Reported
+                                        </span>
+                                      ) : (
+                                        <span className={attendanceClass(r)}>{attendanceDisplay(r.prev_attendance, r.prev_department)}</span>
+                                      )}
                                     </td>
                                   </>
                                 )}

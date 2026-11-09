@@ -943,6 +943,12 @@ select.previsit-control { max-width: 15rem; }
 .attendance-pill.muted { color: #cbd5e1; }
 .attendance-pill.low { color: #b91c1c; background: #fef2f2; }
 .attendance-pill.ok { color: #047857; background: #ecfdf5; }
+.attendance-pill.not-reported { gap: 0.25rem; border: 1px solid #fecaca; }
+
+/* Consent table: deployed last session, zero attendance — whole record red */
+tr.row-not-reported > td { background: #fef2f2; }
+tr.row-not-reported > td:first-child { box-shadow: inset 3px 0 0 #dc2626; }
+tr.row-not-reported:hover > td { background: #fee2e2; }
 
 /* ─── Badges / pills ─── */
 .pill {
