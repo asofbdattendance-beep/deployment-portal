@@ -769,3 +769,131 @@ describe('BarcodeScanner multi-badge sliding suppressor', () => {
     }
   })
 })
+
+// OnePlus field complaint ("the scanner never works on this phone"): the lens
+// id used to be saved on EVERY camera open and every lens-switch tap. Nord /
+// CE phones list 2 MP macro and depth lenses with generic labels
+// ("camera2 2, facing back"), so one tap onto one of them was remembered and
+// reopened forever. A lens is now remembered only after it actually read a
+// badge, under a new key so lenses saved by the old code are dropped.
+describe('BarcodeScanner lens memory', () => {
+  const LENS_KEY = 'dp_scanner_lens_v2'
+
+  // jsdom here runs without a storage origin, so give each test a fresh store.
+  let store
+  beforeEach(() => {
+    store = new Map()
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: (k) => (store.has(k) ? store.get(k) : null),
+        setItem: (k, v) => { store.set(k, String(v)) },
+        removeItem: (k) => { store.delete(k) },
+        clear: () => store.clear(),
+      },
+    })
+  })
+
+  async function renderWithDecode({ decodes, deviceId }) {
+    const stream = makeStream()
+    mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId, resolutionIndex: 0, adopted: false })
+    window.BarcodeDetector = class {
+      static getSupportedFormats = () => Promise.resolve(['code_39'])
+      detect = () => Promise.resolve(decodes ? [{ rawValue: 'FB5971GA0001', cornerPoints: [] }] : [])
+    }
+    const onScan = vi.fn()
+    const utils = render(<BarcodeScanner onScan={onScan} />)
+    const video = utils.container.querySelector('video')
+    Object.defineProperty(video, 'videoWidth', { value: 1280, configurable: true })
+    Object.defineProperty(video, 'videoHeight', { value: 720, configurable: true })
+    await act(async () => { await vi.advanceTimersByTimeAsync(800) })
+    return { ...utils, onScan }
+  }
+
+  it('does not remember a lens that has not read a badge yet', async () => {
+    vi.useFakeTimers()
+    try {
+      await renderWithDecode({ decodes: false, deviceId: 'macro-lens' })
+      expect(localStorage.getItem(LENS_KEY)).toBeNull()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('remembers the lens once it reads a badge', async () => {
+    vi.useFakeTimers()
+    try {
+      const { onScan } = await renderWithDecode({ decodes: true, deviceId: 'main-lens' })
+      expect(onScan).toHaveBeenCalled()
+      expect(localStorage.getItem(LENS_KEY)).toBe('main-lens')
+    } finally { vi.useRealTimers() }
+  })
+
+  it('ignores a lens saved by the old code, so a stuck macro lens is dropped', async () => {
+    vi.useFakeTimers()
+    try {
+      localStorage.setItem('dp_scanner_camera_id', 'macro-lens')
+      await renderWithDecode({ decodes: false, deviceId: 'main-lens' })
+      expect(mocks.openCamera.mock.calls[0][0].preferredDeviceId ?? null).toBeNull()
+      expect(localStorage.getItem('dp_scanner_camera_id')).toBeNull()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('reopens a lens that was proven to scan', async () => {
+    vi.useFakeTimers()
+    try {
+      localStorage.setItem(LENS_KEY, 'main-lens')
+      await renderWithDecode({ decodes: false, deviceId: 'main-lens' })
+      expect(mocks.openCamera.mock.calls[0][0].preferredDeviceId).toBe('main-lens')
+    } finally { vi.useRealTimers() }
+  })
+})
+
+// Some firmwares (reported on OnePlus / OxygenOS at high resolutions) hand back
+// a track that says "live" but never delivers a frame: the preview stays black,
+// videoWidth stays 0 and the loop waits forever with no error. A frame
+// watchdog now steps the camera down a resolution, and finally says so.
+describe('BarcodeScanner no-frames watchdog', () => {
+  const open = (deviceId = 'rear', resolutionIndex = 0) => {
+    const stream = makeStream()
+    return { stream, track: stream.track, torchSupported: false, deviceId, resolutionIndex, adopted: false }
+  }
+
+  it('reopens the camera one resolution lower when no frame arrives', async () => {
+    vi.useFakeTimers()
+    try {
+      mocks.openCamera.mockResolvedValue(open())
+      render(<BarcodeScanner onScan={vi.fn()} />)   // videoWidth stays 0: black preview
+      await act(async () => { await vi.advanceTimersByTimeAsync(5500) })
+
+      expect(mocks.openCamera).toHaveBeenCalledTimes(2)
+      const second = mocks.openCamera.mock.calls[1][0]
+      expect(second.startIndex).toBe(1)
+      expect(second.forceNew).toBe(true)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('leaves a camera that is delivering frames alone', async () => {
+    vi.useFakeTimers()
+    try {
+      mocks.openCamera.mockResolvedValue(open())
+      const { container } = render(<BarcodeScanner onScan={vi.fn()} />)
+      const video = container.querySelector('video')
+      Object.defineProperty(video, 'videoWidth', { value: 1280, configurable: true })
+      Object.defineProperty(video, 'videoHeight', { value: 720, configurable: true })
+      await act(async () => { await vi.advanceTimersByTimeAsync(20000) })
+      expect(mocks.openCamera).toHaveBeenCalledTimes(1)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('says the camera sends no picture (with Retry) once every resolution has failed', async () => {
+    vi.useFakeTimers()
+    try {
+      mocks.openCamera.mockImplementation(() => Promise.resolve(open('rear', 0)))
+      const { getByText, getByRole } = render(<BarcodeScanner onScan={vi.fn()} />)
+      await act(async () => { await vi.advanceTimersByTimeAsync(40000) })
+
+      expect(mocks.openCamera.mock.calls.length).toBeLessThanOrEqual(6)
+      expect(getByText(/not sending a picture/i)).toBeTruthy()
+      expect(getByRole('button', { name: /retry/i })).toBeTruthy()
+    } finally { vi.useRealTimers() }
+  })
+})

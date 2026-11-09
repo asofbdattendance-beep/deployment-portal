@@ -101,6 +101,22 @@ export function isZxingMiss(e) {
   return ZXING_MISS_KINDS.has(kind) || ZXING_MISS_KINDS.has(e.name)
 }
 
+/** Thrown when a native call misses its deadline (see nativeTimeoutMs). */
+class EngineTimeout extends Error {
+  constructor(ms) { super(`native detector did not answer within ${ms} ms`); this.name = 'EngineTimeout' }
+}
+
+/** Resolve/reject with the promise, or reject with EngineTimeout after `ms`. */
+function withDeadline(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new EngineTimeout(ms)), ms)
+    Promise.resolve(promise).then(
+      v => { clearTimeout(timer); resolve(v) },
+      e => { clearTimeout(timer); reject(e) },
+    )
+  })
+}
+
 let _scratchInvCanvas = null
 let _scratchRotCanvas = null
 let _scratchInvBuffer = null
@@ -257,6 +273,15 @@ export function createEnginePool(debug, opts = {}) {
     ? Math.floor(opts.emptyHandoffAfter)
     : 6
 
+  // Deadline for every native BarcodeDetector call. Android backs it with a
+  // Google Play Services module; when that module is missing or updating,
+  // getSupportedFormats()/detect() can hang forever with no error, freezing
+  // the scan loop ("the scanner never works on this phone"). A healthy native
+  // detect answers in tens of ms, so 1.5 s only ever trips on a real hang.
+  const nativeTimeoutMs = Number.isFinite(opts.nativeTimeoutMs) && opts.nativeTimeoutMs > 0
+    ? opts.nativeTimeoutMs
+    : 1500
+
   const engines = [
     { id: 'Native', ready: false, detector: null, failures: 0, maxFailures: 3, emptyCount: 0 },
     { id: 'ZXingCpp', ready: false, detector: null, failures: 0, maxFailures: 3, emptyCount: 0 },
@@ -306,13 +331,24 @@ export function createEnginePool(debug, opts = {}) {
         cornerPoints: pts.map(p => ({ x: p.getX?.() ?? p.x, y: p.getY?.() ?? p.y })),
       }]
     }
-    return engine.detector.detect(canvas)
+    return withDeadline(engine.detector.detect(canvas), nativeTimeoutMs)
+  }
+
+  /**
+   * A hung native detector is broken, not having a slow frame: take it out of
+   * the pool for good (no 3-strike wait, no more hard-pass turns) and move on.
+   */
+  const disableHungEngine = (engine) => {
+    engine.ready = false
+    engine.detector = null
+    if (debug) console.warn(`[Engine] ${engine.id} hung — disabled for this session`)
+    if (getActive() === engine) fallback()
   }
 
   const initNative = async () => {
     if (typeof window === 'undefined' || !('BarcodeDetector' in window)) return false
     try {
-      const fmts = await window.BarcodeDetector.getSupportedFormats()
+      const fmts = await withDeadline(window.BarcodeDetector.getSupportedFormats(), nativeTimeoutMs)
       // Never ask native for a format it doesn't support — filter the tier
       // list down to what this build can actually decode.
       const usable = formats.filter(f => fmts.includes(f))
@@ -517,9 +553,9 @@ export function createEnginePool(debug, opts = {}) {
       }
       return
     }
-    // (No ready engine at all is unreachable: handoffEmpty only runs from
-    // detect() after a *ready* engine's clean miss, and ready is never
-    // cleared once set. Hold position; nothing to reset.)
+    // (No ready engine at all is unreachable here: handoffEmpty only runs from
+    // detect() after a *ready* engine's clean miss. `ready` is cleared only by
+    // disableHungEngine, which never runs on a clean miss. Hold position.)
   }
 
   /**
@@ -572,6 +608,10 @@ export function createEnginePool(debug, opts = {}) {
       }
       return { barcodes, engine: engine.id }
     } catch (e) {
+      if (e instanceof EngineTimeout) {
+        disableHungEngine(engine)
+        return { barcodes: [], engine: engine.id }
+      }
       engine.failures++
       if (debug) console.warn(`[Engine] ${engine.id} detect error (${engine.failures}/${engine.maxFailures}):`, e?.message)
       if (engine.failures >= engine.maxFailures) fallback()
@@ -669,6 +709,7 @@ export function createEnginePool(debug, opts = {}) {
           // hardPass never throws: one engine's failure must not cost the
           // other its chance, and an empty frame is just a miss.
           if (debug) console.warn(`[Engine] hardPass ${engine.id} failed:`, e?.message)
+          if (e instanceof EngineTimeout) { disableHungEngine(engine); break }
         }
       }
     }

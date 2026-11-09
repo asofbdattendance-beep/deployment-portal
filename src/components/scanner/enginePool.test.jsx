@@ -126,6 +126,52 @@ const minifiedNotFound = () => {
 
 const cppHit = (text = 'FB5971GA0001') => [{ rawValue: text, cornerPoints: [{ x: 1, y: 1 }, { x: 9, y: 1 }, { x: 9, y: 4 }, { x: 1, y: 4 }] }]
 
+// The native BarcodeDetector on Android is backed by a Google Play Services
+// module. When that module is missing or mid-update, getSupportedFormats() or
+// detect() can return a promise that NEVER settles — no error, the scan loop
+// just stops. That reads in the field as "the scanner never works on this
+// phone". Every native call now has a deadline.
+describe('enginePool native detector that hangs', () => {
+  const never = () => new Promise(() => {})
+
+  it('init moves past a getSupportedFormats() that never answers', async () => {
+    window.BarcodeDetector = class {
+      static getSupportedFormats = never
+      detect = never
+    }
+    const pool = createEnginePool(false, { nativeTimeoutMs: 20 })
+    await pool.init()
+    expect(pool.getActiveId()).toBe('ZXing')
+  })
+
+  it('a detect() that never answers drops native at once and scanning continues', async () => {
+    mockNativeDetector()
+    mocks.nativeDetectImpl = never
+    const pool = createEnginePool(false, { nativeTimeoutMs: 20 })
+    await pool.init()
+    await pool.armFallback()
+    expect(pool.getActiveId()).toBe('Native')
+
+    const res = await pool.detect(SURFACE)          // must return, not hang
+    expect(res.barcodes).toEqual([])
+    expect(pool.getActiveId()).toBe('ZXing')        // one hang is enough
+
+    const next = await pool.detect(SURFACE)
+    expect(next.engine).toBe('ZXing')
+    expect(next.barcodes).toHaveLength(1)
+  })
+
+  it('hardPass finishes and still reads with the other engines when native hangs', async () => {
+    mockNativeDetector()
+    mocks.nativeDetectImpl = never
+    const pool = createEnginePool(false, { nativeTimeoutMs: 20 })
+    await pool.init()
+    await pool.armFallback()
+    const hard = await pool.hardPass(SURFACE)
+    expect(hard.barcodes.map(b => b.rawValue)).toEqual(['FB5971GA0001'])
+  })
+})
+
 describe('enginePool zxing-cpp (WebAssembly) engine', () => {
   it('is picked ahead of ZXing-JS when there is no native detector', async () => {
     mocks.cppDecode = async () => cppHit()

@@ -128,6 +128,38 @@ const CROP_PAD = 8
 // operator's retry after ~1.5s still goes through.
 const DECLINED_DAMP_MS = 1500
 
+// ─── Lens memory ──────────────────────────────────────────────────────────────
+// A lens is remembered only after it has READ A BADGE. The old code saved the
+// lens on every open and every lens-switch tap, so one tap onto a 2 MP macro
+// or depth lens (OnePlus Nord / CE list them as plain "camera2 2, facing
+// back", so nothing can filter them out) was reopened forever: the scanner
+// "never works on this phone". The key changed so every lens the old code
+// saved is dropped once.
+// No-frames watchdog. Some firmwares (reported on OnePlus / OxygenOS at high
+// resolutions) return a track that is "live" but never delivers a frame: a
+// black preview, videoWidth 0, and a loop that waits forever with no error.
+// If no frame arrives in FRAME_WATCHDOG_MS the camera is reopened one step
+// down cameraManager's resolution chain (1080p → 720p → 540p → 480p → 360p);
+// past the last step the operator is told, with Retry. 5 s is well above a
+// normal camera warm-up after play() resolves.
+const FRAME_WATCHDOG_MS = 5000
+const MAX_RESOLUTION_STEP = 4
+
+const LENS_KEY = 'dp_scanner_lens_v2'
+const LEGACY_LENS_KEY = 'dp_scanner_camera_id'
+
+function readSavedLens() {
+  try {
+    localStorage.removeItem(LEGACY_LENS_KEY)
+    return localStorage.getItem(LENS_KEY) || null
+  } catch { return null }
+}
+
+function saveLens(deviceId) {
+  if (!deviceId) return
+  try { localStorage.setItem(LENS_KEY, deviceId) } catch { /* storage blocked */ }
+}
+
 // ─── Quality Analysis ─────────────────────────────────────────────────────────
 
 function createQualityChecker() {
@@ -294,6 +326,9 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   // firmwares that quietly drop continuous AF). Owned by the session: started
   // once the preview is live, cleared in teardown().
   const refocusTimerRef = useRef(null)
+  const frameWatchRef = useRef(null)
+  // Latest startScanner, so the frame watchdog can restart with fresh state.
+  const startScannerRef = useRef(null)
   const lastRawRef = useRef(null)
   // Reject-hint throttle (epoch ms of the last shown hint) and its hide
   // timeout — the "invalid badge" pill is transient and must not re-flash on
@@ -317,9 +352,11 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const [torchOn, setTorchOn] = useState(false)
   const [torchSupported, setTorchSupported] = useState(false)
   const [cameraList, setCameraList] = useState([])
-  const [currentDeviceId, setCurrentDeviceId] = useState(() => {
-    try { return localStorage.getItem('dp_scanner_camera_id') || null } catch { return null }
-  })
+  const [currentDeviceId, setCurrentDeviceId] = useState(readSavedLens)
+  // The lens this session opened, and whether it has been saved yet (a lens is
+  // saved on its first successful read — see LENS_KEY).
+  const openedLensRef = useRef(null)
+  const lensSavedRef = useRef(false)
   const [cameraToast, setCameraToast] = useState(null)
   const cameraToastTimerRef = useRef(null)
   const [lastRaw, setLastRaw] = useState(null)
@@ -517,6 +554,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       // ran, so burning the 2s window on it would swallow the retry as a
       // duplicate. Any other return (undefined, true, a promise) records.
       // Declined scans record into the short damp above instead.
+      if (!lensSavedRef.current && openedLensRef.current) {
+        saveLens(openedLensRef.current)
+        lensSavedRef.current = true
+      }
       const accepted = onScanRef.current?.(cleaned)
       if (accepted !== false) {
         lastScanRef.current = { badge: cleaned, time: now }
@@ -852,6 +893,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     sessionRef.current++            // invalidate every in-flight continuation
     cancelFrame()
     if (refocusTimerRef.current) { clearInterval(refocusTimerRef.current); refocusTimerRef.current = null }
+    if (frameWatchRef.current) { clearTimeout(frameWatchRef.current); frameWatchRef.current = null }
     if (rejectHintTimerRef.current) { clearTimeout(rejectHintTimerRef.current); rejectHintTimerRef.current = null }
     if (cameraToastTimerRef.current) { clearTimeout(cameraToastTimerRef.current); cameraToastTimerRef.current = null }
     setCameraToast(null)
@@ -889,7 +931,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
 
   // ─── Start ──────────────────────────────────────────────────────────
 
-  const startScanner = useCallback(async ({ reclaim = false, preferredDeviceId = null } = {}) => {
+  const startScanner = useCallback(async ({ reclaim = false, preferredDeviceId = null, resolutionStart = 0 } = {}) => {
     if (!mountedRef.current) return
     // An explicit Retry re-claims leadership — otherwise the button on the
     // "another tab" screen is dead.
@@ -981,14 +1023,19 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
 
     // ── 1. Camera first. Nothing else may delay the preview.
     let activeDeviceId = preferredDeviceId !== null ? preferredDeviceId : currentDeviceId
-    if (!activeDeviceId) {
-      try { activeDeviceId = localStorage.getItem('dp_scanner_camera_id') || null } catch {}
-    }
+    if (!activeDeviceId) activeDeviceId = readSavedLens()
 
     let opened
     try {
       const openTimeout = permState === 'granted' ? CAMERA_INIT_TIMEOUT : CAMERA_PROMPT_TIMEOUT
-      opened = await withTimeout(openCamera({ preferredDeviceId: activeDeviceId, forceNew: !!preferredDeviceId, debug: debugOn }), openTimeout, 'Camera')
+      opened = await withTimeout(openCamera({
+        preferredDeviceId: activeDeviceId,
+        // A watchdog step-down must open a NEW stream: the frameless one still
+        // reports "live" and would otherwise be adopted right back.
+        forceNew: !!preferredDeviceId || resolutionStart > 0,
+        startIndex: resolutionStart,
+        debug: debugOn,
+      }), openTimeout, 'Camera')
     } catch (err) {
       // An abandoned open is a normal cancellation, never a user-facing error.
       // Only OUR cancellation is silent; a getUserMedia AbortError is a real
@@ -1027,10 +1074,10 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     streamRef.current = stream
     trackRef.current = opened.track || stream.getVideoTracks()[0] || null
     setTorchSupported(!!opened.torchSupported)
-    if (opened.deviceId) {
-      setCurrentDeviceId(opened.deviceId)
-      try { localStorage.setItem('dp_scanner_camera_id', opened.deviceId) } catch {}
-    }
+    // Not saved here: only a lens that reads a badge is remembered.
+    openedLensRef.current = opened.deviceId || null
+    lensSavedRef.current = false
+    if (opened.deviceId) setCurrentDeviceId(opened.deviceId)
 
     const video = videoRef.current
     if (!video) { stopStream(stream); setStatus('error'); setErrorMsg('Video element missing'); return }
@@ -1063,6 +1110,26 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
 
     // ── 2. Preview is live. Focus + engines happen after.
     setStatus('ready')
+
+    // No-frames watchdog (see FRAME_WATCHDOG_MS).
+    if (frameWatchRef.current) clearTimeout(frameWatchRef.current)
+    frameWatchRef.current = setTimeout(() => {
+      frameWatchRef.current = null
+      if (!isCurrent(session) || !mountedRef.current || visibilityPausedRef.current) return
+      if (videoRef.current?.videoWidth) return
+      // resolutionIndex is relative to where this open started; -1 means the
+      // browser's own last-resort pick, i.e. the chain is already used up.
+      const used = opened.resolutionIndex >= 0 ? resolutionStart + opened.resolutionIndex : MAX_RESOLUTION_STEP
+      const next = used + 1
+      teardown()
+      if (next > MAX_RESOLUTION_STEP) {
+        setStatus('error')
+        setErrorMsg('Camera is not sending a picture — close other camera apps, then tap Retry')
+        return
+      }
+      if (debugOn) pushDebug(`no frames after ${FRAME_WATCHDOG_MS}ms — reopening at resolution step ${next}`)
+      startScannerRef.current?.({ reclaim: true, resolutionStart: next })
+    }, FRAME_WATCHDOG_MS)
     qualityRef.current = createQualityChecker()
     surfaceRef.current = createDetectSurface()
 
@@ -1114,6 +1181,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     // ── 3. Engines in the background — never block the preview.
     ensureEngines(session)
   }, [debugOn, pushDebug, setGuidance, isCurrent, detectLoop, ensureEngines, teardown, cancelFrame, clearAim, currentDeviceId])
+  startScannerRef.current = startScanner
 
   // ─── Lifecycle ──────────────────────────────────────────────────────
 
@@ -1209,8 +1277,9 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     const nextCam = cameraList[nextIdx]
     if (!nextCam?.deviceId) return
 
+    // Not saved here either: if this lens can't read badges (macro, depth),
+    // the next session goes back to the default lens instead of this one.
     setCurrentDeviceId(nextCam.deviceId)
-    try { localStorage.setItem('dp_scanner_camera_id', nextCam.deviceId) } catch {}
 
     teardown({ stopCamera: true })
     startScanner({ reclaim: true, preferredDeviceId: nextCam.deviceId })
