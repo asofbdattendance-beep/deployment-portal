@@ -68,5 +68,33 @@ export function pushConfirmRead(entries, badge, now, cfg) {
     .filter(e => e.time > now - CONFIRM_WINDOW_MS)
   if (next.length > cfg.confirmWindow) next = next.slice(-cfg.confirmWindow)
   const count = next.filter(e => e.badge === badge).length
-  return { entries: next, confirmed: count >= (cfg.confirmThreshold || 2), count }
+  const threshold = Number.isFinite(cfg?.confirmThreshold) ? cfg.confirmThreshold : DEFAULT_CONFIRM_THRESHOLD
+  return { entries: next, confirmed: count >= threshold, count }
+}
+
+/** Reads a software decoder needs before a badge counts (see confirmThresholdFor). */
+export const DEFAULT_CONFIRM_THRESHOLD = 2
+
+/** Engines whose single read is trusted outright. */
+const SINGLE_READ_ENGINES = new Set(['Native'])
+
+/**
+ * How many identical reads confirm a badge for the engine that produced it.
+ *
+ * BADGE_REGEX checks a read's SHAPE, not that it is the right person: a
+ * one-digit Code 39 substitution (FB5978GA0013 -> FB5978GA0018) is still a
+ * valid badge, just another sewadar's. The native BarcodeDetector (ML Kit on
+ * Android) is reliable enough to lock on one frame. The software decoders
+ * (ZXingCpp, ZXing) and the inverted/rotated hard pass misread soft-focus
+ * frames more often, so they keep the profile's threshold. Misses never enter
+ * the confirm window, so a shaky frame between two reads costs nothing; the
+ * second read only adds one decode interval (~50-150 ms).
+ *
+ * @param {string} [engine]
+ * @param {{confirmThreshold?: number}} [cfg]
+ * @returns {number}
+ */
+export function confirmThresholdFor(engine, cfg) {
+  if (SINGLE_READ_ENGINES.has(engine)) return 1
+  return Number.isFinite(cfg?.confirmThreshold) ? cfg.confirmThreshold : DEFAULT_CONFIRM_THRESHOLD
 }

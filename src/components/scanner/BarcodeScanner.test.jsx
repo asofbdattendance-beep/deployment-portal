@@ -260,6 +260,45 @@ describe('BarcodeScanner camera session lifecycle', () => {
     }
   })
 
+  // Photo fallback: the live stream must let go of the camera before the
+  // phone's camera app opens, the photo's badge goes through the same onScan
+  // path as a live read, and the live camera comes back afterwards.
+  it('reads a badge from a photo, releasing and then reclaiming the camera', async () => {
+    const stream = makeStream()
+    mocks.openCamera.mockResolvedValue({ stream, track: stream.track, torchSupported: false, deviceId: 'rear', resolutionIndex: 0, adopted: false })
+    // The native detector finds the badge only in the photo, never in live frames.
+    window.BarcodeDetector = class {
+      static getSupportedFormats = () => Promise.resolve(['code_39'])
+      detect = (src) => Promise.resolve(src?.isPhoto ? [{ rawValue: 'FB5978GA0013', cornerPoints: [] }] : [])
+    }
+    const realBitmap = globalThis.createImageBitmap
+    globalThis.createImageBitmap = vi.fn().mockResolvedValue({ isPhoto: true, width: 4000, height: 3000, close: vi.fn() })
+    try {
+      const onScan = vi.fn()
+      const { getByRole, getByTestId } = render(<BarcodeScanner onScan={onScan} />)
+      await flush()
+      const opensBefore = mocks.openCamera.mock.calls.length
+
+      const input = getByTestId('photo-input')
+      vi.spyOn(input, 'click').mockImplementation(() => {})
+      await act(async () => { getByRole('button', { name: 'Take a photo of the badge' }).click() })
+      expect(stream.track.stop).toHaveBeenCalled()
+
+      Object.defineProperty(input, 'files', { value: [new File(['x'], 'b.jpg', { type: 'image/jpeg' })], configurable: true })
+      await act(async () => {
+        input.dispatchEvent(new Event('change', { bubbles: true }))
+        for (let i = 0; i < 10; i++) await Promise.resolve()
+        await new Promise(r => setTimeout(r, 0))
+      })
+      await flush()
+
+      expect(onScan).toHaveBeenCalledWith('FB5978GA0013')
+      expect(mocks.openCamera.mock.calls.length).toBeGreaterThan(opensBefore)
+    } finally {
+      globalThis.createImageBitmap = realBitmap
+    }
+  })
+
   // Field bug (Dec 2026 readiness): a 20s "never decoded" watchdog turned an
   // idle scanner — operator waiting for the next sewadar, or a phone still
   // hunting focus — into a permanent "This browser cannot read badges" error.
@@ -564,6 +603,24 @@ describe('BarcodeScanner camera suppressor acceptance (T11)', () => {
       expect(onScan.mock.calls.length).toBeGreaterThan(1)
     } finally {
       vi.useRealTimers()
+    }
+  })
+
+  it('gives success feedback only for an accepted scan, never a declined one', async () => {
+    vi.useFakeTimers()
+    const vibrate = vi.fn()
+    Object.defineProperty(window.navigator, 'vibrate', { configurable: true, writable: true, value: vibrate })
+    try {
+      renderDetectingBadge(vi.fn(() => false))
+      await act(async () => { await vi.advanceTimersByTimeAsync(800) })
+      expect(vibrate).not.toHaveBeenCalled()
+      cleanup()
+      renderDetectingBadge(vi.fn())
+      await act(async () => { await vi.advanceTimersByTimeAsync(800) })
+      expect(vibrate).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+      delete window.navigator.vibrate
     }
   })
 

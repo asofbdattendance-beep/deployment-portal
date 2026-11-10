@@ -44,8 +44,13 @@ import {
   getRearCameraList,
   isAbandonedOpen,
   zoomRampForMisses,
+  getZoom,
+  setZoom,
 } from './cameraManager'
 import { BADGE_REGEX, strictCameraBadge } from '../../lib/logic'
+import { installScanAudioUnlock, playScanBeep } from '../../lib/mobile'
+import { detectInAppBrowser, installTelemetryFlush, scanTelemetry } from '../../lib/scanTelemetry'
+import PhotoCapture from './PhotoCapture'
 
 
 // ─── Device Profiles ──────────────────────────────────────────────────────────
@@ -54,8 +59,9 @@ import { BADGE_REGEX, strictCameraBadge } from '../../lib/logic'
 // cut a slow phone to ~1 decode/s. maxWidth caps the detection surface: 1080
 // keeps a portrait 1080p frame at full resolution (Code 39 bars need ~2 px to
 // survive soft focus); only a phone measured slow drops back to the old 720.
-// confirmThreshold is 2 across profiles to prevent single-frame Code-39 misreads
-// from scanning false barcodes while maintaining responsive detection.
+// confirmThreshold is 2 for the software decoders: BADGE_REGEX checks a read's
+// shape, and a one-digit Code 39 misread is still a valid (wrong) badge. The
+// native ML Kit engine overrides this to a 1-frame lock (confirmThresholdFor).
 const DEVICE_PROFILES = {
   fast:   { confirmWindow: 3, confirmThreshold: 2, minInterval: 0,   maxInterval: 50,  frameSkip: 0, maxWidth: 1280 },
   medium: { confirmWindow: 4, confirmThreshold: 2, minInterval: 16,  maxInterval: 100, frameSkip: 0, maxWidth: 1080 },
@@ -63,6 +69,18 @@ const DEVICE_PROFILES = {
   // 720 px drops them below decodable px/module, trading every read for speed.
   slow:   { confirmWindow: 3, confirmThreshold: 2, minInterval: 33,  maxInterval: 150, frameSkip: 0, maxWidth: 1080 },
 }
+
+// Zoom toggle: 1x <-> ZOOM_TOGGLE_TARGET. Above ZOOM_TOGGLE_SPLIT the lens
+// counts as "zoomed" (the open-time 1.25x and the miss ramp sit either side).
+const ZOOM_TOGGLE_TARGET = 1.6
+const ZOOM_TOGGLE_SPLIT = 1.4
+// Photo fallback prompt: offered once the operator has been aiming at
+// something barcode-like for PHOTO_SUGGEST_MS without a read. An attempt ends
+// when nothing barcode-like is seen for ATTEMPT_GAP_MS (the person left).
+const PHOTO_SUGGEST_MS = 8000
+const ATTEMPT_GAP_MS = 4000
+
+const formatZoom = (z) => `${Number.isFinite(z) ? Math.round(z * 10) / 10 : 1}x`
 
 const ENGINE_LABELS = { Native: 'Optimized', ZXingCpp: 'Universal', ZXing: 'Compatibility' }
 
@@ -122,12 +140,6 @@ const HARD_PASS_EVERY = 3
 const CROP_AFTER = 2
 const CROP_EVERY = 2
 const CROP_PAD = 8
-// Ms a busy/decision-declined badge stays damped. The 2s duplicate suppressor
-// records only on ACCEPTANCE (a declined scan never ran, so its retry must not
-// be swallowed) — but without any damp the same badge re-fires vibrate +
-// onScan every frame for the whole RPC. 1500ms damps the storm while the
-// operator's retry after ~1.5s still goes through.
-const DECLINED_DAMP_MS = 1500
 // Frames between re-checks of the speed profile against the rolling decode time.
 const PROFILE_REFRESH_FRAMES = 30
 
@@ -217,7 +229,7 @@ export function guidanceFor(reason, elapsed, hasEverDetected, consecutiveFails) 
 import { createEnginePool } from './enginePool'
 import { locateBarcode } from './barcodeLocator'
 import { planSourceCrop } from './cropPlan'
-import { profileForDetectMs, profileFromSamples, pushConfirmRead } from './scanTuning'
+import { confirmThresholdFor, profileForDetectMs, profileFromSamples, pushConfirmRead } from './scanTuning'
 
 
 // ─── Detection surface ────────────────────────────────────────────────────────
@@ -295,12 +307,6 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const onScanRef = useRef(onScan)
   const lastScanRef = useRef({ badge: null, time: 0 })
   const recentScansRef = useRef(new Map())
-  // Busy-decline damp: a scan the handler declined (busy / decision-pending,
-  // returns exactly false) never ran, so the 2s suppressor must NOT record it —
-  // but re-firing vibrate + onScan every frame for the whole RPC storms the
-  // main thread. This short damp (DECLINED_DAMP_MS) is separate from the
-  // acceptance suppressor above.
-  const lastDeclinedRef = useRef({ badge: null, time: 0 })
   const slidingWindowRef = useRef([])
   const configRef = useRef(DEVICE_PROFILES.medium)
   const surfaceRef = useRef(null)
@@ -355,6 +361,26 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
   const [guidanceMsg, setGuidanceMsg] = useState(null)
   const [torchOn, setTorchOn] = useState(false)
   const [torchSupported, setTorchSupported] = useState(false)
+  const [zoomSupported, setZoomSupported] = useState(false)
+  const [currentZoom, setCurrentZoom] = useState(1)
+  // Set once the operator picks a zoom: the miss-driven ramp then leaves the
+  // lens alone instead of overriding their choice. Reset per opened track.
+  const userZoomRef = useRef(false)
+
+  useEffect(() => { installScanAudioUnlock() }, [])
+  useEffect(() => installTelemetryFlush(), [])
+
+  // Telemetry for the current camera session (null between sessions), and
+  // the attempt tracker behind the photo prompt.
+  const sessionStatsRef = useRef(null)
+  const missesSinceReadRef = useRef(0)
+  const attemptRef = useRef({ start: 0, last: 0 })
+  const suggestPhotoRef = useRef(false)
+  const [suggestPhoto, setSuggestPhoto] = useState(false)
+  // True while the phone's camera app is open for a photo: the live stream
+  // is released and the visibility handler must not grab it back.
+  const photoActiveRef = useRef(false)
+  const photoHadLiveRef = useRef(false)
   const [cameraList, setCameraList] = useState([])
   const [currentDeviceId, setCurrentDeviceId] = useState(readSavedLens)
   // The lens this session opened, and whether it has been saved yet (a lens is
@@ -426,6 +452,16 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     setAimBox(null)
   }, [])
 
+  /** Camera evidence that someone is presenting a badge (a raw decode or a
+   *  localizer hit). Drives the photo prompt, never a scan decision. */
+  const noteAttempt = useCallback(() => {
+    const now = Date.now()
+    const a = attemptRef.current
+    attemptRef.current = (!a.start || now - a.last > ATTEMPT_GAP_MS)
+      ? { start: now, last: now }
+      : { start: a.start, last: now }
+  }, [])
+
   // ─── Localizer aim hint ─────────────────────────────────────────────
   //
   // When the DECODER is the thing failing, cornerPoints never exist, so the
@@ -457,14 +493,15 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         { x: box.x, y: box.y + box.height },
       ]
       const css = detectionBox(corners, roi, video.videoWidth, video.videoHeight, video.getBoundingClientRect())
-      if (css) publishAim(css)
+      if (css) { publishAim(css); noteAttempt() }
     } catch { /* hint only — never let it touch the loop */ }
-  }, [publishAim])
+  }, [publishAim, noteAttempt])
 
   // Declared before detectLoop, which depends on them (const TDZ).
 
-  const updateWindow = useCallback((badge, cfg) => {
-    const res = pushConfirmRead(slidingWindowRef.current, badge, Date.now(), cfg)
+  const updateWindow = useCallback((badge, cfg, engine) => {
+    const threshold = confirmThresholdFor(engine, cfg)
+    const res = pushConfirmRead(slidingWindowRef.current, badge, Date.now(), { ...cfg, confirmThreshold: threshold })
     slidingWindowRef.current = res.entries
     return { confirmed: res.confirmed, count: res.count }
   }, [])
@@ -485,7 +522,89 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     }, 2000)
   }, [])
 
+  /** What the live track is doing right now, for telemetry. Never throws. */
+  const liveSnapshot = useCallback(() => {
+    const track = trackRef.current
+    let settings
+    try { settings = track?.getSettings?.() || {} } catch { settings = {} }
+    return {
+      lens_label: track?.label || undefined,
+      stream_w: settings.width,
+      stream_h: settings.height,
+      zoom: settings.zoom,
+    }
+  }, [])
+
+  /**
+   * The one place a confirmed badge becomes a scan, for live frames and
+   * photos alike: duplicate suppression, feedback, onScan, telemetry.
+   *
+   * @param {string} cleaned strict badge
+   * @param {string} engine decoder that read it
+   * @param {'live'|'photo'} input
+   * @param {number} [photoMs] decode time of a photo
+   * @returns {'accepted'|'declined'|'dup'}
+   */
+  const acceptBadge = useCallback((cleaned, engine, input, photoMs) => {
+    const now = Date.now()
+    const lastScanTime = recentScansRef.current.get(cleaned) || (lastScanRef.current.badge === cleaned ? lastScanRef.current.time : 0)
+    if (now - lastScanTime < 2000) return 'dup'
+    pushDebug(`SCAN OK [${engine}/${input}]: ${cleaned}`)
+    if (focusHuntStopRef.current) { focusHuntStopRef.current(); focusHuntStopRef.current = null }
+    // Camera-suppressor contract (see the busy guard in useScanHandler.js):
+    // the suppressor records only on ACCEPTANCE. A declined scan (the
+    // handler returned exactly `false` — busy or decision-pending) never
+    // ran, so burning the 2s window on it would swallow the retry as a
+    // duplicate. Any other return (undefined, true, a promise) records.
+    // Declined scans record into the short damp above instead.
+    // A photo read says nothing about the live lens, so it never saves one.
+    if (input === 'live' && !lensSavedRef.current && openedLensRef.current) {
+      saveLens(openedLensRef.current)
+      lensSavedRef.current = true
+    }
+    const accepted = onScanRef.current?.(cleaned)
+    if (accepted === false) {
+      // Declined (busy / decision pending): the 2s suppressor must NOT record
+      // it (the retry has to go through), and there is no success cue —
+      // nothing was marked. Giving feedback only on acceptance is also what
+      // stops a declined badge, re-offered every frame, from buzzing per frame.
+      return 'declined'
+    }
+    // Feedback only once the page has taken the scan.
+    try { navigator.vibrate?.(50) } catch {}
+    playScanBeep('success')
+    lastScanRef.current = { badge: cleaned, time: now }
+    recentScansRef.current.set(cleaned, now)
+    if (recentScansRef.current.size > 20) {
+      for (const [b, t] of recentScansRef.current.entries()) {
+        if (now - t > 5000) recentScansRef.current.delete(b)
+      }
+    }
+
+    const attempt = attemptRef.current
+    scanTelemetry.record({
+      event: 'read',
+      input,
+      engine,
+      ms: input === 'photo' ? photoMs : (attempt.start ? now - attempt.start : 0),
+      misses: input === 'photo' ? undefined : missesSinceReadRef.current,
+      ...(input === 'live' ? liveSnapshot() : {}),
+      detail: { detect_ms: Math.round(detectMsRef.current.avg || 0) },
+    })
+    const stats = sessionStatsRef.current
+    if (stats) {
+      sessionStatsRef.current = input === 'photo'
+        ? { ...stats, photoReads: stats.photoReads + 1 }
+        : { ...stats, reads: stats.reads + 1 }
+    }
+    missesSinceReadRef.current = 0
+    attemptRef.current = { start: 0, last: 0 }
+    if (suggestPhotoRef.current) { suggestPhotoRef.current = false; setSuggestPhoto(false) }
+    return 'accepted'
+  }, [pushDebug, liveSnapshot])
+
   const handleBarcodes = useCallback((barcodes, roi, engine) => {
+    if (barcodes?.length) noteAttempt()
     const cfg = configRef.current
     for (const b of barcodes) {
       const raw = String(b.rawValue || '').trim().toUpperCase()
@@ -534,47 +653,14 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       }
 
       hasEverDetectedRef.current = true
-      const { confirmed, count } = updateWindow(cleaned, cfg)
-      if (debugOn) pushDebug(`window ${cleaned}: ${count}/${cfg.confirmThreshold} ${confirmed ? 'CONFIRMED' : ''}`)
+      const { confirmed, count } = updateWindow(cleaned, cfg, engine)
+      if (debugOn) pushDebug(`window ${cleaned}: ${count}/${confirmThresholdFor(engine, cfg)} [${engine}] ${confirmed ? 'CONFIRMED' : ''}`)
       if (!confirmed) continue
 
-      const now = Date.now()
-      const lastScanTime = recentScansRef.current.get(cleaned) || (lastScanRef.current.badge === cleaned ? lastScanRef.current.time : 0)
-      if (now - lastScanTime < 2000) break
-      // Declined-vibrate damp: a badge declined moments ago (busy /
-      // decision-pending) keeps re-offering onScan every confirmed frame per
-      // the T11 contract — but the per-frame vibrate is pure storm, so damp
-      // vibrate only, never the offer itself.
-      const declinedDamped = lastDeclinedRef.current.badge === cleaned && now - lastDeclinedRef.current.time < DECLINED_DAMP_MS
-      if (!declinedDamped) { try { navigator.vibrate?.(80) } catch {} }
-      pushDebug(`SCAN OK [${engine}]: ${cleaned}`)
-      if (focusHuntStopRef.current) { focusHuntStopRef.current(); focusHuntStopRef.current = null }
-      // Camera-suppressor contract (see the busy guard in useScanHandler.js):
-      // the suppressor records only on ACCEPTANCE. A declined scan (the
-      // handler returned exactly `false` — busy or decision-pending) never
-      // ran, so burning the 2s window on it would swallow the retry as a
-      // duplicate. Any other return (undefined, true, a promise) records.
-      // Declined scans record into the short damp above instead.
-      if (!lensSavedRef.current && openedLensRef.current) {
-        saveLens(openedLensRef.current)
-        lensSavedRef.current = true
-      }
-      const accepted = onScanRef.current?.(cleaned)
-      if (accepted !== false) {
-        lastScanRef.current = { badge: cleaned, time: now }
-        recentScansRef.current.set(cleaned, now)
-        if (recentScansRef.current.size > 20) {
-          for (const [b, t] of recentScansRef.current.entries()) {
-            if (now - t > 5000) recentScansRef.current.delete(b)
-          }
-        }
-        lastDeclinedRef.current = { badge: null, time: 0 }
-      } else {
-        lastDeclinedRef.current = { badge: cleaned, time: now }
-      }
+      acceptBadge(cleaned, engine, 'live')
       break
     }
-  }, [debugOn, pushDebug, updateWindow, publishAim, throttledRejectHint])
+  }, [debugOn, pushDebug, updateWindow, publishAim, throttledRejectHint, acceptBadge, noteAttempt])
 
   // ─── Frame scheduling ───────────────────────────────────────────────
 
@@ -690,6 +776,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     if (visibilityPausedRef.current || decisionPausedRef.current) return
 
     fpsRef.current.frames++
+    if (sessionStatsRef.current) sessionStatsRef.current = { ...sessionStatsRef.current, frames: sessionStatsRef.current.frames + 1 }
     if (Date.now() - fpsRef.current.last > 1000) {
       setFps(fpsRef.current.frames)
       fpsRef.current = { frames: 0, last: Date.now() }
@@ -706,17 +793,32 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       handleBarcodes(barcodes, detectRoi, engine)
     } else {
       consecutiveFailsRef.current++
+      missesSinceReadRef.current++
       if (barcodes?.length) {
         handleBarcodes(barcodes, detectRoi, engine)
       }
+      // Offer the photo fallback once someone has been presenting a badge
+      // for a while without a read. Idle frames between sewadars never count.
+      if (!suggestPhotoRef.current) {
+        const a = attemptRef.current
+        const now = Date.now()
+        if (a.start && now - a.last <= ATTEMPT_GAP_MS && now - a.start >= PHOTO_SUGGEST_MS) {
+          suggestPhotoRef.current = true
+          setSuggestPhoto(true)
+        }
+      }
       // Miss-driven gentle zoom ramp: allows the phone to stay 20-25cm away
       // outside the macro blur distance while still giving the decoder sufficient pixels.
-      if (trackRef.current && consecutiveFailsRef.current >= 4 && consecutiveFailsRef.current % 4 === 0 && consecutiveFailsRef.current <= 16) {
+      if (trackRef.current && !userZoomRef.current && consecutiveFailsRef.current >= 4 && consecutiveFailsRef.current % 4 === 0 && consecutiveFailsRef.current <= 16) {
         try {
           const caps = trackRef.current.getCapabilities?.() || {}
           if (caps.zoom) {
             const z = zoomRampForMisses(consecutiveFailsRef.current, caps)
-            if (z && z > 1) trackRef.current.applyConstraints({ advanced: [{ zoom: z }] }).catch(() => {})
+            if (z && z > 1) {
+              trackRef.current.applyConstraints({ advanced: [{ zoom: z }] })
+                .then(() => { if (mountedRef.current) setCurrentZoom(z) })
+                .catch(() => {})
+            }
           }
         } catch {}
       }
@@ -852,6 +954,22 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     setTorchOn(next)
   }, [])
 
+  const handleZoomToggle = useCallback(async () => {
+    const track = trackRef.current
+    if (!track) return
+    const caps = track.getCapabilities?.() || {}
+    if (!caps.zoom) return
+    const max = Number(caps.zoom.max) || 1
+    const min = Number(caps.zoom.min) || 1
+    const actual = getZoom(track) ?? currentZoom
+    const target = actual >= ZOOM_TOGGLE_SPLIT ? min : Math.min(ZOOM_TOGGLE_TARGET, max)
+    userZoomRef.current = true
+    const res = await setZoom(track, target)
+    if (!mountedRef.current || trackRef.current !== track) return
+    if (res.ok) setCurrentZoom(res.zoom ?? target)
+    else pushDebug('zoom change rejected by device')
+  }, [currentZoom, pushDebug])
+
   /**
    * Load detector engines off the critical path.
    *
@@ -933,6 +1051,24 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     setLastRaw(null)
     channelRef.current?.close(); channelRef.current = null
     if (tapFocusCleanupRef.current) { try { tapFocusCleanupRef.current() } catch {} tapFocusCleanupRef.current = null }
+    const stats = sessionStatsRef.current
+    if (stats) {
+      sessionStatsRef.current = null
+      scanTelemetry.record({
+        event: 'session',
+        engine: engineRef.current?.getActiveId?.() || undefined,
+        misses: missesSinceReadRef.current,
+        ...stats.snapshot,
+        detail: {
+          duration_ms: Date.now() - stats.startedAt,
+          reads: stats.reads,
+          photo_reads: stats.photoReads,
+          frames: stats.frames,
+          detect_ms: Math.round(detectMsRef.current.avg || 0),
+          ever_detected: hasEverDetectedRef.current,
+        },
+      })
+    }
     if (stopCamera) {
       // Abandon any open still in flight so its stream is stopped on arrival
       // rather than adopted by a component that no longer exists.
@@ -1112,6 +1248,9 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     streamRef.current = stream
     trackRef.current = opened.track || stream.getVideoTracks()[0] || null
     setTorchSupported(!!opened.torchSupported)
+    setZoomSupported(false)
+    setCurrentZoom(1)
+    userZoomRef.current = false
     // Not saved here: only a lens that reads a badge is remembered.
     openedLensRef.current = opened.deviceId || null
     lensSavedRef.current = false
@@ -1148,6 +1287,9 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
 
     // ── 2. Preview is live. Focus + engines happen after.
     setStatus('ready')
+    sessionStatsRef.current = { startedAt: Date.now(), reads: 0, photoReads: 0, frames: 0, snapshot: liveSnapshot() }
+    missesSinceReadRef.current = 0
+    attemptRef.current = { start: 0, last: 0 }
 
     // No-frames watchdog (see FRAME_WATCHDOG_MS).
     if (frameWatchRef.current) clearTimeout(frameWatchRef.current)
@@ -1185,9 +1327,14 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         // Chrome on Android often reports an empty capability set until the
         // track is delivering frames, so the pre-play torch probe misses a real
         // torch — exactly the dim-hall phones that need it. Re-read once live.
-        if (!opened.torchSupported) {
-          try { if (trackRef.current?.getCapabilities?.()?.torch) setTorchSupported(true) } catch {}
-        }
+        try {
+          const caps = trackRef.current?.getCapabilities?.() || {}
+          if (!opened.torchSupported && caps.torch) setTorchSupported(true)
+          if (caps.zoom && Number(caps.zoom.max) > 1) {
+            setZoomSupported(true)
+            setCurrentZoom(getZoom(trackRef.current) ?? 1)
+          }
+        } catch {}
       }).catch(() => {})
       // Re-assert AF every 4s until the first decode: some devices drop
       // continuous focus after the initial lock attempt. Stops itself on the
@@ -1218,7 +1365,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
 
     // ── 3. Engines in the background — never block the preview.
     ensureEngines(session)
-  }, [debugOn, pushDebug, setGuidance, isCurrent, detectLoop, ensureEngines, teardown, cancelFrame, clearAim, currentDeviceId])
+  }, [debugOn, pushDebug, setGuidance, isCurrent, detectLoop, ensureEngines, teardown, cancelFrame, clearAim, currentDeviceId, liveSnapshot])
   startScannerRef.current = startScanner
 
   // ─── Lifecycle ──────────────────────────────────────────────────────
@@ -1257,6 +1404,9 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       }
       if (!mountedRef.current) return
       visibilityPausedRef.current = false
+      // The phone's camera app is open (or just closed) for a photo: the
+      // photo flow restarts the live camera itself once the photo is read.
+      if (photoActiveRef.current) return
       // A decision popup open across the hide/show cycle keeps the LOOP
       // halted — but the STREAM must still be re-acquired: the hidden branch
       // stops every track, and returning here with a dead stream left a
@@ -1333,6 +1483,39 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
     }, 2000)
   }, [cameraList, currentDeviceId, teardown, startScanner])
 
+  // ─── Photo fallback ─────────────────────────────────────────────────
+  const handlePhotoOpen = useCallback(() => {
+    photoActiveRef.current = true
+    photoHadLiveRef.current = status === 'ready' || status === 'loading'
+    // Release the camera BEFORE the camera app asks for it.
+    if (photoHadLiveRef.current) teardown({ stopCamera: true })
+  }, [status, teardown])
+
+  const handlePhotoClose = useCallback(() => {
+    photoActiveRef.current = false
+    if (photoHadLiveRef.current && mountedRef.current) startScanner({ reclaim: true })
+  }, [startScanner])
+
+  const handlePhotoResult = useCallback((result) => {
+    if (result.status !== 'ok') {
+      scanTelemetry.record({
+        event: 'photo_fail', input: 'photo', engine: result.engine, ms: result.ms,
+        detail: { reason: result.status, raw: result.rawCount || 0, badges: result.badges?.length || 0 },
+      })
+      pushDebug(`photo: ${result.status}`)
+      return undefined
+    }
+    return acceptBadge(result.badge, result.engine || 'photo', 'photo', result.ms)
+  }, [acceptBadge, pushDebug])
+
+  // One telemetry row per distinct camera failure the operator sees.
+  useEffect(() => {
+    if (status !== 'error' || !errorMsg) return
+    scanTelemetry.record({ event: 'camera_error', detail: { message: errorMsg.slice(0, 160) } })
+  }, [status, errorMsg])
+
+  const inAppBrowser = typeof navigator !== 'undefined' ? detectInAppBrowser(navigator.userAgent) : null
+
   useImperativeHandle(ref, () => ({
     restart: startScanner,
     switchCamera: handleCameraSwitch,
@@ -1371,13 +1554,23 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
       <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '0.6rem' }}><CameraOff size={28} style={{ color: '#b91c1c' }} /></div>
       <div style={{ fontWeight: 700, marginBottom: '0.4rem' }}>Camera error</div>
       <div style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '0.9rem' }}>{errorMsg}</div>
-      <button onClick={() => startScanner({ reclaim: true })} className="btn btn-primary" style={{ minHeight: 44, minWidth: 44, touchAction: 'manipulation' }}><RefreshCw size={14} /> Retry</button>
+      {inAppBrowser && (
+        <div role="note" style={{ fontSize: '0.82rem', color: '#7c2d12', background: '#ffedd5', borderRadius: 8, padding: '0.5rem 0.7rem', marginBottom: '0.9rem' }}>
+          This page is open inside another app&apos;s browser, which often blocks the camera.
+          Open it in Chrome or Safari (menu → &ldquo;Open in browser&rdquo;), or take a photo below.
+        </div>
+      )}
+      <div style={{ display: 'grid', gap: '0.75rem', justifyItems: 'center' }}>
+        <button onClick={() => startScanner({ reclaim: true })} className={inAppBrowser ? 'btn btn-ghost' : 'btn btn-primary'} style={{ minHeight: 44, minWidth: 44, touchAction: 'manipulation' }}><RefreshCw size={14} /> Retry</button>
+        <PhotoCapture variant="block" primary={!!inAppBrowser} onResult={handlePhotoResult} onBeforeOpen={handlePhotoOpen} onAfterClose={handlePhotoClose} />
+      </div>
     </div>
   )
 
   // ─── Main UI ────────────────────────────────────────────────────────
 
   return (
+    <div>
     <div style={{ position: 'relative', background: '#000', borderRadius: 12, overflow: 'hidden' }}>
       <video
         ref={videoRef}
@@ -1454,6 +1647,26 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
           >
             <SwitchCamera size={14} aria-hidden="true" />
             <span>Lens</span>
+          </button>
+        )}
+
+        {zoomSupported && (
+          <button
+            type="button"
+            onClick={handleZoomToggle}
+            aria-label={`Toggle camera zoom (currently ${formatZoom(currentZoom)})`}
+            title="Toggle zoom"
+            className="scanner-zoom-btn"
+            style={{
+              background: 'rgba(0,0,0,0.6)',
+              color: '#fff', border: 'none', borderRadius: 8,
+              padding: '0.4rem 0.65rem', fontWeight: 700, fontSize: '0.75rem',
+              display: 'flex', alignItems: 'center', gap: 4,
+              minHeight: 44, minWidth: 44,
+              touchAction: 'manipulation', cursor: 'pointer',
+            }}
+          >
+            <span>{formatZoom(currentZoom)}</span>
           </button>
         )}
 
@@ -1562,6 +1775,13 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
             : debugLogs.map((l, i) => <div key={i} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{l}</div>)}
         </div>
       )}
+    </div>
+    <PhotoCapture
+      highlight={suggestPhoto}
+      onResult={handlePhotoResult}
+      onBeforeOpen={handlePhotoOpen}
+      onAfterClose={handlePhotoClose}
+    />
     </div>
   )
 })
