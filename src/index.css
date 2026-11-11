@@ -3143,3 +3143,68 @@ tr.row-clickable:focus-visible { outline: 2px solid var(--primary); outline-offs
     .scan-shell-feed-title { font-size: 0.95rem; }
   }
 }
+
+/* ── Consent & Deploy: lock readiness panel + row deploy tags (v86) ──
+   Centre users edit everything until they lock; this panel says so, shows
+   what is left, and owns the Lock CTA. Neutral card, status via soft tints
+   (Soft-Status Rule); the lock button is the page's one destructive action. */
+.lock-panel {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.85rem 1rem;
+  align-items: start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--success);
+  border-radius: var(--radius);
+  padding: 0.95rem 1.1rem;
+  margin-bottom: 1rem;
+}
+.lock-panel--locked { border-left-color: var(--danger); align-items: center; grid-template-columns: auto 1fr; }
+.lock-panel__icon {
+  display: grid; place-items: center;
+  width: 34px; height: 34px; border-radius: 999px;
+  background: var(--success-soft); color: var(--success);
+}
+.lock-panel--locked .lock-panel__icon { background: var(--danger-soft); color: var(--danger); }
+.lock-panel__body { min-width: 0; }
+.lock-panel__title { font-size: 0.95rem; font-weight: 700; letter-spacing: -0.01em; color: var(--text); margin: 0 0 0.15rem; }
+.lock-panel__text { font-size: 0.83rem; color: var(--text-sec); margin: 0; text-wrap: pretty; }
+.lock-panel__steps {
+  list-style: none; margin: 0.7rem 0 0; padding: 0;
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem;
+}
+.lock-step {
+  display: grid; grid-template-columns: auto 1fr auto; column-gap: 0.4rem; row-gap: 0.05rem;
+  align-items: center;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md);
+  padding: 0.5rem 0.65rem;
+}
+.lock-step__glyph { color: var(--text-muted); }
+.lock-step--done .lock-step__glyph { color: var(--success); }
+.lock-step--todo .lock-step__glyph { color: var(--warning); }
+.lock-step__label { font-size: 0.8rem; font-weight: 600; color: var(--text-sec); }
+.lock-step__value { font-size: 0.9rem; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.lock-step__hint { grid-column: 2 / -1; font-size: 0.74rem; color: var(--text-muted); }
+.lock-panel__action { display: flex; flex-direction: column; align-items: flex-end; gap: 0.35rem; max-width: 220px; }
+.lock-panel__btn { color: #b91c1c; border-color: #fecaca; background: var(--danger-soft); font-weight: 600; white-space: nowrap; }
+@media (hover: hover) { .lock-panel__btn:not(:disabled):hover { background: #fee2e2; border-color: #fca5a5; } }
+.lock-panel__note { font-size: 0.74rem; color: var(--text-muted); text-align: right; text-wrap: pretty; }
+@media (max-width: 768px) {
+  .lock-panel { grid-template-columns: auto 1fr; }
+  .lock-panel__steps { grid-template-columns: 1fr; }
+  .lock-panel__action { grid-column: 1 / -1; align-items: stretch; max-width: none; }
+  .lock-panel__btn { justify-content: center; min-height: 44px; }
+  .lock-panel__note { text-align: left; }
+}
+
+/* Row tag beside the department dropdown: saved-deployed vs not-yet-saved. */
+.deploy-tag {
+  display: inline-flex; align-items: center; gap: 0.2rem;
+  font-size: 0.62rem; font-weight: 700; letter-spacing: 0.02em;
+  padding: 0.12rem 0.4rem; border-radius: 999px; white-space: nowrap;
+}
+.deploy-tag--saved { background: var(--success-soft); color: #047857; }
+.deploy-tag--pending { background: var(--warning-soft); color: #b45309; }
+.deploy-tag--locked { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border); }
+.lock-panel__note--warn { color: #b45309; font-weight: 600; }

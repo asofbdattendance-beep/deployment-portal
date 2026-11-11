@@ -1,85 +1,168 @@
 // @vitest-environment jsdom
-// ConsentPage autosave regression: when the master switch closes inside the
-// autosave debounce, the pending user edit stays queued (dirty) and the user
-// is TOLD it was not saved — previously the skip was silent, so the page kept
-// showing the edit as if it had saved.
+// ConsentPage — v86 "edit until lock". A centre admin who has said Yes and
+// assigned a department must still be able to change that sewadar's consent,
+// department, stay at Bhati and chair pass until the centre LOCKS. Before v86
+// the row turned into a read-only "SECURITY · DEPLOYED" pill.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor, cleanup, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, cleanup, within } from '@testing-library/react'
 import ConsentPage from './ConsentPage'
+import { __reset as resetQueryCache } from '../lib/queryCache'
 
-const h = vi.hoisted(() => ({
-  settings: { sewadar_deployment_open: true },
-  handlers: {},
-  writes: [],
-}))
+const CENTRE = 'SECTOR-15-A'
+const SCHEDULE = { id: 's1', name: 'December2026', status: 'open', deadline: '2099-01-01T00:00:00Z' }
+const SECURITY = { id: 'd-sec', name: 'SECURITY', min_days: 1, is_active: true }
+const LANGAR = { id: 'd-lan', name: 'LANGAR', min_days: 1, is_active: true }
+const ROHIT = 'FB5978GA0016'
+const AARTI = 'FB5978LA0020'
 
-const FIX = {
-  dp_sewadars: [{ badge_number: 'B1', sewadar_name: 'Regular One', department: 'X', centre: 'C1', is_initiated: true, gender: 'M' }],
-  sewadar_consents: [{ id: 'c1', centre: 'C1', badge_number: 'B1', consent_given: true, available_days_count: 5, stay_at_bhati: false, chair_pass: false }],
-  deployment_departments: [{ id: 'd1', name: 'TRAFFIC', is_active: true }],
-  centre_allocations: [{ id: 'a1', department_id: 'd1', centre: 'C1', max_count: 5 }],
-  deployments: [],
+let role = 'centre_admin'
+let lockRow = null
+const writes = []
+
+const tables = () => ({
+  dp_sewadars: [
+    { badge_number: ROHIT, sewadar_name: 'ROHIT VERMA', department: 'ADMINISTRATION', centre: CENTRE, is_initiated: true, gender: 'M' },
+    { badge_number: AARTI, sewadar_name: 'AARTI', department: 'PANDAL', centre: CENTRE, is_initiated: true, gender: 'F' },
+  ],
+  sewadar_consents: [
+    { id: 'c1', schedule_id: 's1', centre: CENTRE, badge_number: ROHIT, sewadar_name: 'ROHIT VERMA', consent_given: true, available_days_count: 5, stay_at_bhati: false, chair_pass: false },
+  ],
+  deployment_departments: [SECURITY, LANGAR],
+  centre_allocations: [
+    { id: 'a1', schedule_id: 's1', department_id: SECURITY.id, centre: CENTRE, max_count: 30 },
+    { id: 'a2', schedule_id: 's1', department_id: LANGAR.id, centre: CENTRE, max_count: 12 },
+  ],
+  deployments: [
+    { id: 'p1', schedule_id: 's1', centre: CENTRE, badge_number: ROHIT, sewadar_name: 'ROHIT VERMA', department_id: SECURITY.id, deployed_department_id: null, status: 'requested' },
+  ],
   prev_year_deployments: [],
+})
+
+// chainable, thenable query builder that records write operations
+function builder(table) {
+  const state = { table, op: 'select', payload: null, filters: [] }
+  const result = () => {
+    if (table === 'centre_locks') return { data: lockRow, error: null }
+    return { data: [], error: null }
+  }
+  const b = {
+    select: () => b,
+    eq: (...a) => { state.filters.push(['eq', ...a]); return b },
+    in: (...a) => { state.filters.push(['in', ...a]); return b },
+    or: (...a) => { state.filters.push(['or', ...a]); return b },
+    maybeSingle: () => Promise.resolve(result()),
+    upsert: (payload) => { state.op = 'upsert'; state.payload = payload; writes.push(state); return b },
+    update: (payload) => { state.op = 'update'; state.payload = payload; writes.push(state); return b },
+    delete: () => { state.op = 'delete'; writes.push(state); return b },
+    insert: (payload) => { state.op = 'insert'; state.payload = payload; writes.push(state); return b },
+    then: (res, rej) => Promise.resolve(result()).then(res, rej),
+  }
+  return b
 }
 
-vi.mock('../lib/supabase', async (importOriginal) => {
-  const mod = await importOriginal()
-  const qb = (table) => {
-    const self = {}
-    ;['select', 'eq', 'in', 'or', 'update', 'upsert', 'delete', 'insert', 'maybeSingle'].forEach(k => {
-      self[k] = vi.fn((...a) => { if (['update', 'upsert', 'delete', 'insert'].includes(k)) h.writes.push([table, k, ...a]); return self })
-    })
-    self.then = (res, rej) => Promise.resolve({ data: null, error: null }).then(res, rej)
-    return self
-  }
+vi.mock('../lib/supabase', async () => {
+  const logic = await vi.importActual('../lib/logic')
+  const ch = { on: () => ch, subscribe: () => ch }
   return {
-    ...mod,
     supabase: {
-      from: (t) => qb(t),
-      rpc: () => Promise.resolve({ data: {}, error: null }),
-      channel: () => {
-        const ch = { on: (_e, f, cb) => { h.handlers[f.table] = cb; return ch }, subscribe: () => ch }
-        return ch
-      },
+      from: (t) => builder(t),
+      rpc: () => Promise.resolve({ data: null, error: null }),
+      channel: () => ch,
       removeChannel: () => {},
     },
-    fetchSubtreeCentres: () => Promise.resolve({ centres: [{ name: 'C1', parent_centre: '' }], subtree: ['C1'] }),
-    fetchCentres: () => Promise.resolve([{ name: 'C1', parent_centre: '' }]),
-    fetchAllRows: (table) => Promise.resolve((FIX[table] || []).map(r => ({ ...r }))),
+    fetchSubtreeCentres: () => Promise.resolve({ centres: [{ name: CENTRE, parent_centre: '' }], subtree: [CENTRE] }),
+    fetchCentres: () => Promise.resolve([{ name: CENTRE, parent_centre: '' }]),
+    fetchAllRows: (table) => Promise.resolve(tables()[table] || []),
     fetchAsoDeptKeys: () => Promise.resolve(new Set()),
-    fetchPortalSettings: () => Promise.resolve({ ...h.settings }),
+    fetchPortalSettings: () => Promise.resolve({ sewadar_deployment_open: true }),
+    getRootCentre: logic.getRootCentre,
+    eligibleBadgeStatusFilter: logic.eligibleBadgeStatusFilter,
+    isAssoDepartment: logic.isAssoDepartment,
+    shouldHideFromConsent: logic.shouldHideFromConsent,
   }
 })
 
-vi.mock('../components/ConsentDashboard', () => ({ default: () => null }))
-
-const toast = { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn() }
+const toast = { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() }
 vi.mock('../components/Toast', () => ({ useToast: () => toast }))
 vi.mock('../context/PortalAuthContext', () => ({
-  usePortalAuth: () => ({ profile: { name: 'Centre User', role: 'centre_user', centre: 'C1' } }),
+  usePortalAuth: () => ({ profile: { role, centre: CENTRE, name: 'SACHIN AHUJA' } }),
 }))
 
-const SCHEDULES = [{ id: 's1', name: 'Dec 2026', status: 'open', deadline: null }]
+const renderPage = () => render(<ConsentPage schedules={[SCHEDULE]} scheduleId="s1" />)
+const rohitRow = async () => {
+  const consent = await screen.findByLabelText(`Consent for ${ROHIT}`)
+  return consent.closest('tr')
+}
 
 beforeEach(() => {
-  h.settings = { sewadar_deployment_open: true }
-  h.handlers = {}
-  h.writes.length = 0
+  role = 'centre_admin'
+  lockRow = null
+  writes.length = 0
+  resetQueryCache()
   Object.values(toast).forEach(f => f.mockReset())
 })
-afterEach(() => cleanup())
+afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
-describe('ConsentPage autosave when editing closes mid-debounce', () => {
-  it('reports the unsaved edit instead of dropping it silently', async () => {
-    render(<ConsentPage schedules={SCHEDULES} scheduleId="s1" />)
-    const consent = await screen.findByLabelText('Consent for B1')
-    await waitFor(() => expect(consent.disabled).toBe(false))
-    fireEvent.change(consent, { target: { value: 'no' } })
-    // the ASO closes the master switch before the 800ms autosave fires
-    h.settings = { sewadar_deployment_open: false }
-    h.handlers.portal_settings()
-    await waitFor(() => expect(screen.getByLabelText('Consent for B1').disabled).toBe(true))
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/not saved/)), { timeout: 2500 })
-    expect(h.writes.filter(w => w[0] === 'sewadar_consents')).toHaveLength(0)
+describe('ConsentPage — deployed sewadars stay editable until lock (v86)', () => {
+  it('keeps consent, stay, chair pass and department editable for a deployed sewadar', async () => {
+    renderPage()
+    const row = await rohitRow()
+    expect(within(row).getByLabelText(`Consent for ${ROHIT}`).disabled).toBe(false)
+    expect(within(row).getByLabelText(`Stay at bhati for ${ROHIT}`).disabled).toBe(false)
+    expect(within(row).getByLabelText(`Chair pass for ${ROHIT}`).disabled).toBe(false)
+    const deptBtn = row.querySelector(`[id="dept-btn-${CENTRE}|${ROHIT}"]`)
+    expect(deptBtn).toBeTruthy()
+    expect(deptBtn.disabled).toBe(false)
+    expect(deptBtn.textContent).toContain('SECURITY')
+    expect(within(row).getByText('Deployed')).toBeTruthy()
+    expect(screen.getByText('Editing is open until you lock')).toBeTruthy()
+  })
+
+  it('saves a department change for an already-deployed sewadar', async () => {
+    renderPage()
+    const row = await rohitRow()
+    // jsdom has no layout; DeptDropdown only opens once its button has a size
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 100, bottom: 130, left: 100, right: 250, width: 150, height: 30, x: 100, y: 100, toJSON: () => ({}) })
+    fireEvent.click(row.querySelector(`[id="dept-btn-${CENTRE}|${ROHIT}"]`))
+    fireEvent.click(await screen.findByRole('option', { name: /LANGAR/ }))
+    expect(within(row).getByText('Unsaved')).toBeTruthy()
+    await waitFor(() => {
+      const up = writes.find(w => w.table === 'deployments' && w.op === 'upsert')
+      expect(up?.payload).toEqual([expect.objectContaining({ badge_number: ROHIT, department_id: LANGAR.id })])
+    }, { timeout: 3000 })
+  })
+
+  it('saves stay at Bhati for an already-deployed sewadar', async () => {
+    renderPage()
+    const row = await rohitRow()
+    fireEvent.click(within(row).getByLabelText(`Stay at bhati for ${ROHIT}`))
+    await waitFor(() => {
+      const patch = writes.find(w => w.table === 'sewadar_consents' && w.op === 'update')
+      expect(patch?.payload).toEqual({ stay_at_bhati: true })
+    }, { timeout: 3000 })
+  })
+
+  it('asks before consent No removes a deployed sewadar, then removes the deployment', async () => {
+    renderPage()
+    const row = await rohitRow()
+    fireEvent.change(within(row).getByLabelText(`Consent for ${ROHIT}`), { target: { value: 'no' } })
+    expect(await screen.findByText('Set consent to No?')).toBeTruthy()
+    expect(within(row).getByLabelText(`Consent for ${ROHIT}`).value).toBe('yes')
+    fireEvent.click(screen.getByRole('button', { name: 'Set No and remove' }))
+    await waitFor(() => {
+      expect(writes.find(w => w.table === 'sewadar_consents' && w.op === 'update')?.payload).toMatchObject({ consent_given: false })
+      const del = writes.find(w => w.table === 'deployments' && w.op === 'delete')
+      expect(del?.filters).toContainEqual(['in', 'badge_number', [ROHIT]])
+    }, { timeout: 3000 })
+  })
+
+  it('makes everything read-only once the centre is locked', async () => {
+    lockRow = { schedule_id: 's1', centre: CENTRE, locked_by: 'SACHIN AHUJA', locked_at: '2026-11-10T10:42:00Z' }
+    renderPage()
+    expect(await screen.findByText('Deployment locked')).toBeTruthy()
+    const row = await rohitRow()
+    await waitFor(() => expect(within(row).getByLabelText(`Consent for ${ROHIT}`).disabled).toBe(true))
+    expect(within(row).getByLabelText(`Stay at bhati for ${ROHIT}`).disabled).toBe(true)
+    expect(row.querySelector(`[id="dept-btn-${CENTRE}|${ROHIT}"]`).disabled).toBe(true)
   })
 })
