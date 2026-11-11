@@ -9,7 +9,7 @@
  * identical read within 3 s, which sporadic reads at 3 fps rarely give.
  */
 import { describe, it, expect } from 'vitest'
-import { profileForDetectMs, profileFromSamples, pushConfirmRead, CONFIRM_WINDOW_MS } from './scanTuning'
+import { profileForDetectMs, profileFromSamples, pushConfirmRead, confirmThresholdFor, CONFIRM_WINDOW_MS } from './scanTuning'
 
 describe('profileForDetectMs', () => {
   it('maps decode time to a profile', () => {
@@ -76,5 +76,36 @@ describe('pushConfirmRead', () => {
     const res = pushConfirmRead(entries, 'FB5978GA0013', 1000, cfg)
     expect(res.entries).not.toBe(entries)
     expect(entries).toHaveLength(1)
+  })
+})
+
+describe('confirmThresholdFor', () => {
+  const cfg = { confirmWindow: 3, confirmThreshold: 2 }
+
+  it('locks on one frame for the native ML Kit engine', () => {
+    expect(confirmThresholdFor('Native', cfg)).toBe(1)
+  })
+
+  it('keeps the profile threshold for software decoders and the hard pass', () => {
+    expect(confirmThresholdFor('ZXingCpp', cfg)).toBe(2)
+    expect(confirmThresholdFor('ZXing', cfg)).toBe(2)
+    expect(confirmThresholdFor('hard', cfg)).toBe(2)
+  })
+
+  it('defaults to two reads when the profile omits a threshold', () => {
+    expect(confirmThresholdFor('ZXing', { confirmWindow: 3 })).toBe(2)
+    expect(confirmThresholdFor(undefined, undefined)).toBe(2)
+  })
+})
+
+describe('pushConfirmRead threshold default', () => {
+  it('needs two reads when cfg has no confirmThreshold', () => {
+    const first = pushConfirmRead([], 'FB5978GA0013', 1000, { confirmWindow: 3 })
+    expect(first.confirmed).toBe(false)
+  })
+
+  it('confirms on one read when threshold is 1', () => {
+    const first = pushConfirmRead([], 'FB5978GA0013', 1000, { confirmWindow: 3, confirmThreshold: 1 })
+    expect(first.confirmed).toBe(true)
   })
 })

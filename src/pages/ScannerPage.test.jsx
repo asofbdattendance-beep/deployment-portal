@@ -63,6 +63,14 @@ vi.mock('../hooks/useSewadarSearch', () => ({
   useSewadarSearch: (...args) => mocks.searchHook(...args),
 }))
 vi.mock('../components/Toast', () => ({ useToast: () => mocks.toast }))
+// Device telemetry (v85) also calls supabase.rpc. These tests script rpc
+// answers with mockResolvedValueOnce, so a background telemetry flush would
+// consume them; scanTelemetry.test.js covers the module itself.
+vi.mock('../lib/scanTelemetry', () => ({
+  scanTelemetry: { record: () => {}, flush: () => Promise.resolve() },
+  installTelemetryFlush: () => () => {},
+  detectInAppBrowser: () => null,
+}))
 vi.mock('../lib/offlineQueue', () => ({
   getQueuedScans: (...args) => mocks.getQueuedScans(...args),
   preloadDeployed: vi.fn(async () => {}),

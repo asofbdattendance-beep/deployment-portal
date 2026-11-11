@@ -7,8 +7,12 @@
  * of the ~460 px barcode — so it told operators to move closer while the badge
  * already filled the frame, pushing the phone past its focus distance.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { guidanceFor } from './BarcodeScanner'
+
+// BarcodeScanner pulls in scanTelemetry → the real Supabase client, which opens
+// a realtime WebSocket at import (absent on Node 20 in CI).
+vi.mock('../../lib/supabase', () => ({ supabase: { rpc: () => Promise.resolve({ data: null, error: null }) } }))
 
 describe('guidanceFor', () => {
   it('never tells the operator to move closer (the locator measurement is unreliable)', () => {

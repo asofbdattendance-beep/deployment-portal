@@ -3,7 +3,7 @@ import { getQueuedScans, isFailedQueueRow, isOrphanedQueueRow } from '../lib/off
 import { subscribeOfflineSync } from '../lib/offlineSync'
 import { useScanHandler } from './useScanHandler'
 import { isDecisionPopup, resolveForgotOutTime } from '../lib/scannerUtils'
-import { vibrate } from '../lib/mobile'
+import { vibrate, playScanBeep } from '../lib/mobile'
 
 /**
  * Pending rows EXCLUDE failed and orphaned rows (same rule as
@@ -65,6 +65,8 @@ export function useScannerSession({
       // Haptic confirmation, keyed to the outcome so a glance-free operator
       // still knows what happened. Skipped when the OS asks for reduced
       // motion, and a no-op where the Vibration API is absent.
+      // Audio is not motion: the error beep plays even under reduced motion.
+      if (data.status === 'flagged') playScanBeep('error')
       try {
         if (typeof window !== 'undefined'
           && !(typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches)) {

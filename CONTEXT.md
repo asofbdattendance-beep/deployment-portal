@@ -12,7 +12,7 @@
 | Role | Scope | Can do |
 |---|---|---|
 | `centre_user` | centre subtree (own + SC_SPs) | "Consent & Deploy": consent Yes/No, days (read-only), stay/chair, department — autosave + Save Draft |
-| `centre_admin` | centre subtree | identical editing power to centre_user |
+| `centre_admin` | centre subtree | identical editing power to centre_user — both edit deployed sewadars until the centre locks (v86) |
 | `aso` | all centres | **read-only everywhere (v20)** — all tabs + Excel exports, zero writes |
 | `vss_operator` | all centres | undeployed requested-department deploys + VSS create/assign past lock/deadline/switch (v37: VSS rows fail-closed to effective VSS switch; regular rows keep bypass); may deploy consent-No VSS; never final `deployed_department_id`, Finalize, Control Panel, Schedule, overrides, users, audit |
 | `super_admin` | all centres | sole writer: schedules, departments + restriction rules, allocations, finalize, Control Panel. UI label **"ASO"** — "Super Admin" never appears in UI |
@@ -35,7 +35,7 @@ No dates: fixed **WED, THU, FRI, SAT, SUN**; consent = number of days (1–5), n
 - Quota: total across parent subtree ≤ `max_count` (UI bars + `check_deployment` + batch `check_deployment_batch`).
 - Elderly (`sewadars.badge_status = 'ELDERLY'`) excluded from UI, blocked by trigger.
 - Prev-year (`prev_year_deployments`): no row → "Were not deployed in last session"; low attendance (0,1 always; 2 except TRAFFIC OUTSIDE BHATI) highlighted; TRAFFIC OUTSIDE BHATI out of 3, others out of 5.
-- **v32 deployed freeze (before any lock/deadline)**: centre-role UPDATE/DELETE on a deployed regular sewadar's `deployments`/`sewadar_consents` row raises (`freeze_deployed_rows()`, `trg_a_freeze_deployed_deploy`/`trg_a_freeze_consent_of_deployed`, `sql/v32_freeze_deployed_sewadars.sql`). Exempt: aso/super_admin; a normal `is_centre_override_open` (row's dept for deployments, `NULL` centre-wide for consents); undeployed-only overrides never bypass; VSS exempt; new INSERTs allowed. UI: read-only `DEPLOYED` pill; ASO-finalized rows show `FINAL` (v15), frozen under any override.
+- **Deployed rows editable until lock (v86, supersedes v32 for centre roles)**: centre_user/centre_admin may change a deployed regular sewadar's department, consent, stay and chair pass while the window is open; `freeze_deployed_rows()` (`sql/v86_edit_deployed_until_lock.sql`) now raises for centre roles only when the centre is locked, the master switch is off, the deadline passed or the schedule is done. vss_operator keeps the strict v32 freeze. Unchanged: aso/super_admin bypass, normal `is_centre_override_open` reopens, VSS exempt, ASO-finalized rows `FINAL` (v15). UI: `LockReadinessPanel` (editing-open checklist + Lock CTA / locked notice with who+when), row tag `Deployed` (saved) / `Unsaved`, confirm before consent→No removes a deployed sewadar.
 - Parallel sessions safe: baseline rows PATCH only `changedConsentFields` (grouped field-sets, quoted PostgREST `or()`), new rows chunked INSERT, removals batched per centre; realtime peer writes coalesce 600ms, self-echo skipped (`lastWriteAtRef`); pending edits flush on unmount/tab switch/schedule change.
 - **Every deployed sewadar gets a consent row**: DB raises "No consent recorded for this sewadar"; persist guarantees existence (INSERT with `ignoreDuplicates: true`, chunked, `consentExistsRef` from the load fetch) before any deployment write; an override relaxes consent=No only, never a missing row.
 

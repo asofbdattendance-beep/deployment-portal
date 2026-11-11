@@ -175,6 +175,76 @@ export function vibrate(pattern = 40) {
   return false
 }
 
+let _audioCtx = null
+let _unlockInstalled = false
+
+const BEEP_GAIN = 0.18
+const BEEP_FLOOR = 0.005
+/** Scanner-beep tones: [frequencyHz, startOffsetS, durationS, oscillatorType]. */
+const BEEP_TONES = {
+  success: [[1850, 0, 0.08, 'sine']],
+  error: [[420, 0, 0.12, 'triangle'], [350, 0.14, 0.12, 'triangle']],
+}
+
+function getAudioCtx() {
+  if (typeof window === 'undefined') return null
+  const AudioCtx = window.AudioContext || window.webkitAudioContext
+  if (!AudioCtx) return null
+  if (!_audioCtx || _audioCtx.state === 'closed') _audioCtx = new AudioCtx()
+  return _audioCtx
+}
+
+/**
+ * Unlock Web Audio on the operator's next tap or key press.
+ *
+ * iOS Safari (and Chrome without prior user activation) creates an
+ * AudioContext suspended, and resume() only succeeds inside a user gesture.
+ * The first beep fires from the decode loop, never a gesture, so without this
+ * it is silent on iPhones. Idempotent; listeners remove themselves.
+ */
+export function installScanAudioUnlock() {
+  if (_unlockInstalled || typeof window === 'undefined') return
+  _unlockInstalled = true
+  const unlock = () => {
+    try {
+      const ctx = getAudioCtx()
+      if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {})
+    } catch { /* audio is optional */ }
+    window.removeEventListener('pointerdown', unlock, true)
+    window.removeEventListener('keydown', unlock, true)
+  }
+  window.addEventListener('pointerdown', unlock, true)
+  window.addEventListener('keydown', unlock, true)
+}
+
+/**
+ * Synthesized scanner beep (Web Audio, no asset to load).
+ * 'success' is a 1850 Hz chirp; 'error' a falling double buzz.
+ * Never throws: audio failure must not touch the scan path.
+ *
+ * @param {'success'|'error'} [type]
+ */
+export function playScanBeep(type = 'success') {
+  try {
+    const ctx = getAudioCtx()
+    if (!ctx) return
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {})
+    const now = ctx.currentTime
+    for (const [freq, offset, dur, wave] of BEEP_TONES[type] || BEEP_TONES.success) {
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = wave
+      osc.frequency.setValueAtTime(freq, now + offset)
+      gain.gain.setValueAtTime(BEEP_GAIN, now + offset)
+      gain.gain.exponentialRampToValueAtTime(BEEP_FLOOR, now + offset + dur)
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      osc.start(now + offset)
+      osc.stop(now + offset + dur)
+    }
+  } catch { /* audio failure never crashes scanner */ }
+}
+
 /**
  * Keep the screen awake while scanning. Returns the WakeLockSentinel or
  * null when unsupported/denied. Callers must re-acquire on
