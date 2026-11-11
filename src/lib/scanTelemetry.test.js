@@ -10,6 +10,10 @@ import {
   TELEMETRY_RETRY_BACKOFF_MS,
 } from './scanTelemetry'
 
+// The real client opens a realtime WebSocket at import, which Node 20 (CI)
+// does not have. These tests never touch the network.
+vi.mock('./supabase', () => ({ supabase: { rpc: vi.fn() } }))
+
 const UA = {
   androidChrome: 'Mozilla/5.0 (Linux; Android 14; SM-A356E) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36',
   samsung: 'Mozilla/5.0 (Linux; Android 13; SM-M146B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/25.0 Chrome/121.0.0.0 Mobile Safari/537.36',

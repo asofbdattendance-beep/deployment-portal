@@ -1561,7 +1561,7 @@ const BarcodeScanner = forwardRef(function BarcodeScanner({ onScan, debug = fals
         </div>
       )}
       <div style={{ display: 'grid', gap: '0.75rem', justifyItems: 'center' }}>
-        <button onClick={() => startScanner({ reclaim: true })} className={inAppBrowser ? 'btn btn-ghost' : 'btn btn-primary'} style={{ minHeight: 44, minWidth: 44, touchAction: 'manipulation' }}><RefreshCw size={14} /> Retry</button>
+        <button onClick={() => startScanner({ reclaim: true })} className={inAppBrowser ? 'btn btn-ghost' : 'btn btn-primary'} style={{ minHeight: 48, minWidth: 48, touchAction: 'manipulation' }}><RefreshCw size={14} /> Retry</button>
         <PhotoCapture variant="block" primary={!!inAppBrowser} onResult={handlePhotoResult} onBeforeOpen={handlePhotoOpen} onAfterClose={handlePhotoClose} />
       </div>
     </div>
