@@ -40,8 +40,10 @@ import { loadZxingCpp, toCppFormats } from './zxingCppEngine'
 /**
  * Map our format strings to zx.BarcodeFormat enum members.
  *
- * The naming is 1:1 ('code_39' → CODE_39, 'itf' → ITF, 'upc_a' → UPC_A),
- * so an uppercase lookup is the whole mapping. An unknown string maps to
+ * The naming is almost 1:1 ('code_39' → CODE_39, 'itf' → ITF, 'upc_a' →
+ * UPC_A), so an uppercase lookup covers it — EXCEPT 'pdf417', whose enum
+ * member is PDF_417. Without the alias 'PDF417' looked up undefined and
+ * ZXing-JS silently never tried PDF417. An unknown string still maps to
  * undefined and is SKIPPED, never thrown — a typo in a tier config must not
  * take down the whole pool, it just narrows the symbology set.
  *
@@ -49,10 +51,12 @@ import { loadZxingCpp, toCppFormats } from './zxingCppEngine'
  * @param {string[]} formats
  * @returns {Array<number>} zx.BarcodeFormat members
  */
+const ZXING_FORMAT_ALIASES = { pdf417: 'PDF_417' }
 const toZxingFormats = (zx, formats) => {
   const out = []
   for (const f of formats) {
-    const fmt = zx?.BarcodeFormat?.[String(f || '').toUpperCase()]
+    const key = String(f || '').toLowerCase()
+    const fmt = zx?.BarcodeFormat?.[ZXING_FORMAT_ALIASES[key] || key.toUpperCase()]
     if (fmt !== undefined && fmt !== null) out.push(fmt)
   }
   return out

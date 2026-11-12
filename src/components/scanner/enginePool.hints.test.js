@@ -147,3 +147,45 @@ describe('enginePool ZXing misses are silent (regression: a console.warn per mis
     expect(spy).toHaveBeenCalledWith('unrelated warning')
   })
 })
+
+// ─── Format-name mapping (regression: 'pdf417' was silently dropped) ────────
+// Our format strings were upper-cased into zx.BarcodeFormat keys. That works
+// for every format EXCEPT pdf417: the enum member is PDF_417, so 'PDF417'
+// looked up undefined and ZXing-JS never even tried PDF417 — while the config
+// (deviceCapabilities HARD_PATH_2D_FORMATS) said it should.
+describe('enginePool maps every configured format to a ZXing enum member', () => {
+  it('passes PDF_417 to ZXing for a pdf417 config', async () => {
+    const setHints = vi.spyOn(zx.MultiFormatReader.prototype, 'setHints')
+    const pool = createEnginePool(false, { formats: ['code_39', 'pdf417'] })
+    await pool.init()
+    await pool.detect(surface(frameCode39()))
+    const applied = setHints.mock.calls[0][0]
+    expect(applied.get(zx.DecodeHintType.POSSIBLE_FORMATS)).toEqual([zx.BarcodeFormat.CODE_39, zx.BarcodeFormat.PDF_417])
+  })
+
+  it('maps all twelve configured formats — none dropped', async () => {
+    const all = ['code_39', 'code_128', 'code_93', 'codabar', 'ean_13', 'ean_8', 'itf', 'upc_a', 'upc_e', 'data_matrix', 'pdf417', 'qr_code']
+    const setHints = vi.spyOn(zx.MultiFormatReader.prototype, 'setHints')
+    const pool = createEnginePool(false, { formats: all })
+    await pool.init()
+    await pool.detect(surface(frameCode39()))
+    expect(setHints.mock.calls[0][0].get(zx.DecodeHintType.POSSIBLE_FORMATS)).toHaveLength(all.length)
+  })
+
+  it('decodes a real PDF417 frame through the pool', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { createRequire } = await import('node:module')
+    const { writeBarcode, prepareZXingModule } = await import('zxing-wasm/writer')
+    const wasmBinary = readFileSync(createRequire(import.meta.url).resolve('zxing-wasm/writer/zxing_writer.wasm'))
+    await prepareZXingModule({ overrides: { wasmBinary }, fireImmediately: true })
+    const { symbol: s } = await writeBarcode(BADGE, { format: 'PDF417' })
+    const M = 3, pad = 30
+    const width = s.width * M + 2 * pad, height = s.height * M + 2 * pad
+    const gray = new Uint8ClampedArray(width * height).fill(255)
+    for (let y = 0; y < s.height * M; y += 1) for (let x = 0; x < s.width * M; x += 1) gray[(pad + y) * width + pad + x] = s.data[Math.floor(y / M) * s.width + Math.floor(x / M)]
+    const pool = createEnginePool(false, { formats: ['pdf417'] })
+    await pool.init()
+    const hit = await pool.detect(surface({ gray, width, height }))
+    expect(hit.barcodes.map(b => b.rawValue)).toContain(BADGE)
+  })
+})
