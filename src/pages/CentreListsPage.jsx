@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { supabase, fetchAllRows } from '../lib/supabase'
 import { getRootCentre, isVssBadge } from '../lib/logic'
+import { indexSewadarsByRoot, sewadarInRoot } from '../lib/incharges'
 import { isVssRow, deploymentCounts, verifyDeploymentCounts, reportCountProblems } from '../lib/counts'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from '../components/Toast'
@@ -179,6 +180,15 @@ export default function CentreListsPage({ schedules, scheduleId }) {
     return m
   }, [regularSewadars, vssSewadars])
 
+  // centre → root, resolved once per centres load (getRootCentre rebuilds its
+  // lookup on every call — far too slow to run per sewadar)
+  const rootOfCentre = useMemo(() => {
+    const roots = new Map()
+    ;(centres || []).forEach(c => { roots.set(c.name, getRootCentre(centres, c.name) || c.name) })
+    return (name) => roots.get(name) ?? name
+  }, [centres])
+  const swByRoot = useMemo(() => indexSewadarsByRoot(Object.values(swMap), rootOfCentre), [swMap, rootOfCentre])
+
   const consentMap = useMemo(() => {
     const m = {}
     ;(consentsRaw || []).forEach(c => { m[`${c.centre}|${c.badge_number}`] = c })
@@ -239,7 +249,11 @@ export default function CentreListsPage({ schedules, scheduleId }) {
   const inchargesRows = useMemo(() => {
     return (inchargesRaw || []).map(inc => {
       const deptName = deptMap.get(inc.department_id)?.name || '—'
-      const sw = swMap[`${inc.centre}|${inc.badge_number}`] || {}
+      // incharge rows are stored against the ROOT centre, but the sewadar may
+      // belong to a sub-centre — fall back to the root-centre index
+      const sw = swMap[`${inc.centre}|${inc.badge_number}`]
+        || sewadarInRoot(swByRoot, rootOfCentre, inc.centre, inc.badge_number)
+        || {}
       const isLocked = locksSet.has(inc.centre)
       const lock = lockByCentre[inc.centre] || null
       return {
@@ -258,7 +272,7 @@ export default function CentreListsPage({ schedules, scheduleId }) {
         _root: getRootCentre(centres, inc.centre) || inc.centre,
       }
     })
-  }, [inchargesRaw, deptMap, swMap, locksSet, lockByCentre, centres])
+  }, [inchargesRaw, deptMap, swMap, swByRoot, rootOfCentre, locksSet, lockByCentre, centres])
 
   // stats — rows are already fetched for table display, so JS counting here
   // adds no extra download. For pure DB counts without rows, use:
