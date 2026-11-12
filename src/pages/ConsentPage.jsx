@@ -10,6 +10,7 @@ import { useToast } from '../components/Toast'
 import ConsentDashboard from '../components/ConsentDashboard'
 import DeptDropdown from '../components/DeptDropdown'
 import InchargePicker from '../components/InchargePicker'
+import { findEligibleInchargeRow, staleInchargeKeys, effectiveDept, departmentsNeedingIncharge } from '../lib/incharges'
 import LockReadinessPanel from '../components/LockReadinessPanel'
 import DeadlinePill, { DeadlineWarning } from '../components/DeadlinePill'
 import { Save, Lock, Unlock, CheckCircle2, Search, ClipboardCheck, ChevronDown, Users, AlertTriangle, CheckSquare, Download } from 'lucide-react'
@@ -758,8 +759,6 @@ export default function ConsentPage({ schedules, scheduleId }) {
         }
       }
       // ── department incharges — one per CENTRE × department ──
-      const rowByBadge = {}
-      Object.values(rows).forEach(r => { rowByBadge[consentRowKey(r)] = r })
       const toUpsertInc = Object.entries(incState)
         .filter(([key, inc]) => {
           const saved = savedInchargesRef.current[key]
@@ -776,12 +775,10 @@ export default function ConsentPage({ schedules, scheduleId }) {
       })
       // stale: the incharge's sewadar no longer consents / no longer OCCUPIES
       // that department — occupancy follows the EFFECTIVE dept (final else
-      // requested), matching trg_check_incharge (v17)
-      Object.entries(incState).forEach(([key, inc]) => {
-        const row = rowByBadge[`${inc.centre}|${inc.badge_number}`]
-        const effDept = row ? (row.final_dept || row.requested_dept) : null
-        if (!row || !row.consent_given || effDept !== inc.department_id) toDeleteInc.push(key)
-      })
+      // requested), matching trg_check_incharge (v17). Matched by badge across
+      // the whole subtree — the sewadar may belong to a sub-centre while the
+      // incharge row is stored against the root CENTRE.
+      toDeleteInc.push(...staleInchargeKeys(incState, rows))
       if (toUpsertInc.length > 0) {
         const { error } = await supabase.from('department_incharges').upsert(toUpsertInc, { onConflict: 'schedule_id,centre,department_id' })
         if (error) { toast.error(error.message); dirtyRef.current = true; scheduleRetry(); return }
@@ -1062,7 +1059,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
   const inchargeOptions = useMemo(() => {
     const options = {}
     Object.values(consentRows).forEach(r => {
-      const effDept = r.final_dept || r.requested_dept
+      const effDept = effectiveDept(r)
       if (r.consent_given && effDept) {
         if (!options[effDept]) options[effDept] = []
         options[effDept].push(r)
@@ -1074,7 +1071,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
     return options
   }, [consentRows])
   const inchargeKey = useCallback((deptId) => `${myRoot}|${deptId}`, [myRoot])
-  const setIncharge = (deptId, badgeNumber, centre = myRoot) => {
+  const setIncharge = (deptId, badgeNumber) => {
     if (isVssOperator) return
     dirtyRef.current = true
     editVersionRef.current++
@@ -1084,7 +1081,9 @@ export default function ConsentPage({ schedules, scheduleId }) {
       if (!badgeNumber) {
         delete next[key]
       } else {
-        const row = Object.values(consentRows).find(r => r.centre === centre && r.badge_number === badgeNumber && r.consent_given && (r.final_dept || r.requested_dept) === deptId)
+        // any sewadar in the CENTRE's subtree — the picker lists sub-centre
+        // sewadars too, and the row is stored against the root CENTRE
+        const row = findEligibleInchargeRow(consentRows, badgeNumber, deptId)
         if (row) next[key] = { centre: myRoot, department_id: deptId, badge_number: badgeNumber, sewadar_name: row.sewadar_name }
       }
       return next
@@ -1109,9 +1108,12 @@ export default function ConsentPage({ schedules, scheduleId }) {
   // M4: no consent_given requirement — the DB trigger counts any non-VSS
   // deployments row (consent-No deployments under an override count too), so
   // requiring consent here under-reported and the lock died with a raw error.
-  const deptsNeedingIncharge = useMemo(() => allocatedQuota.filter(a =>
-    Object.values(consentRows).some(r => r.requested_dept === a.department_id && !isVssBadge(r.badge_number))
-  ), [allocatedQuota, consentRows])
+  // same eligibility as the picker, so every department that blocks the lock
+  // has someone who CAN be its incharge
+  const deptsNeedingIncharge = useMemo(
+    () => departmentsNeedingIncharge(allocatedQuota, consentRows),
+    [allocatedQuota, consentRows]
+  )
   const missingIncharges = useMemo(
     () => deptsNeedingIncharge.filter(a => !incharges[inchargeKey(a.department_id)]),
     [deptsNeedingIncharge, incharges, inchargeKey]
@@ -1770,7 +1772,7 @@ export default function ConsentPage({ schedules, scheduleId }) {
                     value={inc?.badge_number || ''}
                     currentName={inc?.sewadar_name || ''}
                     sewadars={inchargeOptions[a.department_id] || []}
-                    onChange={badge => setIncharge(a.department_id, badge, myRoot)}
+                    onChange={badge => setIncharge(a.department_id, badge)}
                     open={openIncharge === a.department_id}
                     onToggle={close => {
                       if (close === false) { setOpenIncharge(null); return }
