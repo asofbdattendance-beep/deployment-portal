@@ -463,12 +463,15 @@ export default function UsersPage() {
       // migration is applied. Retry without them rather than failing the whole save.
       let { error } = await supabase.from('portal_users').update(payload).eq('id', editUser.id)
       if (error && /is_centre_manager|location/i.test(error.message)) {
+        const droppedCM = /is_centre_manager/i.test(error.message)
+        const droppedLocation = /location/i.test(error.message)
         const safePayload = { ...payload }
-        if (/is_centre_manager/i.test(error.message)) delete safePayload.is_centre_manager
-        if (/location/i.test(error.message)) delete safePayload.location
+        if (droppedCM) delete safePayload.is_centre_manager
+        if (droppedLocation) delete safePayload.location
         const retry = await supabase.from('portal_users').update(safePayload).eq('id', editUser.id)
         error = retry.error
-        if (!error && /is_centre_manager/i.test(error?.message || '')) toast.info('Saved — apply sql/v87_centre_manager_role.sql for Centre Manager flag')
+        if (!error && droppedCM) toast.info('Saved — apply sql/v87_centre_manager_role.sql to keep the Centre Manager flag')
+        if (!error && droppedLocation) toast.info('Saved — apply sql/v71_portal_user_location.sql to keep the location field')
       }
       if (error) { toast.error(error.message); return }
       // v51: replace the department grant for this badge + schedule. A role
@@ -969,9 +972,6 @@ export default function UsersPage() {
         toast.success(`Existing portal record completed for ${picked.sewadar_name} — they can sign in now`)
       } else {
         toast.success(`Login created for ${picked.sewadar_name} — they can sign in now`)
-      }
-      if (isCM) {
-        await supabase.from('portal_users').update({ is_centre_manager: true }).eq('email', email).catch(() => {})
       }
       clearPicked()
       setDirectForm({ email: '', role: 'centre_user', customId: '', isCentreManager: false, password: '', showPw: false, deptSchedule: '', deptIds: [], location: '' })
