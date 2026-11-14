@@ -19,6 +19,10 @@ describe('phase helpers', () => {
     expect(phasesForRole('aso')).toEqual([1, 2])
     expect(phasesForRole('super_admin')).toEqual([1, 2])
     expect(phasesForRole('centre_user')).toEqual([1, 2])
+    expect(phasesForRole('centre_admin')).toEqual([1])
+    expect(phasesForRole('centre_admin', true)).toEqual([1, 2])
+    expect(phasesForRole({ role: 'centre_admin', is_centre_manager: true })).toEqual([1, 2])
+    expect(phasesForRole('centre_manager')).toEqual([2])
     expect(phasesForRole('vss_operator')).toEqual([1])
     expect(phasesForRole('dept_incharge')).toEqual([2])
     expect(phasesForRole('scanner')).toEqual([2])
@@ -27,6 +31,7 @@ describe('phase helpers', () => {
 
   it('defaults to the first visible phase', () => {
     expect(defaultPhaseForRole('aso')).toBe(1)
+    expect(defaultPhaseForRole('centre_manager')).toBe(2)
     expect(defaultPhaseForRole('dept_incharge')).toBe(2)
     expect(defaultPhaseForRole('scanner')).toBe(2)
     expect(defaultPhaseForRole('nobody')).toBe(1)
@@ -48,6 +53,9 @@ describe('phase helpers', () => {
     )
     expect(pagesForRolePhase('dept_incharge', 1)).toEqual([])
     expect(visiblePagesForRole('scanner').map(([k]) => k)).toEqual(['scanner'])
+    expect(visiblePagesForRole('centre_manager').map(([k]) => k)).toEqual(['attendance'])
+    expect(visiblePagesForRole('centre_admin').map(([k]) => k)).toEqual(['consent', 'vss'])
+    expect(visiblePagesForRole('centre_admin', true).map(([k]) => k)).toEqual(['consent', 'vss', 'attendance'])
   })
 
   it('storage helpers never throw without localStorage', () => {

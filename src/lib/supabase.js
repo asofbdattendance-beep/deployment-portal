@@ -26,6 +26,7 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
 export const ROLES = {
   CENTRE_USER: 'centre_user',
   CENTRE_ADMIN: 'centre_admin',
+  CENTRE_MANAGER: 'centre_manager',
   ASO: 'aso',
   SUPER_ADMIN: 'super_admin',
   DEPT_INCHARGE: 'dept_incharge',
@@ -36,6 +37,7 @@ export const ROLES = {
 export const ROLE_LABELS = {
   centre_user: 'Centre User',
   centre_admin: 'Centre Admin',
+  centre_manager: 'Centre Manager',
   aso: 'ASO',
   super_admin: 'ASO',
   dept_incharge: 'Dept Incharge',
@@ -46,6 +48,7 @@ export const ROLE_LABELS = {
 export const ROLE_COLORS = {
   centre_user: '#6366f1',
   centre_admin: '#8b5cf6',
+  centre_manager: '#0891b2',
   aso: '#f59e0b',
   super_admin: '#ef4444',
   dept_incharge: '#0ea5e9',

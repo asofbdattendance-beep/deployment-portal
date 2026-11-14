@@ -25,14 +25,24 @@ export function passwordErrors(password) {
 // ─── Phase grouping ───
 
 /**
- * Maps a role to its phase group label: 'deployment', 'attendance', or 'both'.
+ * Maps a role or user object to its phase group label: 'deployment', 'attendance', or 'both'.
  * Uses phasesForRole from lib/phase so the mapping stays in sync with the
- * page registry — with one deliberate override: centre_admin resolves to
- * 'deployment'. Centre admins work the deployment (consent/deploy) side, not
- * scanning, even though the shared attendance screen lists their role.
+ * page registry.
+ * - centre_admin resolves to 'deployment' (or 'both' when is_centre_manager is true).
+ * - centre_manager resolves to 'attendance'.
  */
-export function userPhaseGroup(role) {
-  if (role === 'centre_admin') return 'deployment'
+export function userPhaseGroup(roleOrUser, maybeIsCentreManager = false) {
+  let role = roleOrUser
+  let isCentreManager = Boolean(maybeIsCentreManager)
+  if (roleOrUser && typeof roleOrUser === 'object') {
+    role = roleOrUser.role
+    isCentreManager = Boolean(roleOrUser.is_centre_manager)
+  }
+  if (role === 'centre_manager') return 'attendance'
+  if (role === 'centre_admin') {
+    return isCentreManager ? 'both' : 'deployment'
+  }
+  if (isCentreManager) return 'both'
   const phases = phasesForRole(role)
   if (phases.length === 0) return 'both'
   if (phases.includes(1) && phases.includes(2)) return 'both'
@@ -95,11 +105,12 @@ export function usersToSheetRows(users) {
     name: u.name || '',
     email: u.email || '',
     role: u.role || '',
+    is_centre_manager: (u.is_centre_manager || u.role === 'centre_manager') ? 'yes' : 'no',
     centre: u.centre || '',
     badge_number: u.badge_number || '',
     location: u.location || '',
     status: statusOf(u),
-    phase_group: userPhaseGroup(u.role),
+    phase_group: userPhaseGroup(u),
     is_active: u.is_active,
     is_archived: u.is_archived ? 'yes' : 'no',
     created_at: u.created_at || '',
@@ -115,7 +126,8 @@ export function usersToSheetRows(users) {
  *  - prefix labels: ASO…, SCANNER…, DEPTINC… / DEPT INCH… / DEPT_INCHARGE… /
  *    DEPT INCHARGE…, VSS… map to their base role;
  *  - exact variants: SUPER ADMIN / SUPER_ADMIN, CENTRE_USER / CENTRE USER,
- *    CENTRE_ADMIN / CENTRE ADMIN map to their underscore base role.
+ *    CENTRE_ADMIN / CENTRE ADMIN, CENTRE_MANAGER / CENTRE MANAGER map to their
+ *    underscore base role.
  * Returns '' for anything unrecognized.
  */
 export function normalizeRole(raw) {
@@ -130,6 +142,7 @@ export function normalizeRole(raw) {
   if (norm === 'SUPER ADMIN' || norm === 'SUPER_ADMIN') return 'super_admin'
   if (norm === 'CENTRE_USER' || norm === 'CENTRE USER') return 'centre_user'
   if (norm === 'CENTRE_ADMIN' || norm === 'CENTRE ADMIN') return 'centre_admin'
+  if (norm === 'CENTRE_MANAGER' || norm === 'CENTRE MANAGER') return 'centre_manager'
   return ''
 }
 

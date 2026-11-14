@@ -60,8 +60,8 @@ export interface ActionResult {
 
 // Same role whitelist as create-login — role is always a base value so every
 // RLS policy and trigger behaves identically.
-export const ROLES = ['centre_user', 'centre_admin', 'aso', 'super_admin', 'dept_incharge', 'scanner', 'vss_operator']
-const CENTRE_ROLES = ['centre_user', 'centre_admin']
+export const ROLES = ['centre_user', 'centre_admin', 'centre_manager', 'aso', 'super_admin', 'dept_incharge', 'scanner', 'vss_operator']
+const CENTRE_ROLES = ['centre_user', 'centre_admin', 'centre_manager']
 const BADGE_ROLES = ['dept_incharge', 'scanner']
 
 const MAX_BULK = 100 // DoS cap on a single privileged request

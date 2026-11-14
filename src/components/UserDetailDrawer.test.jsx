@@ -89,6 +89,13 @@ describe('UserDetailDrawer', () => {
     expect(screen.getByText('Deployment + Attendance')).toBeTruthy()
   })
 
+  it('renders + Centre Manager and Deployment + Attendance for centre_admin with is_centre_manager', () => {
+    render(<UserDetailDrawer {...defaultProps} user={{ ...baseUser, role: 'centre_admin', is_centre_manager: true }} />)
+    expect(screen.getByText('+ Centre Manager')).toBeTruthy()
+    expect(screen.getByText('Deployment + Attendance')).toBeTruthy()
+    expect(screen.getByText(/centre & subcentres access/i)).toBeTruthy()
+  })
+
   it('renders suspended status pill', () => {
     render(<UserDetailDrawer {...defaultProps} user={{ ...baseUser, is_active: false }} />)
     expect(screen.getByText('Suspended')).toBeTruthy()
