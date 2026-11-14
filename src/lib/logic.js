@@ -757,8 +757,8 @@ export function isUuid(value) {
 // Roles whose login must be scoped to a centre, and roles that must carry a
 // badge_number (the join key into the sewadar domain for scanner/incharge
 // enforcement). Mirrored server-side by claim_portal_invite — keep in sync.
-export const INVITE_ROLES = ['centre_user', 'centre_admin', 'aso', 'super_admin', 'dept_incharge', 'scanner', 'vss_operator']
-export const INVITE_CENTRE_ROLES = ['centre_user', 'centre_admin']
+export const INVITE_ROLES = ['centre_user', 'centre_admin', 'centre_manager', 'aso', 'super_admin', 'dept_incharge', 'scanner', 'vss_operator']
+export const INVITE_CENTRE_ROLES = ['centre_user', 'centre_admin', 'centre_manager']
 export const INVITE_BADGE_ROLES = ['dept_incharge', 'scanner']
 // v51: a dept_incharge is scoped by DEPARTMENT (across every centre), so the
 // grant itself is required — a login with a badge but no department would come

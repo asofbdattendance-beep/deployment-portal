@@ -79,15 +79,15 @@ function Dashboard() {
   // ── Two-phase IA: the navbar shows one phase at a time. Landing = first
   // visible page of the active phase; the stored preference wins when the
   // role can still see it, otherwise the role default (Phase 1 for centre /
-  // ASO roles, Phase 2 for dept_incharge / scanner).
-  const availablePhases = useMemo(() => phasesForRole(profile?.role), [profile?.role])
-  const [activePhase, setActivePhase] = useState(() => resolveActivePhase(profile?.role, readStoredPhase()))
+  // ASO roles, Phase 2 for dept_incharge / scanner / centre_manager).
+  const availablePhases = useMemo(() => phasesForRole(profile), [profile])
+  const [activePhase, setActivePhase] = useState(() => resolveActivePhase(profile, readStoredPhase()))
   useEffect(() => {
-    setActivePhase((prev) => (phasesForRole(profile?.role).includes(prev)
+    setActivePhase((prev) => (phasesForRole(profile).includes(prev)
       ? prev
-      : resolveActivePhase(profile?.role, readStoredPhase())))
-  }, [profile?.role])
-  const phasePages = useMemo(() => pagesForRolePhase(profile?.role, activePhase), [profile?.role, activePhase])
+      : resolveActivePhase(profile, readStoredPhase())))
+  }, [profile])
+  const phasePages = useMemo(() => pagesForRolePhase(profile, activePhase), [profile, activePhase])
   const [activePage, setActivePage] = useState(phasePages[0]?.[0] || 'consent')
   const [schedules, setSchedules] = useState([])
   const [scheduleId, setScheduleId] = useState('')
@@ -161,21 +161,21 @@ function Dashboard() {
   // the other phase — the shell switches phase first so the target is visible.
   const handleNavigate = useCallback((page, filter) => {
     const targetPhase = PAGES[page]?.phase
-    if ((targetPhase === 1 || targetPhase === 2) && targetPhase !== activePhase && phasesForRole(profile?.role).includes(targetPhase)) {
+    if ((targetPhase === 1 || targetPhase === 2) && targetPhase !== activePhase && phasesForRole(profile).includes(targetPhase)) {
       storeActivePhase(targetPhase)
       setActivePhase(targetPhase)
     }
     setNavFilter({ page, ...(filter || {}) })
     setActivePage(page)
-  }, [activePhase, profile?.role])
+  }, [activePhase, profile])
   const selectPhase = useCallback((phase) => {
-    if (!phasesForRole(profile?.role).includes(phase)) return
+    if (!phasesForRole(profile).includes(phase)) return
     storeActivePhase(phase)
     setActivePhase(phase)
     setNavFilter(null)
-    const first = pagesForRolePhase(profile?.role, phase)[0]?.[0]
+    const first = pagesForRolePhase(profile, phase)[0]?.[0]
     if (first) setActivePage(first)
-  }, [profile?.role])
+  }, [profile])
 
   const currentPage = phasePages.some(([k]) => k === activePage) ? activePage : (phasePages[0]?.[0] || 'consent')
 
@@ -313,6 +313,7 @@ function Dashboard() {
             {profile?.badge_number && <span className="header-centre">{profile.badge_number}</span>}
             <span className="role-badge" style={{ background: ROLE_COLORS[profile?.role] || '#888' }}>
               {ROLE_LABELS[profile?.role] || profile?.role}
+              {profile?.is_centre_manager && profile?.role !== 'centre_manager' ? ' · Centre Manager' : ''}
             </span>
             {deptNames.length > 0 && <span className="header-centre header-depts">{deptNames.join(', ')}</span>}
           </div>
@@ -533,7 +534,7 @@ export default function App() {
     return <AccessDenied signOut={signOut} mode="profile" />
   }
 
-  const allowedRoles = ['centre_user', 'centre_admin', 'aso', 'super_admin', 'dept_incharge', 'scanner', 'vss_operator']
+  const allowedRoles = ['centre_user', 'centre_admin', 'centre_manager', 'aso', 'super_admin', 'dept_incharge', 'scanner', 'vss_operator']
   if (!allowedRoles.includes(profile.role)) return <AccessDenied signOut={signOut} mode="role" />
 
   return <Dashboard />

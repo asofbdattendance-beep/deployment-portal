@@ -25,8 +25,8 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { preflightOverlap } from './overlap.ts'
 
-const ROLES = ['centre_user', 'centre_admin', 'aso', 'super_admin', 'dept_incharge', 'scanner', 'vss_operator']
-const CENTRE_ROLES = ['centre_user', 'centre_admin']
+const ROLES = ['centre_user', 'centre_admin', 'centre_manager', 'aso', 'super_admin', 'dept_incharge', 'scanner', 'vss_operator']
+const CENTRE_ROLES = ['centre_user', 'centre_admin', 'centre_manager']
 const BADGE_ROLES = ['dept_incharge', 'scanner']
 
 // CORS: must cover every header the browser may send (supabase-js sends
@@ -133,6 +133,7 @@ async function handler(req) {
     const email = String(body.email || '').trim()
     const name = String(body.name || '').trim()
     const role = String(body.role || '')
+    const isCentreManager = role === 'centre_manager' || Boolean(body.is_centre_manager)
     const centre = role === 'dept_incharge' ? null : (String(body.centre || '').trim() || null)
     const badge = String(body.badge_number || '').trim() || null
     const location = String(body.location || '').trim() || null
@@ -241,6 +242,7 @@ async function handler(req) {
       name,
       role,
       custom_role_id: customId,
+      is_centre_manager: isCentreManager,
       centre,
       badge_number: badge,
       location,
@@ -256,6 +258,7 @@ async function handler(req) {
           role: resumeRow.role, custom_role_id: resumeRow.custom_role_id,
           centre: resumeRow.centre, badge_number: resumeRow.badge_number,
           location: (resumeRow as Record<string, unknown>).location ?? null,
+          is_centre_manager: (resumeRow as Record<string, unknown>).is_centre_manager ?? false,
           is_active: resumeRow.is_active,
         }).eq('id', resumeRow.id).catch(() => {})
       } else {
@@ -271,10 +274,12 @@ async function handler(req) {
         : await admin.from('portal_users').insert(payload)
     }
     let { error: rowErr } = await writeRow(rowPayload)
-    if (rowErr && (rowErr.code === '42703' || /location/.test(rowErr.message || ''))) {
-      // v71 (location) not deployed yet — retry without it.
-      const { location: _omit, ...payloadNoLoc } = rowPayload
-      ;({ error: rowErr } = await writeRow(payloadNoLoc))
+    if (rowErr && (rowErr.code === '42703' || /is_centre_manager|location/.test(rowErr.message || ''))) {
+      // v71/v87 not deployed yet — retry without missing columns.
+      const safePayload = { ...rowPayload }
+      if (/is_centre_manager/.test(rowErr.message || '')) delete (safePayload as any).is_centre_manager
+      if (/location/.test(rowErr.message || '')) delete (safePayload as any).location
+      ;({ error: rowErr } = await writeRow(safePayload))
     }
     if (rowErr) {
       // Roll back — a half-created login is worse than none.

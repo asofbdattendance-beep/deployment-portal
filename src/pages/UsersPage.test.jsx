@@ -452,6 +452,21 @@ describe('UsersPage — phase group filter', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Both' }))
     await waitFor(() => expect(screen.queryByText('Anil Admin')).toBeNull())
   })
+
+  it('groups centre_admin with is_centre_manager under Both and renders + Centre Manager pill', async () => {
+    usersFixture = [...USERS, { id: 'u3', auth_id: 'a3', name: 'Anil Admin', email: 'anil@example.com', role: 'centre_admin', is_centre_manager: true, custom_role_id: null, centre: 'DELHI', badge_number: null, is_active: true, created_at: '2026-07-01T00:00:00Z' }]
+    await renderPage()
+    expect(screen.getByText('+ Centre Manager')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Both' }))
+    await waitFor(() => expect(screen.getByText('Anil Admin')).toBeTruthy())
+  })
+
+  it('groups dedicated centre_manager under Attendance', async () => {
+    usersFixture = [...USERS, { id: 'u3', auth_id: 'a3', name: 'Manish Manager', email: 'manish@example.com', role: 'centre_manager', is_centre_manager: false, custom_role_id: null, centre: 'DELHI', badge_number: null, is_active: true, created_at: '2026-07-01T00:00:00Z' }]
+    await renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Attendance' }))
+    await waitFor(() => expect(screen.getByText('Manish Manager')).toBeTruthy())
+  })
 })
 
 describe('UsersPage — archived status', () => {

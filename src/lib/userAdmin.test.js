@@ -52,6 +52,17 @@ describe('userPhaseGroup', () => {
     expect(userPhaseGroup('centre_admin')).toBe('deployment')
   })
 
+  it('returns "attendance" for centre_manager (phase 2 only)', () => {
+    expect(userPhaseGroup('centre_manager')).toBe('attendance')
+    expect(userPhaseGroup({ role: 'centre_manager' })).toBe('attendance')
+  })
+
+  it('returns "both" for centre_admin when is_centre_manager is true', () => {
+    expect(userPhaseGroup('centre_admin', true)).toBe('both')
+    expect(userPhaseGroup({ role: 'centre_admin', is_centre_manager: true })).toBe('both')
+    expect(userPhaseGroup({ role: 'centre_admin', is_centre_manager: false })).toBe('deployment')
+  })
+
   it('returns "both" for unknown roles (fallback)', () => {
     expect(userPhaseGroup('nonexistent')).toBe('both')
   })
@@ -257,6 +268,8 @@ describe('normalizeRole', () => {
     expect(normalizeRole('CENTRE USER')).toBe('centre_user')
     expect(normalizeRole('CENTRE_ADMIN')).toBe('centre_admin')
     expect(normalizeRole('CENTRE ADMIN')).toBe('centre_admin')
+    expect(normalizeRole('CENTRE_MANAGER')).toBe('centre_manager')
+    expect(normalizeRole('CENTRE MANAGER')).toBe('centre_manager')
   })
 
   it('returns empty string for unknown labels', () => {

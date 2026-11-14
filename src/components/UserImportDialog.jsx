@@ -240,7 +240,7 @@ export default function UserImportDialog({ open, onClose, onBulkCreate, busy }) 
               Passwords must be at least 6 characters. They are imported but never shown or logged.
             </div>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-              Role accepts: centre_user, centre_admin, aso, super_admin, dept_incharge, scanner, vss_operator — or labels: ASO, SCANNER, VSS…, DEPTINC / DEPT INCHARGE (e.g. DEPTINC (LANGAR)), SUPER ADMIN, CENTRE USER, CENTRE ADMIN. Case-insensitive.
+              Role accepts: centre_user, centre_admin, centre_manager, aso, super_admin, dept_incharge, scanner, vss_operator — or labels: ASO, SCANNER, VSS…, DEPTINC / DEPT INCHARGE (e.g. DEPTINC (LANGAR)), SUPER ADMIN, CENTRE USER, CENTRE ADMIN, CENTRE MANAGER. Case-insensitive.
             </div>
           </div>
         )}

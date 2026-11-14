@@ -72,7 +72,7 @@ export default function UserDetailDrawer({
   if (!open || !user) return null
 
   const status = statusOf(user)
-  const phaseGroup = userPhaseGroup(user.role)
+  const phaseGroup = userPhaseGroup(user)
   const roleLabel = ROLE_LABELS[user.role] || user.role
   const isSuspended = status === 'suspended'
   const isArchived = status === 'archived'
@@ -123,7 +123,20 @@ export default function UserDetailDrawer({
                   <ShieldCheck size={11} style={{ marginRight: 3, verticalAlign: '-1px' }} />
                   {roleLabel}
                 </span>
+                {user.is_centre_manager && user.role !== 'centre_manager' && (
+                  <span className="pill" style={{ marginLeft: '0.35rem', background: '#0891b21a', color: '#0891b2', fontWeight: 700, fontSize: '0.7rem' }}>
+                    + Centre Manager
+                  </span>
+                )}
               </dd>
+              {(user.is_centre_manager || user.role === 'centre_manager') && (
+                <>
+                  <dt>Attendance</dt>
+                  <dd style={{ fontSize: '0.78rem', color: '#0891b2', fontWeight: 600 }}>
+                    Centre Manager (centre & subcentres access)
+                  </dd>
+                </>
+              )}
               <dt>Badge</dt>
               <dd className="mono">{user.badge_number || '—'}</dd>
               <dt>Centre</dt>

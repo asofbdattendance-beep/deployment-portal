@@ -27,8 +27,8 @@ import { Users, UserPlus, Search, Pencil, Ban, CheckCircle2, Copy, Trash2, KeyRo
 //   AccessDenied screen, the RPC validates email/role/expiry single-use.
 // - audit_log rows are best-effort (console.warn), never fatal.
 
-const SYSTEM_ROLES = ['centre_user', 'centre_admin', 'aso', 'super_admin', 'dept_incharge', 'scanner', 'vss_operator']
-const CENTRE_ROLES = ['centre_user', 'centre_admin']
+const SYSTEM_ROLES = ['centre_user', 'centre_admin', 'centre_manager', 'aso', 'super_admin', 'dept_incharge', 'scanner', 'vss_operator']
+const CENTRE_ROLES = ['centre_user', 'centre_admin', 'centre_manager']
 const BADGE_ROLES = ['dept_incharge', 'scanner']
 
 // Phase-group filter chips (labels match the drawer's phase pills). The group
@@ -171,7 +171,7 @@ export default function UsersPage() {
   const [saving, setSaving] = useState(false)
   const [confirm, setConfirm] = useState(null) // { title, body, confirmLabel, danger, onConfirm }
 
-  const [inviteForm, setInviteForm] = useState({ name: '', email: '', role: 'centre_user', customId: '', centre: '', badge: '', deptSchedule: '', deptIds: [], days: '7', code: newCode() })
+  const [inviteForm, setInviteForm] = useState({ name: '', email: '', role: 'centre_user', customId: '', isCentreManager: false, centre: '', badge: '', deptSchedule: '', deptIds: [], days: '7', code: newCode() })
   const [creating, setCreating] = useState(false)
   // Direct provisioning: search a badge from the database, pick the sewadar,
   // set role + password, create. Name/centre/badge come from the picked
@@ -180,7 +180,7 @@ export default function UsersPage() {
   const [badgeHits, setBadgeHits] = useState([])
   const [badgeSearching, setBadgeSearching] = useState(false)
   const [picked, setPicked] = useState(null) // { badge_number, sewadar_name, centre, is_vss }
-  const [directForm, setDirectForm] = useState({ email: '', role: 'centre_user', customId: '', password: '', showPw: false, deptSchedule: '', deptIds: [], location: '' })
+  const [directForm, setDirectForm] = useState({ email: '', role: 'centre_user', customId: '', isCentreManager: false, password: '', showPw: false, deptSchedule: '', deptIds: [], location: '' })
   const [directBusy, setDirectBusy] = useState(false)
   const [createdCred, setCreatedCred] = useState(null) // { email, tempPassword } — shown once
 
@@ -369,7 +369,7 @@ export default function UsersPage() {
       // statusOf: archived wins over suspended, so an archived login never
       // leaks into the "suspended" filter.
       .filter(u => statusFilter === 'all' || statusOf(u) === statusFilter)
-      .filter(u => phaseFilter === 'all' || userPhaseGroup(u.role) === phaseFilter)
+      .filter(u => phaseFilter === 'all' || userPhaseGroup(u) === phaseFilter)
       .filter(u => !term || [u.name, u.email, u.badge_number, u.centre, roleName(u)].some(v => String(v || '').toLowerCase().includes(term)))
       .slice()
       .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
@@ -381,7 +381,7 @@ export default function UsersPage() {
   const groupedUsers = useMemo(() => {
     const groups = []
     for (const key of ['deployment', 'attendance', 'both']) {
-      const rows = filteredUsers.filter(u => userPhaseGroup(u.role) === key)
+      const rows = filteredUsers.filter(u => userPhaseGroup(u) === key)
       if (rows.length) groups.push({ key, label: PHASE_GROUP_LABELS[key], rows })
     }
     return groups
@@ -400,6 +400,7 @@ export default function UsersPage() {
       name: u.name || '',
       role: u.role,
       customId: u.custom_role_id || '',
+      isCentreManager: Boolean(u.is_centre_manager || u.role === 'centre_manager'),
       centre: u.centre || '',
       badge,
       location: u.location || '',
@@ -448,22 +449,26 @@ export default function UsersPage() {
     setConfirm(null)
     setSaving(true)
     try {
+      const isCM = editForm.role === 'centre_manager' || Boolean(editForm.isCentreManager)
       const payload = {
         name,
         role: editForm.role,
         custom_role_id: custom ? custom.id : null,
+        is_centre_manager: isCM,
         centre: editForm.role === 'dept_incharge' ? null : (editForm.centre.trim() || null),
         badge_number: editForm.badge.trim() || null,
         location: editForm.location.trim() || null,
       }
-      // v71 tolerance: location may not exist server-side until the migration
-      // is applied. Retry without it rather than failing the whole save.
+      // v71/v87 tolerance: is_centre_manager or location may not exist server-side until
+      // migration is applied. Retry without them rather than failing the whole save.
       let { error } = await supabase.from('portal_users').update(payload).eq('id', editUser.id)
-      if (error && /location/i.test(error.message)) {
-        const { location: _dropped, ...withoutLocation } = payload
-        const retry = await supabase.from('portal_users').update(withoutLocation).eq('id', editUser.id)
+      if (error && /is_centre_manager|location/i.test(error.message)) {
+        const safePayload = { ...payload }
+        if (/is_centre_manager/i.test(error.message)) delete safePayload.is_centre_manager
+        if (/location/i.test(error.message)) delete safePayload.location
+        const retry = await supabase.from('portal_users').update(safePayload).eq('id', editUser.id)
         error = retry.error
-        if (!error) toast.info('Saved — apply sql/v71_portal_user_location.sql to keep the location field')
+        if (!error && /is_centre_manager/i.test(error?.message || '')) toast.info('Saved — apply sql/v87_centre_manager_role.sql for Centre Manager flag')
       }
       if (error) { toast.error(error.message); return }
       // v51: replace the department grant for this badge + schedule. A role
@@ -790,11 +795,13 @@ export default function UsersPage() {
     setCreating(true)
     try {
       const days = Math.max(1, Math.min(30, Number(inviteForm.days) || 7))
+      const isCM = form.role === 'centre_manager' || Boolean(inviteForm.isCentreManager)
       const payload = {
         email: form.email,
         name: form.name,
         role: form.role,
         custom_role_id: custom ? custom.id : null,
+        is_centre_manager: isCM,
         centre: form.role === 'dept_incharge' ? null : (form.centre || null),
         badge_number: form.badge || null,
         // v51: the grant travels WITH the invite; trg_grant_incharge_on_claim
@@ -806,6 +813,11 @@ export default function UsersPage() {
         created_by: profile?.name || null,
       }
       let { error } = await supabase.from('portal_invitations').insert(payload)
+      if (error && /is_centre_manager/i.test(error.message)) {
+        const { is_centre_manager: _drop, ...withoutCM } = payload
+        const retry = await supabase.from('portal_invitations').insert(withoutCM)
+        error = retry.error
+      }
       if (error && error.code === '23505') {
         // code collision (or a raced duplicate email) — mint a fresh code once
         payload.code = newCode()
@@ -816,7 +828,7 @@ export default function UsersPage() {
       if (error) { toast.error(error.message); return }
       await audit('CREATE_INVITE', 'portal_invitations', null, { email: payload.email, role: payload.role, centre: payload.centre })
       toast.success(`Invite created — share the code ${payload.code} with ${payload.name}`)
-      setInviteForm({ name: '', email: '', role: 'centre_user', customId: '', centre: '', badge: '', deptSchedule: '', deptIds: [], days: '7', code: newCode() })
+      setInviteForm({ name: '', email: '', role: 'centre_user', customId: '', isCentreManager: false, centre: '', badge: '', deptSchedule: '', deptIds: [], days: '7', code: newCode() })
       load().catch(() => {})
     } finally {
       setCreating(false)
@@ -883,12 +895,14 @@ export default function UsersPage() {
         setDirectBusy(false)
         return
       }
+      const isCM = directForm.role === 'centre_manager' || Boolean(directForm.isCentreManager)
       const { data, error } = await supabase.functions.invoke('create-login', {
         body: {
           email,
           name: picked.sewadar_name,
           role: directForm.role,
           custom_role_id: custom ? custom.id : null,
+          is_centre_manager: isCM,
           centre: INVITE_CENTRE_ROLES.includes(directForm.role) ? picked.centre : null,
           badge_number: picked.badge_number,
           location: directForm.location.trim() || null,
@@ -956,8 +970,11 @@ export default function UsersPage() {
       } else {
         toast.success(`Login created for ${picked.sewadar_name} — they can sign in now`)
       }
+      if (isCM) {
+        await supabase.from('portal_users').update({ is_centre_manager: true }).eq('email', email).catch(() => {})
+      }
       clearPicked()
-      setDirectForm({ email: '', role: 'centre_user', customId: '', password: '', showPw: false, deptSchedule: '', deptIds: [], location: '' })
+      setDirectForm({ email: '', role: 'centre_user', customId: '', isCentreManager: false, password: '', showPw: false, deptSchedule: '', deptIds: [], location: '' })
       load().catch(() => {})
     } catch (e) {
       toast.error(e?.message || 'Could not create login')
@@ -1176,6 +1193,11 @@ export default function UsersPage() {
                             <span className="pill" style={{ background: ROLE_COLORS[u.role] ? `${ROLE_COLORS[u.role]}1a` : '#f1f5f9', color: ROLE_COLORS[u.role] || '#64748b', fontWeight: 700 }}>
                               {custom ? custom.name : roleLabel(u.role)}
                             </span>
+                            {u.is_centre_manager && u.role !== 'centre_manager' && (
+                              <span className="pill" style={{ marginLeft: '0.35rem', background: '#0891b21a', color: '#0891b2', fontWeight: 700, fontSize: '0.65rem' }}>
+                                + Centre Manager
+                              </span>
+                            )}
                             {custom && <div style={{ fontSize: '0.65rem', color: '#94a3b8', marginTop: '0.15rem' }}>{roleLabel(custom.base_role)}</div>}
                             {u.role === 'super_admin' && <span className="pill pill-red" style={{ marginLeft: '0.35rem', fontSize: '0.6rem' }}>ADMIN</span>}
                           </td>
@@ -1330,6 +1352,18 @@ export default function UsersPage() {
             </div>
           </div>
           <div><label style={labelStyle}>Location (optional)</label><input value={directForm.location} onChange={e => setDirectForm(f => ({ ...f, location: e.target.value }))} placeholder="e.g. Bhati Gate 2" autoComplete="off" style={inputStyle} /></div>
+          <div style={{ display: 'flex', alignItems: 'center', paddingTop: '1.25rem' }}>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.45rem', fontSize: '0.82rem', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={directForm.role === 'centre_manager' || directForm.isCentreManager}
+                disabled={directForm.role === 'centre_manager'}
+                onChange={e => setDirectForm(f => ({ ...f, isCentreManager: e.target.checked }))}
+              />
+              <span style={{ fontWeight: 600 }}>Centre Manager</span>
+              <span style={{ color: '#64748b', fontSize: '0.74rem' }}>(Attendance portal access)</span>
+            </label>
+          </div>
         </div>
         <div style={{ marginTop: '0.75rem' }}>
           <button onClick={createLoginDirect} disabled={directBusy} className="btn btn-primary"><UserPlus size={14} /> {directBusy ? 'Creating…' : 'Create login'}</button>
@@ -1356,7 +1390,7 @@ export default function UsersPage() {
               {customRoles.filter(r => r.base_role === inviteForm.role).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
             </select>
           </div>
-          <div><label style={labelStyle}>Centre{['centre_user', 'centre_admin'].includes(inviteForm.role) ? ' *' : ''}</label>
+          <div><label style={labelStyle}>Centre{['centre_user', 'centre_admin', 'centre_manager'].includes(inviteForm.role) ? ' *' : ''}</label>
             <select value={inviteForm.centre} onChange={e => setInviteForm(f => ({ ...f, centre: e.target.value }))} className="select" style={{ width: '100%' }}>
               <option value="">—</option>
               {centres.map(c => <option key={c} value={c}>{c}</option>)}
@@ -1380,6 +1414,18 @@ export default function UsersPage() {
               <input value={inviteForm.code} onChange={e => setInviteForm(f => ({ ...f, code: e.target.value.toUpperCase() }))} style={{ ...inputStyle, fontFamily: 'monospace' }} maxLength={16} />
               <button onClick={() => setInviteForm(f => ({ ...f, code: newCode() }))} className="btn btn-ghost" style={smallBtn} title="Generate a fresh code"><RefreshCw size={13} /></button>
             </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', paddingTop: '1.25rem' }}>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.45rem', fontSize: '0.82rem', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={inviteForm.role === 'centre_manager' || inviteForm.isCentreManager}
+                disabled={inviteForm.role === 'centre_manager'}
+                onChange={e => setInviteForm(f => ({ ...f, isCentreManager: e.target.checked }))}
+              />
+              <span style={{ fontWeight: 600 }}>Centre Manager</span>
+              <span style={{ color: '#64748b', fontSize: '0.74rem' }}>(Attendance portal access)</span>
+            </label>
           </div>
         </div>
         <button onClick={createInvite} disabled={creating} className="btn btn-primary"><UserPlus size={14} /> {creating ? 'Creating…' : 'Create invite'}</button>
@@ -1570,6 +1616,18 @@ export default function UsersPage() {
                 <div><label style={labelStyle}>Badge</label><input value={editForm.badge} onChange={e => setEditForm(f => ({ ...f, badge: e.target.value, deptIds: [] }))} style={{ ...inputStyle, fontFamily: 'monospace' }} /></div>
               </div>
               <div><label style={labelStyle}>Location (optional)</label><input value={editForm.location} onChange={e => setEditForm(f => ({ ...f, location: e.target.value }))} placeholder="e.g. Bhati Gate 2" autoComplete="off" style={inputStyle} /></div>
+              <div style={{ padding: '0.2rem 0' }}>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={editForm.role === 'centre_manager' || editForm.isCentreManager}
+                    disabled={editForm.role === 'centre_manager'}
+                    onChange={e => setEditForm(f => ({ ...f, isCentreManager: e.target.checked }))}
+                  />
+                  <span style={{ fontWeight: 600 }}>Centre Manager</span>
+                  <span style={{ color: '#64748b', fontSize: '0.78rem' }}>(Attendance portal access for centre & subcentres)</span>
+                </label>
+              </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '0.7rem' }}>
                 <DeptAssignFields
                   role={editForm.role} schedules={schedules} departments={departments}
