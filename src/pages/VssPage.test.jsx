@@ -106,4 +106,19 @@ describe('VssPage deploy table', () => {
     expect(toast.info).not.toHaveBeenCalledWith(expect.stringMatching(/already saved/))
     await waitFor(() => expect(h.writes).toContainEqual(['sewadar_consents', 'update', expect.objectContaining({ consent_given: false })]))
   })
+
+  // v86 parity: a deployed VSS sewadar stays editable for centre roles while
+  // VSS editing is open (was frozen with a DEPLOYED pill — could not be changed).
+  it('a deployed VSS row stays editable and consent→No removes its deployment', async () => {
+    FIX.deployments = [{ id: 'dp1', schedule_id: 's1', centre: 'C1', badge_number: 'VS001', department_id: 'd1', deployed_department_id: null }]
+    try {
+      const { row, consent } = await renderTable()
+      expect(row.textContent).not.toContain('DEPLOYED')
+      fireEvent.change(consent, { target: { value: 'no' } })
+      await waitFor(() => expect(h.writes).toContainEqual(['deployments', 'delete']), { timeout: 2500 })
+      expect(h.writes).toContainEqual(['sewadar_consents', 'update', expect.objectContaining({ consent_given: false })])
+    } finally {
+      FIX.deployments = []
+    }
+  })
 })
