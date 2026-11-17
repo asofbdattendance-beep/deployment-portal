@@ -67,3 +67,24 @@ describe('AddVssForm delete', () => {
     expect(h.removeMock).toHaveBeenCalledWith(['reg/p1.jpg'])
   })
 })
+
+describe('AddVssForm duplicate check (v88)', () => {
+  it('shows the existing VSS ID and blocks Create when a fuzzy match exists', async () => {
+    const { supabase } = await import('../lib/supabase')
+    supabase.rpc.mockResolvedValueOnce({
+      data: [{ source: 'roster', vss_id: 'VSFB5971GB4629', sewadar_name: 'ABHAY SINGH', centre: 'C1', reasons: ['similar name + same date of birth'] }],
+      error: null,
+    })
+    render(<AddVssForm creationOpen windowOpen creationOverride={null} />)
+    fireEvent.change(screen.getByPlaceholderText('Full name'), { target: { value: 'Abhey Sing' } })
+    fireEvent.click(screen.getByRole('button', { name: /Check for duplicates/ }))
+    expect(await screen.findByText('VSFB5971GB4629')).toBeTruthy()
+    expect(screen.getByText(/already exists/)).toBeTruthy()
+    expect(supabase.rpc).toHaveBeenCalledWith('find_vss_duplicates', expect.objectContaining({ p_name: 'Abhey Sing' }))
+    expect(screen.getByRole('button', { name: /Create VSS record/ }).disabled).toBe(true)
+    // editing the details clears the block so a corrected record can be re-checked
+    fireEvent.change(screen.getByPlaceholderText('Full name'), { target: { value: 'Someone Else' } })
+    expect(screen.queryByText('VSFB5971GB4629')).toBeNull()
+    expect(screen.getByRole('button', { name: /Create VSS record/ }).disabled).toBe(false)
+  })
+})

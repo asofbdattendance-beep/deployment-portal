@@ -90,6 +90,9 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
   const [assignVals, setAssignVals] = useState({})
   const [assigningId, setAssigningId] = useState(null)
   const [dupCheck, setDupCheck] = useState(null)
+  // v88 fuzzy duplicate check on create: null = not checked, [] = none found
+  const [createDups, setCreateDups] = useState(null)
+  const [checkingDups, setCheckingDups] = useState(false)
   // edit / delete
   const [editReg, setEditReg] = useState(null)
   const [editForm, setEditForm] = useState(EMPTY_FORM)
@@ -146,6 +149,34 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
   const set = (key) => (e) => {
     setForm(f => ({ ...f, [key]: e.target.value }))
     setErrors(prev => ({ ...prev, [key]: undefined }))
+    setCreateDups(null)
+  }
+
+  // Fuzzy match against the VSS roster + registrations in EVERY centre (v88
+  // SECURITY DEFINER RPC). Returns the matches, or null when the check could
+  // not run — the DB insert trigger still blocks duplicates in that case.
+  const findCreateDuplicates = async (f) => {
+    const { data, error } = await supabase.rpc('find_vss_duplicates', {
+      p_name: f.sewadar_name.trim(),
+      p_father: f.father_husband_name.trim() || null,
+      p_dob: f.dob || null,
+      p_aadhar: f.aadhar_number.trim() || null,
+      p_contact: f.contact_no.trim() || null,
+      p_emergency: f.emergency_contact.trim() || null,
+    })
+    if (error) return null
+    return data || []
+  }
+
+  const checkDuplicatesNow = async () => {
+    if (!form.sewadar_name.trim()) { toast.error('Enter the sewadar name first'); return }
+    setCheckingDups(true)
+    try {
+      const dups = await findCreateDuplicates(form)
+      if (dups == null) { toast.error('Could not check for duplicates — try again'); return }
+      setCreateDups(dups)
+      if (dups.length === 0) toast.success('No matching VSS record found')
+    } finally { setCheckingDups(false) }
   }
 
   const onPhoto = (e) => {
@@ -185,6 +216,12 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
     setSubmitting(true)
     let uploadedPath = null
     try {
+      const dups = await findCreateDuplicates(form)
+      if (dups && dups.length > 0) {
+        setCreateDups(dups)
+        toast.error(`This VSS record already exists: ${dups.map(d => d.vss_id).join(', ')}`)
+        return
+      }
       const photo_url = await uploadPhoto(photo)
       uploadedPath = photo_url
       const { error } = await supabase.from('vss_registrations').insert({
@@ -203,6 +240,7 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
       })
       if (error) throw error
       toast.success('VSS record created with a temporary ID')
+      setCreateDups(null)
       setForm(EMPTY_FORM)
       setErrors({})
       clearPhoto()
@@ -542,11 +580,33 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
 
             <div style={{ flex: 1 }} />
 
-            <button type="submit" disabled={submitting} className="btn btn-primary" style={{ padding: '0.6rem 1.3rem', fontSize: '0.88rem', display: 'inline-flex', alignItems: 'center', gap: '0.45rem', marginTop: '1.4rem' }}>
+            <button type="button" onClick={checkDuplicatesNow} disabled={checkingDups || submitting} className="btn" style={{ padding: '0.6rem 1rem', fontSize: '0.85rem', display: 'inline-flex', alignItems: 'center', gap: '0.4rem', marginTop: '1.4rem' }}>
+              {checkingDups ? <Loader2 size={15} style={{ animation: 'spin 0.6s linear infinite' }} /> : <Search size={15} />}
+              Check for duplicates
+            </button>
+            <button type="submit" disabled={submitting || (createDups && createDups.length > 0)} className="btn btn-primary" style={{ padding: '0.6rem 1.3rem', fontSize: '0.88rem', display: 'inline-flex', alignItems: 'center', gap: '0.45rem', marginTop: '1.4rem' }}>
               {submitting ? <Loader2 size={16} style={{ animation: 'spin 0.6s linear infinite' }} /> : <UserPlus size={16} />}
               {submitting ? 'Creating…' : 'Create VSS record'}
             </button>
           </div>
+
+          {createDups && createDups.length > 0 && (
+            <div role="alert" style={{ marginTop: '1rem', border: '1px solid #fecaca', background: '#fef2f2', borderRadius: 10, padding: '0.75rem 0.9rem' }}>
+              <div style={{ fontSize: '0.86rem', fontWeight: 700, color: '#b91c1c', marginBottom: '0.4rem' }}>
+                This VSS record already exists — it cannot be created again
+              </div>
+              {createDups.map((d, i) => (
+                <div key={`${d.vss_id}-${i}`} style={{ fontSize: '0.82rem', color: '#7f1d1d', padding: '0.2rem 0', display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'baseline' }}>
+                  <span className="pill pill-red" style={{ fontFamily: 'ui-monospace, monospace', fontWeight: 700 }}>{d.vss_id}</span>
+                  <span><b>{d.sewadar_name}</b> · {d.centre || '—'} · {d.source === 'roster' ? 'VSS roster' : 'pending registration'}</span>
+                  <span style={{ color: '#991b1b' }}>({(d.reasons || []).join(', ')})</span>
+                </div>
+              ))}
+              <div style={{ fontSize: '0.75rem', color: '#991b1b', marginTop: '0.4rem' }}>
+                Use the existing VSS ID above. If this is a different person, correct the details and check again.
+              </div>
+            </div>
+          )}
         </fieldset>
       </form>
       )}
