@@ -10,6 +10,7 @@ import VssPage from './VssPage'
 
 const h = vi.hoisted(() => ({
   settings: { vss_deployment_open: true },
+  float: false,
   handlers: {},
   writes: [],
 }))
@@ -36,7 +37,9 @@ vi.mock('../lib/supabase', async (importOriginal) => {
     ...mod,
     supabase: {
       from: (t) => qb(t),
-      rpc: () => Promise.resolve({ data: { vss_deployment_open: h.settings.vss_deployment_open }, error: null }),
+      rpc: (fn) => Promise.resolve(fn === 'vss_float_count_for_centre'
+        ? { data: h.float, error: null }
+        : { data: { vss_deployment_open: h.settings.vss_deployment_open }, error: null }),
       channel: () => {
         const ch = { on: (_e, f, cb) => { h.handlers[f.table] = cb; return ch }, subscribe: () => ch }
         return ch
@@ -66,6 +69,7 @@ const SCHEDULES = [{ id: 's1', name: 'Dec 2026', status: 'open', deadline: null 
 
 beforeEach(() => {
   h.settings = { vss_deployment_open: true }
+  h.float = false
   h.handlers = {}
   h.writes.length = 0
   Object.values(toast).forEach(f => f.mockReset())
@@ -105,5 +109,49 @@ describe('VssPage deploy table', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Save Draft/ }))
     expect(toast.info).not.toHaveBeenCalledWith(expect.stringMatching(/already saved/))
     await waitFor(() => expect(h.writes).toContainEqual(['sewadar_consents', 'update', expect.objectContaining({ consent_given: false })]))
+  })
+
+  // v86 parity: a deployed VSS sewadar stays editable for centre roles while
+  // VSS editing is open (was frozen with a DEPLOYED pill — could not be changed).
+  it('a deployed VSS row stays editable and consent→No removes its deployment', async () => {
+    FIX.deployments = [{ id: 'dp1', schedule_id: 's1', centre: 'C1', badge_number: 'VS001', department_id: 'd1', deployed_department_id: null }]
+    try {
+      const { row, consent } = await renderTable()
+      expect(row.textContent).not.toContain('DEPLOYED')
+      fireEvent.change(consent, { target: { value: 'no' } })
+      await waitFor(() => expect(h.writes).toContainEqual(['deployments', 'delete']), { timeout: 2500 })
+      expect(h.writes).toContainEqual(['sewadar_consents', 'update', expect.objectContaining({ consent_given: false })])
+    } finally {
+      FIX.deployments = []
+    }
+  })
+
+  // v89 float count: a full department stays selectable for VSS
+  it('float count lets a centre pick a department whose quota is full', async () => {
+    const prev = { a: FIX.centre_allocations, v: FIX.vss_sewadars, c: FIX.sewadar_consents }
+    // quota 1, already used by another VSS sewadar
+    FIX.centre_allocations = [{ id: 'a1', department_id: 'd1', centre: 'C1', max_count: 1 }]
+    FIX.vss_sewadars = [...prev.v, { badge_number: 'VS002', sewadar_name: 'Other One', gender: 'M', is_initiated: true, is_active: true, remarks: '', centre: 'C1', department: 'SANGAT' }]
+    FIX.sewadar_consents = [...prev.c, { id: 'c2', centre: 'C1', badge_number: 'VS002', consent_given: true, available_days_count: 5, stay_at_bhati: false, chair_pass: false }]
+    FIX.deployments = [{ id: 'dp2', schedule_id: 's1', centre: 'C1', badge_number: 'VS002', department_id: 'd1', deployed_department_id: null }]
+    try {
+      await renderTable()
+      const trafficBlocked = async () => {
+        fireEvent.click(screen.getByText('Vee Ess').closest('tr').querySelector('[data-label="Deployment"] button'))
+        const opt = await screen.findByRole('option', { name: /TRAFFIC/ })
+        return opt.getAttribute('aria-disabled') === 'true'
+      }
+      expect(await trafficBlocked()).toBe(true)
+      cleanup()
+      h.float = true
+      await renderTable()
+      expect(await screen.findByText(/Float count is ON/)).toBeTruthy()
+      expect(await trafficBlocked()).toBe(false)
+    } finally {
+      FIX.centre_allocations = prev.a
+      FIX.vss_sewadars = prev.v
+      FIX.sewadar_consents = prev.c
+      FIX.deployments = []
+    }
   })
 })

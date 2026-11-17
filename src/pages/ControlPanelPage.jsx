@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   supabase, fetchCentres, fetchAllRows, fetchPortalSettings, setPortalSetting,
   fetchCentreOverrides, setCentreOverride, removeCentreOverride,
-  fetchVssOverrides, setVssOverride, getCount,
+  fetchVssOverrides, setVssOverride, getCount, fetchVssFloat, setVssFloat,
 } from '../lib/supabase'
 import {
   getParentCentres, getRootCentre, getSubtreeCentres,
@@ -97,6 +97,8 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
   const [deployRows, setDeployRows] = useState([])
   const [overrides, setOverrides] = useState([])
   const [vssOverrides, setVssOverrides] = useState([])
+  // v89 per-centre VSS float count rows ({ centre, float_count }); absent = Auto
+  const [vssFloat, setVssFloatRows] = useState([])
   const [locks, setLocks] = useState([])
   const [settings, setSettings] = useState({})
   const [loading, setLoading] = useState(true)
@@ -155,6 +157,8 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
 
   useEffect(() => {
     setLoading(true)
+    // float rows are non-fatal: before v89 the table does not exist
+    fetchVssFloat().then(setVssFloatRows).catch(() => setVssFloatRows([]))
     Promise.all([loadStatic(), loadScheduleData(selectedScheduleId), fetchPortalSettings().then(setSettings)])
       .catch(err => toast.error(err?.message || 'Failed to load control-panel data'))
       .finally(() => setLoading(false))
@@ -171,6 +175,7 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
     subscriptions: [
       { table: 'portal_settings' },
       { table: 'centre_vss_overrides' },
+      { table: 'centre_vss_float' },
       ...(selectedScheduleId ? [
         { table: 'centre_locks', filter: `schedule_id=eq.${selectedScheduleId}` },
         { table: 'centre_overrides', filter: `schedule_id=eq.${selectedScheduleId}` },
@@ -179,6 +184,7 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
     onReload: () => {
       fetchPortalSettings().then(setSettings).catch(() => {})
       fetchVssOverrides().then(setVssOverrides).catch(() => {})
+      fetchVssFloat().then(setVssFloatRows).catch(() => {})
       if (!selectedScheduleId) return
       fetchAllRows('centre_locks', '*', (q) => q.eq('schedule_id', selectedScheduleId), 'id').then((data) => setLocks(data || [])).catch(() => {})
       fetchCentreOverrides(selectedScheduleId).then(setOverrides).catch(() => {})
@@ -389,6 +395,23 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
     } finally { setBusy(false) }
   }
 
+  // v89 VSS float count, per ROOT centre: Auto (null) inherits All-centres,
+  // then the global switch. Yes lets that centre deploy VSS past a full quota.
+  const setVssFloatKnob = async (centre, value) => {
+    const rootCentre = getRootCentre(centres, centre) || centre
+    const label = rootCentre === OVERRIDE_ALL_CENTRES ? 'all centres' : rootCentre
+    if (value === true && !window.confirm(`Turn VSS float count ON for ${label}?\n\n• VSS sewadars can be deployed to a department even when its quota is full (extras show as Additional).\n• Regular sewadars stay capped at the quota — and floated VSS still count toward it.\n• All other VSS rules still apply.`)) return
+    setBusy(true)
+    try {
+      await setVssFloat(rootCentre, value, profile?.name || null)
+      setVssFloatRows(await fetchVssFloat())
+      audit('vss_float_count', { centre: rootCentre, float_count: value })
+      toast.success(`VSS float count ${value === null ? 'reset to Auto' : value ? 'ON' : 'OFF'} — ${label}`)
+    } catch (err) {
+      toast.error(err.message || 'Could not update VSS float count')
+    } finally { setBusy(false) }
+  }
+
   const clearStaleVssDeploy = async () => {
     const toClear = vssOverrides.filter(o => o.deployment_open === true)
     if (!toClear.length) return
@@ -568,6 +591,7 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
                     <MasterSwitch label="Sewadar Deployment" open={settings.sewadar_deployment_open !== false} onToggle={toggleSetting('sewadar_deployment_open', 'Sewadar deployment')} busy={busy} />
                     <MasterSwitch label="VSS Deployment" open={settings.vss_deployment_open === true} onToggle={toggleSetting('vss_deployment_open', 'VSS deployment')} busy={busy} />
                     <MasterSwitch label="Add VSS" open={settings.vss_creation_open === true} onToggle={toggleSetting('vss_creation_open', 'Add VSS')} busy={busy} />
+                    <MasterSwitch label="VSS Float count" open={settings.vss_float_count === true} onToggle={toggleSetting('vss_float_count', 'VSS float count')} busy={busy} />
                   </div>
                 </PanelCard>
 
@@ -876,6 +900,7 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
                   <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
                     <MasterSwitch label="VSS Deployment" open={settings.vss_deployment_open === true} onToggle={toggleSetting('vss_deployment_open', 'VSS deployment')} busy={busy} />
                     <MasterSwitch label="Add VSS" open={settings.vss_creation_open === true} onToggle={toggleSetting('vss_creation_open', 'Add VSS')} busy={busy} />
+                    <MasterSwitch label="VSS Float count" open={settings.vss_float_count === true} onToggle={toggleSetting('vss_float_count', 'VSS float count')} busy={busy} />
                   </div>
                   <div className="table-wrap">
                     <table className="table">
@@ -884,6 +909,7 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
                           <th>Centre</th>
                           <th>VSS creation (Add-VSS gate)</th>
                           <th>VSS deployment marking</th>
+                          <th title="Yes = VSS can be deployed even when the department quota is full">Float count</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -895,6 +921,7 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
                               <td style={{ fontWeight: name === OVERRIDE_ALL_CENTRES ? 800 : 600 }}>{label}{name !== OVERRIDE_ALL_CENTRES && ` (+${childrenOf(name).length})`}</td>
                               <td><TriState value={creation} onChange={v => setVssKnob(name, 'creation_open', v)} /></td>
                               <td><TriState value={deployment} onChange={v => setVssKnob(name, 'deployment_open', v)} /></td>
+                              <td><TriState value={vssFloat.find(f => f.centre === name)?.float_count ?? null} onChange={v => setVssFloatKnob(name, v)} labels={['Auto', 'Yes', 'No']} /></td>
                             </tr>
                           )
                         })}
@@ -903,6 +930,7 @@ export default function ControlPanelPage({ schedules, scheduleId }) {
                   </div>
                   <div style={{ marginTop: '0.75rem', fontSize: '0.8rem', color: '#64748b' }}>
                     Creation “Auto” = Add-VSS switch {settings.vss_creation_open ? 'OPEN' : 'closed'} ∧ deadline window. Deployment “Auto” = VSS Deployment switch ({settings.vss_deployment_open ? 'OPEN' : 'closed'}).
+                    {' '}Float count “Auto” = All-centres row, else the VSS Float count switch ({settings.vss_float_count ? 'ON' : 'off'}); Yes lets VSS go past a full department quota — regular sewadars stay capped.
                     {' '}The DB trigger <code>trg_a_guard_vss_registration</code> and the consent/deploy gates are authoritative.
                   </div>
                 </PanelCard>
