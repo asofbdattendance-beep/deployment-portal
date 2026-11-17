@@ -333,6 +333,8 @@ export async function fetchPortalSettings() {
     sewadar_deployment_open: data?.sewadar_deployment_open !== false,
     vss_deployment_open: data?.vss_deployment_open === true,
     vss_creation_open: data?.vss_creation_open === true,
+    // v89: VSS may be deployed beyond the department quota (global default)
+    vss_float_count: data?.vss_float_count === true,
     updated_by: data?.updated_by || null,
     updated_at: data?.updated_at || null,
   }
@@ -428,6 +430,26 @@ export async function setVssOverride(centre, patch, updatedBy = null) {
     .upsert(
       { centre, ...patch, updated_at: new Date().toISOString(), ...(updatedBy ? { updated_by: updatedBy } : {}) },
       { onConflict: 'centre' }
+    )
+  if (error) throw error
+}
+
+// ── VSS float count (v89) ─────────────────────────────────────
+// Per ROOT centre ('*' = all centres). Row absent = Auto (inherit the
+// All-centres row, then the global portal_settings.vss_float_count).
+export async function fetchVssFloat() {
+  const { data, error } = await supabase.from('centre_vss_float').select('centre, float_count')
+  if (error) throw error
+  return data || []
+}
+
+// value: null = Auto (delete the row) | true | false
+export async function setVssFloat(centre, value, updatedBy = null) {
+  const { error } = value === null
+    ? await supabase.from('centre_vss_float').delete().eq('centre', centre)
+    : await supabase.from('centre_vss_float').upsert(
+      { centre, float_count: value, updated_at: new Date().toISOString(), ...(updatedBy ? { updated_by: updatedBy } : {}) },
+      { onConflict: 'centre' },
     )
   if (error) throw error
 }

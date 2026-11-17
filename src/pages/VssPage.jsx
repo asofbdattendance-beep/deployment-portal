@@ -122,7 +122,10 @@ function VssDeployTable({ schedules, scheduleId }) {
   // super_admin + vss_operator may deploy BEYOND the allocated quota
   // (v38 bypass); the extra rows surface as Additional. Centre roles stay
   // capped — the quota-full block below still binds them.
-  const canExceedQuota = profile?.role === 'super_admin' || isVssOperator
+  // v89 VSS float count: the super_admin let this centre deploy VSS past a
+  // full department quota (resolved server-side: centre → All-centres → global)
+  const [vssFloat, setVssFloat] = useState(false)
+  const canExceedQuota = profile?.role === 'super_admin' || isVssOperator || vssFloat
   const isEditableRole = profile?.role === 'centre_user' || profile?.role === 'centre_admin' || isVssOperator
   // v86 parity (ConsentPage): centre roles may edit a deployed VSS sewadar
   // (consent, stay, department) while VSS editing is open — the DB freeze
@@ -232,6 +235,14 @@ function VssDeployTable({ schedules, scheduleId }) {
   // Generic `centre_overrides` (any_override_open) must NOT reopen VSS.
   const loadGates = useCallback(async () => {
     if (!selectedScheduleId) return
+    // v89 float count for this centre's root — non-fatal (false before v89)
+    if (gateRoot) {
+      supabase.rpc('vss_float_count_for_centre', { p_centre: gateRoot })
+        .then(({ data, error }) => setVssFloat(!error && data === true))
+        .catch(() => setVssFloat(false))
+    } else {
+      setVssFloat(false)
+    }
     // vss_operator on 'All centres' has no per-centre root — gate purely on the
     // global VSS switch (v34 hard close still applies: switch OFF stays closed)
     if (isVssOperator && !gateRoot) {
@@ -555,6 +566,7 @@ function VssDeployTable({ schedules, scheduleId }) {
         fetchPortalSettings().then(setSettings).then(() => loadGatesRef.current()).catch(() => {})
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_vss_overrides' }, () => { loadGatesRef.current() })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_vss_float' }, () => { loadGatesRef.current() })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'centre_overrides', filter: `schedule_id=eq.${selectedScheduleId}` }, () => { loadGatesRef.current() })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'deployments', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'sewadar_consents', filter: `schedule_id=eq.${selectedScheduleId}` }, reload)
@@ -1468,6 +1480,12 @@ function VssDeployTable({ schedules, scheduleId }) {
       {inactiveAll > 0 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '0.6rem 0.75rem', fontSize: '0.82rem', color: '#b91c1c', marginBottom: '1rem' }}>
           <AlertTriangle size={15} /> {inactiveAll} inactive VSS sewadar{inactiveAll > 1 ? 's' : ''} — deployment blocked. Hover the red icon for the reason.
+        </div>
+      )}
+
+      {vssFloat && !isVssOperator && (
+        <div role="status" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '0.6rem 0.75rem', fontSize: '0.82rem', color: '#1d4ed8', marginBottom: '1rem' }}>
+          <Unlock size={15} /> Float count is ON — VSS can be deployed even when a department quota is full (extras count as Additional).
         </div>
       )}
 
