@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { registerUnsavedWork } from '../lib/unsavedWork'
 import { supabase, fetchSubtreeCentres, fetchCentres, fetchAllRows, fetchAsoDeptKeys, getRootCentre, eligibleBadgeStatusFilter, isAssoDepartment, fetchPortalSettings, shouldHideFromConsent } from '../lib/supabase'
 import { cached } from '../lib/queryCache'
 import { computeEditGates, isDeptSelectable, isUndeployedCohort, computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, aggregateQuotaAllocations, eligibilityReasons, isLowAttendance, attendanceDisplay, isVssBadge, changedConsentRows, changedConsentFields, consentRowKey, buildConsentSnapshot, groupConsentPatches, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept } from '../lib/logic'
@@ -877,7 +878,9 @@ export default function ConsentPage({ schedules, scheduleId }) {
       }
     }
     window.addEventListener('beforeunload', onBeforeUnload)
-    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+    // auto-update waits while edits are unsaved, queued or mid-save
+    const unregister = registerUnsavedWork(() => dirtyRef.current || savingRef.current || !!saveTimer.current)
+    return () => { window.removeEventListener('beforeunload', onBeforeUnload); unregister() }
   }, [])
 
   useEffect(() => {

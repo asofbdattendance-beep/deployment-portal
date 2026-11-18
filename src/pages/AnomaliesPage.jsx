@@ -41,7 +41,7 @@ const RULE_META = {
   BAD_STATUS: {
     label: 'Ineligible badge',
     pill: 'pill-red',
-    text: 'Badge status outside OPEN/PERMANENT (e.g. ELDERLY) at scan time',
+    text: 'Badge status outside OPEN/PERMANENT/ELDERLY at scan time',
   },
   MULTI_SESSION: {
     label: '3+ sessions/day',

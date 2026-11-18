@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react'
+import { registerUnsavedWork } from '../lib/unsavedWork'
 import { supabase, fetchAllRows } from '../lib/supabase'
 import { eligibleBadgeStatusFilter, notElderlyFilter, isVssBadge, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, getRootCentre, changedConsentRows, buildConsentSnapshot, shouldHideFromConsent } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
@@ -613,7 +614,9 @@ export default function DeploymentAllocationPage({ schedules, scheduleId }) {
       }
     }
     window.addEventListener('beforeunload', onBeforeUnload)
-    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+    // auto-update waits while edits are unsaved, queued or mid-save
+    const unregister = registerUnsavedWork(() => dirtyRef.current || savingRef.current || !!saveTimer.current)
+    return () => { window.removeEventListener('beforeunload', onBeforeUnload); unregister() }
   }, [])
 
   // drop pending autosave when schedule changes

@@ -7,7 +7,8 @@
  *   and Realtime are NEVER cached (auth/PII must not sit in a cache).
  * - Navigations fall back to cached index.html (SPA) when offline.
  *
- * UPDATE POSTURE: no auto skipWaiting. A new SW waits until the user taps
+ * UPDATE POSTURE: no auto skipWaiting here — SwUpdatePrompt sends
+ * SKIP_WAITING itself on tab-hide / 2 min idle, only when no unsaved work. A new SW waits until the user taps
  * "Reload" in the update prompt (SwUpdatePrompt), which posts
  * { type: 'SKIP_WAITING' }. This never swaps code mid-scan.
  *
