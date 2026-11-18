@@ -46,9 +46,9 @@ describe('dbVersionStatus', () => {
   })
 
   it('defaults the minimum to the shipped floor', () => {
-    expect(MIN_SUPPORTED_DB_VERSION).toBe('v81')
-    expect(dbVersionStatus('v81')).toBe('ok')
-    expect(dbVersionStatus('v80')).toBe('stale')
+    expect(MIN_SUPPORTED_DB_VERSION).toBe('v91')
+    expect(dbVersionStatus('v91')).toBe('ok')
+    expect(dbVersionStatus('v90')).toBe('stale')
     expect(dbVersionStatus('v79')).toBe('stale')
     expect(dbVersionStatus('v78')).toBe('stale')
     expect(dbVersionStatus('v75')).toBe('stale')

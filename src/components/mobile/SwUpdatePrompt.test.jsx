@@ -70,3 +70,66 @@ describe('SwUpdatePrompt reload timing', () => {
     }
   })
 })
+
+describe('SwUpdatePrompt auto-apply', () => {
+  const mockSw = (postMessage) => Object.defineProperty(window.navigator, 'serviceWorker', {
+    configurable: true,
+    writable: true,
+    value: { getRegistration: vi.fn().mockResolvedValue({ waiting: { postMessage } }), addEventListener: () => {} },
+  })
+
+  it('applies the update by itself after the idle window', async () => {
+    vi.useFakeTimers()
+    try {
+      const postMessage = vi.fn()
+      mockSw(postMessage)
+      render(<SwUpdatePrompt reloadPage={vi.fn()} idleMs={1000} />)
+      act(() => { window.dispatchEvent(new CustomEvent('portal-sw-update', { detail: { registration: {} } })) })
+      await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); await Promise.resolve() })
+      expect(postMessage).toHaveBeenCalledWith({ type: 'SKIP_WAITING' })
+    } finally {
+      vi.useRealTimers()
+      delete window.navigator.serviceWorker
+    }
+  })
+
+  it('applies the update when the tab is hidden', async () => {
+    const postMessage = vi.fn()
+    mockSw(postMessage)
+    render(<SwUpdatePrompt reloadPage={vi.fn()} idleMs={60_000} />)
+    act(() => { window.dispatchEvent(new CustomEvent('portal-sw-update', { detail: { registration: {} } })) })
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); await Promise.resolve(); await Promise.resolve() })
+    expect(postMessage).toHaveBeenCalledWith({ type: 'SKIP_WAITING' })
+    delete document.hidden
+    delete window.navigator.serviceWorker
+  })
+})
+
+describe('SwUpdatePrompt never loses unsaved work', () => {
+  it('does not auto-apply or manually reload while work is unsaved', async () => {
+    const { registerUnsavedWork } = await import('../../lib/unsavedWork')
+    vi.useFakeTimers()
+    const off = registerUnsavedWork(() => true)
+    try {
+      const postMessage = vi.fn()
+      Object.defineProperty(window.navigator, 'serviceWorker', {
+        configurable: true, writable: true,
+        value: { getRegistration: vi.fn().mockResolvedValue({ waiting: { postMessage } }), addEventListener: () => {} },
+      })
+      const reloadPage = vi.fn()
+      render(<SwUpdatePrompt reloadPage={reloadPage} idleMs={1000} />)
+      act(() => { window.dispatchEvent(new CustomEvent('portal-sw-update', { detail: { registration: {} } })) })
+      await act(async () => { vi.advanceTimersByTime(5000); await Promise.resolve() })
+      fireEvent.click(screen.getByRole('button', { name: 'Reload' }))
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+      expect(postMessage).not.toHaveBeenCalled()
+      expect(reloadPage).not.toHaveBeenCalled()
+      expect(screen.getByRole('status').textContent).toContain('Save or finish your changes first')
+    } finally {
+      off()
+      vi.useRealTimers()
+      delete window.navigator.serviceWorker
+    }
+  })
+})

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { registerUnsavedWork } from '../lib/unsavedWork'
 import { supabase, fetchSubtreeCentres, fetchAllRows, fetchAsoDeptKeys, getRootCentre, fetchPortalSettings, fetchCentres, fetchVssOverrides } from '../lib/supabase'
 import { computeDeptQuota, selectQuotaAllocations, resolveOperatorQuotaRoot, aggregateQuotaAllocations, vssEligibilityReasons, isVssBadge, canEditDeployment, changedConsentRows, changedConsentFields, consentRowKey, consentRowSignature, buildConsentSnapshot, groupConsentPatches, EDITABLE_CONSENT_FIELDS, DEFAULT_AVAILABLE_DAYS, isOeEscortsDept, daysForDept, isAssoDepartment, resolveVssOverride, effectiveVssCreation, effectiveVssDeployment } from '../lib/logic'
 import { consentCounts } from '../lib/counts'
@@ -915,7 +916,9 @@ function VssDeployTable({ schedules, scheduleId }) {
       }
     }
     window.addEventListener('beforeunload', onBeforeUnload)
-    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+    // auto-update waits while edits are unsaved, queued or mid-save
+    const unregister = registerUnsavedWork(() => dirtyRef.current || savingRef.current || !!saveTimer.current)
+    return () => { window.removeEventListener('beforeunload', onBeforeUnload); unregister() }
   }, [])
 
   useEffect(() => {

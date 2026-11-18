@@ -10,7 +10,9 @@
  */
 
 /** Oldest DB this frontend works with. Bump when the frontend starts
- *  calling RPCs/columns a migration introduces. v81: department shift
+ *  calling RPCs/columns a migration introduces. v91: the deployment trigger
+ *  (v90) calls vss_float_count_for_centre (v89) — without v89 every centre
+ *  deploy/consent save fails with "function does not exist". v81: department shift
  *  cutoffs and timing tags (is_late_in, is_early_out) on
  *  dp_attendance_sessions — without it the SCAN_LOG_SESSION_COLS select
  *  fails with PGRST204. v79: the scan-log select
@@ -33,7 +35,7 @@
  *  session_count/is_open (Total, Present and Attention tabs + the day-count
  *  export depend on it), alongside the v60 window, v61 window-scoped
  *  visit RPCs, v62 previsit RPCs and v63 previsit_deployed. */
-export const MIN_SUPPORTED_DB_VERSION = 'v81'
+export const MIN_SUPPORTED_DB_VERSION = 'v91'
 
 /**
  * 'v50' → 50. Letter suffixes ('v38b') compare by their number — the

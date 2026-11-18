@@ -68,6 +68,12 @@ if ('serviceWorker' in navigator) {
         window.dispatchEvent(new CustomEvent('portal-sw-update', { detail: { registration: reg } }))
       }
       reg.addEventListener('updatefound', () => watch(reg.installing))
+      // Browsers only re-check sw.js on navigation (~24h cap). Poll so a new
+      // deploy reaches open tabs within a minute, and re-check on tab return.
+      const check = () => { reg.update().catch(() => {}) }
+      setInterval(check, 60 * 1000)
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) check() })
+      window.addEventListener('online', check)
     }).catch(() => {})
   })
 }

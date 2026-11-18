@@ -1,19 +1,26 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { RefreshCw } from 'lucide-react'
+import { hasUnsavedWork } from '../../lib/unsavedWork'
 
 /**
- * SwUpdatePrompt — "New version available" banner.
+ * SwUpdatePrompt — "New version available" banner + auto-apply.
  *
  * main.jsx dispatches `portal-sw-update` when an installed service worker
  * finishes installing while a controller already exists (i.e. this is an
- * UPDATE, not the first install). Tapping Reload posts SKIP_WAITING to the
- * waiting worker and reloads once it activates — never mid-scan without
- * the user's tap.
+ * UPDATE, not the first install). The update applies itself — no manual
+ * reload needed — when the tab is hidden or has had no input for IDLE_MS,
+ * and ONLY if hasUnsavedWork() is false (no unsaved/in-flight autosave, no
+ * open modal/sheet, no focused or filled form field, no live camera).
+ * Otherwise it keeps waiting. Tapping Reload with unsaved work asks the
+ * user to save first instead of reloading.
  */
 const hardReload = () => window.location.reload()
+export const IDLE_MS = 2 * 60 * 1000
 
-export default function SwUpdatePrompt({ reloadPage = hardReload } = {}) {
+export default function SwUpdatePrompt({ reloadPage = hardReload, idleMs = IDLE_MS } = {}) {
   const [waiting, setWaiting] = useState(null)
+  const [blocked, setBlocked] = useState(false)
+  const appliedRef = useRef(false)
 
   useEffect(() => {
     if (typeof window === 'undefined') return undefined
@@ -34,9 +41,12 @@ export default function SwUpdatePrompt({ reloadPage = hardReload } = {}) {
     return () => { cancelled = true }
   }, [waiting])
 
-  if (waiting == null) return null
-
   const reload = () => {
+    if (appliedRef.current) return
+    // SKIP_WAITING purges the old build's files, so never start it while
+    // anything is unsaved — a cancelled reload would strand the old page.
+    if (hasUnsavedWork()) { setBlocked(true); return }
+    appliedRef.current = true
     try {
       if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
         const sw = navigator.serviceWorker
@@ -62,11 +72,39 @@ export default function SwUpdatePrompt({ reloadPage = hardReload } = {}) {
     } catch { /* ignore */ }
     reloadPage()
   }
+  const reloadRef = useRef(reload)
+  reloadRef.current = reload
+
+  // Auto-apply: on tab hide, or after idleMs with no user input.
+  useEffect(() => {
+    if (waiting == null || typeof document === 'undefined') return undefined
+    let timer = null
+    // auto path: apply only when nothing can be lost, else try again later
+    const apply = () => { if (!hasUnsavedWork()) reloadRef.current() }
+    const arm = () => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => { apply(); if (!appliedRef.current) arm() }, idleMs)
+    }
+    const onVis = () => { if (document.hidden) apply() }
+    const inputs = ['pointerdown', 'keydown', 'touchstart', 'wheel']
+    inputs.forEach(t => window.addEventListener(t, arm, { passive: true }))
+    document.addEventListener('visibilitychange', onVis)
+    arm()
+    return () => {
+      if (timer) clearTimeout(timer)
+      inputs.forEach(t => window.removeEventListener(t, arm))
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [waiting, idleMs])
+
+  if (waiting == null) return null
 
   return (
     <div className="sw-update-banner" role="status">
       <RefreshCw size={15} aria-hidden="true" />
-      <span className="install-text">A new version is ready.</span>
+      <span className="install-text">{blocked
+        ? 'Save or finish your changes first — the new version loads automatically after.'
+        : 'A new version is ready — it will load automatically.'}</span>
       <button type="button" onClick={reload} className="btn btn-primary install-btn">
         Reload
       </button>
