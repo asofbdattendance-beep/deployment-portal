@@ -77,14 +77,14 @@ describe('notElderlyFilter / isElderly', () => {
   })
 })
 describe('badgeStatusEligible / eligibleBadgeStatusFilter', () => {
-  it('returns true for OPEN and PERMANENT', () => {
+  it('returns true for OPEN, PERMANENT and ELDERLY', () => {
     expect(badgeStatusEligible('OPEN')).toBe(true)
     expect(badgeStatusEligible('PERMANENT')).toBe(true)
+    expect(badgeStatusEligible('ELDERLY')).toBe(true)
     expect(badgeStatusEligible('open')).toBe(true)
     expect(badgeStatusEligible(' permanent ')).toBe(true)
   })
-  it('returns false for ELDERLY and other statuses', () => {
-    expect(badgeStatusEligible('ELDERLY')).toBe(false)
+  it('returns false for other statuses', () => {
     expect(badgeStatusEligible('CLOSED')).toBe(false)
     expect(badgeStatusEligible('')).toBe(false)
   })
@@ -93,7 +93,7 @@ describe('badgeStatusEligible / eligibleBadgeStatusFilter', () => {
     expect(badgeStatusEligible(undefined)).toBe(false)
   })
   it('produces the correct Supabase OR filter', () => {
-    expect(eligibleBadgeStatusFilter()).toBe('badge_status.is.null,badge_status.in.(OPEN,PERMANENT)')
+    expect(eligibleBadgeStatusFilter()).toBe('badge_status.is.null,badge_status.in.(OPEN,PERMANENT,ELDERLY)')
   })
 })
 
@@ -122,10 +122,9 @@ describe('AREA SECRETARY OFFICE restriction', () => {
 })
 
 describe('shouldHideFromConsent', () => {
-  it('returns true for elderly sewadars', () => {
-    expect(shouldHideFromConsent({ badge_status: 'ELDERLY', department: 'LANGAR' })).toBe(true)
-    expect(shouldHideFromConsent({ badge_status: 'elderly', department: 'LANGAR' })).toBe(true)
-    expect(shouldHideFromConsent({ badge_status: 'ELDERLY', department: 'LANGAR' }, 'super_admin')).toBe(true)
+  it('shows elderly sewadars (deployable since v90)', () => {
+    expect(shouldHideFromConsent({ badge_status: 'ELDERLY', department: 'LANGAR' }, 'centre_admin')).toBe(false)
+    expect(shouldHideFromConsent({ badge_status: 'elderly', department: 'LANGAR' }, 'centre_user')).toBe(false)
   })
   it('returns true for AREA SECRETARY OFFICE department sewadars', () => {
     expect(shouldHideFromConsent({ badge_status: 'OPEN', department: 'AREA SECRETARY OFFICE' })).toBe(true)

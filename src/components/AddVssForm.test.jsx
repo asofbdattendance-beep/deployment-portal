@@ -88,3 +88,21 @@ describe('AddVssForm duplicate check (v88)', () => {
     expect(screen.getByRole('button', { name: /Create VSS record/ }).disabled).toBe(false)
   })
 })
+
+describe('AddVssForm reset', () => {
+  it('clears typed fields and the duplicate warning', async () => {
+    const { supabase } = await import('../lib/supabase')
+    supabase.rpc.mockResolvedValueOnce({
+      data: [{ source: 'roster', vss_id: 'VSFB5971GB4629', sewadar_name: 'ABHAY SINGH', centre: 'C1', reasons: ['similar name'] }],
+      error: null,
+    })
+    render(<AddVssForm creationOpen windowOpen creationOverride={null} />)
+    const name = screen.getByPlaceholderText('Full name')
+    fireEvent.change(name, { target: { value: 'Abhey Sing' } })
+    fireEvent.click(screen.getByRole('button', { name: /Check for duplicates/ }))
+    expect(await screen.findByText('VSFB5971GB4629')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /Reset/ }))
+    expect(name.value).toBe('')
+    expect(screen.queryByText('VSFB5971GB4629')).toBeNull()
+  })
+})

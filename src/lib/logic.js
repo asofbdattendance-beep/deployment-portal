@@ -2,7 +2,9 @@
 import { sanitizeBarcode } from './scannerUtils'
 
 export const ELDERLY_BADGE_STATUS = 'ELDERLY'
-export const ELIGIBLE_BADGE_STATUSES = ['OPEN', 'PERMANENT']
+// Regular (dp_sewadars) badges that can get consent + be deployed. ELDERLY
+// joined in v90; VSS elderly stay blocked (notElderlyFilter + DB trigger).
+export const ELIGIBLE_BADGE_STATUSES = ['OPEN', 'PERMANENT', 'ELDERLY']
 
 // Supabase filter fragment that excludes elderly badges (null-safe)
 export function notElderlyFilter() {
@@ -17,9 +19,9 @@ export function badgeStatusEligible(badge_status) {
   return ELIGIBLE_BADGE_STATUSES.includes(String(badge_status || '').trim().toUpperCase())
 }
 
-// Supabase OR filter: badge_status IS NULL OR IN ('OPEN','PERMANENT')
+// Supabase OR filter: badge_status IS NULL OR IN ('OPEN','PERMANENT','ELDERLY')
 export function eligibleBadgeStatusFilter() {
-  return 'badge_status.is.null,badge_status.in.(OPEN,PERMANENT)'
+  return 'badge_status.is.null,badge_status.in.(OPEN,PERMANENT,ELDERLY)'
 }
 
 /* ─── AREA SECRETARY OFFICE restriction ─── */
@@ -40,7 +42,6 @@ export function canCentreDeploy(consentRow, userRole) {
 
 export function shouldHideFromConsent(sewadar, role) {
   if (!sewadar) return true
-  if (isElderly(sewadar.badge_status)) return true
   if (isAssoDepartment(sewadar.department) && !['aso', 'super_admin'].includes(role)) return true
   return false
 }
