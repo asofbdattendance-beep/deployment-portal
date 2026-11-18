@@ -3,7 +3,7 @@ import { supabase, fetchCentres, fetchAllRows, vssPhotoUrl } from '../lib/supaba
 import { getSubtreeCentres, computeAge, isVssAgeBlocked, vssRegistrationErrors } from '../lib/logic'
 import { usePortalAuth } from '../context/PortalAuthContext'
 import { useToast } from './Toast'
-import { UserPlus, Camera, Trash2, Loader2, BadgeCheck, Pencil, X, Search, Lock } from 'lucide-react'
+import { UserPlus, Camera, Trash2, Loader2, BadgeCheck, Pencil, X, Search, Lock, RotateCcw } from 'lucide-react'
 
 // Resolves a stored photo (legacy full URL or bare reg/... path) to a
 // time-limited signed URL — the vss-photos bucket is private (v16), so plain
@@ -193,6 +193,15 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
     setPhoto(null)
     revokePreview()
     if (fileRef.current) fileRef.current.value = ''
+  }
+
+  // Clear every create field; centre-scoped users keep their own centre.
+  const resetForm = () => {
+    const keepCentre = !isAllCentres && profile?.centre && centres.some(c => c.name === profile.centre)
+    setForm(keepCentre ? { ...EMPTY_FORM, centre: profile.centre } : EMPTY_FORM)
+    setErrors({})
+    setCreateDups(null)
+    clearPhoto()
   }
 
   const handleSubmit = async (e) => {
@@ -580,6 +589,9 @@ export default function AddVssForm({ creationOpen = false, windowOpen = false, c
 
             <div style={{ flex: 1 }} />
 
+            <button type="button" onClick={resetForm} disabled={submitting} className="btn" style={{ padding: '0.6rem 1rem', fontSize: '0.85rem', display: 'inline-flex', alignItems: 'center', gap: '0.4rem', marginTop: '1.4rem' }}>
+              <RotateCcw size={15} /> Reset
+            </button>
             <button type="button" onClick={checkDuplicatesNow} disabled={checkingDups || submitting} className="btn" style={{ padding: '0.6rem 1rem', fontSize: '0.85rem', display: 'inline-flex', alignItems: 'center', gap: '0.4rem', marginTop: '1.4rem' }}>
               {checkingDups ? <Loader2 size={15} style={{ animation: 'spin 0.6s linear infinite' }} /> : <Search size={15} />}
               Check for duplicates
